@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from collections import deque
 import logging
 import math
 import os
 import threading
 from time import perf_counter, monotonic
+from typing import Callable
 
 from PySide6.QtCore import QEvent, QPointF, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor
@@ -197,6 +199,11 @@ class _DesignPlotPane(QWidget):
         self._snap_request_id = 0
         self._latest_hover_request_id = 0
         self._pending_clicks: dict[int, PendingClick] = {}
+        self._click_order: deque[int] = deque()
+        self._click_completions: dict[
+            int,
+            tuple[SnapResult | None, float | None],
+        ] = {}
         self._pending_hover_markup: dict[
             int,
             tuple[SnapResult | None, bool, bool],
@@ -683,14 +690,29 @@ class _DesignPlotPane(QWidget):
         self._probe_route_preview_arrow_item.setData([], [])
 
     def set_document(self, document: DesignDocument | None) -> None:
+        previous_content_key = (
+            _design_content_key(self._document)
+            if self._document is not None
+            else None
+        )
+        new_content_key = (
+            _design_content_key(document)
+            if document is not None
+            else None
+        )
         same_document = document is self._document
+        same_content = (
+            self._document is not None
+            and document is not None
+            and previous_content_key == new_content_key
+        )
         if not same_document and self._snap_worker is not None:
             self._snap_worker.cancel_pending()
         self._document = document
         if document is None:
             self._snap_generation += 1
             self._latest_hover_request_id = 0
-            self._pending_clicks.clear()
+            self._reset_file_backed_click_order()
             self._pending_hover_markup.clear()
             self._set_hover_snap(None)
             self._detach_file_backed_document(timeout_s=0.0)
@@ -700,11 +722,15 @@ class _DesignPlotPane(QWidget):
         elif not same_document:
             self._snap_generation += 1
             self._latest_hover_request_id = 0
-            self._pending_clicks.clear()
+            self._reset_file_backed_click_order()
             self._pending_hover_markup.clear()
             self._set_hover_snap(None)
             self.set_status_message("")
-            self._update_navigation_limits(recompute_content=True, focus_gds=True)
+            if not same_content:
+                self._update_navigation_limits(
+                    recompute_content=True,
+                    focus_gds=True,
+                )
             if document.file_backed:
                 self._configure_file_backed_document(document)
             else:
@@ -739,7 +765,7 @@ class _DesignPlotPane(QWidget):
     def _detach_file_backed_document(self, *, timeout_s: float) -> None:
         self._klayout_config = None
         self._latest_hover_request_id = 0
-        self._pending_clicks.clear()
+        self._reset_file_backed_click_order()
         self._pending_hover_markup.clear()
         self._stop_snap_worker(timeout_s=timeout_s)
         if self._raster_controller is not None:
@@ -814,12 +840,16 @@ class _DesignPlotPane(QWidget):
         if failure.purpose != "click":
             return
         pending = self._pending_clicks.get(failure.request_id)
-        if pending is None or pending.config_generation != config.generation:
+        if (
+            pending is None
+            or pending.config_generation != config.generation
+            or failure.request_id in self._click_completions
+        ):
             return
-        self._pending_clicks.pop(failure.request_id, None)
         self._snap_failure_visible = True
         self.set_status_message("Snap failed. Try again.")
         QTimer.singleShot(1500, self._clear_snap_failure_status)
+        self._complete_file_backed_click(failure.request_id, None)
 
     def _clear_snap_failure_status(self) -> None:
         if not self._snap_failure_visible:
@@ -1123,16 +1153,17 @@ class _DesignPlotPane(QWidget):
         self._redraw_overlays()
 
     def _cancel_pending_tool_snaps(self) -> None:
-        self._latest_hover_request_id = 0
-        self._pending_hover_markup.clear()
-        if self._snap_worker is not None:
-            self._snap_worker.cancel_hover()
-        self._pending_clicks = {
-            request_id: pending
-            for request_id, pending in self._pending_clicks.items()
-            if pending.action
-            not in {"point", "guide_point", "route_pick", "alignment_point", "move"}
+        self._invalidate_file_backed_hover()
+        cancelled_actions = {
+            "point",
+            "guide_point",
+            "route_pick",
+            "alignment_point",
+            "move",
         }
+        self._cancel_file_backed_clicks(
+            lambda pending: pending.action in cancelled_actions
+        )
 
     def _clear_move_pointer_state(self) -> None:
         self._move_press_scene_pos = None
@@ -1275,7 +1306,7 @@ class _DesignPlotPane(QWidget):
         normalized = bool(enabled)
         if normalized != self._snap_enabled:
             self._markup_generation += 1
-            self._pending_clicks.clear()
+            self._reset_file_backed_click_order()
             self._pending_hover_markup.clear()
             if not normalized and self._snap_worker is not None:
                 self._snap_worker.cancel_pending()
@@ -1980,20 +2011,11 @@ class _DesignPlotPane(QWidget):
             and is_left_click
             and modifiers == Qt.NoModifier
         )
+        action: str
+        payload: tuple[object, ...]
         if active_tool == "move":
             if not move_click or is_double_click or self._suppress_move_scene_click:
                 return
-            action = "move"
-            payload: tuple[object, ...] = ()
-        elif alignment_click or route_pick or route_click or guide_click or select_click:
-            slot = None
-        elif is_left_click:
-            slot = 0
-        elif event.button() == Qt.RightButton:
-            slot = 1
-        else:
-            return
-        if active_tool == "move":
             action = "move"
             payload = ()
         elif alignment_click:
@@ -2013,12 +2035,14 @@ class _DesignPlotPane(QWidget):
         elif select_click:
             action = "select"
             payload = ()
-        elif slot is None:
-            action = "move"
-            payload = ()
-        else:
+        elif active_tool == "legacy" and is_left_click:
             action = "calibration"
-            payload = (slot,)
+            payload = (0,)
+        elif active_tool == "legacy" and event.button() == Qt.RightButton:
+            action = "calibration"
+            payload = (1,)
+        else:
+            return
         position = event.scenePos()
         if not self._plot.sceneBoundingRect().contains(position):
             return
@@ -2053,34 +2077,12 @@ class _DesignPlotPane(QWidget):
             snap_result.distance,
             elapsed_ms,
         )
-        if route_pick:
-            self.route_pick_requested.emit(
-                str(self._route_pick_mode),
-                snap_result.point[0],
-                snap_result.point[1],
-                shift_constraint,
-                control_constraint,
-            )
-            return
-        if guide_click or route_click or alignment_click:
-            self._execute_click_action(
-                action,
-                payload,
-                snap_result,
-                shift=shift_constraint,
-                control=control_constraint,
-            )
-            return
-        if action == "move":
-            self.move_requested.emit(
-                snap_result.point[0],
-                snap_result.point[1],
-            )
-            return
-        self.calibration_point_selected.emit(
-            slot,
-            snap_result.point[0],
-            snap_result.point[1],
+        self._execute_click_action(
+            action,
+            payload,
+            snap_result,
+            shift=shift_constraint,
+            control=control_constraint,
         )
 
     def _submit_file_backed_click(
@@ -2116,36 +2118,31 @@ class _DesignPlotPane(QWidget):
         plan = plan_snap_search(raw_point, radius, config.display_bounds)
         if not plan.accepted:
             logger.debug("DESIGN SNAP click skipped reason=%s", plan.skip_reason)
+            self._invalidate_file_backed_hover()
             fallback = self._file_snap_fallback(raw_point)
-            self._set_hover_snap(
-                fallback,
-                shift=shift_constraint,
-                control=control_constraint,
-            )
-            self._execute_click_action(
+            pending = self._enqueue_file_backed_click(
+                config,
                 action,
+                raw_point,
                 payload,
-                fallback,
-                shift=shift_constraint,
-                control=control_constraint,
+                markup_result=None,
+                shift_constraint=shift_constraint,
+                control_constraint=control_constraint,
             )
+            self._complete_file_backed_click(pending.request_id, fallback)
             return
-        self._snap_request_id += 1
-        request_id = self._snap_request_id
-        self._pending_clicks[request_id] = PendingClick(
-            request_id=request_id,
-            config_generation=config.generation,
-            action=str(action),
-            raw_point=raw_point,
-            payload=tuple(payload),
+        pending = self._enqueue_file_backed_click(
+            config,
+            action,
+            raw_point,
+            payload,
             markup_result=self._best_markup_snap(raw_point),
-            markup_generation=self._markup_generation,
             shift_constraint=shift_constraint,
             control_constraint=control_constraint,
         )
         worker.submit_click(
             SnapRequest(
-                request_id=request_id,
+                request_id=pending.request_id,
                 config=config,
                 point=raw_point,
                 radius=radius,
@@ -2336,6 +2333,115 @@ class _DesignPlotPane(QWidget):
             )
         )
 
+    def _enqueue_file_backed_click(
+        self,
+        config: KLayoutConfig,
+        action: str,
+        raw_point: Point2D,
+        payload: tuple[object, ...],
+        *,
+        markup_result: SnapResult | None,
+        shift_constraint: bool,
+        control_constraint: bool,
+    ) -> PendingClick:
+        self._snap_request_id += 1
+        pending = PendingClick(
+            request_id=self._snap_request_id,
+            config_generation=config.generation,
+            action=str(action),
+            raw_point=raw_point,
+            payload=tuple(payload),
+            markup_result=markup_result,
+            markup_generation=self._markup_generation,
+            shift_constraint=shift_constraint,
+            control_constraint=control_constraint,
+        )
+        self._pending_clicks[pending.request_id] = pending
+        self._click_order.append(pending.request_id)
+        return pending
+
+    def _complete_file_backed_click(
+        self,
+        request_id: int,
+        result: SnapResult | None,
+        *,
+        elapsed_ms: float | None = None,
+    ) -> None:
+        if (
+            request_id not in self._pending_clicks
+            or request_id in self._click_completions
+        ):
+            return
+        self._click_completions[request_id] = (result, elapsed_ms)
+        self._drain_file_backed_clicks()
+
+    def _drain_file_backed_clicks(self) -> None:
+        while (
+            self._click_order
+            and self._click_order[0] in self._click_completions
+        ):
+            request_id = self._click_order.popleft()
+            result, elapsed_ms = self._click_completions.pop(request_id)
+            pending = self._pending_clicks.pop(request_id, None)
+            config = self._klayout_config
+            if (
+                pending is None
+                or result is None
+                or config is None
+                or pending.config_generation != config.generation
+                or pending.markup_generation != self._markup_generation
+            ):
+                continue
+            self._set_hover_snap(
+                result,
+                shift=pending.shift_constraint,
+                control=pending.control_constraint,
+            )
+            if elapsed_ms is not None:
+                logger.debug(
+                    "DESIGN SNAP click raw=(%.3f, %.3f) snapped=(%.3f, %.3f) "
+                    "mode=%s dist=%.4f elapsed_ms=%.2f",
+                    pending.raw_point[0],
+                    pending.raw_point[1],
+                    result.point[0],
+                    result.point[1],
+                    result.mode,
+                    result.distance,
+                    elapsed_ms,
+                )
+            self._execute_click_action(
+                pending.action,
+                pending.payload,
+                result,
+                shift=pending.shift_constraint,
+                control=pending.control_constraint,
+            )
+
+    def _cancel_file_backed_clicks(
+        self,
+        predicate: Callable[[PendingClick], bool],
+    ) -> None:
+        ordered_ids = set(self._click_order)
+        for request_id, pending in tuple(self._pending_clicks.items()):
+            if not predicate(pending):
+                continue
+            if request_id in ordered_ids:
+                self._click_completions[request_id] = (None, None)
+            else:
+                self._pending_clicks.pop(request_id, None)
+        self._drain_file_backed_clicks()
+
+    def _reset_file_backed_click_order(self) -> None:
+        self._pending_clicks.clear()
+        self._click_order.clear()
+        self._click_completions.clear()
+
+    def _invalidate_file_backed_hover(self) -> None:
+        self._latest_hover_request_id = 0
+        self._pending_hover_markup.clear()
+        if self._snap_worker is not None:
+            self._snap_worker.cancel_hover()
+
     def _on_file_backed_snap_ready(self, response: SnapResponse) -> None:
         if response.unavailable_reason is not None:
             logger.debug(
@@ -2375,39 +2481,24 @@ class _DesignPlotPane(QWidget):
             return
         if response.purpose != "click":
             return
-        pending = self._pending_clicks.pop(response.request_id, None)
+        pending = self._pending_clicks.get(response.request_id)
         if (
             pending is None
             or pending.config_generation != config.generation
-            or pending.markup_generation != self._markup_generation
         ):
+            return
+        if pending.markup_generation != self._markup_generation:
+            self._complete_file_backed_click(response.request_id, None)
             return
         result = self._nearest_screen_result(
             pending.raw_point,
             response.result,
             pending.markup_result,
         )
-        self._set_hover_snap(
+        self._complete_file_backed_click(
+            response.request_id,
             result,
-            shift=pending.shift_constraint,
-            control=pending.control_constraint,
-        )
-        logger.debug(
-            "DESIGN SNAP click raw=(%.3f, %.3f) snapped=(%.3f, %.3f) mode=%s dist=%.4f elapsed_ms=%.2f",
-            pending.raw_point[0],
-            pending.raw_point[1],
-            result.point[0],
-            result.point[1],
-            result.mode,
-            result.distance,
-            response.elapsed_ms,
-        )
-        self._execute_click_action(
-            pending.action,
-            pending.payload,
-            result,
-            shift=pending.shift_constraint,
-            control=pending.control_constraint,
+            elapsed_ms=response.elapsed_ms,
         )
 
     def _file_snap_fallback(self, raw_point: Point2D) -> SnapResult:
@@ -2605,7 +2696,7 @@ class _DesignPlotPane(QWidget):
         if self._shutdown:
             return
         self._shutdown = True
-        self._pending_clicks.clear()
+        self._reset_file_backed_click_order()
         self._pending_hover_markup.clear()
         self._latest_hover_request_id = 0
         if hasattr(self, "_hover_timer"):

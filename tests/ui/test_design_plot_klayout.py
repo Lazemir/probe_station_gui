@@ -302,6 +302,43 @@ def test_file_configuration_changes_reuse_snap_worker_and_generation(
     assert pane._snap_worker is not worker
 
 
+def test_file_backed_layer_toggle_preserves_view_and_cached_navigation(
+    pane,
+    document: DesignDocument,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_content_bounds = plot_module.content_bounds
+    content_scans = 0
+
+    def counted_content_bounds(*args, **kwargs):
+        nonlocal content_scans
+        content_scans += 1
+        return real_content_bounds(*args, **kwargs)
+
+    monkeypatch.setattr(plot_module, "content_bounds", counted_content_bounds)
+    pane.set_document(document)
+    _view_box(pane).setRange(
+        xRange=(20.0, 40.0),
+        yRange=(10.0, 20.0),
+        padding=0.0,
+    )
+    before_view = _box(pane)
+    before_content = pane._navigation_content_bounds
+    before_frame = pane._navigation_frame
+    scans_before_toggle = content_scans
+
+    pane.set_document(document.with_visible_layers({(2, 0)}))
+
+    assert _box(pane) == pytest.approx(before_view)
+    assert pane._navigation_content_bounds is before_content
+    assert pane._navigation_frame is before_frame
+    assert content_scans == scans_before_toggle
+    assert pane._raster_controller.documents[-1].visible_layers == frozenset(
+        {(2, 0)}
+    )
+    assert pane._klayout_config.visible_layers == frozenset({(2, 0)})
+
+
 def test_same_path_new_source_retires_snap_worker_while_same_source_reuses(
     pane,
     tmp_path: Path,
@@ -359,6 +396,132 @@ def test_hover_is_replaceable_and_click_waits_for_matching_current_response(
 
     assert len(worker.hover_requests) == 2
     assert moves == [(50.0, 60.0)]
+
+
+def test_preflight_skipped_click_waits_for_older_accepted_click(
+    pane,
+    tmp_path: Path,
+) -> None:
+    pane.set_document(_document(tmp_path / "ordered-clicks.gds"))
+    pane._snap_distance_threshold = lambda: 1.0
+    worker = pane._snap_worker
+    moves: list[tuple[float, float]] = []
+    pane.move_requested.connect(lambda x, y: moves.append((x, y)))
+
+    pane._submit_file_backed_click("move", (10.0, 10.0))
+    accepted = worker.click_requests[-1]
+    pane._submit_file_backed_click("move", (1_000.0, 1_000.0))
+
+    assert len(worker.click_requests) == 1
+    assert moves == []
+
+    worker.snap_ready.emit(
+        SnapResponse(
+            request_id=accepted.request_id,
+            config_generation=accepted.config.generation,
+            raw_point=accepted.point,
+            result=SnapResult((11.0, 12.0), "vertex", 0.1),
+            elapsed_ms=1.0,
+            shapes_inspected=1,
+            purpose="click",
+        )
+    )
+
+    assert moves == [(11.0, 12.0), (1_000.0, 1_000.0)]
+
+
+def test_preflight_skipped_click_invalidates_inflight_hover(
+    pane,
+    tmp_path: Path,
+) -> None:
+    pane.set_document(_document(tmp_path / "skipped-click-hover.gds"))
+    pane._snap_distance_threshold = lambda: 1.0
+    worker = pane._snap_worker
+    pane._submit_file_backed_hover((10.0, 10.0))
+    hover = worker.hover_requests[-1]
+
+    pane._submit_file_backed_click("move", (1_000.0, 1_000.0))
+
+    assert worker.click_requests == []
+    assert worker.cancel_hover_calls == 1
+    assert pane._pending_hover_markup == {}
+    assert pane._hover_snap == SnapResult((1_000.0, 1_000.0), "free", 0.0)
+
+    worker.snap_ready.emit(_hover_response(hover))
+
+    assert pane._hover_snap == SnapResult((1_000.0, 1_000.0), "free", 0.0)
+
+
+def test_failed_older_click_releases_preflight_skipped_click(
+    pane,
+    tmp_path: Path,
+) -> None:
+    pane.set_document(_document(tmp_path / "failed-ordered-click.gds"))
+    pane._snap_distance_threshold = lambda: 1.0
+    worker = pane._snap_worker
+    moves: list[tuple[float, float]] = []
+    pane.move_requested.connect(lambda x, y: moves.append((x, y)))
+    pane._submit_file_backed_click("move", (10.0, 10.0))
+    accepted = worker.click_requests[-1]
+    pane._submit_file_backed_click("move", (1_000.0, 1_000.0))
+
+    worker.failed.emit(
+        SnapFailure(
+            accepted.request_id,
+            accepted.config.generation,
+            "click",
+            "failed",
+        )
+    )
+
+    assert moves == [(1_000.0, 1_000.0)]
+    assert pane._pending_clicks == {}
+    assert list(pane._click_order) == []
+
+
+def test_cancelled_ordered_click_ignores_late_failure(
+    pane,
+    tmp_path: Path,
+) -> None:
+    pane.set_document(_document(tmp_path / "cancelled-ordered-click.gds"))
+    pane._snap_distance_threshold = lambda: 1.0
+    worker = pane._snap_worker
+    calibration: list[tuple[int, float, float]] = []
+    moves: list[tuple[float, float]] = []
+    pane.calibration_point_selected.connect(
+        lambda slot, x, y: calibration.append((slot, x, y))
+    )
+    pane.move_requested.connect(lambda x, y: moves.append((x, y)))
+    pane._submit_file_backed_click("calibration", (10.0, 10.0), (0,))
+    earlier = worker.click_requests[-1]
+    pane._submit_file_backed_click("move", (20.0, 20.0))
+    cancelled = worker.click_requests[-1]
+
+    pane.cancel_active_interaction()
+    worker.failed.emit(
+        SnapFailure(
+            cancelled.request_id,
+            cancelled.config.generation,
+            "click",
+            "late failure",
+        )
+    )
+
+    assert not pane._snap_failure_visible
+    worker.snap_ready.emit(
+        SnapResponse(
+            request_id=earlier.request_id,
+            config_generation=earlier.config.generation,
+            raw_point=earlier.point,
+            result=SnapResult((11.0, 12.0), "vertex", 0.1),
+            elapsed_ms=1.0,
+            shapes_inspected=1,
+            purpose="click",
+        )
+    )
+    assert calibration == [(0, 11.0, 12.0)]
+    assert moves == []
+    assert pane._pending_clicks == {}
 
 
 def test_file_backed_click_uses_nearer_correlated_markup_candidate(

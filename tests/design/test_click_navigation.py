@@ -2,6 +2,8 @@ import os
 import types
 from pathlib import Path
 
+import pytest
+
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QItemSelectionModel, QPointF, QRectF, Qt
@@ -48,11 +50,12 @@ class _FakePlot:
 
 
 class _FakeClickEvent:
-    def __init__(self, *, double: bool) -> None:
+    def __init__(self, *, double: bool, button=Qt.LeftButton) -> None:
         self._double = bool(double)
+        self._button = button
 
     def button(self) -> object:
-        return Qt.LeftButton
+        return self._button
 
     def double(self) -> bool:
         return self._double
@@ -82,6 +85,10 @@ def _navigation_pane() -> types.SimpleNamespace:
             distance=0.0,
         ),
         _emit_click_selection=lambda _point, _modifiers: None,
+    )
+    pane._execute_click_action = types.MethodType(
+        _DesignPlotPane._execute_click_action,
+        pane,
     )
     return pane
 
@@ -123,6 +130,40 @@ def test_design_select_double_click_does_not_move() -> None:
 
     _DesignPlotPane._on_mouse_clicked(pane, _FakeClickEvent(double=True))
 
+    assert pane.move_requested.emissions == []
+
+
+@pytest.mark.parametrize("tool", ["array", "point", "guide"])
+def test_unhandled_explicit_tool_click_does_not_calibrate_or_move(tool: str) -> None:
+    pane = _navigation_pane()
+    pane._active_design_tool = tool
+    pane._route_edit_enabled = False
+
+    _DesignPlotPane._on_mouse_clicked(pane, _FakeClickEvent(double=False))
+
+    assert pane.calibration_point_selected.emissions == []
+    assert pane.move_requested.emissions == []
+
+
+@pytest.mark.parametrize(
+    ("button", "expected_slot"),
+    [(Qt.LeftButton, 0), (Qt.RightButton, 1)],
+)
+def test_explicit_legacy_click_keeps_calibration_fallback(
+    button: Qt.MouseButton,
+    expected_slot: int,
+) -> None:
+    pane = _navigation_pane()
+    pane._active_design_tool = "legacy"
+
+    _DesignPlotPane._on_mouse_clicked(
+        pane,
+        _FakeClickEvent(double=False, button=button),
+    )
+
+    assert pane.calibration_point_selected.emissions == [
+        (expected_slot, 11.0, 22.0)
+    ]
     assert pane.move_requested.emissions == []
 
 

@@ -119,6 +119,34 @@ def test_cancellation_discards_partial_snap() -> None:
     _assert_following_normal_request_runs()
 
 
+def test_backend_budget_abort_closes_shape_stream() -> None:
+    closed: list[bool] = []
+    backend = _KLayoutSnapBackend(clock=time.perf_counter)
+
+    def close_aware_stream(_config, _source_box):
+        try:
+            yield _shape([(0.0, 0.0)])
+            yield _shape([(1.0, 0.0)])
+        finally:
+            closed.append(True)
+
+    backend._iter_shape_contours = close_aware_stream
+
+    response = backend.snap(
+        SnapRequest(
+            1,
+            _config(),
+            (1.0, 1.0),
+            1.0,
+            budget=_budget(shapes=1),
+        ),
+        is_cancelled=lambda: False,
+    )
+
+    assert response.unavailable_reason == SNAP_UNAVAILABLE_SHAPE_BUDGET
+    assert closed == [True]
+
+
 def _backend_with_counted_stream():
     calls: list[object] = []
     backend = _KLayoutSnapBackend(clock=time.perf_counter)

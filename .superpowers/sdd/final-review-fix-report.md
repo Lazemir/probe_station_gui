@@ -108,3 +108,87 @@ All Python commands used the required shared interpreter:
 
 - The calibration-fit tests require ignored `.npz` fixtures that are present in the main checkout but not materialized automatically in a new Git worktree. The final suite is green after copying those fixtures locally; repository changes do not depend on or include them.
 - No remaining behavioral concern was found in the eight reviewed items.
+
+---
+
+# Design Move and Bounded Viewport Final Review Fix Report
+
+## Scope and commit
+
+- Worktree: `C:\Users\Lazemir\.codex\worktrees\design-move-bounded-viewport\probe_station_gui`
+- Branch: `codex/design-move-bounded-viewport`
+- Starting HEAD: `74a12ee1a97c44599e5771d26f3991fa8980ad54`
+- Commit subject: `fix: preserve design interaction ordering`
+- Final commit hash: added after the commit because a commit cannot contain its own hash.
+- Hardware-dependent code and `main.py` were not run.
+
+## Finding-by-finding result
+
+1. **Legacy calibration fallback leaked into explicit tools** — confirmed and fixed.
+   - RED command: `python.exe -m pytest tests/design/test_click_navigation.py::test_unhandled_explicit_tool_click_does_not_calibrate_or_move tests/design/test_click_navigation.py::test_explicit_legacy_click_keeps_calibration_fallback -q`
+   - RED result: exit `1`; Array, disabled Point, and disabled Guide each failed because they emitted `(0, 11.0, 22.0)` through `calibration_point_selected`; explicit legacy LMB/RMB already passed (`3 failed, 2 passed in 1.38s`).
+   - GREEN: click dispatch now makes one action decision. Only the explicit `legacy` tool reaches LMB/RMB calibration; unhandled explicit-tool clicks return. The duplicated Move assignment and unreachable `slot is None` Move fallback were removed.
+
+2. **Identity-equivalent layer updates refocused the GDS** — confirmed and fixed.
+   - RED command: `python.exe -m pytest tests/ui/test_design_plot_klayout.py::test_file_backed_layer_toggle_preserves_view_and_cached_navigation -q`
+   - RED result: exit `1`; the zoomed/panned range was replaced by the GDS-focused range (`1 failed in 1.04s`).
+   - GREEN: `set_document()` compares the old and new `_design_content_key()` values before replacement. An unchanged content key preserves the valid ViewBox range and the exact cached navigation content/frame while still reconfiguring raster and snap layers. New path/top-cell/rotation/bounds/source-load identities retain full recompute and GDS focus.
+
+3. **Preflight-skipped clicks overtook accepted FIFO clicks and retained stale hover correlation** — confirmed and fixed.
+   - RED command: `python.exe -m pytest tests/ui/test_design_plot_klayout.py::test_preflight_skipped_click_waits_for_older_accepted_click tests/ui/test_design_plot_klayout.py::test_preflight_skipped_click_invalidates_inflight_hover -q`
+   - RED result: exit `1`; skipped click B emitted before A and `cancel_hover()` was never called (`2 failed in 1.05s`).
+   - GREEN: a pane-local FIFO records every accepted action, stores worker or preflight-fallback completions by request id, and drains only from the head. Skipped work submits no worker/native traversal. An isolated skipped action completes immediately. Before a skipped fallback is queued, hover request identity and pending markup are cleared and `cancel_hover()` is called, so late hover responses are ignored.
+   - Self-review RED: `test_cancelled_ordered_click_ignores_late_failure` initially failed because a late failure for an already tool-cancelled queued click showed a snap-failure state (`1 failed in 1.06s`). GREEN ignores failures for terminal queue entries and later emits only the surviving earlier action (`2 passed in 0.87s` with the failure-release regression).
+
+4. **Collector cleanup regression** — coverage added; production already correct.
+   - `test_backend_budget_abort_closes_shape_stream` uses a close-aware generator with a `finally` marker and a deterministic shape-budget abort.
+   - It passed immediately (`1 passed in 0.22s`), proving `_KLayoutSnapBackend.snap()` closes the contour stream on early collector return.
+
+## Changed tracked files
+
+Production:
+
+- `probe_station_gui/views/design_plot_pane.py`
+
+Tests:
+
+- `tests/design/test_click_navigation.py`
+- `tests/design/test_klayout_snap_backend.py`
+- `tests/ui/test_design_plot_klayout.py`
+
+Ignored report:
+
+- `.superpowers/sdd/final-review-fix-report.md`
+
+## Final verification
+
+All Python commands used `C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe`.
+
+- New-regression GREEN: `9 passed in 1.49s`, exit `0`.
+- Required focused command:
+  - `python.exe -m pytest tests/design/test_click_navigation.py tests/design/test_klayout_snap_backend.py tests/ui/test_design_plot_klayout.py tests/ui/test_design_plot_move.py tests/ui/test_design_plot_selection.py tests/ui/test_design_navigator_panel.py -q`
+  - Fresh final result: `137 passed in 7.77s`, exit `0`.
+- Task 5 targeted command:
+  - `python.exe -m pytest tests/design tests/ui tests/app/test_main_design_navigation.py tests/ui/test_main_window_auxiliary.py tests/stage/test_controller_click_move.py -q`
+  - Fresh final result: `551 passed in 11.91s`, exit `0`.
+- Full repository suite:
+  - `python.exe -m pytest tests -q`
+  - Fresh final result: `1817 passed, 30 subtests passed in 30.86s`, exit `0`.
+- `git diff --check`: exit `0`; Git printed only existing LF-to-CRLF working-copy warnings.
+
+## Ordered-completion state audit
+
+- Success stores the correlated result and drains completed actions strictly from the FIFO head.
+- Failure stores a terminal no-action completion, advances the FIFO, and does not fall back to raw or markup movement.
+- Escape/tool cancellation marks matching queued actions terminal, including results that arrived early, then drains them when older actions finish. Late responses and failures cannot revive a cancelled action.
+- Document replacement, content/config generation invalidation, snap-mode changes, unload, and shutdown call one reset helper that clears pending records, order, and completion buffers together. Worker `cancel_pending()` remains in the existing invalidation paths.
+- A skipped click invalidates hover correlation and pending hover markup before `cancel_hover()` and fallback selection; late hover responses cannot overwrite click feedback.
+- Markup generation is checked again at FIFO drain time, so a delayed skipped completion cannot publish stale markup or movement after a markup/snap change.
+- Signal-driven re-entry is safe: each head entry is removed before its action signal is emitted, and a synchronous unload/reset leaves the drain loop with an empty queue.
+
+## Scope protection and concerns
+
+- Stage movement/safety, registration mathematics, raster LOD, selection rectangles, and route Pause/Resume/Interrupt code were not changed.
+- Skipped preflight work never submits a `SnapRequest`; markup-aware fallback and exact raw Move behavior remain covered by the focused suite.
+- The requested remaining Minor in `navigation_bounds` was intentionally left unchanged: the first-two `NeedleOffset.apply_to()` loop was not replaced with `MeasurementRoute.needle_hits_for_point()`.
+- No behavioral concern remains from the automated and state-path review. Manual hardware/GUI operation was outside scope and was not performed.
