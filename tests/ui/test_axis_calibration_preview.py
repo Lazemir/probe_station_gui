@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 
+import numpy as np
 import pytest
 
 
@@ -46,6 +47,22 @@ def test_curve_and_samples_are_populated_and_auto_ranged(qtbot) -> None:
     assert preview.curve_item.getData()[0].tolist() == [0.0, 1.0, 2.0]
     assert len(preview.samples_item.points()) == 3
     assert preview.unit == "mm"
+
+
+def test_set_curve_keeps_private_copies_of_input_arrays(qtbot) -> None:
+    preview = AxisCalibrationPreview("X")
+    qtbot.addWidget(preview)
+    controller = np.array((0.0, 1.0, 2.0))
+    physical = np.array((1.0, 3.0, 5.0))
+    preview.set_curve(controller, physical)
+
+    controller[:] = (10.0, 11.0, 12.0)
+    physical[:] = (20.0, 21.0, 22.0)
+    preview.set_hover_controller_value(1.0)
+
+    assert preview.curve_item.getData()[0].tolist() == [0.0, 1.0, 2.0]
+    assert preview.curve_item.getData()[1].tolist() == [1.0, 3.0, 5.0]
+    assert preview.hover_position == pytest.approx((1.0, 3.0))
 
 
 def test_rotary_axis_labels_use_degrees(qtbot) -> None:
@@ -191,8 +208,7 @@ def test_hover_updates_interpolated_guides_and_label_without_resetting_view(qtbo
     assert preview.hover_vertical_line.isVisible()
     assert preview.hover_horizontal_line.isVisible()
     assert preview.hover_label.isVisible()
-    assert "X: 0.5 mm" in preview.hover_label.toPlainText()
-    assert "Y: 2 mm" in preview.hover_label.toPlainText()
+    assert preview.hover_label.toPlainText() == "X: 0.5 mm · Y: 2 mm"
     assert preview.plot_widget.viewRange() == before
 
 

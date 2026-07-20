@@ -19,8 +19,8 @@ def _curve_arrays(
     """Return finite, ordered one-dimensional curve arrays when usable."""
 
     try:
-        controller_values = np.asarray(controller, dtype=float)
-        physical_values = np.asarray(physical, dtype=float)
+        controller_values = np.array(controller, dtype=float, copy=True)
+        physical_values = np.array(physical, dtype=float, copy=True)
     except (TypeError, ValueError):
         return None
     if (
@@ -262,7 +262,7 @@ class AxisCalibrationPreview(QWidget):
         self.hover_vertical_line.setValue(controller_value)
         self.hover_horizontal_line.setValue(physical_value)
         self.hover_label.setText(
-            f"X: {controller_value:.6g} {self.unit}\n"
+            f"X: {controller_value:.6g} {self.unit} · "
             f"Y: {physical_value:.6g} {self.unit}"
         )
         self._place_hover_label(controller_value, physical_value)
