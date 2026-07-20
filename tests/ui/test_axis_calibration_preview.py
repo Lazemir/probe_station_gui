@@ -149,6 +149,31 @@ def test_position_card_retains_raw_value_when_physical_is_missing(qtbot) -> None
     assert not preview.marker_item.isVisible()
 
 
+def test_hidden_valid_position_updates_card_without_retaining_marker_state(qtbot) -> None:
+    preview = AxisCalibrationPreview("Z")
+    qtbot.addWidget(preview)
+
+    preview.set_current_position(5.441, 5.439, visible=False)
+
+    assert preview.controller_position_value.text() == "5.441 mm"
+    assert preview.physical_position_value.text() == "5.439 mm"
+    assert preview.current_position is None
+    assert not preview.marker_item.isVisible()
+    assert len(preview.marker_item.points()) == 0
+
+
+def test_position_card_uses_widget_palette_roles(qtbot) -> None:
+    preview = AxisCalibrationPreview("X")
+    qtbot.addWidget(preview)
+
+    card_style = preview.position_card.styleSheet().casefold()
+
+    assert "background: palette(base)" in card_style
+    assert "border: 1px solid palette(mid)" in card_style
+    assert "color: palette(mid)" in card_style
+    assert "color: palette(text)" in card_style
+
+
 def test_marker_is_a_small_filled_red_circle_without_position_line(qtbot) -> None:
     preview = AxisCalibrationPreview("X")
     qtbot.addWidget(preview)
@@ -205,6 +230,21 @@ def test_clear_curve_removes_curve_and_live_items(qtbot) -> None:
     assert curve_x is None or curve_x.size == 0
     assert len(preview.samples_item.points()) == 0
     assert not preview.marker_item.isVisible()
+
+
+def test_replacing_curve_clears_live_position_from_previous_curve(qtbot) -> None:
+    preview = AxisCalibrationPreview("Z")
+    qtbot.addWidget(preview)
+    preview.set_curve((0.0, 1.0), (10.0, 11.0))
+    preview.set_current_position(0.5, 10.5, visible=True)
+
+    preview.set_curve((100.0, 200.0), (1_000.0, 2_000.0))
+
+    assert preview.current_position is None
+    assert preview.controller_position_value.text() == "—"
+    assert preview.physical_position_value.text() == "—"
+    assert not preview.marker_item.isVisible()
+    assert len(preview.marker_item.points()) == 0
 
 
 def test_interpolated_curve_position_interpolates_within_domain() -> None:

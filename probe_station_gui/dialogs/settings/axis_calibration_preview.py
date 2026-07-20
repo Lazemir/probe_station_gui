@@ -92,12 +92,14 @@ class AxisCalibrationPreview(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 4, 0, 0)
         self.position_card = QFrame(self)
+        self.position_card.setObjectName("positionCard")
         self.position_card.setFixedHeight(54)
         self.position_card.setStyleSheet(
-            "QFrame { border: 1px solid #e0e0e0; border-radius: 3px; "
-            "background: #fafafa; }"
-            "QLabel#positionHeader { color: #757575; font-size: 11px; }"
-            "QLabel#positionValue { color: #212121; font-size: 15px; "
+            "QFrame#positionCard { border: 1px solid palette(mid); "
+            "border-radius: 3px; "
+            "background: palette(base); }"
+            "QLabel#positionHeader { color: palette(mid); font-size: 11px; }"
+            "QLabel#positionValue { color: palette(text); font-size: 15px; "
             "font-weight: 600; }"
         )
         position_layout = QGridLayout(self.position_card)
@@ -215,6 +217,7 @@ class AxisCalibrationPreview(QWidget):
     ) -> None:
         """Replace curve data and auto-range exactly once for the new curve."""
 
+        self.set_current_position(None, None, visible=False)
         arrays = _curve_arrays(controller, physical)
         if arrays is None:
             self._controller_values = np.array([], dtype=float)
@@ -295,15 +298,21 @@ class AxisCalibrationPreview(QWidget):
             physical_value = float(physical)
         except (TypeError, ValueError):
             self.current_position = None
+            self.marker_item.setData([], [])
             self.marker_item.hide()
             return
-        if not (np.isfinite(controller_value) and np.isfinite(physical_value)):
+        if not (
+            visible
+            and np.isfinite(controller_value)
+            and np.isfinite(physical_value)
+        ):
             self.current_position = None
+            self.marker_item.setData([], [])
             self.marker_item.hide()
             return
         self.current_position = (controller_value, physical_value)
         self.marker_item.setData([controller_value], [physical_value])
-        self.marker_item.setVisible(bool(visible))
+        self.marker_item.show()
 
     def set_outside_range(
         self,
