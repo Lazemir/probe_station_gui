@@ -336,16 +336,9 @@ from probe_station_gui.route.artifact_rows import (
     route_contact_height_map_row,
 )
 from probe_station_gui.camera.imaging import (
-    MicroscopeCaptureResult,
-    MicroscopeScanPlan,
-    MicroscopeScanTile,
-    apply_flat_field_correction,
-    apply_self_flat_field_correction,
-    build_median_flat_field_profile,
+    apply_flat_field_correction,  # noqa: F401 - retained test/patch seam
     objective_scale_calibration,
-    refine_scan_scale_from_tile_overlaps,
     save_microscope_image,
-    stitch_scan_tiles,
     utc_timestamp,
 )
 from probe_station_gui.camera.distortion import (
@@ -357,6 +350,18 @@ from probe_station_gui.camera.distortion import (
     fit_stage_geometry_from_observations,
 )
 from probe_station_gui.camera import microscope_scan
+from probe_station_gui.camera.microscope_scan_runtime import (
+    MicroscopeScanArtifactAdapter,
+    MicroscopeAreaScanRequest,
+    MicroscopeScanCameraAdapter,
+    MicroscopeDesignScanRequest,
+    MicroscopeScanEventAdapter,
+    MicroscopeScanRunRequest,
+    MicroscopeScanRuntime,
+    MicroscopeScanSessionAdapter,
+    MicroscopeScanStageAdapter,
+    build_microscope_scan_plan,
+)
 from probe_station_gui.settings.manager import (
     Settings,
     SettingsManager,
@@ -413,14 +418,6 @@ logger = logging.getLogger(__name__)
 
 APP_ICON_RESOURCE = "assets/app_icon.ico"
 WINDOWS_APP_USER_MODEL_ID = "ProbeStationGUI.ProbeStationGUI"
-
-
-@dataclass(frozen=True)
-class _MicroscopeScanCapturedFrame:
-    tile: MicroscopeScanTile
-    frame: QImage
-    captured_at: str
-    actual_stage_position: tuple[float, ...] | None
 
 
 @dataclass(frozen=True)
@@ -493,22 +490,6 @@ class _MicroscopeScanLaunchSnapshot:
         if self.registration_offset is not None:
             payload["registration_offset"] = list(self.registration_offset)
         return payload
-
-
-@dataclass(frozen=True)
-class _MicroscopeDesignScanRequest:
-    bounds: tuple[float, float, float, float]
-    overlap_fraction: float
-
-
-@dataclass(frozen=True)
-class _MicroscopeAreaScanRequest:
-    row_count: int
-    column_count: int
-    overlap_fraction: float
-    scan_pattern: str
-    structure_size_mm: float | None = None
-    placement_fraction: float | None = None
 
 
 @dataclass(frozen=True)
@@ -3462,7 +3443,7 @@ class Main(QMainWindow):
             flat_field_options=flat_field_options,
             camera_lock_settings=camera_lock_settings,
         )
-        planning_request = _MicroscopeAreaScanRequest(
+        planning_request = MicroscopeAreaScanRequest(
             row_count=rows,
             column_count=columns,
             overlap_fraction=overlap_fraction,
@@ -10721,7 +10702,7 @@ class Main(QMainWindow):
                 document=document,
                 registration=registration,
             )
-            planning_request = _MicroscopeDesignScanRequest(
+            planning_request = MicroscopeDesignScanRequest(
                 bounds=tuple(float(value) for value in document.bounds),
                 overlap_fraction=float(configuration.overlap_fraction),
             )
@@ -10751,381 +10732,71 @@ class Main(QMainWindow):
             self._show_status(message, 8000)
         self._update_stage_coordinate_apply_state()
 
-    def _build_microscope_scan_plan(
-        self,
-        planning_request: object,
-        frame_size_px: tuple[int, int],
-        *,
-        launch_snapshot: _MicroscopeScanLaunchSnapshot,
-        center_stage_xy: tuple[float, float] | None = None,
-    ) -> MicroscopeScanPlan:
-        width_px, height_px = (int(frame_size_px[0]), int(frame_size_px[1]))
-        if width_px <= 0 or height_px <= 0:
-            raise RuntimeError("Camera frame size is unavailable.")
-        if isinstance(planning_request, _MicroscopeDesignScanRequest):
-            decision = microscope_scan.scan_plan_decision(
-                document=planning_request,
-                scale=launch_snapshot.scale,
-                frame_size_px=(width_px, height_px),
-                overlap_fraction=planning_request.overlap_fraction,
-                design_to_stage_xy=launch_snapshot.design_to_raw_stage,
-            )
-            if not decision.accepted or decision.plan is None:
-                message = (
-                    decision.status.message
-                    if decision.status is not None
-                    else "Microscope scan plan is unavailable."
-                )
-                raise RuntimeError(message)
-            return decision.plan
-        if isinstance(planning_request, _MicroscopeAreaScanRequest):
-            if center_stage_xy is None or len(center_stage_xy) < 2:
-                raise RuntimeError("Unable to read X/Y stage position.")
-            center_stage_xy = (
-                float(center_stage_xy[0]),
-                float(center_stage_xy[1]),
-            )
-            if not all(math.isfinite(value) for value in center_stage_xy):
-                raise RuntimeError("Unable to read X/Y stage position.")
-            pixels_to_mm = getattr(launch_snapshot.scale, "pixels_to_mm", None)
-            if planning_request.scan_pattern == "stitch_debug":
-                return microscope_scan.stitch_debug_scan_plan_from_pixel_matrix(
-                    center_stage_xy=center_stage_xy,
-                    frame_size_px=(width_px, height_px),
-                    pixels_to_mm=pixels_to_mm,
-                    structure_size_mm=float(planning_request.structure_size_mm),
-                    placement_fraction=float(planning_request.placement_fraction),
-                    overlap_fraction=planning_request.overlap_fraction,
-                )
-            if pixels_to_mm is not None:
-                return microscope_scan.centered_area_scan_plan_from_pixel_matrix(
-                    center_stage_xy=center_stage_xy,
-                    frame_size_px=(width_px, height_px),
-                    pixels_to_mm=pixels_to_mm,
-                    row_count=planning_request.row_count,
-                    column_count=planning_request.column_count,
-                    overlap_fraction=planning_request.overlap_fraction,
-                )
-            fov_size_mm = (
-                float(width_px) * float(launch_snapshot.scale.pixel_size_x_mm),
-                float(height_px) * float(launch_snapshot.scale.pixel_size_y_mm),
-            )
-            return microscope_scan.centered_area_scan_plan(
-                center_stage_xy=center_stage_xy,
-                fov_size_mm=fov_size_mm,
-                row_count=planning_request.row_count,
-                column_count=planning_request.column_count,
-                overlap_fraction=planning_request.overlap_fraction,
-            )
-        if hasattr(planning_request, "tiles"):
-            return planning_request
-        raise RuntimeError("Microscope scan planning request is invalid.")
-
     def _run_microscope_scan(
         self,
         configuration: MicroscopeScanConfiguration,
         planning_request: object,
         launch_snapshot: _MicroscopeScanLaunchSnapshot,
     ) -> None:
-        success = False
-        message = "Microscope scan stopped."
-        output_dir = microscope_scan.output_dir_from_configuration(configuration)
-        scale = launch_snapshot.scale
         flat_field_options = getattr(
             configuration,
             "flat_field_options",
             microscope_scan.FlatFieldScanOptions(enabled=False),
-        )
-        scan_flat_field_enabled = bool(
-            getattr(flat_field_options, "enabled", False)
         )
         camera_lock_settings = getattr(
             configuration,
             "camera_lock_settings",
             microscope_scan.CameraLockSettings(enabled=False),
         )
-        corrections = self._microscope_scan_corrections_metadata(
+        request = MicroscopeScanRunRequest(
+            output_dir=microscope_scan.output_dir_from_configuration(configuration),
+            scale=launch_snapshot.scale,
+            plan_factory=lambda frame_size, start_xy: build_microscope_scan_plan(
+                planning_request,
+                frame_size,
+                launch=launch_snapshot,
+                center_stage_xy=start_xy,
+            ),
             flat_field_options=flat_field_options,
             camera_lock_settings=camera_lock_settings,
+            settle_s=float(configuration.settle_s),
+            tile_approach_mm=float(getattr(configuration, "tile_approach_mm", 0.0)),
+            scan_pattern=str(getattr(configuration, "scan_pattern", "grid") or "grid"),
+            refine_scale_from_overlaps=bool(
+                getattr(configuration, "refine_scale_from_overlaps", True)
+            ),
         )
-        scan_pattern = str(getattr(configuration, "scan_pattern", "grid") or "grid")
-        refine_scale_from_overlaps = bool(
-            getattr(configuration, "refine_scale_from_overlaps", True)
+        runtime = MicroscopeScanRuntime(
+            stage=MicroscopeScanStageAdapter(
+                begin_task=self.stage_controller.begin_external_task,
+                read_reserved_position=self.stage_controller.run_external_current_stage_position,
+                raise_action=self.stage_controller.run_external_needles_action,
+                needle_feedrate=self._current_needle_feedrate,
+                move_xy=self.stage_controller.run_external_move_to_xy,
+                latest_position=self.stage_controller.latest_stage_position,
+                finish_task=self.stage_controller.finish_external_task,
+            ),
+            camera=MicroscopeScanCameraAdapter(
+                grabber=self.grabber,
+                stop_event=self._microscope_scan_stop_requested,
+                latest_frame_counter=self._latest_camera_counter,
+                wait_for_frame=self._wait_for_camera_frame,
+                latest_raw_frame_counter=self._latest_raw_camera_counter,
+                wait_for_raw_frame=self._wait_for_raw_camera_frame,
+                correct_lens=self._correct_camera_frame_for_active_objective,
+                settings_timeout_s=self.MICROSCOPE_SCAN_CAMERA_SETTINGS_TIMEOUT_S,
+            ),
+            artifacts=MicroscopeScanArtifactAdapter(
+                launch=launch_snapshot,
+                stage_position_for_metadata=self._stage_position_for_image_metadata,
+            ),
+            event_sink=MicroscopeScanEventAdapter(
+                status_callback=self.microscope_scan_status.emit,
+                finished_callback=self.microscope_scan_finished.emit,
+            ),
+            session=MicroscopeScanSessionAdapter(self._optical_session_manager),
         )
-        if scan_pattern != "grid" or not refine_scale_from_overlaps:
-            corrections["scan"] = {
-                "pattern": scan_pattern,
-                "refine_scale_from_overlaps": refine_scale_from_overlaps,
-            }
-        captured_frames: list[_MicroscopeScanCapturedFrame] = []
-        camera_restore_key: str | None = None
-        stage_task_started = False
-        start_stage_xy: tuple[float, float] | None = None
-        stage_position_changed = False
-        optical_session: object | None = None
-        try:
-            self.microscope_scan_status.emit("Microscope scan: fixing exposure.")
-            optical_session = self._optical_session_manager.open("microscope scan")
-            corrections.update(
-                self._microscope_scan_corrections_metadata(
-                    flat_field_options=flat_field_options,
-                    camera_lock_settings=camera_lock_settings,
-                    optical_session=optical_session.snapshot(),
-                )
-            )
-            if scale is None:
-                raise RuntimeError(
-                    "Active objective has no calibrated microscope scale."
-                )
-            self.stage_controller.begin_external_task("microscope design scan")
-            stage_task_started = True
-            start_stage_xy = self._reserved_stage_start_xy()
-            before_counter = self._latest_camera_counter()
-            frame, _counter = self._wait_for_camera_frame(
-                after_counter=before_counter,
-                timeout_s=2.0,
-            )
-            if frame is None:
-                raise RuntimeError("Camera frame is unavailable; cannot scan.")
-            plan = self._build_microscope_scan_plan(
-                planning_request,
-                (int(frame.width()), int(frame.height())),
-                launch_snapshot=launch_snapshot,
-                center_stage_xy=start_stage_xy,
-            )
-            self.microscope_scan_status.emit(microscope_scan.starting_status(plan))
-            output_dir.mkdir(parents=True, exist_ok=True)
-            camera_restore_key = self._apply_microscope_scan_camera_lock(
-                camera_lock_settings
-            )
-            self.microscope_scan_status.emit("Microscope scan: raising needles.")
-            self.stage_controller.run_external_needles_action(
-                "raise",
-                self._current_needle_feedrate(),
-            )
-            for tile in plan.tiles:
-                if self._microscope_scan_stop_requested.is_set():
-                    message = "Microscope scan stopped by user."
-                    break
-                self.microscope_scan_status.emit(
-                    microscope_scan.tile_status(tile, len(plan.tiles))
-                )
-                stage_position_changed = True
-                self._move_to_microscope_scan_tile(
-                    tile,
-                    tile_approach_mm=float(
-                        getattr(configuration, "tile_approach_mm", 0.0)
-                    ),
-                )
-                if not self._sleep_microscope_scan_settle(configuration.settle_s):
-                    message = "Microscope scan stopped by user."
-                    break
-                captured_frames.append(
-                    _MicroscopeScanCapturedFrame(
-                        tile=tile,
-                        frame=self._capture_microscope_scan_frame(
-                            raw=scan_flat_field_enabled
-                        ),
-                        captured_at=utc_timestamp(),
-                        actual_stage_position=self._microscope_scan_actual_position(),
-                    )
-                )
-            else:
-                flat_field_profile = self._flat_field_profile_for_microscope_scan(
-                    captured_frames,
-                    flat_field_options,
-                )
-                captured_tiles: list[tuple[MicroscopeScanTile, QImage]] = []
-                tile_results: list[MicroscopeCaptureResult] = []
-                for captured in captured_frames:
-                    if scan_flat_field_enabled:
-                        corrected_frame = self._correct_microscope_scan_frame(
-                            captured.frame,
-                            flat_field_options,
-                            flat_field_profile=flat_field_profile,
-                        )
-                    else:
-                        corrected_frame = captured.frame
-                    result = self._save_microscope_scan_tile(
-                        captured.tile,
-                        plan,
-                        frame=corrected_frame,
-                        captured_at=captured.captured_at,
-                        output_dir=output_dir,
-                        scale=scale,
-                        launch_snapshot=launch_snapshot,
-                        corrections=corrections,
-                        actual_stage_position=captured.actual_stage_position,
-                    )
-                    tile_results.append(result)
-                    captured_tiles.append((captured.tile, result.raw_image))
-                if refine_scale_from_overlaps:
-                    stitch_scale = refine_scan_scale_from_tile_overlaps(
-                        captured_tiles,
-                        scale,
-                    )
-                else:
-                    stitch_scale = scale
-                diagnostic_mosaic_results: dict[str, MicroscopeCaptureResult] = {}
-                if scan_pattern == "stitch_debug":
-                    raw_images_by_label = {
-                        str(getattr(tile, "label", "") or ""): image
-                        for tile, image in captured_tiles
-                    }
-                    for group in microscope_scan.stitch_debug_mosaic_groups(plan):
-                        group_plan = microscope_scan.stitch_debug_mosaic_group_plan(
-                            plan,
-                            group,
-                        )
-                        group_tile_images = [
-                            (tile, raw_images_by_label[str(getattr(tile, "label", ""))])
-                            for tile in group_plan.tiles
-                        ]
-                        group_mosaic = stitch_scan_tiles(
-                            plan=group_plan,
-                            tile_images=group_tile_images,
-                            scale=stitch_scale,
-                        )
-                        diagnostic_mosaic_results[group.name] = (
-                            self._save_microscope_scan_mosaic(
-                                group_mosaic,
-                                group_plan,
-                                output_dir=output_dir,
-                                scale=stitch_scale,
-                                launch_snapshot=launch_snapshot,
-                                corrections=corrections,
-                                filename_suffix=group.name,
-                                extra={
-                                    "stitch_debug_group": group.name,
-                                    "stitch_debug_tiles": [
-                                        str(getattr(tile, "label", "") or "")
-                                        for tile in group_plan.tiles
-                                    ],
-                                },
-                            )
-                        )
-                    mosaic_result = next(iter(diagnostic_mosaic_results.values()))
-                else:
-                    mosaic = stitch_scan_tiles(
-                        plan=plan,
-                        tile_images=captured_tiles,
-                        scale=stitch_scale,
-                    )
-                    mosaic_result = self._save_microscope_scan_mosaic(
-                        mosaic,
-                        plan,
-                        output_dir=output_dir,
-                        scale=stitch_scale,
-                        launch_snapshot=launch_snapshot,
-                        corrections=corrections,
-                    )
-                manifest_path = microscope_scan.write_manifest(
-                    output_dir=output_dir,
-                    plan=plan,
-                    tile_results=tile_results,
-                    mosaic_result=mosaic_result,
-                    corrections=corrections,
-                    diagnostic_mosaics=diagnostic_mosaic_results or None,
-                )
-                success = True
-                if diagnostic_mosaic_results:
-                    paths = ", ".join(
-                        f"{name} {result.image_path}"
-                        for name, result in diagnostic_mosaic_results.items()
-                    )
-                    message = (
-                        f"Microscope seam debug complete: {len(tile_results)} tiles, "
-                        f"{paths}, manifest {manifest_path}."
-                    )
-                else:
-                    message = microscope_scan.completion_message(
-                        tile_count=len(tile_results),
-                        mosaic_result=mosaic_result,
-                        manifest_path=manifest_path,
-                    )
-        except Exception as exc:
-            logger.exception("Microscope scan failed")
-            message = f"Microscope scan failed: {exc}"
-        finally:
-            if (
-                stage_task_started
-                and stage_position_changed
-                and start_stage_xy is not None
-            ):
-                try:
-                    self.microscope_scan_status.emit(
-                        "Microscope scan: returning to start."
-                    )
-                    self.stage_controller.run_external_move_to_xy(
-                        start_stage_xy[0],
-                        start_stage_xy[1],
-                    )
-                except Exception as exc:
-                    logger.exception("Microscope scan return to start failed")
-                    success, message = self._microscope_scan_cleanup_failure(
-                        success,
-                        message,
-                        "return to start",
-                        exc,
-                    )
-            if camera_restore_key is not None:
-                restore_error = self._restore_microscope_scan_camera_lock(
-                    camera_restore_key
-                )
-                if restore_error:
-                    logger.error("Microscope scan camera restore failed: %s", restore_error)
-                    success, message = self._microscope_scan_cleanup_failure(
-                        success,
-                        message,
-                        "camera settings restore",
-                        restore_error,
-                    )
-            if stage_task_started:
-                try:
-                    self.stage_controller.finish_external_task()
-                except Exception as exc:
-                    logger.exception("Microscope scan stage release failed")
-                    success, message = self._microscope_scan_cleanup_failure(
-                        success,
-                        message,
-                        "stage release",
-                        exc,
-                    )
-            if optical_session is not None:
-                try:
-                    session_result = optical_session.close()
-                    session_error = str(session_result.get("warning") or "")
-                except Exception as exc:
-                    session_error = str(exc) or type(exc).__name__
-                if session_error:
-                    logger.error(
-                        "Microscope scan exposure policy restore failed: %s",
-                        session_error,
-                    )
-                    if success:
-                        success = False
-                        message = (
-                            "Microscope scan complete, but exposure policy restore "
-                            f"failed: {session_error}"
-                        )
-                    else:
-                        message = f"{message} Exposure policy restore failed: {session_error}"
-            self.microscope_scan_finished.emit(success, message)
-
-    @staticmethod
-    def _microscope_scan_cleanup_failure(
-        success: bool,
-        message: str,
-        operation: str,
-        error: object,
-    ) -> tuple[bool, str]:
-        detail = str(error) or type(error).__name__
-        if success:
-            return (
-                False,
-                f"Microscope scan complete, but {operation} failed: {detail}",
-            )
-        return False, f"{message} {operation.capitalize()} failed: {detail}"
+        runtime.run(request)
 
     def _reserved_stage_start_xy(self) -> tuple[float, float]:
         position = self.stage_controller.run_external_current_stage_position()
@@ -11135,302 +10806,6 @@ class Main(QMainWindow):
         if not all(math.isfinite(value) for value in start_xy):
             raise RuntimeError("Unable to read X/Y stage position.")
         return start_xy
-
-    def _move_to_microscope_scan_tile(
-        self,
-        tile: MicroscopeScanTile,
-        *,
-        tile_approach_mm: float,
-    ) -> None:
-        target_x = float(tile.stage_xy[0])
-        target_y = float(tile.stage_xy[1])
-        approach = max(0.0, float(tile_approach_mm))
-        if approach > 1e-9:
-            self.stage_controller.run_external_move_to_xy(
-                target_x - approach,
-                target_y - approach,
-            )
-        self.stage_controller.run_external_move_to_xy(target_x, target_y)
-
-    def _sleep_microscope_scan_settle(self, settle_s: float) -> bool:
-        deadline = time.monotonic() + max(0.0, float(settle_s))
-        while True:
-            if self._microscope_scan_stop_requested.is_set():
-                return False
-            remaining = deadline - time.monotonic()
-            if remaining <= 0.0:
-                return True
-            time.sleep(min(remaining, 0.05))
-
-    def _microscope_scan_actual_position(self) -> tuple[float, ...] | None:
-        position = self.stage_controller.latest_stage_position()
-        if position is None or len(position) < 2:
-            return None
-        try:
-            values = tuple(float(value) for value in position)
-        except (TypeError, ValueError):
-            return None
-        if not all(math.isfinite(value) for value in values[:2]):
-            return None
-        return values
-
-    def _apply_microscope_scan_camera_lock(
-        self,
-        camera_lock_settings: object,
-    ) -> str | None:
-        if not bool(getattr(camera_lock_settings, "enabled", False)):
-            return None
-        settings = tuple(getattr(camera_lock_settings, "settings", ()) or ())
-        if not settings:
-            return None
-        restore_key = f"microscope_scan_{uuid.uuid4().hex}"
-        self.microscope_scan_status.emit("Microscope scan: locking camera settings.")
-        result = self._wait_for_camera_settings_override(
-            restore_key=restore_key,
-            request=lambda: self.grabber.request_temporary_camera_settings(
-                settings,
-                restore_key=restore_key,
-            ),
-        )
-        if not bool(result.get("ok")):
-            raise RuntimeError(str(result.get("message") or "Camera settings lock failed."))
-        return restore_key
-
-    def _restore_microscope_scan_camera_lock(self, restore_key: str) -> str:
-        self.microscope_scan_status.emit("Microscope scan: restoring camera settings.")
-        try:
-            result = self._wait_for_camera_settings_override(
-                restore_key=restore_key,
-                request=lambda: self.grabber.request_restore_camera_settings(
-                    restore_key=restore_key,
-                ),
-            )
-        except Exception as exc:
-            return str(exc)
-        if not bool(result.get("ok")):
-            return str(result.get("message") or "Camera settings restore failed.")
-        return ""
-
-    def _wait_for_camera_settings_override(
-        self,
-        *,
-        restore_key: str,
-        request: Any,
-    ) -> dict[str, Any]:
-        event = threading.Event()
-        result_holder: dict[str, Any] = {}
-
-        def on_changed(payload: object) -> None:
-            if not isinstance(payload, dict):
-                return
-            if str(payload.get("restore_key") or "") != restore_key:
-                return
-            result_holder.update(payload)
-            event.set()
-
-        self.grabber.camera_settings_override_changed.connect(
-            on_changed,
-            Qt.ConnectionType.DirectConnection,
-        )
-        try:
-            request()
-            if not event.wait(self.MICROSCOPE_SCAN_CAMERA_SETTINGS_TIMEOUT_S):
-                raise RuntimeError("Camera settings response timeout.")
-            return dict(result_holder)
-        finally:
-            try:
-                self.grabber.camera_settings_override_changed.disconnect(on_changed)
-            except (TypeError, RuntimeError):
-                pass
-
-    @staticmethod
-    def _microscope_scan_corrections_metadata(
-        *,
-        flat_field_options: object,
-        camera_lock_settings: object,
-        optical_session: Mapping[str, object] | None = None,
-    ) -> dict[str, object]:
-        corrections: dict[str, object] = {}
-        if hasattr(flat_field_options, "to_metadata"):
-            flat_metadata = flat_field_options.to_metadata()
-            if bool(flat_metadata.get("enabled")):
-                corrections["flat_field"] = flat_metadata
-        if hasattr(camera_lock_settings, "to_metadata"):
-            lock_metadata = camera_lock_settings.to_metadata()
-            if bool(lock_metadata.get("enabled")):
-                corrections["camera_lock"] = lock_metadata
-        if optical_session is not None:
-            corrections["optical_session"] = dict(optical_session)
-        return corrections
-
-    def _capture_microscope_scan_frame(self, *, raw: bool = False) -> QImage:
-        if raw:
-            before_counter = self._latest_raw_camera_counter()
-            wait_for_frame = self._wait_for_raw_camera_frame
-        else:
-            before_counter = self._latest_camera_counter()
-            wait_for_frame = self._wait_for_camera_frame
-        frame, _counter = wait_for_frame(
-            after_counter=before_counter,
-            timeout_s=2.0,
-        )
-        if frame is None:
-            raise RuntimeError("Camera frame is unavailable.")
-        return frame
-
-    def _correct_microscope_scan_frame(
-        self,
-        frame: QImage,
-        flat_field_options: object,
-        *,
-        flat_field_profile: object | None,
-    ) -> QImage:
-        flat_corrected = self._flat_field_microscope_scan_frame(
-            frame,
-            flat_field_options,
-            flat_field_profile=flat_field_profile,
-        )
-        return self._correct_camera_frame_for_active_objective(flat_corrected)
-
-    def _save_microscope_scan_tile(
-        self,
-        tile: MicroscopeScanTile,
-        plan: MicroscopeScanPlan,
-        *,
-        frame: QImage,
-        captured_at: str,
-        output_dir: Path,
-        scale: Any,
-        launch_snapshot: _MicroscopeScanLaunchSnapshot,
-        corrections: dict[str, object],
-        actual_stage_position: tuple[float, ...] | None = None,
-    ) -> MicroscopeCaptureResult:
-        extra: dict[str, object] = {
-            "scan_launch": launch_snapshot.metadata(),
-        }
-        if corrections:
-            extra["corrections"] = corrections
-        if actual_stage_position is not None:
-            extra["actual_stage_position"] = [float(value) for value in actual_stage_position]
-        save_plan = microscope_scan.tile_image_save_plan(
-            output_dir=output_dir,
-            scan_name=launch_snapshot.scan_name,
-            tile=tile,
-            plan=plan,
-            captured_at=captured_at,
-            objective_name=launch_snapshot.objective_name,
-            magnification=launch_snapshot.magnification,
-            design_xy=launch_snapshot.raw_stage_to_design(tile.stage_xy),
-            stage_position=self._stage_position_for_image_metadata(
-                stage_xy=tile.stage_xy
-            ),
-            extra=extra or None,
-        )
-        return save_microscope_image(
-            frame=frame,
-            output_dir=save_plan.output_dir,
-            filename_stem=save_plan.filename_stem,
-            metadata=save_plan.metadata,
-            scale=scale,
-            save_raw=True,
-        )
-
-    def _save_microscope_scan_mosaic(
-        self,
-        mosaic: QImage,
-        plan: MicroscopeScanPlan,
-        *,
-        output_dir: Path,
-        scale: Any,
-        launch_snapshot: _MicroscopeScanLaunchSnapshot,
-        corrections: dict[str, object],
-        filename_suffix: str = "",
-        extra: dict[str, object] | None = None,
-    ) -> MicroscopeCaptureResult:
-        metadata_extra: dict[str, object] = {}
-        if corrections:
-            metadata_extra["corrections"] = corrections
-        if extra:
-            metadata_extra.update(extra)
-        metadata_extra["scan_launch"] = launch_snapshot.metadata()
-        save_plan = microscope_scan.mosaic_image_save_plan(
-            output_dir=output_dir,
-            scan_name=launch_snapshot.scan_name,
-            plan=plan,
-            captured_at=utc_timestamp(),
-            objective_name=launch_snapshot.objective_name,
-            magnification=launch_snapshot.magnification,
-            filename_suffix=filename_suffix,
-            extra=metadata_extra or None,
-        )
-        return save_microscope_image(
-            frame=mosaic,
-            output_dir=save_plan.output_dir,
-            filename_stem=save_plan.filename_stem,
-            metadata=save_plan.metadata,
-            scale=scale,
-        )
-
-    @staticmethod
-    def _flat_field_profile_for_microscope_scan(
-        captured_frames: list[_MicroscopeScanCapturedFrame],
-        flat_field_options: object,
-    ) -> object | None:
-        if not bool(getattr(flat_field_options, "enabled", False)):
-            return None
-        mode = str(getattr(flat_field_options, "mode", "scan") or "scan").lower()
-        if mode == "self":
-            return None
-        if mode == "scan":
-            frames = [captured.frame for captured in captured_frames]
-            source = "scan_median"
-        elif mode == "reference":
-            reference_images = tuple(
-                str(path)
-                for path in getattr(flat_field_options, "reference_images", ())
-            )
-            if not reference_images:
-                raise RuntimeError("Flat-field reference images are not configured.")
-            frames = []
-            for reference_image in reference_images:
-                image_path = Path(reference_image).expanduser()
-                image = QImage(str(image_path))
-                if image.isNull():
-                    raise RuntimeError(
-                        f"Flat-field reference image is unreadable: {image_path}"
-                    )
-                frames.append(image.convertToFormat(QImage.Format_RGB32))
-            source = "reference"
-        else:
-            raise RuntimeError(f"Unsupported flat-field mode: {mode}")
-        return build_median_flat_field_profile(
-            frames,
-            blur_radius_px=int(getattr(flat_field_options, "blur_radius_px", 401)),
-            max_gain=float(getattr(flat_field_options, "max_gain", 4.0)),
-            source=source,
-        )
-
-    @staticmethod
-    def _flat_field_microscope_scan_frame(
-        frame: QImage,
-        flat_field_options: object,
-        *,
-        flat_field_profile: object | None = None,
-    ) -> QImage:
-        if not bool(getattr(flat_field_options, "enabled", False)):
-            return frame
-        mode = str(getattr(flat_field_options, "mode", "scan") or "scan").lower()
-        if mode in {"scan", "reference"}:
-            if flat_field_profile is None:
-                raise RuntimeError("Flat-field profile is unavailable.")
-            return apply_flat_field_correction(frame, flat_field_profile)
-        if mode != "self":
-            raise RuntimeError(f"Unsupported flat-field mode: {mode}")
-        return apply_self_flat_field_correction(
-            frame,
-            blur_radius_px=int(getattr(flat_field_options, "blur_radius_px", 401)),
-            max_gain=float(getattr(flat_field_options, "max_gain", 4.0)),
-        )
 
     def _on_microscope_scan_status(self, message: str) -> None:
         self._show_status(message)
