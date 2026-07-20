@@ -80,10 +80,12 @@ def request_home_axis_from_ui(owner: MainWindowHomingOwner, axis: str) -> None:
     axis_name = axis.strip().upper()
     if axis_name not in VALID_HOME_AXES:
         return
+    _clear_exact_step_targets(owner)
     queue_or_start_homing_axes(owner, [axis_name])
 
 
 def request_home_all_from_ui(owner: MainWindowHomingOwner) -> None:
+    _clear_exact_step_targets(owner)
     if owner.stage_controller.request_home_all():
         owner._pending_homing_axes.clear()
         refresh_pending_homing_ui(owner)
@@ -108,6 +110,12 @@ def queue_or_start_homing_axes(
             HOMING_RETRY_DELAY_MS,
             lambda: start_next_pending_homing_action(owner),
         )
+
+
+def _clear_exact_step_targets(owner: MainWindowHomingOwner) -> None:
+    callback = getattr(owner, "_clear_exact_step_targets", None)
+    if callable(callback):
+        callback()
 
 
 def start_next_pending_homing_action(owner: MainWindowHomingOwner) -> None:

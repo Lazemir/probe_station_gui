@@ -23,6 +23,7 @@ def serial_baud_rate(serial_port: object) -> int:
 
 
 def on_serial_connected(owner: object, serial_port: object) -> None:
+    _clear_exact_step_targets(owner)
     if owner.serial_connection and owner.serial_connection.is_open:
         owner.serial_connection.close()
     owner.serial_connection = serial_port
@@ -61,6 +62,7 @@ def on_serial_connected(owner: object, serial_port: object) -> None:
 def on_serial_disconnected(owner: object) -> None:
     from probe_station_gui.views.main_window_shutdown import stop_jog_before_serial_close
 
+    _clear_exact_step_targets(owner)
     stop_jog_before_serial_close(owner, "serial disconnect")
     if owner.serial_connection and owner.serial_connection.is_open:
         owner.serial_connection.close()
@@ -209,12 +211,19 @@ def apply_joystick_feedrate_preferences(owner: object) -> None:
 
 
 def on_controller_reboot_detected(owner: object) -> None:
+    _clear_exact_step_targets(owner)
     owner._stage_unhomed_display_origins.clear()
     owner._pending_persisted_design_state = None
     owner._pending_persisted_design_position = None
     owner._invalidate_design_registration(
         "Design registration cleared after controller reboot."
     )
+
+
+def _clear_exact_step_targets(owner: object) -> None:
+    callback = getattr(owner, "_clear_exact_step_targets", None)
+    if callable(callback):
+        callback()
 
 
 def on_controller_reboot_ready(owner: object) -> None:

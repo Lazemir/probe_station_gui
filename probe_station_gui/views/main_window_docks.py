@@ -215,6 +215,9 @@ def _connect_joystick_panel(owner: MainWindowDockOwner) -> None:
         )
     )
     owner.joystick_panel.reset_requested.connect(
+        lambda: getattr(owner, "_clear_exact_step_targets", lambda: None)()
+    )
+    owner.joystick_panel.reset_requested.connect(
         lambda: owner.stage_controller.reset_controller(
             source="joystick_reset_button"
         )

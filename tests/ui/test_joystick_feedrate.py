@@ -452,6 +452,7 @@ class JoystickFeedrateTest(unittest.TestCase):
         widget._needle_feedrate_value = JoystickWindow.MIN_LINEAR_FEEDRATE
         widget._active_axes = None
         widget.linear_feedrate_changed = _SignalRecorder()
+        widget.step_feedrate_changed = _SignalRecorder()
         JoystickWindow._update_linear_feedrate_slider_range(widget)
 
         changed = JoystickWindow._apply_wheel_delta(widget, 120)

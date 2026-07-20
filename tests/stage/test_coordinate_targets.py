@@ -47,6 +47,12 @@ def test_start_plan_orders_targets_by_axis_names_and_filters_unknown_axes() -> N
     assert decision.plan.raw_targets == {"X": 1.0, "B": 4.0}
     assert decision.plan.display_targets == {"X": 1.0, "B": 4.0}
 
+    state = _state()
+    state.apply_start_plan(decision.plan)
+    assert state.display_targets == {"X": 1.0, "B": 4.0}
+    state.clear_tracking()
+    assert state.display_targets == {}
+
 
 def test_start_plan_rejects_empty_targets_unavailable_origin_limit_errors_and_bad_target_position() -> None:
     empty = plan_coordinate_target_start(

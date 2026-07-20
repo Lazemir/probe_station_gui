@@ -101,6 +101,7 @@ class CoordinateTargetMoveState:
     origin_position: tuple[float, ...] | None = None
     stage_position: tuple[float, ...] | None = None
     target_position: tuple[float, ...] | None = None
+    display_targets: dict[str, float] = field(default_factory=dict)
     started_at: float | None = None
     ends_at: float | None = None
     programmed_feedrate: float | None = None
@@ -123,6 +124,9 @@ class CoordinateTargetMoveState:
         self.origin_position = tuple(float(value) for value in plan.origin_position)
         self.stage_position = tuple(float(value) for value in plan.publish_position)
         self.target_position = tuple(float(value) for value in plan.target_position)
+        self.display_targets = {
+            axis: float(value) for axis, value in plan.display_targets.items()
+        }
         self.started_at = float(plan.started_at)
         self.ends_at = float(plan.ends_at)
         self.programmed_feedrate = float(plan.feedrate_mm_min)
@@ -232,6 +236,7 @@ class CoordinateTargetMoveState:
         self.origin_position = None
         self.stage_position = None
         self.target_position = None
+        self.display_targets.clear()
         self.started_at = None
         self.ends_at = None
         self.programmed_feedrate = None
