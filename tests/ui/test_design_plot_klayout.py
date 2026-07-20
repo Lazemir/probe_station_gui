@@ -13,8 +13,9 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 pytest.importorskip("PySide6")
 pytest.importorskip("pyqtgraph")
 
-from PySide6.QtCore import QObject, QPointF, Qt, Signal
-from PySide6.QtWidgets import QApplication
+from PySide6.QtCore import QObject, QPoint, QPointF, Qt, Signal
+from PySide6.QtGui import QAction, QWheelEvent
+from PySide6.QtWidgets import QAbstractButton, QApplication
 
 from probe_station_gui.design.klayout_types import (
     KLayoutConfig,
@@ -22,8 +23,13 @@ from probe_station_gui.design.klayout_types import (
     SnapFailure,
     SnapResponse,
 )
-from probe_station_gui.design.markup import MarkupDocument
+from probe_station_gui.design.markup import GuideSegment, MarkupDocument
 from probe_station_gui.design.model import DesignDocument, SnapResult
+from probe_station_gui.design.navigation_bounds import (
+    GDS_FOCUS_PADDING_FRACTION,
+    pad_bounds,
+)
+from probe_station_gui.route.model import MeasurementRoute, NeedleOffset, RoutePoint
 from probe_station_gui.views import design_plot_pane as plot_module
 from probe_station_gui.views.design_navigator_panel import (
     DesignLayoutWindow,
@@ -42,13 +48,19 @@ class _RasterController(QObject):
 
     def __init__(self, *_args, **_kwargs) -> None:
         super().__init__()
+        self._view_box = _args[0]
         self.config = None
         self.documents = []
+        self.ranges_seen_on_set_document = []
         self.generation = 0
         self.shutdown_calls = 0
         self.closed = False
 
     def set_document(self, document) -> None:
+        x_range, y_range = self._view_box.viewRange()
+        self.ranges_seen_on_set_document.append(
+            (x_range[0], y_range[0], x_range[1], y_range[1])
+        )
         self.documents.append(document)
         if self.closed:
             self.config = None
@@ -87,6 +99,8 @@ class _SnapWorker(QObject):
         self.hover_requests = []
         self.click_requests = []
         self.stop_calls = []
+        self.cancel_hover_calls = 0
+        self.cancel_pending_calls = 0
         self.instances.append(self)
 
     def submit_hover(self, request) -> None:
@@ -94,6 +108,12 @@ class _SnapWorker(QObject):
 
     def submit_click(self, request) -> None:
         self.click_requests.append(request)
+
+    def cancel_hover(self) -> None:
+        self.cancel_hover_calls += 1
+
+    def cancel_pending(self) -> None:
+        self.cancel_pending_calls += 1
 
     def stop(self, timeout_s: float = 1.0) -> None:
         self.stop_calls.append(timeout_s)
@@ -132,6 +152,72 @@ def _document(path: Path) -> DesignDocument:
         available_layers=frozenset({(1, 0), (2, 0)}),
         cell_bounds={"TOP": (0.0, 0.0, 100.0, 50.0)},
     )
+
+
+@pytest.fixture
+def document(tmp_path: Path) -> DesignDocument:
+    source = tmp_path / "layout.gds"
+    source.write_bytes(b"gds")
+    return _document(source)
+
+
+@pytest.fixture
+def window(monkeypatch, qt_app: QApplication):
+    monkeypatch.setattr(plot_module, "KLayoutRasterController", _RasterController)
+    monkeypatch.setattr(plot_module, "KLayoutSnapWorker", _SnapWorker)
+    widget = DesignLayoutWindow()
+    yield widget
+    widget._main_view.shutdown()
+    widget.deleteLater()
+
+
+@pytest.fixture
+def distant_hidden_markup(document: DesignDocument) -> MarkupDocument:
+    return MarkupDocument.empty(document.path, visible=False).append_guide(
+        (1_000_000.0, 0.0),
+        (1_000_100.0, 100.0),
+        guide_id="distant-guide",
+    )
+
+
+@pytest.fixture
+def distant_route(document: DesignDocument) -> MeasurementRoute:
+    route = MeasurementRoute.default_for_document(document)
+    route.points.append(
+        RoutePoint("far", "Far", (1_000_000.0, 0.0), enabled=False)
+    )
+    return route
+
+
+def _view_box(pane):
+    return pane._plot.getViewBox()
+
+
+def _box(pane):
+    x_range, y_range = _view_box(pane).viewRange()
+    return (x_range[0], y_range[0], x_range[1], y_range[1])
+
+
+def _assert_gds_focus(pane, document: DesignDocument) -> None:
+    visible = _box(pane)
+    padded = pad_bounds(document.bounds, GDS_FOCUS_PADDING_FRACTION)
+    frame = pane._navigation_frame
+    assert visible[0] <= padded[0]
+    assert visible[1] <= padded[1]
+    assert visible[2] >= padded[2]
+    assert visible[3] >= padded[3]
+    assert (visible[0] + visible[2]) * 0.5 == pytest.approx(
+        (padded[0] + padded[2]) * 0.5
+    )
+    assert (visible[1] + visible[3]) * 0.5 == pytest.approx(
+        (padded[1] + padded[3]) * 0.5
+    )
+    assert visible[0] >= frame[0] - 1e-6
+    assert visible[1] >= frame[1] - 1e-6
+    assert visible[2] <= frame[2] + 1e-6
+    assert visible[3] <= frame[3] + 1e-6
+    x_per_pixel, y_per_pixel = _view_box(pane).viewPixelSize()
+    assert x_per_pixel == pytest.approx(y_per_pixel, rel=1e-6)
 
 
 def test_file_backed_document_never_calls_legacy_plot_or_global_snap(
@@ -216,6 +302,43 @@ def test_file_configuration_changes_reuse_snap_worker_and_generation(
     assert pane._snap_worker is not worker
 
 
+def test_file_backed_layer_toggle_preserves_view_and_cached_navigation(
+    pane,
+    document: DesignDocument,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_content_bounds = plot_module.content_bounds
+    content_scans = 0
+
+    def counted_content_bounds(*args, **kwargs):
+        nonlocal content_scans
+        content_scans += 1
+        return real_content_bounds(*args, **kwargs)
+
+    monkeypatch.setattr(plot_module, "content_bounds", counted_content_bounds)
+    pane.set_document(document)
+    _view_box(pane).setRange(
+        xRange=(20.0, 40.0),
+        yRange=(10.0, 20.0),
+        padding=0.0,
+    )
+    before_view = _box(pane)
+    before_content = pane._navigation_content_bounds
+    before_frame = pane._navigation_frame
+    scans_before_toggle = content_scans
+
+    pane.set_document(document.with_visible_layers({(2, 0)}))
+
+    assert _box(pane) == pytest.approx(before_view)
+    assert pane._navigation_content_bounds is before_content
+    assert pane._navigation_frame is before_frame
+    assert content_scans == scans_before_toggle
+    assert pane._raster_controller.documents[-1].visible_layers == frozenset(
+        {(2, 0)}
+    )
+    assert pane._klayout_config.visible_layers == frozenset({(2, 0)})
+
+
 def test_same_path_new_source_retires_snap_worker_while_same_source_reuses(
     pane,
     tmp_path: Path,
@@ -275,6 +398,132 @@ def test_hover_is_replaceable_and_click_waits_for_matching_current_response(
     assert moves == [(50.0, 60.0)]
 
 
+def test_preflight_skipped_click_waits_for_older_accepted_click(
+    pane,
+    tmp_path: Path,
+) -> None:
+    pane.set_document(_document(tmp_path / "ordered-clicks.gds"))
+    pane._snap_distance_threshold = lambda: 1.0
+    worker = pane._snap_worker
+    moves: list[tuple[float, float]] = []
+    pane.move_requested.connect(lambda x, y: moves.append((x, y)))
+
+    pane._submit_file_backed_click("move", (10.0, 10.0))
+    accepted = worker.click_requests[-1]
+    pane._submit_file_backed_click("move", (1_000.0, 1_000.0))
+
+    assert len(worker.click_requests) == 1
+    assert moves == []
+
+    worker.snap_ready.emit(
+        SnapResponse(
+            request_id=accepted.request_id,
+            config_generation=accepted.config.generation,
+            raw_point=accepted.point,
+            result=SnapResult((11.0, 12.0), "vertex", 0.1),
+            elapsed_ms=1.0,
+            shapes_inspected=1,
+            purpose="click",
+        )
+    )
+
+    assert moves == [(11.0, 12.0), (1_000.0, 1_000.0)]
+
+
+def test_preflight_skipped_click_invalidates_inflight_hover(
+    pane,
+    tmp_path: Path,
+) -> None:
+    pane.set_document(_document(tmp_path / "skipped-click-hover.gds"))
+    pane._snap_distance_threshold = lambda: 1.0
+    worker = pane._snap_worker
+    pane._submit_file_backed_hover((10.0, 10.0))
+    hover = worker.hover_requests[-1]
+
+    pane._submit_file_backed_click("move", (1_000.0, 1_000.0))
+
+    assert worker.click_requests == []
+    assert worker.cancel_hover_calls == 1
+    assert pane._pending_hover_markup == {}
+    assert pane._hover_snap == SnapResult((1_000.0, 1_000.0), "free", 0.0)
+
+    worker.snap_ready.emit(_hover_response(hover))
+
+    assert pane._hover_snap == SnapResult((1_000.0, 1_000.0), "free", 0.0)
+
+
+def test_failed_older_click_releases_preflight_skipped_click(
+    pane,
+    tmp_path: Path,
+) -> None:
+    pane.set_document(_document(tmp_path / "failed-ordered-click.gds"))
+    pane._snap_distance_threshold = lambda: 1.0
+    worker = pane._snap_worker
+    moves: list[tuple[float, float]] = []
+    pane.move_requested.connect(lambda x, y: moves.append((x, y)))
+    pane._submit_file_backed_click("move", (10.0, 10.0))
+    accepted = worker.click_requests[-1]
+    pane._submit_file_backed_click("move", (1_000.0, 1_000.0))
+
+    worker.failed.emit(
+        SnapFailure(
+            accepted.request_id,
+            accepted.config.generation,
+            "click",
+            "failed",
+        )
+    )
+
+    assert moves == [(1_000.0, 1_000.0)]
+    assert pane._pending_clicks == {}
+    assert list(pane._click_order) == []
+
+
+def test_cancelled_ordered_click_ignores_late_failure(
+    pane,
+    tmp_path: Path,
+) -> None:
+    pane.set_document(_document(tmp_path / "cancelled-ordered-click.gds"))
+    pane._snap_distance_threshold = lambda: 1.0
+    worker = pane._snap_worker
+    calibration: list[tuple[int, float, float]] = []
+    moves: list[tuple[float, float]] = []
+    pane.calibration_point_selected.connect(
+        lambda slot, x, y: calibration.append((slot, x, y))
+    )
+    pane.move_requested.connect(lambda x, y: moves.append((x, y)))
+    pane._submit_file_backed_click("calibration", (10.0, 10.0), (0,))
+    earlier = worker.click_requests[-1]
+    pane._submit_file_backed_click("move", (20.0, 20.0))
+    cancelled = worker.click_requests[-1]
+
+    pane.cancel_active_interaction()
+    worker.failed.emit(
+        SnapFailure(
+            cancelled.request_id,
+            cancelled.config.generation,
+            "click",
+            "late failure",
+        )
+    )
+
+    assert not pane._snap_failure_visible
+    worker.snap_ready.emit(
+        SnapResponse(
+            request_id=earlier.request_id,
+            config_generation=earlier.config.generation,
+            raw_point=earlier.point,
+            result=SnapResult((11.0, 12.0), "vertex", 0.1),
+            elapsed_ms=1.0,
+            shapes_inspected=1,
+            purpose="click",
+        )
+    )
+    assert calibration == [(0, 11.0, 12.0)]
+    assert moves == []
+    assert pane._pending_clicks == {}
+
+
 def test_file_backed_click_uses_nearer_correlated_markup_candidate(
     pane,
     tmp_path: Path,
@@ -282,7 +531,7 @@ def test_file_backed_click_uses_nearer_correlated_markup_candidate(
     design_path = tmp_path / "markup-snap.gds"
     design_path.write_bytes(b"gds")
     pane.set_document(_document(design_path))
-    pane._snap_distance_threshold = lambda: 100.0
+    pane._snap_distance_threshold = lambda: 1.0
     markup = MarkupDocument.empty(design_path).append_guide(
         (1.0, 1.0),
         (3.0, 1.0),
@@ -414,7 +663,7 @@ def test_pending_click_is_rejected_when_markup_or_snap_state_changes(
     design_path = tmp_path / f"pending-{change}.gds"
     design_path.write_bytes(b"gds")
     pane.set_document(_document(design_path))
-    pane._snap_distance_threshold = lambda: 100.0
+    pane._snap_distance_threshold = lambda: 1.0
     markup = MarkupDocument.empty(design_path).append_guide(
         (1.0, 1.0),
         (3.0, 1.0),
@@ -454,7 +703,7 @@ def test_failed_file_backed_click_does_not_execute_correlated_markup_candidate(
     design_path = tmp_path / "markup-failure.gds"
     design_path.write_bytes(b"gds")
     pane.set_document(_document(design_path))
-    pane._snap_distance_threshold = lambda: 100.0
+    pane._snap_distance_threshold = lambda: 1.0
     pane.set_markup(
         MarkupDocument.empty(design_path).append_guide(
             (1.0, 1.0),
@@ -542,7 +791,7 @@ def test_click_snap_failure_removes_only_matching_action_without_raw_fallback(
     getattr(pane, signal_name).connect(lambda *args: emitted.append(args))
     pane._submit_file_backed_click(action, (7.0, 8.0), payload)
     matching = pane._snap_worker.click_requests[-1]
-    pane._submit_file_backed_click("move", (70.0, 80.0))
+    pane._submit_file_backed_click("move", (70.0, 40.0))
     other = pane._snap_worker.click_requests[-1]
 
     pane._snap_worker.failed.emit(
@@ -599,12 +848,48 @@ def test_snap_off_invalidates_inflight_hover_response(
     request = worker.hover_requests[-1]
 
     pane.set_snap_enabled(False)
+    assert worker.cancel_pending_calls == 1
     changes.clear()
     worker.snap_ready.emit(_hover_response(request))
 
     assert pane._hover_snap is None
     assert changes == []
     assert len(pane._hover_item.getData()[0]) == 0
+
+
+def test_extreme_hover_skips_worker_but_keeps_markup_snap(pane, tmp_path) -> None:
+    source = tmp_path / "chip.gds"
+    source.write_bytes(b"gds")
+    pane.set_document(_document(source))
+    pane.set_markup(
+        MarkupDocument.empty(source).append_guide(
+            (0.0, 0.0), (10.0, 0.0), guide_id="guide"
+        )
+    )
+    pane._snap_distance_threshold = lambda: 10_000_000.0
+    worker = pane._snap_worker
+
+    pane._submit_file_backed_hover((5.0, 0.0))
+
+    assert worker.hover_requests == []
+    assert worker.cancel_hover_calls == 1
+    assert pane._hover_snap.mode in {"guide_center", "guide_intersection"}
+
+
+def test_extreme_move_click_executes_exact_cursor_once_without_worker(
+    pane, tmp_path
+) -> None:
+    source = tmp_path / "move-chip.gds"
+    source.write_bytes(b"gds")
+    pane.set_document(_document(source))
+    emitted: list[tuple[float, float]] = []
+    pane.move_requested.connect(lambda x, y: emitted.append((x, y)))
+    pane._snap_distance_threshold = lambda: 10_000_000.0
+
+    pane._submit_file_backed_click("move", (25.0, 30.0))
+
+    assert pane._snap_worker.click_requests == []
+    assert emitted == [(25.0, 30.0)]
 
 
 def test_cursor_leave_invalidates_inflight_hover_response(
@@ -809,3 +1094,262 @@ def test_design_window_disables_escape_during_pending_document_preview(
     assert window._escape_shortcut.isEnabled()
     assert window.navigator_panel._delete_shortcut.isEnabled()
     window.deleteLater()
+
+
+def test_open_frames_gds_but_internal_limits_include_distant_hidden_markup(
+    pane, document, distant_hidden_markup
+) -> None:
+    pane.set_document(document)
+    pane.set_markup(distant_hidden_markup)
+
+    _assert_gds_focus(pane, document)
+    assert pane._navigation_frame[2] > 1_000_000.0
+
+
+def test_route_and_markup_updates_expand_limits_without_changing_view(
+    pane, document, distant_route, distant_hidden_markup
+) -> None:
+    pane.set_document(document)
+    before = _box(pane)
+
+    pane.set_probe_route(distant_route, selected_route_point_index=-1)
+    pane.set_markup(distant_hidden_markup)
+
+    assert _box(pane) == pytest.approx(before)
+    assert pane._navigation_frame[2] > 1_000_000.0
+
+
+def test_deleting_outer_content_shrinks_and_clamps_once(
+    pane, document, distant_route
+) -> None:
+    pane.set_document(document)
+    pane.set_probe_route(distant_route, selected_route_point_index=-1)
+    _view_box(pane).setRange(
+        xRange=(999_900.0, 1_000_100.0),
+        yRange=(-100.0, 100.0),
+        padding=0.0,
+    )
+
+    pane.set_probe_route(None, selected_route_point_index=-1)
+
+    assert pane._navigation_frame[2] < 1_000.0
+    assert _box(pane)[2] <= pane._navigation_frame[2]
+
+
+def test_shrink_preserves_an_already_valid_view(
+    pane, document, distant_route
+) -> None:
+    pane.set_document(document)
+    pane.set_probe_route(distant_route, selected_route_point_index=-1)
+    _view_box(pane).setRange(
+        xRange=(10.0, 40.0),
+        yRange=(5.0, 20.0),
+        padding=0.0,
+    )
+    before = _box(pane)
+
+    pane.set_probe_route(None, selected_route_point_index=-1)
+
+    assert _box(pane) == pytest.approx(before)
+
+
+def test_home_restores_gds_without_changing_content_limits(
+    window, document, distant_route
+) -> None:
+    window.set_document(document)
+    window.set_probe_route(distant_route, selected_route_point_index=-1)
+    frame = window._main_view._navigation_frame
+    window._home_shortcut.activated.emit()
+
+    assert window._main_view._navigation_frame == frame
+    _assert_gds_focus(window._main_view, document)
+
+
+def test_needle_offset_update_expands_then_shrinks_navigation_frame(
+    pane, document
+) -> None:
+    route = MeasurementRoute.default_for_document(document)
+    route.points.append(RoutePoint("local", "Local", (20.0, 20.0)))
+    pane.set_document(document)
+    pane.set_probe_route(route, selected_route_point_index=-1)
+    original = pane._navigation_frame
+
+    route.needle_offsets = [
+        NeedleOffset("N1", "Needle 1", 2_000_000.0, 0.0)
+    ]
+    pane.set_probe_route(route, selected_route_point_index=-1)
+    assert pane._navigation_frame[2] > 2_000_000.0
+
+    route.needle_offsets = [NeedleOffset("N1", "Needle 1", 0.0, 0.0)]
+    pane.set_probe_route(route, selected_route_point_index=-1)
+    assert pane._navigation_frame == pytest.approx(original)
+
+
+def test_rotated_document_ignores_stale_content_until_models_are_refreshed(
+    pane, document, distant_route, distant_hidden_markup
+) -> None:
+    pane.set_document(document)
+    pane.set_probe_route(distant_route, selected_route_point_index=-1)
+    pane.set_markup(distant_hidden_markup)
+    assert pane._navigation_frame[2] > 1_000_000.0
+
+    rotated = replace(
+        document,
+        bounds=(0.0, 0.0, 50.0, 100.0),
+        rotation_quarter_turns=1,
+        source_load_id="rotated-load",
+    )
+    pane.set_document(rotated)
+    assert pane._navigation_frame[2] < 1_000.0
+
+    rotated_route = MeasurementRoute.default_for_document(rotated)
+    rotated_route.points.append(RoutePoint("far", "Far", (0.0, 1_000_000.0)))
+    rotated_markup = replace(
+        distant_hidden_markup,
+        guides=(
+            GuideSegment(
+                "rotated-guide",
+                (0.0, 1_000_000.0),
+                (-100.0, 1_000_100.0),
+            ),
+        ),
+    )
+    pane.set_probe_route(rotated_route, selected_route_point_index=-1)
+    pane.set_markup(rotated_markup)
+    assert pane._navigation_frame[3] > 1_000_000.0
+
+
+def test_design_window_exposes_no_fit_all_control_or_action(window) -> None:
+    button_texts = {
+        button.text().replace("&", "")
+        for button in window.findChildren(QAbstractButton)
+    }
+    action_texts = {
+        action.text().replace("&", "")
+        for action in window.findChildren(QAction)
+    }
+    assert all("fit all" not in text.casefold() for text in button_texts)
+    assert all("fit all" not in text.casefold() for text in action_texts)
+
+
+def test_file_backed_renderer_receives_gds_focused_range_on_first_request(
+    pane, document
+) -> None:
+    pane.set_document(document)
+
+    first_range = pane._raster_controller.ranges_seen_on_set_document[0]
+    assert first_range == pytest.approx(_box(pane))
+    assert abs(first_range[2] - first_range[0]) < 2.0 * (
+        document.bounds[2] - document.bounds[0]
+    )
+
+
+@pytest.mark.parametrize(
+    ("dx", "dy"),
+    [
+        (-1_000_000.0, 0.0),
+        (1_000_000.0, 0.0),
+        (0.0, -1_000_000.0),
+        (0.0, 1_000_000.0),
+    ],
+)
+def test_viewbox_cannot_pan_past_any_navigation_edge(
+    pane, document, qt_app, dx, dy
+) -> None:
+    pane.set_document(document)
+    frame = pane._navigation_frame
+    view_box = _view_box(pane)
+    view_box.setRange(
+        xRange=(20.0, 80.0),
+        yRange=(10.0, 40.0),
+        padding=0.0,
+    )
+    view_box.translateBy(x=dx, y=dy)
+    qt_app.processEvents()
+
+    visible = _box(pane)
+    assert visible[0] >= frame[0] - 1e-6
+    assert visible[1] >= frame[1] - 1e-6
+    assert visible[2] <= frame[2] + 1e-6
+    assert visible[3] <= frame[3] + 1e-6
+
+
+def test_wheel_zoom_out_stops_at_navigation_frame(pane, document, qt_app) -> None:
+    pane.set_document(document)
+    frame = pane._navigation_frame
+    before = _box(pane)
+    viewport = pane._plot.viewport()
+    center = viewport.rect().center()
+    wheel = QWheelEvent(
+        QPointF(center),
+        QPointF(viewport.mapToGlobal(center)),
+        QPoint(),
+        QPoint(0, -12_000),
+        Qt.NoButton,
+        Qt.NoModifier,
+        Qt.ScrollUpdate,
+        False,
+    )
+
+    QApplication.sendEvent(viewport, wheel)
+    qt_app.processEvents()
+
+    visible = _box(pane)
+    assert visible[2] - visible[0] > before[2] - before[0]
+    assert visible[0] >= frame[0] - 1e-6
+    assert visible[1] >= frame[1] - 1e-6
+    assert visible[2] <= frame[2] + 1e-6
+    assert visible[3] <= frame[3] + 1e-6
+
+
+def test_resize_recomputes_aspect_frame_without_refocusing(
+    pane, document, distant_route, qt_app
+) -> None:
+    pane.resize(800, 600)
+    pane.show()
+    qt_app.processEvents()
+    pane.set_document(document)
+    pane.set_probe_route(distant_route, selected_route_point_index=-1)
+    _view_box(pane).setRange(
+        xRange=(1_000.0, 1_100.0),
+        yRange=(-25.0, 25.0),
+        padding=0.0,
+    )
+    before = _box(pane)
+    before_center = ((before[0] + before[2]) * 0.5, (before[1] + before[3]) * 0.5)
+
+    pane.resize(900, 300)
+    qt_app.processEvents()
+
+    frame = pane._navigation_frame
+    after = _box(pane)
+    after_center = ((after[0] + after[2]) * 0.5, (after[1] + after[3]) * 0.5)
+    viewport_width, viewport_height = pane._viewport_size()
+    frame_aspect = (frame[2] - frame[0]) / (frame[3] - frame[1])
+    assert frame_aspect == pytest.approx(
+        viewport_width / viewport_height,
+        rel=0.05,
+    )
+    assert after_center == pytest.approx(before_center)
+
+
+def test_resize_refits_cached_content_without_rescanning_models(
+    pane, document, distant_route, qt_app, monkeypatch
+) -> None:
+    real_content_bounds = plot_module.content_bounds
+    calls = 0
+
+    def counted_content_bounds(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return real_content_bounds(*args, **kwargs)
+
+    monkeypatch.setattr(plot_module, "content_bounds", counted_content_bounds)
+    pane.set_document(document)
+    pane.set_probe_route(distant_route, selected_route_point_index=-1)
+    scans_before_resize = calls
+
+    pane.resize(900, 300)
+    qt_app.processEvents()
+
+    assert calls == scans_before_resize

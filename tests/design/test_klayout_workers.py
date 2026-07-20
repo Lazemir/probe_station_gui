@@ -177,11 +177,13 @@ class _SnapHarness:
             def ensure_config(self, config: KLayoutConfig) -> None:
                 harness.ensure_calls.append((config.generation, threading.get_ident()))
 
-            def snap(self, request: SnapRequest) -> SnapResponse:
+            def snap(self, request: SnapRequest, *, is_cancelled) -> SnapResponse:
                 harness.snap_calls.append((request.request_id, threading.get_ident()))
                 if request.request_id in harness.block_ids:
                     harness.entered.set()
                     harness.release.wait(2.0)
+                if is_cancelled():
+                    return _response(request)
                 return _response(request)
 
             def close(self) -> None:
@@ -201,7 +203,13 @@ def _lifecycle_state(
     )
     if isinstance(worker, KLayoutRenderWorker):
         return (*common, worker._pending)
-    return (*common, worker._hover, tuple(worker._clicks))
+    return (
+        *common,
+        worker._hover,
+        tuple(worker._clicks),
+        worker._cancellation_generation,
+        worker._hover_cancellation_generation,
+    )
 
 
 @pytest.mark.parametrize(
@@ -211,6 +219,8 @@ def _lifecycle_state(
         ("render", "stop"),
         ("snap", "submit_hover"),
         ("snap", "submit_click"),
+        ("snap", "cancel_hover"),
+        ("snap", "cancel_pending"),
         ("snap", "stop"),
     ],
 )
@@ -237,6 +247,12 @@ def test_public_lifecycle_methods_reject_foreign_threads_without_mutation(
             elif method_name == "submit_click":
                 assert isinstance(worker, KLayoutSnapWorker)
                 worker.submit_click(_snap_request(1, purpose="click"))
+            elif method_name == "cancel_hover":
+                assert isinstance(worker, KLayoutSnapWorker)
+                worker.cancel_hover()
+            elif method_name == "cancel_pending":
+                assert isinstance(worker, KLayoutSnapWorker)
+                worker.cancel_pending()
             else:
                 worker.stop(timeout_s=0.0)
         except BaseException as exc:
@@ -288,11 +304,146 @@ def test_snap_keeps_newest_hover_but_prioritizes_fifo_clicks(
     worker.submit_click(_snap_request(4, purpose="click"))
     worker.submit_click(_snap_request(5, purpose="click"))
     harness.release.set()
-    _process_until(qt_app, lambda: len(responses) == 4)
+    _process_until(qt_app, lambda: len(responses) == 3)
     worker.stop()
 
     assert [request_id for request_id, _thread_id in harness.snap_calls] == [1, 4, 5, 3]
-    assert [response.request_id for response in responses] == [1, 4, 5, 3]
+    assert [response.request_id for response in responses] == [4, 5, 3]
+
+
+def test_newer_hover_cooperatively_cancels_inflight_hover(qt_app) -> None:
+    entered = threading.Event()
+    cancelled = threading.Event()
+    calls: list[int] = []
+
+    class Backend:
+        def ensure_config(self, _config) -> None:
+            pass
+
+        def snap(self, request, *, is_cancelled):
+            calls.append(request.request_id)
+            if request.request_id == 1:
+                entered.set()
+                assert cancelled.wait(1.0)
+                assert is_cancelled()
+            return _response(request)
+
+        def close(self) -> None:
+            pass
+
+    worker = KLayoutSnapWorker(backend_factory=Backend)
+    responses: list[SnapResponse] = []
+    worker.snap_ready.connect(responses.append, Qt.ConnectionType.DirectConnection)
+    worker.submit_hover(_snap_request(1))
+    assert entered.wait(1.0)
+    worker.submit_hover(_snap_request(2))
+    cancelled.set()
+    _process_until(qt_app, lambda: [item.request_id for item in responses] == [2])
+    worker.stop()
+    assert calls == [1, 2]
+
+
+def test_click_preempts_hover_without_cancelling_fifo_clicks(qt_app) -> None:
+    harness = _SnapHarness(block_ids={1})
+    worker = KLayoutSnapWorker(backend_factory=harness.factory)
+    responses: list[SnapResponse] = []
+    worker.snap_ready.connect(responses.append, Qt.ConnectionType.DirectConnection)
+
+    worker.submit_hover(_snap_request(1))
+    assert harness.entered.wait(1.0)
+    worker.submit_click(_snap_request(2, purpose="click"))
+    worker.submit_click(_snap_request(3, purpose="click"))
+    worker.submit_hover(_snap_request(4))
+    harness.release.set()
+    _process_until(
+        qt_app,
+        lambda: [response.request_id for response in responses] == [2, 3, 4],
+    )
+    worker.stop()
+
+    assert [request_id for request_id, _thread_id in harness.snap_calls] == [1, 2, 3, 4]
+    assert [response.request_id for response in responses] == [2, 3, 4]
+
+
+def test_cancel_hover_cooperatively_cancels_active_hover_without_dropping_clicks(
+    qt_app: QApplication,
+) -> None:
+    entered = threading.Event()
+    observed_cancel = threading.Event()
+    calls: list[int] = []
+
+    class Backend:
+        def ensure_config(self, _config: KLayoutConfig) -> None:
+            pass
+
+        def snap(self, request: SnapRequest, *, is_cancelled) -> SnapResponse:
+            calls.append(request.request_id)
+            if request.request_id == 1:
+                entered.set()
+                while not is_cancelled():
+                    time.sleep(0.001)
+                observed_cancel.set()
+            return _response(request)
+
+        def close(self) -> None:
+            pass
+
+    worker = KLayoutSnapWorker(backend_factory=Backend)
+    responses: list[SnapResponse] = []
+    worker.snap_ready.connect(responses.append, Qt.ConnectionType.DirectConnection)
+    worker.submit_hover(_snap_request(1))
+    assert entered.wait(1.0)
+    worker.submit_click(_snap_request(2, purpose="click"))
+    worker.cancel_hover()
+    assert observed_cancel.wait(1.0)
+    _process_until(
+        qt_app,
+        lambda: [response.request_id for response in responses] == [2],
+    )
+    worker.stop()
+
+    assert calls == [1, 2]
+    assert [response.request_id for response in responses] == [2]
+
+
+def test_cancel_between_dequeue_and_config_load_never_reaches_snap(
+    qt_app: QApplication,
+) -> None:
+    ensure_entered = threading.Event()
+    release_ensure = threading.Event()
+    ensure_returned = threading.Event()
+    snap_calls: list[int] = []
+
+    class Backend:
+        def ensure_config(self, _config: KLayoutConfig) -> None:
+            ensure_entered.set()
+            assert release_ensure.wait(1.0)
+            ensure_returned.set()
+
+        def snap(self, request: SnapRequest, *, is_cancelled) -> SnapResponse:
+            snap_calls.append(request.request_id)
+            return _response(request)
+
+        def close(self) -> None:
+            pass
+
+    worker = KLayoutSnapWorker(backend_factory=Backend)
+    responses: list[SnapResponse] = []
+    worker.snap_ready.connect(responses.append, Qt.ConnectionType.DirectConnection)
+    worker.submit_click(_snap_request(1, purpose="click"))
+    assert ensure_entered.wait(1.0)
+    worker.cancel_pending()
+    release_ensure.set()
+    assert ensure_returned.wait(1.0)
+    worker.submit_click(_snap_request(2, purpose="click"))
+    _process_until(
+        qt_app,
+        lambda: [response.request_id for response in responses] == [2],
+    )
+    worker.stop()
+
+    assert snap_calls == [2]
+    assert [response.request_id for response in responses] == [2]
 
 
 def test_stale_hover_after_prioritized_click_does_not_exit_snap_thread(
@@ -559,7 +710,7 @@ def test_all_public_signals_are_delivered_on_worker_creator_thread(
         def ensure_config(self, _config: KLayoutConfig) -> None:
             raise RuntimeError("snap config exploded")
 
-        def snap(self, _request: SnapRequest) -> SnapResponse:
+        def snap(self, _request: SnapRequest, *, is_cancelled) -> SnapResponse:
             raise AssertionError("snap must not run after config failure")
 
         def close(self) -> None:
@@ -680,7 +831,7 @@ def test_request_failure_keeps_request_correlation(
             def ensure_config(self, _config: KLayoutConfig) -> None:
                 pass
 
-            def snap(self, _request: SnapRequest) -> SnapResponse:
+            def snap(self, _request: SnapRequest, *, is_cancelled) -> SnapResponse:
                 raise RuntimeError("snap exploded")
 
             def close(self) -> None:

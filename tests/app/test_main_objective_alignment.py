@@ -489,12 +489,15 @@ def test_capture_manual_alignment_point_design_near_zero_applies_without_b_rotat
     session_calls: list[object] = []
     preparation = _preparation(0.0005)
     session = types.SimpleNamespace(
-        set_source_stage_mark=lambda slot, xy: session_calls.append(("mark", slot, xy)),
-        source_pair_count=lambda: 2,
-        prepare_source_alignment=lambda: preparation,
+        prepare_alignment_draft=lambda design, captured: (
+            session_calls.append(("prepare", design, captured)) or preparation
+        ),
         apply_prepared_alignment=lambda prep: session_calls.append(("apply", prep)),
     )
     window._design_session = session
+    window._alignment_design_draft = preparation.design_marks
+    window._alignment_stage_draft = [(10.0, 20.0), None]
+    window._alignment_draft_fit_residuals = None
     window._manual_alignment_pick_slot = 1
     window._pending_alignment_preparation = None
     window._design_backed_alignment_active = lambda: True
@@ -509,12 +512,19 @@ def test_capture_manual_alignment_point_design_near_zero_applies_without_b_rotat
 
     Main._capture_manual_alignment_point(window, 1, (11.0, 20.0), source="center")
 
-    assert ("mark", 1, (10.88, 20.08)) in session_calls
+    assert (
+        "prepare",
+        preparation.design_marks,
+        ((10.0, 20.0), (10.88, 20.08)),
+    ) in session_calls
     assert ("apply", preparation) in session_calls
     assert ("snap", False) in session_calls
     assert "collapse" in session_calls
     assert stage.rotations == []
-    assert statuses == ["Design calibration complete. Spacing ratio 1.000."]
+    assert statuses == [
+        "Design calibration complete. Spacing ratio 1.000. "
+        "RMS 0.0000 mm, max 0.0000 mm."
+    ]
 
 
 def test_clicked_alignment_capture_dispatches_worker_without_gui_resolution() -> None:
@@ -637,3 +647,93 @@ def test_clicked_alignment_resolution_error_restores_retry_state() -> None:
     assert window._manual_alignment_pick_slot == 0
     assert refreshes[-1] == "refresh"
     assert statuses[-1] == "Camera frames are unavailable for calibration."
+
+
+def test_accept_multipoint_align_draft_preserves_active_registration() -> None:
+    window, _stage, _manager, statuses = _window()
+    active_registration = object()
+    window._design_session = types.SimpleNamespace(
+        registration=active_registration,
+        document=object(),
+    )
+    window._pending_alignment_preparation = None
+    window._manual_alignment_pick_slot = None
+    window._set_alignment_panel_expanded = lambda: None
+    window._refresh_manual_alignment_ui = lambda: None
+    window._update_stage_coordinate_apply_state = lambda: None
+
+    Main._on_alignment_draft_accepted(
+        window,
+        ((0.0, 0.0), (10.0, 0.0), (2.0, 5.0)),
+    )
+
+    assert window._design_session.registration is active_registration
+    assert window._alignment_design_draft == (
+        (0.0, 0.0),
+        (10.0, 0.0),
+        (2.0, 5.0),
+    )
+    assert window._alignment_stage_draft == [None, None, None]
+    assert statuses[-1] == "Align: 3 design points ready. Capture S1 next."
+
+
+def test_multipoint_capture_keeps_old_registration_until_rotation_starts() -> None:
+    window, stage, _manager, statuses = _window()
+    active_registration = object()
+    invalidations: list[str] = []
+    preparation = AlignmentPreparation(
+        design_marks=((0.0, 0.0), (10.0, 0.0), (2.0, 5.0)),
+        stage_marks_before_rotation=((1.0, 2.0), (11.0, 2.0), (3.0, 7.0)),
+        stage_marks_after_rotation=((1.0, 2.0), (11.0, 2.0), (3.0, 7.0)),
+        pivot_stage=(0.0, 0.0),
+        rotation_deg=5.0,
+        design_distance_mm=1.0,
+        stage_distance_mm=1.0,
+        distance_ratio=1.0,
+        rms_residual_mm=0.0123,
+        max_residual_mm=0.0456,
+    )
+    prepared: list[object] = []
+    session = types.SimpleNamespace(
+        registration=active_registration,
+        document=object(),
+        registration_status="Registered.",
+        prepare_alignment_draft=lambda design, captured: (
+            prepared.append((design, captured)) or preparation
+        ),
+        invalidate_registration=lambda reason: invalidations.append(reason),
+    )
+    window._design_session = session
+    window._alignment_design_draft = preparation.design_marks
+    window._alignment_stage_draft = [None, None, None]
+    window._manual_alignment_pick_slot = None
+    window._pending_alignment_preparation = None
+    window._pending_quick_alignment_rotation = False
+    window._camera_stage_xy_from_raw_stage_xy = lambda xy: xy
+    window._refresh_manual_alignment_ui = lambda: None
+    window._update_stage_coordinate_apply_state = lambda: None
+    window._refresh_design_panel = lambda: None
+    window._refresh_design_position = lambda: None
+    window._set_alignment_panel_expanded = lambda: None
+    window._design_spacing_ratio_is_reasonable = lambda _ratio: True
+    window._set_design_snap_enabled = lambda _enabled: None
+    window._collapse_alignment_panel_if_ready = lambda: None
+    window._collapse_alignment_panel_if_design_open = lambda: None
+
+    Main._capture_manual_alignment_point(window, 0, (1.0, 2.0), source="center")
+    Main._capture_manual_alignment_point(window, 1, (11.0, 2.0), source="center")
+
+    assert session.registration is active_registration
+    assert prepared == []
+    Main._capture_manual_alignment_point(window, 2, (3.0, 7.0), source="center")
+
+    assert prepared == [(preparation.design_marks, preparation.stage_marks_before_rotation)]
+    assert window._pending_alignment_preparation is preparation
+    assert stage.rotations == [5.0]
+    assert invalidations == []
+
+    Main._on_alignment_b_rotation_started(window)
+
+    assert invalidations == ["Design registration stale after B-axis rotation started."]
+    assert window._pending_alignment_preparation is preparation
+    assert "RMS 0.0123 mm" in statuses[-1]

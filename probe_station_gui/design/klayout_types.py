@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from pathlib import Path
 
 from .model import LayerKey, SnapResult
@@ -10,6 +11,14 @@ from .model import LayerKey, SnapResult
 
 Point2D = tuple[float, float]
 Box2D = tuple[float, float, float, float]
+
+SNAP_UNAVAILABLE_INVALID = "invalid"
+SNAP_UNAVAILABLE_OUTSIDE_BOUNDS = "outside_bounds"
+SNAP_UNAVAILABLE_EXCESSIVE_COVERAGE = "excessive_coverage"
+SNAP_UNAVAILABLE_CANCELLED = "cancelled"
+SNAP_UNAVAILABLE_SHAPE_BUDGET = "shape_budget"
+SNAP_UNAVAILABLE_CANDIDATE_BUDGET = "candidate_budget"
+SNAP_UNAVAILABLE_TIME_BUDGET = "time_budget"
 
 
 @dataclass(frozen=True)
@@ -75,6 +84,22 @@ class RenderFailure:
 
 
 @dataclass(frozen=True)
+class SnapWorkBudget:
+    max_shapes: int = 4_000
+    max_candidates: int = 40_000
+    max_elapsed_ms: float = 50.0
+
+    def __post_init__(self) -> None:
+        if self.max_shapes <= 0 or self.max_candidates <= 0:
+            raise ValueError("Snap count budgets must be positive.")
+        if not math.isfinite(self.max_elapsed_ms) or self.max_elapsed_ms <= 0.0:
+            raise ValueError("Snap time budget must be finite and positive.")
+
+
+DEFAULT_SNAP_WORK_BUDGET = SnapWorkBudget()
+
+
+@dataclass(frozen=True)
 class SnapRequest:
     """One local geometry query around a raw design-space point."""
 
@@ -83,6 +108,7 @@ class SnapRequest:
     point: Point2D
     radius: float
     purpose: str = "hover"
+    budget: SnapWorkBudget = DEFAULT_SNAP_WORK_BUDGET
 
 
 @dataclass(frozen=True)
@@ -96,6 +122,8 @@ class SnapResponse:
     elapsed_ms: float
     shapes_inspected: int
     purpose: str = "hover"
+    candidates_generated: int = 0
+    unavailable_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -174,6 +202,7 @@ def _rotate_point(point: Point2D, bounds: Box2D, quarter_turns: int) -> Point2D:
 
 __all__ = [
     "Box2D",
+    "DEFAULT_SNAP_WORK_BUDGET",
     "KLayoutConfig",
     "PendingClick",
     "Point2D",
@@ -183,6 +212,14 @@ __all__ = [
     "SnapRequest",
     "SnapResponse",
     "SnapFailure",
+    "SnapWorkBudget",
+    "SNAP_UNAVAILABLE_CANCELLED",
+    "SNAP_UNAVAILABLE_CANDIDATE_BUDGET",
+    "SNAP_UNAVAILABLE_EXCESSIVE_COVERAGE",
+    "SNAP_UNAVAILABLE_INVALID",
+    "SNAP_UNAVAILABLE_OUTSIDE_BOUNDS",
+    "SNAP_UNAVAILABLE_SHAPE_BUDGET",
+    "SNAP_UNAVAILABLE_TIME_BUDGET",
     "forward_rotate_point",
     "inverse_rotate_box",
     "inverse_rotate_point",

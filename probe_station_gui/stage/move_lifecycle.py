@@ -57,7 +57,13 @@ class StageMoveLifecycleOwner(Protocol):
     def _refresh_design_position(self) -> None: ...
     def _collapse_alignment_panel_if_ready(self) -> None: ...
     def _collapse_alignment_panel_if_design_open(self) -> None: ...
+    def _finish_alignment_draft(self) -> None: ...
     def _update_stage_coordinate_apply_state(self) -> None: ...
+    def _on_coordinate_move_finished(
+        self,
+        success: bool,
+        finished_display_targets: dict[str, float],
+    ) -> None: ...
 
 
 ScheduleSingleShot = Callable[[int, Callable[[], None]], Any]
@@ -114,6 +120,9 @@ def cancel_stage_coordinate_action(
     *,
     focus_reason: object,
 ) -> None:
+    clear_exact_steps = getattr(owner, "_clear_exact_step_targets", None)
+    if callable(clear_exact_steps):
+        clear_exact_steps()
     cancelled_any = _cancel_pending_ui_intents(owner)
     cancelled_any = _cancel_route_measurement(owner) or cancelled_any
     cancelled_any = _cancel_background_captures(owner) or cancelled_any
@@ -169,7 +178,11 @@ def finish_coordinate_move_if_idle(
         return
     if decision.stage_position is not None:
         owner._coordinate_targets.stage_position = decision.stage_position
+    finished_display_targets = dict(owner._coordinate_targets.display_targets)
     clear_coordinate_move_tracking(owner, clear_pending=False, reset_override=True)
+    callback = getattr(owner, "_on_coordinate_move_finished", None)
+    if callable(callback):
+        callback(True, finished_display_targets)
     if owner._pending_homing_axes:
         schedule_single_shot(
             0,
@@ -194,12 +207,16 @@ def on_move_finished(
     owner._coordinate_targets.reissue_cancel_pending = False
     _finish_target_cross(owner, success)
     if _coordinate_tracking_should_clear(success, message_lower):
+        finished_display_targets = dict(owner._coordinate_targets.display_targets)
         clear_coordinate_move_tracking(
             owner,
             clear_pending=not success,
             reset_override=True,
         )
         stage_position_panel.clear_stage_motion_axes(owner)
+        callback = getattr(owner, "_on_coordinate_move_finished", None)
+        if callable(callback):
+            callback(success, finished_display_targets)
     if message:
         owner._show_status(message, 5000)
     owner._schedule_cancel_state_refresh()
@@ -356,6 +373,7 @@ def _finish_pending_alignment_preparation(
     owner._pending_alignment_preparation = None
     if success:
         owner._design_session.apply_prepared_alignment(preparation)
+        owner._finish_alignment_draft()
         owner._set_design_snap_enabled(False)
         owner._refresh_design_panel()
         owner._refresh_design_position()
@@ -364,7 +382,9 @@ def _finish_pending_alignment_preparation(
         owner._show_status(
             "Design calibration complete. "
             f"Rotation {preparation.rotation_deg:+.3f} deg, "
-            f"spacing ratio {preparation.distance_ratio:.3f}.",
+            f"spacing ratio {preparation.distance_ratio:.3f}. "
+            f"RMS {preparation.rms_residual_mm:.4f} mm, "
+            f"max {preparation.max_residual_mm:.4f} mm.",
             7000,
         )
     else:

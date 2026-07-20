@@ -14,12 +14,9 @@ from pathlib import Path
 from typing import Callable, Dict, Iterable, List
 
 from probe_station_gui.settings.axis_calibration_config import (
-    AxisACalibrationConfig,
-    AxisACalibrationSettings,
-    AxisZCalibrationConfig,
-    AxisZCalibrationSettings,
-    parse_axis_a_calibration,
-    parse_axis_z_calibration,
+    AxisCalibrationSettings,
+    default_axis_calibrations,
+    parse_axis_calibrations,
 )
 from probe_station_gui.settings.controls_config import (
     CONTROL_ACTIONS,
@@ -69,6 +66,10 @@ from probe_station_gui.settings.oscillation_config import (
     OscillationSettingsDefaults,
     parse_oscillation_settings,
 )
+from probe_station_gui.settings.precision_approach import (
+    PrecisionApproachSettings,
+    parse_precision_approach_settings,
+)
 from probe_station_gui.settings.value_parsing import (
     coerce_bool,
     finite_float,
@@ -116,16 +117,16 @@ class Settings:
     needle_calibration: NeedleCalibrationSettings = field(
         default_factory=NeedleCalibrationSettings
     )
-    axis_a_calibration: AxisACalibrationSettings = field(
-        default_factory=AxisACalibrationSettings
-    )
-    axis_z_calibration: AxisZCalibrationSettings = field(
-        default_factory=AxisZCalibrationSettings
+    axis_calibrations: dict[str, AxisCalibrationSettings] = field(
+        default_factory=default_axis_calibrations
     )
     coordinate_system: CoordinateSystemSettings = field(
         default_factory=CoordinateSystemSettings
     )
     objectives: ObjectivesSettings = field(default_factory=ObjectivesSettings)
+    precision_approach: PrecisionApproachSettings = field(
+        default_factory=PrecisionApproachSettings
+    )
     design_last_directory: str = ""
     exposure_policy: ExposurePolicySettings = field(
         default_factory=ExposurePolicySettings
@@ -145,10 +146,13 @@ class Settings:
             jog=self.jog.clone(),
             click_to_move=self.click_to_move.clone(),
             needle_calibration=self.needle_calibration.clone(),
-            axis_a_calibration=self.axis_a_calibration.clone(),
-            axis_z_calibration=self.axis_z_calibration.clone(),
+            axis_calibrations={
+                axis: calibration.clone()
+                for axis, calibration in self.axis_calibrations.items()
+            },
             coordinate_system=self.coordinate_system.clone(),
             objectives=self.objectives.clone(),
+            precision_approach=self.precision_approach.clone(),
             design_last_directory=self.design_last_directory,
         )
 
@@ -178,10 +182,13 @@ class Settings:
             "jog": self.jog.to_dict(),
             "click_to_move": self.click_to_move.to_dict(),
             "needle_calibration": self.needle_calibration.to_dict(),
-            "axis_a_calibration": self.axis_a_calibration.to_dict(),
-            "axis_z_calibration": self.axis_z_calibration.to_dict(),
+            "axis_calibrations": {
+                axis: calibration.to_dict()
+                for axis, calibration in self.axis_calibrations.items()
+            },
             "coordinate_system": self.coordinate_system.to_dict(),
             "objectives": self.objectives.to_dict(),
+            "precision_approach": self.precision_approach.to_dict(),
             "design_last_directory": self.design_last_directory,
         }
 
@@ -264,18 +271,6 @@ class SettingsManager:
     DEFAULT_LCR_POLL_INTERVAL_MS: int = 250
     DEFAULT_NEEDLE_FEEDRATE_MM_MIN: float = 1.0
     DEFAULT_NEEDLE_CONTACT_ZONE_MM: float = 0.05
-    DEFAULT_AXIS_A_CALIBRATION_MODEL: str = "cosine_displacement"
-    DEFAULT_AXIS_A_CALIBRATION_STEPS_PER_MM: float = 2600.0
-    DEFAULT_AXIS_A_CALIBRATION_MIN_MM: float = 0.0
-    DEFAULT_AXIS_A_CALIBRATION_MAX_MM: float = 5.5
-    DEFAULT_AXIS_A_CALIBRATION_OFFSET_MM: float = 0.15233792205087007
-    DEFAULT_AXIS_A_CALIBRATION_AMPLITUDE_MM: float = 4.257907588676109
-    DEFAULT_AXIS_A_CALIBRATION_ANGULAR_FREQUENCY: float = 0.2557266307909934
-    DEFAULT_AXIS_A_CALIBRATION_PHASE_RAD: float = 0.9228536838711686
-    DEFAULT_AXIS_A_CALIBRATION_RMSE_MM: float = 0.004633488125628648
-    DEFAULT_AXIS_A_CALIBRATION_MAX_ABS_ERROR_MM: float = 0.042784046777278234
-    DEFAULT_AXIS_A_CALIBRATION_SOURCE: str = "calibrations/axis_a_spm2600_pulloff0p25_forward_reverse_settle1p0_20260504.png"
-    DEFAULT_AXIS_A_CALIBRATION_CREATED_AT: str = "2026-05-06T00:00:00+03:00"
     DEFAULT_POSITION_MODE: str = "work"
     DEFAULT_COORDINATE_STARTUP_MODE: str = "controller"
     DEFAULT_COORDINATE_SYSTEM: str = "G54"
@@ -674,16 +669,16 @@ class SettingsManager:
             needle_calibration=self._parse_needle_calibration(
                 self._raw_section(raw, "needle_calibration")
             ),
-            axis_a_calibration=self._parse_axis_a_calibration(
-                self._raw_section(raw, "axis_a_calibration")
-            ),
-            axis_z_calibration=self._parse_axis_z_calibration(
-                self._raw_section(raw, "axis_z_calibration")
+            axis_calibrations=parse_axis_calibrations(
+                self._raw_section(raw, "axis_calibrations")
             ),
             coordinate_system=self._parse_coordinate_system(
                 self._raw_section(raw, "coordinate_system")
             ),
             objectives=parse_objectives_settings(self._raw_section(raw, "objectives")),
+            precision_approach=parse_precision_approach_settings(
+                self._raw_section(raw, "precision_approach")
+            ),
             design_last_directory=self._design_last_directory_from_raw(raw),
         )
 
@@ -912,30 +907,6 @@ class SettingsManager:
             min_feedrate_mm_min=self.MIN_FEEDRATE_MM_MIN,
         )
 
-    def _parse_axis_a_calibration(self, raw_calibration) -> AxisACalibrationSettings:
-        """Normalise the compact A-axis nonlinear calibration model."""
-
-        config = parse_axis_a_calibration(
-            raw_calibration,
-            AxisACalibrationConfig(**AxisACalibrationSettings().to_dict()),
-            expected_model=self.DEFAULT_AXIS_A_CALIBRATION_MODEL,
-        )
-        return AxisACalibrationSettings(**config.__dict__)
-
-    def _parse_axis_z_calibration(self, raw_calibration) -> AxisZCalibrationSettings:
-        """Normalise the compact Z-axis nonlinear calibration model."""
-
-        config = parse_axis_z_calibration(
-            raw_calibration,
-            AxisZCalibrationConfig(**AxisZCalibrationSettings().to_dict()),
-        )
-        return AxisZCalibrationSettings(
-            **{
-                **config.__dict__,
-                "coefficients_mm": list(config.coefficients_mm),
-            }
-        )
-
     def _parse_coordinate_system(self, raw_coordinate_system) -> CoordinateSystemSettings:
         """Normalise persisted coordinate-system settings."""
 
@@ -992,13 +963,16 @@ class SettingsManager:
         clone.needle_calibration = self._parse_needle_calibration(
             clone.needle_calibration.to_dict()
         )
-        clone.axis_a_calibration = self._parse_axis_a_calibration(
-            clone.axis_a_calibration.to_dict()
-        )
-        clone.axis_z_calibration = self._parse_axis_z_calibration(
-            clone.axis_z_calibration.to_dict()
+        clone.axis_calibrations = parse_axis_calibrations(
+            {
+                axis: calibration.to_dict()
+                for axis, calibration in clone.axis_calibrations.items()
+            }
         )
         clone.objectives = parse_objectives_settings(clone.objectives.to_dict())
+        clone.precision_approach = parse_precision_approach_settings(
+            clone.precision_approach.to_dict()
+        )
         clone.design_last_directory = clone.design_last_directory.strip()
         return clone
 
@@ -1046,20 +1020,23 @@ class SettingsManager:
 
         return self._settings.needle_calibration.clone()
 
-    def axis_a_calibration_configuration(self) -> AxisACalibrationSettings:
-        """Return the current compact A-axis calibration model clone."""
+    def axis_calibrations_configuration(self) -> dict[str, AxisCalibrationSettings]:
+        """Return independent calibration snapshots for every stage axis."""
 
-        return self._settings.axis_a_calibration.clone()
-
-    def axis_z_calibration_configuration(self) -> AxisZCalibrationSettings:
-        """Return the current compact Z-axis calibration model clone."""
-
-        return self._settings.axis_z_calibration.clone()
+        return {
+            axis: calibration.clone()
+            for axis, calibration in self._settings.axis_calibrations.items()
+        }
 
     def coordinate_system_configuration(self) -> CoordinateSystemSettings:
         """Return the current coordinate-system configuration clone."""
 
         return self._settings.coordinate_system.clone()
+
+    def precision_approach_configuration(self) -> PrecisionApproachSettings:
+        """Return the current per-axis final approach profiles."""
+
+        return self._settings.precision_approach.clone()
 
     def objectives_configuration(self) -> ObjectivesSettings:
         """Return the current objective configuration clone."""

@@ -14,6 +14,7 @@ from probe_station_gui.design.klayout_types import (
     SnapRequest,
     SnapResponse,
     SnapFailure,
+    SnapWorkBudget,
 )
 from probe_station_gui.design.model import SnapResult
 
@@ -148,3 +149,12 @@ def test_request_failures_are_frozen_and_fully_correlated() -> None:
         render.message = "changed"  # type: ignore[misc]
     with pytest.raises(FrozenInstanceError):
         snap.message = "changed"  # type: ignore[misc]
+
+
+def test_snap_request_owns_immutable_default_budget() -> None:
+    request = SnapRequest(1, _config(), (1.0, 2.0), 0.5)
+    assert request.budget == SnapWorkBudget(
+        max_shapes=4_000,
+        max_candidates=40_000,
+        max_elapsed_ms=50.0,
+    )

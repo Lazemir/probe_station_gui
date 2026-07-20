@@ -115,9 +115,9 @@ class DesignPanelPresentation:
     route_measurement_running: bool
     calibration_prompt: str
     registration_status: str
-    source_design_marks: list[Point2D | None]
-    check_design_marks: list[Point2D]
-    source_stage_marks: list[Point2D | None]
+    source_design_marks: tuple[Point2D, ...]
+    check_design_marks: tuple[Point2D, ...]
+    source_stage_marks: tuple[Point2D, ...]
 
 
 @dataclass(frozen=True)
@@ -133,8 +133,8 @@ class DesignPositionPresentation:
     stage_xy: Point2D | None
     current_design_position: Point2D | None
     fov_design_size: Point2D | None
-    source_design_marks: list[Point2D]
-    check_design_marks: list[Point2D]
+    source_design_marks: tuple[Point2D, ...]
+    check_design_marks: tuple[Point2D, ...]
 
 
 def coerce_position_tuple(value: object) -> tuple[float, ...] | None:
@@ -830,9 +830,9 @@ def design_panel_presentation(
             else session.calibration_prompt()
         ),
         registration_status=session.registration_status,
-        source_design_marks=list(session.source_design_marks),
-        check_design_marks=list(session.check_design_marks),
-        source_stage_marks=list(session.source_stage_marks),
+        source_design_marks=tuple(session.source_design_marks_compact()),
+        check_design_marks=tuple(session.check_design_marks),
+        source_stage_marks=tuple(session.source_stage_marks_compact()),
     )
 
 
@@ -854,8 +854,8 @@ def design_position_presentation(
         stage_xy=stage_xy,
         current_design_position=design_xy,
         fov_design_size=fov_design_size,
-        source_design_marks=session.source_design_marks_compact(),
-        check_design_marks=list(session.check_design_marks),
+        source_design_marks=tuple(session.source_design_marks_compact()),
+        check_design_marks=tuple(session.check_design_marks),
     )
 
 

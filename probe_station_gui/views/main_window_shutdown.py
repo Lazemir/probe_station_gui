@@ -227,6 +227,9 @@ def close_auxiliary_windows(
         owner.surface_map_window.close()
     if owner.microscope_scan_dialog is not None:
         owner.microscope_scan_dialog.close()
+    serial_terminal_panel = getattr(owner, "serial_terminal_panel", None)
+    if serial_terminal_panel is not None:
+        serial_terminal_panel.close()
     serial_connection_dialog = getattr(owner, "serial_connection_dialog", None)
     if serial_connection_dialog is not None:
         serial_connection_dialog.close()

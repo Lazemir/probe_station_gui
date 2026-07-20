@@ -25,7 +25,6 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QMessageBox,
     QPushButton,
-    QFrame,
     QTabWidget,
     QTreeWidget,
     QTreeWidgetItem,
@@ -47,6 +46,7 @@ from probe_station_gui.api.keys import (
     normalize_permissions,
 )
 from probe_station_gui.dialogs.camera_settings_dialog import CameraSettingsWidget
+from probe_station_gui.dialogs.settings.axis_settings import AxisSettingsWidget
 from probe_station_gui.dialogs.settings.controls import (
     ControlsSettingsWidget,
     KeyBindingListEditor,
@@ -70,8 +70,6 @@ from probe_station_gui.shared.wheel_guard import (
 from probe_station_gui.settings.manager import (
     ApiSettings,
     LoggingSettings,
-    AxisACalibrationSettings,
-    AxisZCalibrationSettings,
     NeedleCalibrationSettings,
     Settings,
     TELEGRAM_ALERT_TYPES,
@@ -870,94 +868,6 @@ class NeedleSettingsWidget(QWidget):
         self._chip_contact_z_spin.setValue(0.0)
 
 
-class AxisCalibrationSettingsWidget(QWidget):
-    """Tab that controls optional nonlinear axis coordinate calibration."""
-
-    def __init__(
-        self,
-        axis_a_calibration: AxisACalibrationSettings,
-        axis_z_calibration: AxisZCalibrationSettings,
-        parent: QWidget | None = None,
-    ) -> None:
-        super().__init__(parent)
-        self._axis_a_calibration = axis_a_calibration.clone()
-        self._axis_z_calibration = axis_z_calibration.clone()
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-
-        self._axis_a_enabled_checkbox = QCheckBox(
-            "Use calibrated A-axis coordinate curve",
-            self,
-        )
-        self._axis_a_enabled_checkbox.setChecked(axis_a_calibration.configured)
-        self._axis_a_enabled_checkbox.setToolTip(
-            "When disabled, A coordinates are sent and displayed as raw GCode."
-        )
-        layout.addWidget(self._axis_a_enabled_checkbox)
-        layout.addLayout(
-            self._read_only_field_layout("A curve source", axis_a_calibration.source)
-        )
-        layout.addLayout(
-            self._read_only_field_layout(
-                "A fit error",
-                (
-                    f"RMSE {axis_a_calibration.fit_rmse_mm:.6f} mm, "
-                    f"max {axis_a_calibration.fit_max_abs_error_mm:.6f} mm"
-                ),
-            )
-        )
-
-        separator = QFrame(self)
-        separator.setFrameShape(QFrame.HLine)
-        separator.setFrameShadow(QFrame.Sunken)
-        layout.addWidget(separator)
-
-        self._axis_z_enabled_checkbox = QCheckBox(
-            "Use calibrated Z-axis coordinate curve",
-            self,
-        )
-        self._axis_z_enabled_checkbox.setChecked(axis_z_calibration.configured)
-        self._axis_z_enabled_checkbox.setToolTip(
-            "When disabled, Z coordinates are sent and displayed as raw GCode."
-        )
-        layout.addWidget(self._axis_z_enabled_checkbox)
-        layout.addLayout(
-            self._read_only_field_layout("Z curve source", axis_z_calibration.source)
-        )
-        layout.addLayout(
-            self._read_only_field_layout(
-                "Z fit error",
-                (
-                    f"RMSE {axis_z_calibration.fit_rmse_mm:.6f} mm, "
-                    f"max {axis_z_calibration.fit_max_abs_error_mm:.6f} mm"
-                ),
-            )
-        )
-
-        layout.addStretch(1)
-
-    def to_settings(self, settings: Settings) -> None:
-        """Persist enabled/disabled state while preserving curve parameters."""
-
-        axis_a = self._axis_a_calibration.clone()
-        axis_a.configured = self._axis_a_enabled_checkbox.isChecked()
-        axis_z = self._axis_z_calibration.clone()
-        axis_z.configured = self._axis_z_enabled_checkbox.isChecked()
-        settings.axis_a_calibration = axis_a
-        settings.axis_z_calibration = axis_z
-
-    def _read_only_field_layout(self, label: str, text: str) -> QHBoxLayout:
-        row = QHBoxLayout()
-        row.addWidget(QLabel(label, self))
-        field = QLineEdit(self)
-        field.setReadOnly(True)
-        field.setText(text)
-        field.setCursorPosition(0)
-        row.addWidget(field, 1)
-        return row
-
-
 class SettingsDialog(QDialog):
     """Main settings dialog with tabbed sections."""
 
@@ -971,6 +881,7 @@ class SettingsDialog(QDialog):
         initial_tab: str | None = None,
         camera_settings_source: object | None = None,
         exposure_policy_source: object | None = None,
+        axis_position_source: object | None = None,
         api_key_store: ApiKeyStore | None = None,
     ) -> None:
         super().__init__(parent)
@@ -979,6 +890,7 @@ class SettingsDialog(QDialog):
         self.setWindowFlag(Qt.WindowContextHelpButtonHint, False)
         self._settings = settings.clone()
         self._applied_once = False
+        self._calibration_imports_active = False
         self._camera_tab: CameraSettingsWidget | None = None
         self._accept_after_camera_apply = False
         self._collecting_settings = False
@@ -1010,10 +922,11 @@ class SettingsDialog(QDialog):
             self._settings.objectives,
             self,
         )
-        self._axis_calibration_tab = AxisCalibrationSettingsWidget(
-            self._settings.axis_a_calibration,
-            self._settings.axis_z_calibration,
+        self._axes_tab = AxisSettingsWidget(
+            self._settings.axis_calibrations,
+            self._settings.precision_approach,
             self,
+            position_source=axis_position_source,
         )
         if camera_settings_source is not None:
             self._camera_tab = CameraSettingsWidget(
@@ -1029,29 +942,36 @@ class SettingsDialog(QDialog):
         self._tabs.addTab(self._telegram_tab, "Telegram")
         self._tabs.addTab(self._jog_tab, "Jog")
         self._tabs.addTab(self._coordinate_system_tab, "Coordinates")
+        self._tabs.addTab(self._axes_tab, "Axes")
         self._tabs.addTab(self._objectives_tab, "Objectives")
-        self._tabs.addTab(self._axis_calibration_tab, "Axis Calibration")
         self._tabs.addTab(self._measurement_tab, "Measurement")
         self._tabs.addTab(self._needles_tab, "Needles")
         self._tabs.addTab(self._logging_tab, "Logging")
-        if initial_tab:
+        requested_tab = (initial_tab or "").strip().lower()
+        if requested_tab in {"axis calibration", "precision approach"}:
+            requested_tab = "axes"
+        if requested_tab:
             for index in range(self._tabs.count()):
-                if self._tabs.tabText(index).lower() == initial_tab.lower():
+                if self._tabs.tabText(index).lower() == requested_tab:
                     self._tabs.setCurrentIndex(index)
                     break
         self._tabs.currentChanged.connect(self._on_tab_changed)
         self._refresh_camera_tab_if_current()
 
-        self._buttons = QDialogButtonBox(
+        self._button_box = QDialogButtonBox(
             QDialogButtonBox.Save | QDialogButtonBox.Apply | QDialogButtonBox.Cancel,
             self,
         )
-        self._buttons.accepted.connect(self.accept)
-        self._buttons.rejected.connect(self.reject)
-        apply_button = self._buttons.button(QDialogButtonBox.Apply)
-        if apply_button is not None:
-            apply_button.clicked.connect(self._apply_without_closing)
-        root_layout.addWidget(self._buttons)
+        self._button_box.accepted.connect(self.accept)
+        self._button_box.rejected.connect(self.reject)
+        self._save_button = self._button_box.button(QDialogButtonBox.Save)
+        self._apply_button = self._button_box.button(QDialogButtonBox.Apply)
+        if self._apply_button is not None:
+            self._apply_button.clicked.connect(self._apply_without_closing)
+        self._axes_tab.calibration_imports_active_changed.connect(
+            self._set_calibration_imports_active
+        )
+        root_layout.addWidget(self._button_box)
 
     def _on_tab_changed(self, _index: int) -> None:
         self._refresh_camera_tab_if_current()
@@ -1065,12 +985,14 @@ class SettingsDialog(QDialog):
             self._camera_tab.refresh()
 
     def accept(self) -> None:  # type: ignore[override]
+        if self._calibration_imports_active:
+            return
         self._accept_after_camera_apply = True
         camera_started = self._collect_settings()
         self._applied_once = True
         self.settings_applied.emit(self._settings.clone())
         if camera_started:
-            self._buttons.setEnabled(False)
+            self._button_box.setEnabled(False)
             self._finish_deferred_camera_apply_if_ready()
             return
         self._accept_after_camera_apply = False
@@ -1078,13 +1000,22 @@ class SettingsDialog(QDialog):
         super().accept()
 
     def _apply_without_closing(self) -> None:
+        if self._calibration_imports_active:
+            return
         self._accept_after_camera_apply = False
         camera_started = self._collect_settings()
         self._applied_once = True
         self.settings_applied.emit(self._settings.clone())
         if camera_started:
-            self._buttons.setEnabled(False)
+            self._button_box.setEnabled(False)
             self._finish_deferred_camera_apply_if_ready()
+
+    def _set_calibration_imports_active(self, active: bool) -> None:
+        self._calibration_imports_active = active
+        if self._save_button is not None:
+            self._save_button.setEnabled(not active)
+        if self._apply_button is not None:
+            self._apply_button.setEnabled(not active)
 
     def _collect_settings(self) -> bool:
         self._collecting_settings = True
@@ -1096,7 +1027,7 @@ class SettingsDialog(QDialog):
             self._jog_tab.to_settings(self._settings)
             self._coordinate_system_tab.to_settings(self._settings)
             self._objectives_tab.to_settings(self._settings)
-            self._axis_calibration_tab.to_settings(self._settings)
+            self._axes_tab.to_settings(self._settings)
             self._measurement_tab.to_settings(self._settings)
             self._needles_tab.to_settings(self._settings)
             self._logging_tab.to_settings(self._settings.logging)
@@ -1120,7 +1051,7 @@ class SettingsDialog(QDialog):
             self._complete_camera_apply(result)
 
     def _complete_camera_apply(self, success: bool) -> None:
-        self._buttons.setEnabled(True)
+        self._button_box.setEnabled(True)
         if not self._accept_after_camera_apply:
             return
         self._accept_after_camera_apply = False

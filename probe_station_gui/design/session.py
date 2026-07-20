@@ -25,14 +25,16 @@ DEFAULT_B_AXIS_ROTATION_PIVOT_STAGE: Point2D = (0.0, 0.0)
 class AlignmentPreparation:
     """Prepared source-mark alignment ready to be committed after B rotation."""
 
-    design_marks: tuple[Point2D, Point2D]
-    stage_marks_before_rotation: tuple[Point2D, Point2D]
-    stage_marks_after_rotation: tuple[Point2D, Point2D]
+    design_marks: tuple[Point2D, ...]
+    stage_marks_before_rotation: tuple[Point2D, ...]
+    stage_marks_after_rotation: tuple[Point2D, ...]
     pivot_stage: Point2D
     rotation_deg: float
     design_distance_mm: float
     stage_distance_mm: float
     distance_ratio: float
+    rms_residual_mm: float = 0.0
+    max_residual_mm: float = 0.0
 
 
 @dataclass
@@ -41,12 +43,8 @@ class DesignSession:
 
     document: Optional[DesignDocument] = None
     registration: Optional[DesignRegistration] = None
-    source_design_marks: list[Optional[Point2D]] = field(
-        default_factory=lambda: [None, None]
-    )
-    source_stage_marks: list[Optional[Point2D]] = field(
-        default_factory=lambda: [None, None]
-    )
+    source_design_marks: tuple[Point2D, ...] = ()
+    source_stage_marks: tuple[Point2D, ...] = ()
     check_design_marks: list[Point2D] = field(default_factory=list)
     check_stage_marks: list[Point2D] = field(default_factory=list)
     targets: list[MeasurementTarget] = field(default_factory=list)
@@ -61,7 +59,7 @@ class DesignSession:
         if self.document is None:
             return None
         state: dict[str, object] = {
-            "version": 1,
+            "version": 2,
             "document_path": str(self.document.path),
             "top_cell_name": self.document.top_cell_name,
             "rotation_quarter_turns": int(self.document.rotation_quarter_turns),
@@ -69,11 +67,11 @@ class DesignSession:
                 [int(layer), int(datatype)]
                 for layer, datatype in sorted(self.document.visible_layers)
             ],
-            "source_design_marks": self._serialize_optional_points(
-                self.source_design_marks
+            "source_design_marks": self._serialize_points(
+                self.source_design_marks_compact()
             ),
-            "source_stage_marks": self._serialize_optional_points(
-                self.source_stage_marks
+            "source_stage_marks": self._serialize_points(
+                self.source_stage_marks_compact()
             ),
             "check_design_marks": self._serialize_points(self.check_design_marks),
             "check_stage_marks": self._serialize_points(self.check_stage_marks),
@@ -107,14 +105,34 @@ class DesignSession:
         self.document = document
         self.clear_targets()
         self.clear_route()
-        self.source_design_marks = self._coerce_optional_points(
-            state.get("source_design_marks"),
-            expected_count=2,
-        )
-        self.source_stage_marks = self._coerce_optional_points(
-            state.get("source_stage_marks"),
-            expected_count=2,
-        )
+        try:
+            state_version = int(state.get("version", 1))
+        except (TypeError, ValueError):
+            state_version = 1
+        if state_version <= 1:
+            self.source_design_marks = tuple(
+                point
+                for point in self._coerce_optional_points(
+                    state.get("source_design_marks"),
+                    expected_count=2,
+                )
+                if point is not None
+            )
+            self.source_stage_marks = tuple(
+                point
+                for point in self._coerce_optional_points(
+                    state.get("source_stage_marks"),
+                    expected_count=2,
+                )
+                if point is not None
+            )
+        else:
+            self.source_design_marks = tuple(
+                self._coerce_points(state.get("source_design_marks"))
+            )
+            self.source_stage_marks = tuple(
+                self._coerce_points(state.get("source_stage_marks"))
+            )
         self.check_design_marks = self._coerce_points(state.get("check_design_marks"))
         self.check_stage_marks = self._coerce_points(state.get("check_stage_marks"))
         self._restore_persisted_route(document, state.get("route"))
@@ -230,9 +248,6 @@ class DesignSession:
         def rotate_point(point: Point2D) -> Point2D:
             return old_document.rotate_point(point, delta)
 
-        def rotate_optional(point: Point2D | None) -> Point2D | None:
-            return None if point is None else rotate_point(point)
-
         registration_was_stale = (
             self.registration is not None and not self.registration.valid
         )
@@ -243,9 +258,9 @@ class DesignSession:
         )
 
         self.document = new_document
-        self.source_design_marks = [
-            rotate_optional(point) for point in self.source_design_marks
-        ]
+        self.source_design_marks = tuple(
+            rotate_point(point) for point in self.source_design_marks_compact()
+        )
         self.check_design_marks = [rotate_point(point) for point in self.check_design_marks]
         self.targets = [
             replace(target, design_center=rotate_point(target.design_center))
@@ -268,8 +283,8 @@ class DesignSession:
     def clear_registration(self) -> None:
         """Drop source marks, check marks, and the active registration."""
 
-        self.source_design_marks = [None, None]
-        self.source_stage_marks = [None, None]
+        self.source_design_marks = ()
+        self.source_stage_marks = ()
         self.check_design_marks.clear()
         self.check_stage_marks.clear()
         self.registration = None
@@ -278,7 +293,7 @@ class DesignSession:
     def clear_source_stage_marks(self) -> None:
         """Drop captured stage-side marks while preserving selected design marks."""
 
-        self.source_stage_marks = [None, None]
+        self.source_stage_marks = ()
         self.check_design_marks.clear()
         self.check_stage_marks.clear()
         self.registration = None
@@ -287,51 +302,55 @@ class DesignSession:
     def has_complete_source_design_marks(self) -> bool:
         """Return whether both design-side source marks are selected."""
 
-        return all(point is not None for point in self.source_design_marks)
+        return len(self.source_design_marks_compact()) >= 2
 
     def capture_source_pair(self, design_point: Point2D, stage_point: Point2D) -> int:
         """Append a matched design/stage pair for simplified calibration."""
 
-        slot = 0
-        if self.source_design_marks[0] is not None and self.source_stage_marks[0] is not None:
-            slot = 1
-        if slot == 1 and self.source_design_marks[1] is not None and self.source_stage_marks[1] is not None:
-            self.clear_registration()
-            slot = 0
-        self.set_source_design_mark(slot, design_point)
-        self.set_source_stage_mark(slot, stage_point)
+        design_marks = tuple(self.source_design_marks_compact())
+        stage_marks = tuple(self.source_stage_marks_compact())
+        if len(design_marks) != len(stage_marks):
+            raise DesignModelError("Source mark capture is incomplete.")
+        self.source_design_marks = design_marks + (self._point(design_point),)
+        self.source_stage_marks = stage_marks + (self._point(stage_point),)
         self.registration = None
         pair_count = self.source_pair_count()
         if pair_count < 2:
             self.registration_status = "Calibration step 2/4: choose the second design mark."
         else:
-            self.registration_status = "Two mark pairs captured. Preparing chip rotation."
+            self.registration_status = (
+                f"{pair_count} mark pairs captured. Preparing chip rotation."
+            )
         return pair_count
 
     def set_source_design_mark(self, slot: int, point: Point2D) -> None:
-        """Set one of the two design-space calibration marks by slot index."""
+        """Set or append one design-space calibration mark by index."""
 
-        self._set_slot_point(self.source_design_marks, slot, point)
+        self.source_design_marks = self._with_slot_point(
+            self.source_design_marks,
+            slot,
+            point,
+        )
         self.registration = None
         self.registration_status = self.calibration_prompt()
 
     def set_source_stage_mark(self, slot: int, point: Point2D) -> None:
-        """Set one of the two stage-space calibration marks by slot index."""
+        """Set or append one stage-space calibration mark by index."""
 
-        self._set_slot_point(self.source_stage_marks, slot, point)
+        self.source_stage_marks = self._with_slot_point(
+            self.source_stage_marks,
+            slot,
+            point,
+        )
         self.registration = None
         self.registration_status = self.calibration_prompt()
 
     def source_pair_count(self) -> int:
         """Return how many calibration slots contain both design and stage points."""
 
-        return sum(
-            1
-            for design_point, stage_point in zip(
-                self.source_design_marks,
-                self.source_stage_marks,
-            )
-            if design_point is not None and stage_point is not None
+        return min(
+            len(self.source_design_marks_compact()),
+            len(self.source_stage_marks_compact()),
         )
 
     def source_design_marks_compact(self) -> list[Point2D]:
@@ -347,34 +366,43 @@ class DesignSession:
     def calibration_prompt(self) -> str:
         """Return a short operator-facing prompt for the next calibration step."""
 
-        if self.source_design_marks[0] is None or self.source_design_marks[1] is None:
+        design_count = len(self.source_design_marks_compact())
+        stage_count = len(self.source_stage_marks_compact())
+        if design_count < 2:
             return (
                 "Pick mark 1 with left click and mark 2 with right click in the design window."
             )
-        if self.source_stage_marks[0] is None:
-            return "Center chip mark 1 and capture it."
-        if self.source_stage_marks[1] is None:
-            return "Center chip mark 2 and capture it."
+        if stage_count < design_count:
+            return f"Center chip mark {stage_count + 1} and capture it."
         if self.registration is not None and self.registration.valid:
             return "Calibration complete. Use the minimap or click in the design window to navigate."
-        return "Two mark pairs captured. Waiting for chip rotation to finish."
+        return f"{design_count} mark pairs captured. Waiting for chip rotation to finish."
 
     def prepare_source_alignment(self) -> AlignmentPreparation:
-        """Prepare B-axis rotation and rotated stage marks from two captured pairs."""
+        """Fit all captured pairs and prepare their B-axis correction."""
+
+        return self.prepare_alignment_draft(
+            tuple(self.source_design_marks_compact()),
+            tuple(self.source_stage_marks_compact()),
+        )
+
+    def prepare_alignment_draft(
+        self,
+        design_marks: tuple[Point2D, ...],
+        stage_marks: tuple[Point2D, ...],
+    ) -> AlignmentPreparation:
+        """Prepare an alignment without changing the active registration."""
 
         if self.document is None:
             raise DesignModelError("No design document is loaded.")
-        if any(point is None for point in self.source_design_marks) or any(
-            point is None for point in self.source_stage_marks
-        ):
-            raise DesignModelError("Exactly two mark pairs are required for calibration.")
+        design_marks = tuple(self._point(point) for point in design_marks)
+        stage_marks = tuple(self._point(point) for point in stage_marks)
+        if len(design_marks) < 2 or len(design_marks) != len(stage_marks):
+            raise DesignModelError("At least two complete mark pairs are required.")
 
-        design_a = self.source_design_marks[0]
-        design_b = self.source_design_marks[1]
-        stage_a = self.source_stage_marks[0]
-        stage_b = self.source_stage_marks[1]
-        assert design_a is not None and design_b is not None
-        assert stage_a is not None and stage_b is not None
+        fitted = DesignRegistration.from_marks(design_marks, stage_marks)
+        design_a, design_b = design_marks[:2]
+        stage_a, stage_b = stage_marks[:2]
         design_dx = float(design_b[0] - design_a[0])
         design_dy = float(design_b[1] - design_a[1])
         stage_dx = float(stage_b[0] - stage_a[0])
@@ -385,34 +413,37 @@ class DesignSession:
         if design_distance_mm <= 1e-9 or stage_distance_mm <= 1e-9:
             raise DesignModelError("Calibration marks are too close together.")
 
-        design_angle = math.atan2(design_dy, design_dx)
-        stage_angle = math.atan2(stage_dy, stage_dx)
-        rotation_deg = math.degrees(design_angle - stage_angle)
+        rotation_deg = -float(fitted.rotation_deg)
         while rotation_deg <= -180.0:
             rotation_deg += 360.0
         while rotation_deg > 180.0:
             rotation_deg -= 360.0
 
         pivot_stage = DEFAULT_B_AXIS_ROTATION_PIVOT_STAGE
-        adjusted_stage_a = self._rotate_stage_point(stage_a, pivot_stage, rotation_deg)
-        adjusted_stage_b = self._rotate_stage_point(stage_b, pivot_stage, rotation_deg)
-        distance_ratio = stage_distance_mm / design_distance_mm
+        adjusted_stage_marks = tuple(
+            self._rotate_stage_point(point, pivot_stage, rotation_deg)
+            for point in stage_marks
+        )
+        design_unit_mm = float(self.document.dbu) * 1e3
+        distance_ratio = fitted.scale / design_unit_mm
         return AlignmentPreparation(
-            design_marks=(design_a, design_b),
-            stage_marks_before_rotation=(stage_a, stage_b),
-            stage_marks_after_rotation=(adjusted_stage_a, adjusted_stage_b),
+            design_marks=design_marks,
+            stage_marks_before_rotation=stage_marks,
+            stage_marks_after_rotation=adjusted_stage_marks,
             pivot_stage=pivot_stage,
             rotation_deg=rotation_deg,
             design_distance_mm=design_distance_mm,
             stage_distance_mm=stage_distance_mm,
             distance_ratio=distance_ratio,
+            rms_residual_mm=fitted.source_residual_summary.rms,
+            max_residual_mm=fitted.source_residual_summary.max_error,
         )
 
     def apply_prepared_alignment(self, preparation: AlignmentPreparation) -> None:
         """Commit a prepared alignment after the B-axis rotation succeeds."""
 
-        self.source_design_marks = list(preparation.design_marks)
-        self.source_stage_marks = list(preparation.stage_marks_after_rotation)
+        self.source_design_marks = tuple(preparation.design_marks)
+        self.source_stage_marks = tuple(preparation.stage_marks_after_rotation)
         self._rebuild_registration()
         if self.registration is not None and self.registration.valid:
             self.registration_status = (
@@ -429,23 +460,21 @@ class DesignSession:
         self.registration_status = reason
 
     def add_source_design_mark(self, point: Point2D) -> None:
-        """Append a design-space source mark, replacing oldest overflow."""
+        """Append a design-space source mark."""
 
-        slot = 0 if self.source_design_marks[0] is None else 1
-        if slot == 1 and self.source_design_marks[1] is not None:
-            self.clear_registration()
-            slot = 0
-        self.set_source_design_mark(slot, point)
+        self.source_design_marks = tuple(self.source_design_marks_compact()) + (
+            self._point(point),
+        )
+        self.registration = None
         self._rebuild_registration()
 
     def add_source_stage_mark(self, point: Point2D) -> None:
-        """Append a stage-space source mark, replacing oldest overflow."""
+        """Append a stage-space source mark."""
 
-        slot = 0 if self.source_stage_marks[0] is None else 1
-        if slot == 1 and self.source_stage_marks[1] is not None:
-            self.clear_registration()
-            slot = 0
-        self.set_source_stage_mark(slot, point)
+        self.source_stage_marks = tuple(self.source_stage_marks_compact()) + (
+            self._point(point),
+        )
+        self.registration = None
         self._rebuild_registration()
 
     def add_check_design_mark(self, point: Point2D) -> None:
@@ -618,6 +647,8 @@ class DesignSession:
 
         design_marks = self.source_design_marks_compact()
         stage_marks = self.source_stage_marks_compact()
+        self.source_design_marks = tuple(design_marks)
+        self.source_stage_marks = tuple(stage_marks)
         if len(design_marks) < 2 or len(stage_marks) < 2:
             self.registration = None
             self.registration_status = (
@@ -639,14 +670,21 @@ class DesignSession:
             check_design_marks=self.check_design_marks,
             check_stage_marks=self.check_stage_marks,
         )
-        summary = self.registration.residual_summary
-        if summary.count:
+        source_summary = self.registration.source_residual_summary
+        check_summary = self.registration.residual_summary
+        source_text = (
+            f"Fit RMS {source_summary.rms:.4f} mm, "
+            f"max {source_summary.max_error:.4f} mm over {source_summary.count} marks."
+        )
+        if check_summary.count:
             self.registration_status = (
-                f"Registered. Check RMS {summary.rms:.4f} mm, "
-                f"max {summary.max_error:.4f} mm over {summary.count} marks."
+                f"Registered. {source_text} "
+                f"Check RMS {check_summary.rms:.4f} mm, "
+                f"max {check_summary.max_error:.4f} mm over "
+                f"{check_summary.count} marks."
             )
         else:
-            self.registration_status = "Registered from 2 source marks."
+            self.registration_status = f"Registered. {source_text}"
 
     @staticmethod
     def _rotate_stage_point(
@@ -663,15 +701,31 @@ class DesignSession:
         )
 
     @staticmethod
-    def _set_slot_point(
-        slots: list[Optional[Point2D]], slot: int, point: Point2D
-    ) -> None:
-        if slot not in (0, 1):
-            raise DesignModelError("Calibration slot must be 0 or 1.")
-        slots[slot] = (float(point[0]), float(point[1]))
+    def _with_slot_point(
+        slots: tuple[Point2D, ...] | list[Optional[Point2D]],
+        slot: int,
+        point: Point2D,
+    ) -> tuple[Point2D, ...]:
+        populated = [item for item in slots if item is not None]
+        if slot < 0 or slot > len(populated):
+            raise DesignModelError("Calibration mark index is not contiguous.")
+        normalized = DesignSession._point(point)
+        if slot == len(populated):
+            populated.append(normalized)
+        else:
+            populated[slot] = normalized
+        return tuple(populated)
 
     @staticmethod
-    def _serialize_points(points: list[Point2D]) -> list[list[float]]:
+    def _point(point: Point2D) -> Point2D:
+        x_value = float(point[0])
+        y_value = float(point[1])
+        if not math.isfinite(x_value) or not math.isfinite(y_value):
+            raise DesignModelError("Calibration marks must be finite 2D points.")
+        return (x_value, y_value)
+
+    @staticmethod
+    def _serialize_points(points: list[Point2D] | tuple[Point2D, ...]) -> list[list[float]]:
         return [[float(point[0]), float(point[1])] for point in points]
 
     @staticmethod

@@ -469,13 +469,9 @@ def test_create_main_window_docks_assigns_owner_attrs_and_dock_names(monkeypatch
     monkeypatch.setattr(main_window_docks, "QDialog", _FakeDialog)
     monkeypatch.setattr(main_window_docks, "QHBoxLayout", _FakeLayout)
     monkeypatch.setattr(main_window_docks, "QPushButton", _FakeButton)
-    monkeypatch.setattr(main_window_docks, "QTabWidget", _FakeTabs)
     monkeypatch.setattr(main_window_docks, "QVBoxLayout", _FakeLayout)
     monkeypatch.setattr(
         main_window_docks, "SerialConnectionPanel", _FakeSerialConnectionPanel
-    )
-    monkeypatch.setattr(
-        main_window_docks, "SerialTerminalWindow", _FakeSerialTerminalWindow
     )
     monkeypatch.setattr(
         main_window_docks, "ResistanceMonitorPanel", _FakeResistanceMonitorPanel
@@ -492,9 +488,8 @@ def test_create_main_window_docks_assigns_owner_attrs_and_dock_names(monkeypatch
 
     assert owner.serial_connection_dialog.windowTitle() == "Connection"
     assert not owner.serial_connection_dialog.isModal()
-    assert owner.serial_connection_tabs.tabText(0) == "Connection"
-    assert owner.serial_connection_tabs.tabText(1) == "Terminal"
-    assert owner.serial_terminal_panel.stage_controller is owner.stage_controller
+    assert owner.serial_connection_tabs is None
+    assert owner.serial_terminal_panel is None
     assert owner.joystick_panel.stage_controller is owner.stage_controller
     assert owner.resistance_dock.objectName() == "ResistanceDock"
     assert owner.joystick_dock.objectName() == "JoystickDock"
@@ -512,13 +507,9 @@ def test_needles_zone_change_persists_controller_state(monkeypatch) -> None:
     monkeypatch.setattr(main_window_docks, "QDialog", _FakeDialog)
     monkeypatch.setattr(main_window_docks, "QHBoxLayout", _FakeLayout)
     monkeypatch.setattr(main_window_docks, "QPushButton", _FakeButton)
-    monkeypatch.setattr(main_window_docks, "QTabWidget", _FakeTabs)
     monkeypatch.setattr(main_window_docks, "QVBoxLayout", _FakeLayout)
     monkeypatch.setattr(
         main_window_docks, "SerialConnectionPanel", _FakeSerialConnectionPanel
-    )
-    monkeypatch.setattr(
-        main_window_docks, "SerialTerminalWindow", _FakeSerialTerminalWindow
     )
     monkeypatch.setattr(
         main_window_docks, "ResistanceMonitorPanel", _FakeResistanceMonitorPanel

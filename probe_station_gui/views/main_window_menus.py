@@ -39,6 +39,7 @@ class MainWindowMenuOwner(Protocol):
     _rect_action: Any
     _alignment_capture_action: Any
     _alignment_exit_action: Any
+    _terminal_action: Any
 
     def menuBar(self) -> Any: ...  # noqa: N802 - Qt naming
     def addAction(self, action: Any) -> None: ...  # noqa: N802 - Qt naming
@@ -50,6 +51,7 @@ class MainWindowMenuOwner(Protocol):
     def _capture_manual_alignment_center_shortcut(self) -> None: ...
     def _cancel_manual_alignment_pick(self) -> None: ...
     def _on_measure_mode_exited(self) -> None: ...
+    def show_serial_terminal_window(self) -> None: ...
 
 
 def setup_main_window_menus(owner: MainWindowMenuOwner) -> None:
@@ -169,6 +171,10 @@ def _add_dock_actions(
         action = dock.toggleViewAction()
         action.setText(title)
         panels_menu.addAction(action)
+
+    owner._terminal_action = QAction("Terminal", owner)
+    owner._terminal_action.triggered.connect(owner.show_serial_terminal_window)
+    panels_menu.addAction(owner._terminal_action)
 
     for dock, title in (
         (owner.alignment_dock, "Alignment"),

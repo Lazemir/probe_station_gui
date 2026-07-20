@@ -113,6 +113,17 @@ def test_axis_home_request_normalizes_axis_before_queue(monkeypatch) -> None:
     assert events == [("queue", ["X"])]
 
 
+def test_home_request_clears_deferred_exact_step() -> None:
+    events: list[object] = []
+    owner = _owner(events)
+    owner._clear_exact_step_targets = lambda: events.append(("clear_exact_step",))
+
+    homing_ui.request_home_axis_from_ui(owner, "X")
+
+    assert events[0] == ("clear_exact_step",)
+    assert ("home_axis", "X") in events
+
+
 def test_queue_defers_when_controller_is_busy(monkeypatch) -> None:
     events: list[object] = []
     timer_calls: list[tuple[int, object]] = []

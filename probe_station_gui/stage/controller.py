@@ -19,6 +19,7 @@ from PySide6.QtCore import QObject, Signal
 from probe_station_gui.stage.autofocus_flow import StageControllerAutofocusMixin
 from probe_station_gui.stage.click_move import StageControllerClickMoveMixin
 from probe_station_gui.stage.axis_coordinates import StageControllerAxisCoordinatesMixin
+from probe_station_gui.stage.axis_mapping import CalibrationOutOfDomain
 from probe_station_gui.stage.connection_state import StageControllerConnectionMixin
 from probe_station_gui.stage.autofocus_math import (
     autofocus_sweep_feedrate_mm_min as autofocus_sweep_feedrate_mm_min,
@@ -51,6 +52,7 @@ from probe_station_gui.stage.jog_commands import (
 from probe_station_gui.stage.homing_startup import StageControllerHomingStartupMixin
 from probe_station_gui.stage.jog_queue import StageControllerJogQueueMixin
 from probe_station_gui.stage.motion_commands import StageControllerMotionCommandsMixin
+from probe_station_gui.stage.precision_motion import StageControllerPrecisionMotionMixin
 from probe_station_gui.stage.motion_timing import (
     absolute_move_distance_for_timeout as absolute_move_distance_for_timeout,
     idle_timeout_for_distance as idle_timeout_for_distance,
@@ -153,6 +155,7 @@ class StageController(
     StageControllerJogQueueMixin,
     StageControllerMotionCommandsMixin,
     StageControllerAxisCoordinatesMixin,
+    StageControllerPrecisionMotionMixin,
     StageControllerSafetyStateMixin,
     StageControllerClickMoveMixin,
     StageControllerAutofocusMixin,
@@ -163,6 +166,7 @@ class StageController(
     calibration_changed: Signal = Signal(float, float)
     movement_started: Signal = Signal()
     movement_finished: Signal = Signal(bool, str)
+    b_rotation_started: Signal = Signal()
     click_move_started: Signal = Signal(float, float, float)
     absolute_xy_move_started: Signal = Signal(float, float, float)
     stage_position_changed: Signal = Signal(object)
@@ -185,6 +189,7 @@ class StageController(
     status_message: Signal = Signal(str)
     controller_reboot_detected: Signal = Signal()
     controller_reboot_ready: Signal = Signal()
+    coordinate_confidence_changed: Signal = Signal(object)
 
     CALIBRATION_PIXEL_TARGET = 120.0
     CALIBRATION_MIN_VERIFY_PIXELS = 15.0
@@ -206,7 +211,6 @@ class StageController(
     MOVE_IDLE_TIMEOUT_MAX_S = 3600.0
     AUTOFOCUS_FINE_STEP_MM = 0.02
     AUTOFOCUS_MIN_SWEEP_FRAMES = 4
-    AUTOFOCUS_BACKLASH_MM = 0.03
     AUTOFOCUS_STATIC_REFINEMENT_POINTS = 9
     AUTOFOCUS_STATIC_EDGE_REFINEMENT_ROUNDS = 2
     AUTOFOCUS_STATIC_SETTLE_FRAMES = 1
@@ -313,8 +317,7 @@ class StageController(
         self._needle_down_lowering_mm: Optional[float] = None
         self._needle_contact_zone_mm = self.DEFAULT_NEEDLE_CONTACT_ZONE_MM
         self._axis_max_feedrates: dict[str, float] = {}
-        self._axis_a_calibration: dict[str, float | str] | None = None
-        self._axis_z_calibration: dict[str, float | str | tuple[float, ...]] | None = None
+        self._axis_calibrations = {}
         self._active_objective_name = "X5"
         self._objective_calibration_target_pixels = self.CALIBRATION_PIXEL_TARGET
         self._objective_autofocus_range_mm = 1.0
@@ -354,6 +357,7 @@ class StageController(
         self._preferred_work_coordinate_system = self.DEFAULT_WORK_COORDINATE_SYSTEM
         self._active_work_coordinate_system: Optional[str] = None
         self._controller_coordinate_offsets: dict[str, tuple[float, ...]] = {}
+        self._initialize_precision_motion()
         self._async_write_queue: PriorityQueue[_QueuedSerialWrite] = PriorityQueue()
         self._async_write_clear_epoch = 0
         self._async_write_shutdown = threading.Event()
@@ -661,7 +665,7 @@ class StageController(
     def axis_display_limits(self, axis: str) -> tuple[float, float] | None:
         """Return software limits in the same coordinate basis as the GUI."""
 
-        return self._axis_limits_for_configured_mode(axis.upper().strip(), None)
+        return self.calibrated_axis_display_limits(axis.upper().strip(), None)
 
     def set_current_axis_work_coordinate(
         self,
@@ -884,6 +888,9 @@ class StageController(
             self._oscillation_needles_actions.clear()
             self._active_needles_action = None
             self._active_needles_programmed_feedrate = None
+        self.invalidate_coordinate_confidence(
+            "Controller reset makes coordinates approximate."
+        )
         self.status_message.emit(reason)
         self.queue_soft_reset(source=source)
 
@@ -1216,6 +1223,51 @@ class StageController(
             return None
         return tuple(self._last_stage_position)
 
+    def latest_machine_position(self) -> tuple[float, ...] | None:
+        """Return the latest cached raw machine coordinates without controller I/O."""
+
+        if self._position_reporting_mode == "work":
+            work_position = self._last_stage_position
+            coordinate_system = self._active_work_coordinate_system
+            if work_position is None or coordinate_system is None:
+                return None
+            work_offset = self._controller_coordinate_offsets.get(coordinate_system)
+            if (
+                work_offset is None
+                or len(work_position) < 3
+                or len(work_offset) < len(work_position)
+            ):
+                return None
+            # TODO(coordinate-system-rework): publish one canonical machine-coordinate snapshot instead of reconstructing MPos from WPos/WCO.
+            return tuple(
+                float(position + offset)
+                for position, offset in zip(work_position, work_offset)
+            )
+        if self._last_machine_position is None:
+            return None
+        return tuple(self._last_machine_position)
+
+    def axis_calibration_preview_position(
+        self,
+        axis: str,
+    ) -> tuple[float, float] | None:
+        """Return cached raw and mapped machine coordinates for a preview marker."""
+
+        normalized = str(axis).strip().upper()
+        index = self.AXIS_INDEX.get(normalized)
+        machine_position = self.latest_machine_position()
+        if index is None or machine_position is None or index >= len(machine_position):
+            return None
+        controller_value = float(machine_position[index])
+        try:
+            physical_value = self._axis_calibration_mapper().machine_controller_to_physical(
+                normalized,
+                controller_value,
+            )
+        except CalibrationOutOfDomain:
+            return None
+        return controller_value, physical_value
+
     def latest_a_position(self) -> float | None:
         """Return the latest cached A position, if known."""
 
@@ -1322,6 +1374,7 @@ class StageController(
             self._controller_coordinate_offsets[status.coordinate_system] = tuple(
                 float(v) for v in status.work_offset
             )
+        self._update_coordinate_confidence_from_status(status)
 
     def _check_cancelled(self) -> None:
         if self._cancel_event.is_set():

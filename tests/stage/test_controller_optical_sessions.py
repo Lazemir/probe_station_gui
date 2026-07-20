@@ -432,24 +432,13 @@ def test_cancelled_local_autofocus_restores_start_z_before_session_close(
         raise StageControllerError("Operation cancelled.")
 
     controller._run_static_focus_refinement_locked = _cancel
-    controller._query_status_with_required_coordinates = (
-        lambda _serial, *, axes: SimpleNamespace(
-            state="Idle",
-            position=(0.0, 0.0, current_z[0]),
-            work_position=(0.0, 0.0, current_z[0]),
-            display_position=(0.0, 0.0, current_z[0]),
-            work_offset=(0.0, 0.0, 0.0),
-            homed_axes={"Z"},
-        )
-    )
-    controller._position_for_configured_mode = lambda status: status.display_position
     controller._wait_for_idle = lambda timeout=10.0: None
 
-    def _restore(move, **_kwargs) -> None:
+    def _restore(target_z: float) -> None:
         events.append("restore start Z")
-        current_z[0] += move.z
+        current_z[0] = float(target_z)
 
-    controller._send_relative_move = _restore
+    controller._move_to_autofocus_final_z_locked = _restore
 
     with pytest.raises(StageControllerError, match="Operation cancelled"):
         controller.run_external_local_autofocus(range_mm=0.03)
@@ -509,7 +498,12 @@ def test_verified_click_does_not_open_optical_session(controller) -> None:
     _install_result_signals(controller, events)
     controller._move_safety_check = lambda: None
     controller._get_frame_snapshot = lambda timeout=3.0: (object(), 4)
-    controller._send_relative_move = lambda *_args, **_kwargs: events.append("move")
+    controller._query_current_status_with_required_coordinates = (
+        lambda **_kwargs: SimpleNamespace(display_position=(0.0, 0.0, 0.0))
+    )
+    controller._execute_precision_axis_targets_locked = (
+        lambda *_args, **_kwargs: events.append("move")
+    )
     controller._wait_for_new_frame = lambda counter, timeout=4.0: (
         object(),
         counter + 1,

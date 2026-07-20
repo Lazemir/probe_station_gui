@@ -15,6 +15,7 @@ from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import (
     QAbstractSpinBox,
     QApplication,
+    QDoubleSpinBox,
     QGridLayout,
     QHBoxLayout,
     QLabel,
@@ -36,7 +37,7 @@ from probe_station_gui.shared.qt_compat import (
 from probe_station_gui.settings.controls_config import CONTROL_ACTIONS, KeyBinding
 from probe_station_gui.shared.wheel_guard import (
     GuardedComboBox as QComboBox,
-    GuardedDoubleSpinBox as QDoubleSpinBox,
+    GuardedDoubleSpinBox,
     allow_wheel_value_change,
 )
 from probe_station_gui.views.joystick.feedrate_panel import (
@@ -377,14 +378,13 @@ class JoystickWindow(JoystickFeedrateMixin, QWidget):
         self.jog_mode_combo.addItem("Step", self.MODE_STEP)
         mode_layout.addWidget(self.jog_mode_combo)
         self.step_distance_label = QLabel("Step:", self)
-        self.step_distance_spin = QDoubleSpinBox(self)
+        self.step_distance_spin = GuardedDoubleSpinBox(self)
         self.step_distance_spin.setLocale(QLocale.c())
         self.step_distance_spin.setDecimals(3)
         self.step_distance_spin.setRange(0.001, 1000.0)
-        self.step_distance_spin.setSingleStep(0.1)
+        self.step_distance_spin.setSingleStep(0.001)
         self.step_distance_spin.setSuffix(" mm/deg")
         self.step_distance_spin.setValue(self._manual_axis_distance_mm)
-        allow_wheel_value_change(self.step_distance_spin)
         mode_layout.addWidget(self.step_distance_label)
         mode_layout.addWidget(self.step_distance_spin)
         root_layout.addLayout(mode_layout)
@@ -952,9 +952,6 @@ class JoystickWindow(JoystickFeedrateMixin, QWidget):
         self, axis: str, direction: int, *, mode: Optional[str] = None
     ) -> None:
         if not (self._axis_a_ready or self._motion_safety_disabled):
-            return
-        if self.stage_controller is not None and self.stage_controller.is_busy():
-            logger.debug("Manual axis step blocked because stage controller is busy")
             return
         axis = axis.strip().upper()
         if axis not in self.MANUAL_JOG_AXES:
@@ -1562,20 +1559,6 @@ class JoystickWindow(JoystickFeedrateMixin, QWidget):
         self._last_feedrate_wheel_at = now
         notch_units = abs(delta_y) / 120.0
         speed_multiplier = self._wheel_speed_multiplier(dt)
-        if self._control_mode == self.MODE_STEP:
-            current_step = max(0.001, float(self._manual_axis_distance_mm))
-            base_step = max(0.001, current_step * 0.1)
-            step_delta = base_step * notch_units * speed_multiplier
-            if delta_y < 0:
-                step_delta = -step_delta
-            self._set_step_distance(current_step + step_delta, emit_changed=True)
-            logger.debug(
-                "Step wheel applied: delta=%s step=%s value=%s",
-                delta_y,
-                step_delta,
-                self._manual_axis_distance_mm,
-            )
-            return True
         base_step = max(0.2, self._linear_feedrate_value * 0.03)
         step = base_step * notch_units * speed_multiplier
         if delta_y < 0:

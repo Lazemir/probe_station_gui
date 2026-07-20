@@ -123,8 +123,7 @@ StageController = _stage_controller_module.StageController
 StageControllerError = _stage_controller_module.StageControllerError
 QueuedSerialWrite = _stage_controller_module._QueuedSerialWrite
 MoveVector = _stage_controller_module.MoveVector
-AxisACalibrationSettings = _settings_manager_module.AxisACalibrationSettings
-AxisZCalibrationSettings = _settings_manager_module.AxisZCalibrationSettings
+AxisCalibrationSettings = _settings_manager_module.AxisCalibrationSettings
 FocusSweepResult = _stage_controller_module._FocusSweepResult
 AutofocusContext = _stage_controller_module._AutofocusContext
 

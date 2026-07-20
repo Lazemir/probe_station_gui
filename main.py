@@ -91,7 +91,6 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPlainTextEdit,
-    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -103,7 +102,6 @@ from probe_station_gui import (
     JoystickWindow,
     MicroscopeView,
     StageController,
-    SerialTerminalWindow,
 )
 from probe_station_gui.design.model import DesignDocument, DesignModelError
 from probe_station_gui.design.contact_navigation import (
@@ -196,6 +194,7 @@ from probe_station_gui.stage.coordinate_targets import (
     resolve_stage_axis_target,
     stage_axis_target_limit_error,
 )
+from probe_station_gui.stage.exact_step import ExactStepAccumulator
 from probe_station_gui.stage.manual_jog_prediction import (
     ManualJogPredictionConfig,
     ManualJogPredictionState,
@@ -394,7 +393,7 @@ from probe_station_gui.views.resistance_monitor_panel import ResistanceMonitorPa
 from probe_station_gui.views.serial_connection_panel import SerialConnectionPanel
 from probe_station_gui.views.main_window_auxiliary import (
     create_design_layout_window,
-    show_connection_dialog,
+    show_serial_terminal_window as show_serial_terminal_tool_window,
     toggle_design_layout_window,
 )
 from probe_station_gui.views.main_window_docks import create_main_window_docks
@@ -595,6 +594,7 @@ if TYPE_CHECKING:
         RouteMeasurementRunConfiguration,
     )
     from probe_station_gui.views.surface_map_panel import SurfaceMapWindow
+    from probe_station_gui.views.serial_terminal_window import SerialTerminalWindow
     from probe_station_gui.views.design_navigator_panel import (
         DesignLayoutWindow,
         DesignNavigatorPanel,
@@ -646,6 +646,7 @@ class Main(QMainWindow):
     MANUAL_JOG_STOP_TAIL_MAX_S = 0.25
     MANUAL_JOG_STOP_TAIL_LEARN_ALPHA = 0.25
     STAGE_COORDINATE_BLINK_MS = 250
+    EXACT_STEP_ACCUMULATION_MS = 80
     PLANNED_MOVE_DURATION_PADDING_S = 0.12
     COORDINATE_MOVE_MIN_IDLE_ACCEPT_S = 0.15
     COORDINATE_MOVE_TARGET_TOLERANCE_MM = 7.5e-4
@@ -755,7 +756,6 @@ class Main(QMainWindow):
         self.serial_terminal_panel: SerialTerminalWindow | None = None
         self.serial_connection_panel: SerialConnectionPanel | None = None
         self.serial_connection_dialog: QDialog | None = None
-        self.serial_connection_tabs: QTabWidget | None = None
         self.resistance_panel: ResistanceMonitorPanel | None = None
         self.oscillation_panel: OscillationPanel | None = None
         self.surface_map_window: SurfaceMapWindow | None = None
@@ -808,6 +808,9 @@ class Main(QMainWindow):
         self._current_design_stage_xy: tuple[float, float] | None = None
         self._pending_design_stage_xy: tuple[float, float] | None = None
         self._pending_alignment_preparation: AlignmentPreparation | None = None
+        self._alignment_design_draft: tuple[tuple[float, float], ...] = ()
+        self._alignment_stage_draft: list[tuple[float, float] | None] = []
+        self._alignment_draft_fit_residuals: tuple[float, float] | None = None
         self._pending_quick_alignment_rotation = False
         self._manual_alignment_pick_slot: int | None = None
         self._manual_alignment_points: list[tuple[float, float] | None] = [None, None]
@@ -850,6 +853,9 @@ class Main(QMainWindow):
         self._pending_click_to_move: tuple[float, float, float, float] | None = None
         self._pending_click_deadline: float | None = None
         self._pending_stage_axis_targets: dict[str, tuple[float, float]] = {}
+        self._exact_step_accumulator = ExactStepAccumulator(self.STAGE_AXIS_NAMES)
+        self._exact_step_pending_axes: set[str] = set()
+        self._exact_step_window_elapsed = False
         self._stage_position_panel: StagePositionPanel | None = None
         self._design_snap_enabled = True
         self._last_reported_b_position: float | None = None
@@ -1072,6 +1078,9 @@ class Main(QMainWindow):
                 message,
             )
         )
+        self.stage_controller.b_rotation_started.connect(
+            self._on_alignment_b_rotation_started
+        )
         self.stage_controller.click_move_started.connect(self._on_click_move_started)
         self.stage_controller.absolute_xy_move_started.connect(
             self._on_absolute_xy_move_started
@@ -1092,6 +1101,12 @@ class Main(QMainWindow):
             lambda position: stage_position_update.on_stage_position_changed(
                 self,
                 position,
+            )
+        )
+        self.stage_controller.coordinate_confidence_changed.connect(
+            lambda updates: stage_position_panel_adapter.update_coordinate_confidence(
+                self,
+                updates,
             )
         )
         self.stage_controller.needle_height_changed.connect(self._on_needle_height_changed)
@@ -1139,6 +1154,10 @@ class Main(QMainWindow):
         self._linear_feedrate_save_timer.timeout.connect(
             self._save_pending_linear_feedrate_default
         )
+        self._exact_step_timer = QTimer(self)
+        self._exact_step_timer.setSingleShot(True)
+        self._exact_step_timer.setInterval(self.EXACT_STEP_ACCUMULATION_MS)
+        self._exact_step_timer.timeout.connect(self._on_exact_step_window_elapsed)
 
         create_main_window_docks(self)
         _startup_trace("dock widgets created")
@@ -4301,6 +4320,7 @@ class Main(QMainWindow):
         self.view.setFocus(Qt.OtherFocusReason)
 
     def _on_stage_coordinate_mode_changed(self) -> None:
+        self._clear_exact_step_targets()
         if self._pending_stage_axis_targets and self._stage_position_panel is not None:
             self._stage_position_panel.clear_pending_target_state()
             stage_position_panel_adapter.update_stage_position_display(
@@ -4450,7 +4470,43 @@ class Main(QMainWindow):
             4000,
         )
 
+    def _on_alignment_draft_accepted(self, points: object) -> None:
+        if self._pending_alignment_preparation is not None:
+            self._show_status("Chip rotation is already in progress.", 4000)
+            return
+        if not isinstance(points, (list, tuple)):
+            return
+        try:
+            normalized = tuple(
+                (float(point[0]), float(point[1]))
+                for point in points
+                if isinstance(point, (list, tuple)) and len(point) == 2
+            )
+        except (TypeError, ValueError):
+            return
+        if len(normalized) < 2 or len(set(normalized)) < 2:
+            self._show_status("Align requires at least two distinct design points.", 5000)
+            return
+        self._alignment_design_draft = normalized
+        self._alignment_stage_draft = [None] * len(normalized)
+        self._alignment_draft_fit_residuals = None
+        self._manual_alignment_pick_slot = None
+        design_layout_window = getattr(self, "design_layout_window", None)
+        if design_layout_window is not None:
+            design_layout_window.set_alignment_capture_points(normalized)
+        self._set_alignment_panel_expanded()
+        self._refresh_manual_alignment_ui()
+        self._update_stage_coordinate_apply_state()
+        self._show_status(
+            f"Align: {len(normalized)} design points ready. Capture S1 next.",
+            5000,
+        )
+
+    def _on_alignment_draft_discarded(self) -> None:
+        self._show_status("Align draft discarded.", 2500)
+
     def _apply_settings(self, *, apply_objective_runtime: bool = True) -> None:
+        self._clear_exact_step_targets()
         connection_flow.apply_axis_feedrate_limits(
             self,
             self.stage_controller.axis_max_feedrates(),
@@ -4464,11 +4520,11 @@ class Main(QMainWindow):
         self.stage_controller.set_motion_safety_disabled(jog.motion_safety_disabled)
         needle_settings = self.settings_manager.needle_calibration_configuration()
         oscillation_settings = self.settings_manager.oscillation_configuration()
-        self.stage_controller.apply_axis_a_calibration(
-            self.settings_manager.axis_a_calibration_configuration()
+        self.stage_controller.apply_axis_calibrations(
+            self.settings_manager.axis_calibrations_configuration()
         )
-        self.stage_controller.apply_axis_z_calibration(
-            self.settings_manager.axis_z_calibration_configuration()
+        self.stage_controller.apply_precision_approach_configuration(
+            self.settings_manager.precision_approach_configuration()
         )
         needle_calibration_ui.apply_needle_calibration_runtime(self, needle_settings)
         coordinate_settings = self.settings_manager.coordinate_system_configuration()
@@ -6750,7 +6806,12 @@ class Main(QMainWindow):
             self._show_status(message, 7000)
 
     def _design_backed_alignment_active(self) -> bool:
-        return self._design_session.has_complete_source_design_marks()
+        return len(getattr(self, "_alignment_design_draft", ())) >= 2
+
+    def _alignment_capture_slot_count(self) -> int:
+        if self._design_backed_alignment_active():
+            return len(self._alignment_design_draft)
+        return 2
 
     def _design_window_is_open(self) -> bool:
         return self.design_layout_window is not None and self.design_layout_window.isVisible()
@@ -6775,7 +6836,7 @@ class Main(QMainWindow):
         self.alignment_dock.raise_()
 
     def _arm_manual_alignment_pick(self, slot: int) -> None:
-        if slot not in (0, 1):
+        if not 0 <= slot < self._alignment_capture_slot_count():
             return
         if getattr(self, "_manual_alignment_capture_context", None) is not None:
             self._show_status("Alignment point capture is already running.", 4000)
@@ -6818,10 +6879,11 @@ class Main(QMainWindow):
         if self._design_backed_alignment_active():
             self._pending_alignment_preparation = None
             self._pending_quick_alignment_rotation = False
-            self._design_session.clear_source_stage_marks()
+            self._alignment_stage_draft = [None] * len(
+                self._alignment_design_draft
+            )
+            self._alignment_draft_fit_residuals = None
             self._set_design_snap_enabled(True)
-            self._refresh_design_panel()
-            self._refresh_design_position()
         else:
             self._reset_manual_alignment(cancel_pick=False)
             self._pending_quick_alignment_rotation = False
@@ -6853,7 +6915,7 @@ class Main(QMainWindow):
         return plan.stage_xy
 
     def _capture_manual_alignment_center(self, slot: int) -> None:
-        if slot not in (0, 1):
+        if not 0 <= slot < self._alignment_capture_slot_count():
             return
         if getattr(self, "_manual_alignment_capture_context", None) is not None:
             self._show_status("Alignment point capture is already running.", 4000)
@@ -6871,6 +6933,7 @@ class Main(QMainWindow):
 
     def _zero_b_axis(self) -> None:
         try:
+            self._clear_exact_step_targets()
             self._invalidate_design_registration(
                 "Design registration cleared after B-axis zeroing."
             )
@@ -6980,7 +7043,7 @@ class Main(QMainWindow):
     def _capture_manual_alignment_point(
         self, slot: int, captured: tuple[float, float], *, source: str
     ) -> None:
-        if slot not in (0, 1):
+        if not 0 <= slot < self._alignment_capture_slot_count():
             return
         self._manual_alignment_pick_slot = None
         self._refresh_manual_alignment_ui()
@@ -6989,19 +7052,33 @@ class Main(QMainWindow):
         if self._design_backed_alignment_active():
             registration_stage_xy = self._camera_stage_xy_from_raw_stage_xy(captured)
             self._pending_alignment_preparation = None
-            self._design_session.set_source_stage_mark(slot, registration_stage_xy)
-            self._refresh_design_panel()
-            self._refresh_design_position()
-            pair_count = self._design_session.source_pair_count()
+            required_pair_count = len(self._alignment_design_draft)
+            if len(self._alignment_stage_draft) != required_pair_count:
+                self._alignment_stage_draft = [None] * required_pair_count
+            self._alignment_stage_draft[slot] = registration_stage_xy
+            pair_count = sum(
+                point is not None for point in self._alignment_stage_draft
+            )
             preparation = None
             preparation_error = None
             spacing_reasonable = True
-            if pair_count >= 2:
+            if pair_count == required_pair_count:
                 try:
-                    preparation = self._design_session.prepare_source_alignment()
+                    preparation = self._design_session.prepare_alignment_draft(
+                        self._alignment_design_draft,
+                        tuple(
+                            point
+                            for point in self._alignment_stage_draft
+                            if point is not None
+                        ),
+                    )
                 except DesignModelError as exc:
                     preparation_error = str(exc)
                 else:
+                    self._alignment_draft_fit_residuals = (
+                        preparation.rms_residual_mm,
+                        preparation.max_residual_mm,
+                    )
                     spacing_reasonable = self._design_spacing_ratio_is_reasonable(
                         preparation.distance_ratio
                     )
@@ -7010,6 +7087,7 @@ class Main(QMainWindow):
                 stage_xy=registration_stage_xy,
                 source=source,
                 pair_count=pair_count,
+                required_pair_count=required_pair_count,
                 preparation=preparation,
                 preparation_error=preparation_error,
                 spacing_reasonable=spacing_reasonable,
@@ -7030,6 +7108,7 @@ class Main(QMainWindow):
             self._manual_alignment_points = plan.points
         if plan.apply_prepared_alignment and plan.preparation is not None:
             self._design_session.apply_prepared_alignment(plan.preparation)
+            self._finish_alignment_draft()
         if plan.pending_preparation is not None:
             self._pending_alignment_preparation = plan.pending_preparation
         if plan.pending_quick_alignment_rotation:
@@ -7054,15 +7133,33 @@ class Main(QMainWindow):
         if plan.request_b_rotation and plan.rotation_deg is not None:
             self.stage_controller.request_rotate_b(plan.rotation_deg)
 
+    def _on_alignment_b_rotation_started(self) -> None:
+        if self._pending_alignment_preparation is None:
+            return
+        self._design_session.invalidate_registration(
+            "Design registration stale after B-axis rotation started."
+        )
+        self._refresh_design_panel()
+        self._refresh_design_position()
+
+    def _finish_alignment_draft(self) -> None:
+        self._alignment_design_draft = ()
+        self._alignment_stage_draft = []
+        self._alignment_draft_fit_residuals = None
+        design_layout_window = getattr(self, "design_layout_window", None)
+        if design_layout_window is not None:
+            design_layout_window.set_alignment_capture_points(())
+
     def _refresh_manual_alignment_ui(self) -> None:
         presentation = alignment.alignment_presentation(
             design_backed=self._design_backed_alignment_active(),
-            design_stage_marks=self._design_session.source_stage_marks,
+            design_stage_marks=self._alignment_stage_draft,
             manual_points=self._manual_alignment_points,
             pick_slot=self._manual_alignment_pick_slot,
+            required_design_mark_count=len(self._alignment_design_draft),
         )
         if self.alignment_panel is not None:
-            self.alignment_panel.set_design_marks(self._design_session.source_design_marks)
+            self.alignment_panel.set_design_marks(self._alignment_design_draft)
             self.alignment_panel.set_captured_points(presentation.captured_points)
             self.alignment_panel.set_pick_slot(presentation.pick_slot)
             self.alignment_panel.set_capture_running(
@@ -7071,6 +7168,10 @@ class Main(QMainWindow):
             self.alignment_panel.set_registration_status(
                 self._design_session.registration_status
             )
+            if self._alignment_draft_fit_residuals is not None:
+                self.alignment_panel.set_fit_residuals(
+                    *self._alignment_draft_fit_residuals
+                )
         self.view.set_alignment_mode(presentation.alignment_mode)
         self.view.set_alignment_instruction(presentation.instruction)
 
@@ -7170,10 +7271,7 @@ class Main(QMainWindow):
             self.joystick_panel.setFocus(Qt.ActiveWindowFocusReason)
 
     def show_serial_terminal_window(self) -> None:
-        if not self.serial_terminal_panel:
-            return
-        show_connection_dialog(self, "terminal")
-        self.serial_terminal_panel.setFocus(Qt.ActiveWindowFocusReason)
+        show_serial_terminal_tool_window(self)
 
     def _on_manual_motion_axis(self, axis: str) -> None:
         axis_name = axis.upper()
@@ -7188,6 +7286,7 @@ class Main(QMainWindow):
     ) -> None:
         if not isinstance(commanded_distances, tuple):
             return
+        self._clear_exact_step_targets()
         self._clear_planned_move_prediction(clear_wait_state=True)
         if self.serial_terminal_panel is not None:
             self.serial_terminal_panel.set_live_poll_paused(True)
@@ -7307,6 +7406,8 @@ class Main(QMainWindow):
         control_mode = str(mode).strip().lower()
         if control_mode not in {"jog", "step"}:
             return
+        if control_mode != "step":
+            self._clear_exact_step_targets()
         settings = self.settings_manager.settings.clone()
         if settings.jog.mode == control_mode:
             return
@@ -7364,7 +7465,7 @@ class Main(QMainWindow):
         mode: str,
         feedrate_mm_min: float,
     ) -> None:
-        """Route manual +/- axis controls through the coordinate move path."""
+        """Accumulate exact Step targets and route them through coordinate moves."""
 
         axis = axis.strip().upper()
         if axis not in self.STAGE_AXIS_NAMES:
@@ -7373,31 +7474,132 @@ class Main(QMainWindow):
         if mode not in {"G90", "G91"}:
             self._show_status(f"Unsupported manual move mode: {mode}.", 3000)
             return
-        current_display = self._stage_axis_display_values.get(axis)
-        if current_display is None:
+        if self.stage_controller.is_busy() and not self._coordinate_targets.has_active_move():
+            self._show_status("Stage is busy. Ignoring manual axis move.", 3000)
+            return
+        baseline = self._coordinate_targets.display_targets.get(axis)
+        if baseline is None:
+            baseline = self._stage_axis_display_values.get(axis)
+        if baseline is None:
             self._show_status(f"{axis} coordinate is unavailable.", 3000)
             return
-        display_target = (
-            float(value_mm)
-            if mode == "G90"
-            else float(current_display) + float(value_mm)
-        )
+        current_pending = self._exact_step_accumulator.targets.get(axis)
+        try:
+            display_target = (
+                float(value_mm)
+                if mode == "G90"
+                else float(
+                    current_pending if current_pending is not None else baseline
+                )
+                + float(value_mm)
+            )
+        except (TypeError, ValueError):
+            self._show_status(f"Invalid {axis} target coordinate.", 3000)
+            return
         raw_target = self._raw_target_from_display_value(axis, display_target)
         if raw_target is None:
             self._show_status(f"{axis} coordinate is unavailable.", 3000)
             return
-        if self._coordinate_targets.has_active_move():
-            self._show_status("Stage is busy. Ignoring manual axis move.", 3000)
+        limit_error = self._stage_axis_target_limit_error(axis, display_target)
+        if limit_error is not None:
+            self._show_status(limit_error, 4000)
             return
-        if self.stage_controller.is_busy():
-            self._show_status("Stage is busy. Ignoring manual axis move.", 3000)
-            return
-        self._start_coordinate_axis_move(
-            axis,
-            raw_target,
-            display_target,
-            feedrate_mm_min=feedrate_mm_min,
+        self._exact_step_accumulator.set_absolute(axis, display_target)
+        self._exact_step_pending_axes.add(axis)
+        self._pending_stage_axis_targets[axis] = (float(raw_target), display_target)
+        stage_position_panel_adapter.refresh_stage_axis_styles(self)
+        self._update_stage_coordinate_apply_state()
+        if (
+            not self._exact_step_timer.isActive()
+            and not self._exact_step_window_elapsed
+        ):
+            self._exact_step_timer.start()
+
+    def _on_exact_step_window_elapsed(self) -> None:
+        self._exact_step_window_elapsed = True
+        self._dispatch_exact_step_targets()
+
+    def _dispatch_exact_step_targets(self) -> bool:
+        if not self._exact_step_window_elapsed:
+            return False
+        if self._coordinate_targets.has_active_move() or self.stage_controller.is_busy():
+            return False
+        display_targets = dict(self._exact_step_accumulator.targets)
+        if not display_targets:
+            self._exact_step_window_elapsed = False
+            return False
+        targets: dict[str, tuple[float, float]] = {}
+        for axis, display_target in display_targets.items():
+            raw_target = self._raw_target_from_display_value(axis, display_target)
+            if raw_target is None:
+                self._show_status(f"{axis} coordinate is unavailable.", 3000)
+                self._clear_exact_step_targets()
+                return False
+            limit_error = self._stage_axis_target_limit_error(axis, display_target)
+            if limit_error is not None:
+                self._show_status(limit_error, 4000)
+                self._clear_exact_step_targets()
+                return False
+            targets[axis] = (float(raw_target), float(display_target))
+        self._exact_step_accumulator.drain()
+        self._exact_step_window_elapsed = False
+        accepted = self._start_coordinate_targets_move(
+            targets,
+            feedrate_mm_min=self._coordinate_feedrate_for_axes(targets),
+            source_label="Step",
         )
+        if accepted:
+            self._exact_step_pending_axes.difference_update(targets)
+        else:
+            self._clear_exact_step_targets()
+        return accepted
+
+    def _on_coordinate_move_finished(
+        self,
+        success: bool,
+        finished_display_targets: dict[str, float],
+    ) -> None:
+        if not success:
+            self._clear_exact_step_targets()
+            return
+        accumulator = getattr(self, "_exact_step_accumulator", None)
+        if accumulator is None:
+            return
+        for axis, reached_target in finished_display_targets.items():
+            pending_target = accumulator.targets.get(axis)
+            if pending_target is None or not math.isclose(
+                pending_target,
+                reached_target,
+                rel_tol=0.0,
+                abs_tol=1e-12,
+            ):
+                continue
+            accumulator.targets.pop(axis, None)
+            self._exact_step_pending_axes.discard(axis)
+            self._pending_stage_axis_targets.pop(axis, None)
+        stage_position_panel_adapter.refresh_stage_axis_styles(self)
+        self._update_stage_coordinate_apply_state()
+        if not self._exact_step_timer.isActive():
+            self._dispatch_exact_step_targets()
+
+    def _clear_exact_step_targets(self) -> None:
+        timer = getattr(self, "_exact_step_timer", None)
+        if timer is not None:
+            timer.stop()
+        accumulator = getattr(self, "_exact_step_accumulator", None)
+        if accumulator is not None:
+            accumulator.clear()
+        for axis in getattr(self, "_exact_step_pending_axes", set()):
+            self._pending_stage_axis_targets.pop(axis, None)
+        self._exact_step_pending_axes = set()
+        self._exact_step_window_elapsed = False
+        if (
+            getattr(self, "_stage_position_panel", None) is not None
+            and hasattr(self, "_stage_motion_axes")
+            and hasattr(self, "_stage_motion_blink_dimmed")
+        ):
+            stage_position_panel_adapter.refresh_stage_axis_styles(self)
+            self._update_stage_coordinate_apply_state()
 
     def _schedule_linear_feedrate_save(self, feedrate_mm_min: float) -> None:
         try:
@@ -7656,6 +7858,11 @@ class Main(QMainWindow):
         stripped = command.strip().upper()
         if not stripped:
             return
+        self._clear_exact_step_targets()
+        self.stage_controller.invalidate_needles_state()
+        self.stage_controller.invalidate_coordinate_confidence(
+            "Manual controller command."
+        )
         if re.match(r"^G5(?:4|5|6|7|8|9(?:\.[123])?)$", stripped):
             self.stage_controller.request_startup_sync(auto_home_a=False)
             self._schedule_cancel_state_refresh()
@@ -10458,6 +10665,7 @@ class Main(QMainWindow):
         return (float(np.linalg.norm(width_vec)), float(np.linalg.norm(height_vec)))
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
+        self._clear_exact_step_targets()
         shutdown_ui.close_event(self, event)
 
     def _clear_microscope_scan_dialog(self) -> None:

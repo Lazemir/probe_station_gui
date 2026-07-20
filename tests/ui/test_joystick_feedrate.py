@@ -425,46 +425,67 @@ class JoystickFeedrateTest(unittest.TestCase):
             [widget._linear_feedrate_value],
         )
 
-    def test_wheel_changes_step_distance_in_step_mode(self) -> None:
+    def test_panel_wheel_changes_feedrate_in_step_mode(self) -> None:
         widget = JoystickWindow.__new__(JoystickWindow)
         widget._control_mode = JoystickWindow.MODE_STEP
         widget._manual_axis_distance_mm = 1.0
-        widget._manual_axis_mode = JoystickWindow.DEFAULT_MANUAL_AXIS_MODE
-        widget._manual_axis_feedrate_mm_min = 7.0
+        widget._linear_default = 42.0
+        widget._linear_presets = [1.0, 3.0, 10.0, 30.0, 100.0, 300.0]
+        widget._linear_feedrate_bounds = None
+        widget._axis_feedrate_limits = {}
+        widget._active_feedrate_target = JoystickWindow.FEED_TARGET_XY
         widget._feedrate_values = {
             JoystickWindow._feedrate_key(
                 widget,
                 JoystickWindow.FEED_TARGET_XY,
                 JoystickWindow.MODE_STEP,
-            ): 7.0
+            ): 42.0
         }
         widget.step_distance_spin = _FakeSpin()
         widget.step_distance_spin.setValue(1.0)
-        widget._applying_jog_settings = False
         widget._last_feedrate_wheel_at = 0.0
         widget._linear_feedrate_value = 42.0
-        widget.manual_axis_settings_changed = _ArgsSignalRecorder()
+        widget.linear_feedrate_slider = _FakeSlider()
+        widget.linear_feedrate_spin = _FakeSpin()
+        widget.linear_feedrate_target_label = _FakeLabel()
+        widget.needle_feedrate_spin = _FakeSpin()
+        widget._needle_feedrate_value = JoystickWindow.MIN_LINEAR_FEEDRATE
+        widget._active_axes = None
         widget.linear_feedrate_changed = _SignalRecorder()
+        widget.step_feedrate_changed = _SignalRecorder()
+        JoystickWindow._update_linear_feedrate_slider_range(widget)
 
         changed = JoystickWindow._apply_wheel_delta(widget, 120)
 
         self.assertTrue(changed)
-        self.assertGreater(widget._manual_axis_distance_mm, 1.0)
+        self.assertEqual(widget._manual_axis_distance_mm, 1.0)
+        self.assertEqual(widget.step_distance_spin.value(), 1.0)
+        self.assertGreater(widget._linear_feedrate_value, 42.0)
+        self.assertEqual(widget.linear_feedrate_spin.value(), widget._linear_feedrate_value)
+
+    def test_step_editor_uses_guarded_spin_and_one_micron_increment(self) -> None:
+        source = inspect.getsource(JoystickWindow.__init__)
+
+        self.assertIn("self.step_distance_spin = GuardedDoubleSpinBox(self)", source)
+        self.assertIn("self.step_distance_spin.setSingleStep(0.001)", source)
+        self.assertNotIn("allow_wheel_value_change(self.step_distance_spin)", source)
+
+    def test_step_request_is_emitted_even_while_controller_is_busy(self) -> None:
+        widget = JoystickWindow.__new__(JoystickWindow)
+        widget._axis_a_ready = True
+        widget._motion_safety_disabled = False
+        widget.stage_controller = types.SimpleNamespace(is_busy=lambda: True)
+        widget._manual_axis_distance_mm = 0.001
+        widget._linear_feedrate_value = 7.0
+        widget._set_active_feedrate_target = lambda _target: None
+        widget.motion_axis_requested = _ArgsSignalRecorder()
+        widget.manual_axis_move_requested = _ArgsSignalRecorder()
+
+        JoystickWindow._manual_axis_step(widget, "X", 1, mode="G91")
+
         self.assertEqual(
-            widget.step_distance_spin.value(),
-            widget._manual_axis_distance_mm,
-        )
-        self.assertEqual(widget.linear_feedrate_changed.values, [])
-        self.assertEqual(
-            widget.manual_axis_settings_changed.values,
-            [
-                (
-                    "X",
-                    widget._manual_axis_distance_mm,
-                    JoystickWindow.DEFAULT_MANUAL_AXIS_MODE,
-                    7.0,
-                )
-            ],
+            widget.manual_axis_move_requested.values,
+            [("X", 0.001, "G91", 7.0)],
         )
 
     def test_manual_axis_settings_do_not_override_linear_feedrate(self) -> None:

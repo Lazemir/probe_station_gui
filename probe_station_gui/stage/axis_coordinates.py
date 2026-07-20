@@ -1,119 +1,71 @@
-"""A/Z calibration and configured-coordinate mapping for stage control."""
+"""Universal calibrated-coordinate mapping for stage control."""
 
 from __future__ import annotations
 
-import math
+from collections.abc import Mapping
 from typing import Optional
 
-from probe_station_gui.stage.axis_calibration import StageAxisCalibrationMapper
-from probe_station_gui.stage.axis_mapping import evaluate_polynomial
+from probe_station_gui.settings.axis_calibration_config import AxisCalibrationSettings
+from probe_station_gui.stage.axis_calibration import (
+    CalibrationCoordinateUnavailable,
+    StageAxisCalibrationMapper,
+)
+from probe_station_gui.stage.axis_mapping import (
+    AxisCalibrationCurve,
+    CalibrationOutOfDomain,
+    curve_from_settings,
+)
+from probe_station_gui.stage.errors import StageControllerError
 from probe_station_gui.stage.needle_targets import normalise_needle_lowering_target
 from probe_station_gui.stage.types import _Status
 
 
 class StageControllerAxisCoordinatesMixin:
-    """Internal A/Z calibration and coordinate-mapping methods."""
+    """Controller-facing operations built on the pure six-axis mapper."""
 
-    def apply_axis_a_calibration(self, calibration: object | None) -> None:
-        """Apply the compact nonlinear A-axis calibration model."""
+    def apply_axis_calibrations(
+        self,
+        calibrations: Mapping[str, AxisCalibrationSettings],
+    ) -> None:
+        """Replace all runtime curves with validated settings snapshots."""
 
-        if calibration is None or not bool(getattr(calibration, "configured", False)):
-            self._axis_a_calibration = None
-            return
-        model = str(getattr(calibration, "model", "")).strip()
-        if model != "cosine_displacement":
-            self._axis_a_calibration = None
-            return
-        try:
-            offset = float(getattr(calibration, "offset_mm"))
-            if offset > 0.0:
-                offset = -offset
-            amplitude = float(getattr(calibration, "amplitude_mm"))
-            if amplitude > 0.0:
-                amplitude = -amplitude
-            values: dict[str, float | str] = {
-                "model": model,
-                "steps_per_mm": float(getattr(calibration, "steps_per_mm")),
-                "min": float(getattr(calibration, "commanded_lowering_min_mm")),
-                "max": float(getattr(calibration, "commanded_lowering_max_mm")),
-                "offset": offset,
-                "amplitude": amplitude,
-                "angular_frequency": float(
-                    getattr(calibration, "angular_frequency_rad_per_mm")
-                ),
-                "phase": float(getattr(calibration, "phase_rad")),
-            }
-        except (TypeError, ValueError):
-            self._axis_a_calibration = None
-            return
-        if (
-            float(values["steps_per_mm"]) <= 0
-            or float(values["max"]) <= float(values["min"])
-            or abs(float(values["amplitude"])) <= 1e-12
-            or float(values["angular_frequency"]) <= 0
-        ):
-            self._axis_a_calibration = None
-            return
-        self._axis_a_calibration = values
-
-    def apply_axis_z_calibration(self, calibration: object | None) -> None:
-        """Apply the compact nonlinear Z-axis calibration model."""
-
-        if calibration is None or not bool(getattr(calibration, "configured", False)):
-            self._axis_z_calibration = None
-            return
-        model = str(getattr(calibration, "model", "")).strip()
-        if model != "quintic_polynomial":
-            self._axis_z_calibration = None
-            return
-        try:
-            coefficients = tuple(
-                float(value) for value in getattr(calibration, "coefficients_mm")
-            )
-            values: dict[str, float | str | tuple[float, ...]] = {
-                "model": model,
-                "steps_per_mm": float(getattr(calibration, "steps_per_mm")),
-                "min": float(getattr(calibration, "gcode_min_mm")),
-                "max": float(getattr(calibration, "gcode_max_mm")),
-                "coefficients": coefficients,
-            }
-        except (TypeError, ValueError):
-            self._axis_z_calibration = None
-            return
-        if (
-            float(values["steps_per_mm"]) <= 0
-            or float(values["max"]) <= float(values["min"])
-            or len(coefficients) != 6
-            or not all(math.isfinite(value) for value in coefficients)
-        ):
-            self._axis_z_calibration = None
-            return
-        self._axis_z_calibration = values
+        curves: dict[str, AxisCalibrationCurve] = {}
+        for raw_axis, settings in calibrations.items():
+            axis = str(raw_axis).strip().upper()
+            if axis not in self.AXIS_INDEX:
+                continue
+            curve = curve_from_settings(settings)
+            if curve is not None:
+                curves[axis] = curve
+        self._axis_calibrations = curves
 
     def axis_a_gcode_coordinate_for_lowering(self, lowering_mm: float) -> float:
-        """Map a physical A-axis lowering in millimeters to an absolute G-code A coordinate."""
+        """Map physical A lowering to a raw machine A coordinate."""
 
-        return self._axis_a_gcode_coordinate_for_lowering(lowering_mm)
+        try:
+            return self._axis_calibration_mapper().physical_to_controller(
+                "A",
+                -float(lowering_mm),
+            )
+        except CalibrationOutOfDomain as error:
+            raise self._calibration_target_error("A") from error
 
     def axis_a_lowering_for_gcode_coordinate(self, a_coordinate_mm: float) -> float:
-        """Map an absolute G-code A coordinate to physical calibrated lowering."""
+        """Map a raw machine A coordinate to positive physical lowering."""
 
-        return self._axis_a_lowering_for_gcode_coordinate(a_coordinate_mm)
+        try:
+            physical = self._axis_calibration_mapper().controller_to_physical(
+                "A",
+                float(a_coordinate_mm),
+            )
+        except CalibrationOutOfDomain as error:
+            raise self._calibration_target_error("A") from error
+        return -physical
 
-    def axis_a_configured_coordinate_for_lowering(
-        self,
-        lowering_mm: float,
-    ) -> float:
-        """Map physical A lowering to the current GUI/controller coordinate basis."""
+    def axis_a_configured_coordinate_for_lowering(self, lowering_mm: float) -> float:
+        return self._axis_a_configured_target_for_lowering(lowering_mm)
 
-        return self._axis_a_configured_coordinate_for_lowering(lowering_mm)
-
-    def axis_a_lowering_for_configured_coordinate(
-        self,
-        a_coordinate_mm: float,
-    ) -> float:
-        """Map the current GUI/controller A coordinate to physical calibrated lowering."""
-
+    def axis_a_lowering_for_configured_coordinate(self, a_coordinate_mm: float) -> float:
         return self._axis_a_lowering_for_configured_coordinate(a_coordinate_mm)
 
     def _normalise_needle_lowering_target(
@@ -122,78 +74,113 @@ class StageControllerAxisCoordinatesMixin:
     ) -> Optional[float]:
         return normalise_needle_lowering_target(
             position_mm,
-            lowering_for_gcode_coordinate=self._axis_a_lowering_for_gcode_coordinate,
+            lowering_for_gcode_coordinate=self.axis_a_lowering_for_gcode_coordinate,
         )
 
-    def calibrated_axis_display_value(
-        self,
-        axis: str,
-        raw_value: float,
-    ) -> float:
-        """Map a controller coordinate to the calibrated user-facing coordinate."""
+    def calibrated_axis_display_value(self, axis: str, raw_value: float) -> float:
+        """Map a configured raw coordinate to its physical display coordinate."""
 
-        axis = axis.upper().strip()
-        if axis == "A":
-            return self._axis_a_calibrated_coordinate_for_gcode_coordinate(raw_value)
-        if axis == "Z":
-            return self._axis_z_display_for_gcode_coordinate(raw_value)
-        return float(raw_value)
+        normalized = str(axis).strip().upper()
+        try:
+            return self._axis_calibration_mapper().configured_controller_to_physical(
+                normalized,
+                float(raw_value),
+            )
+        except (CalibrationOutOfDomain, CalibrationCoordinateUnavailable) as error:
+            raise self._calibration_target_error(normalized) from error
 
-    def calibrated_axis_raw_value(
+    def calibrated_axis_raw_value(self, axis: str, display_value: float) -> float:
+        """Map a physical display coordinate to the configured raw basis."""
+
+        normalized = str(axis).strip().upper()
+        try:
+            return self._axis_calibration_mapper().physical_to_configured_controller(
+                normalized,
+                float(display_value),
+            )
+        except (CalibrationOutOfDomain, CalibrationCoordinateUnavailable) as error:
+            raise self._calibration_target_error(normalized) from error
+
+    def calibrated_axis_raw_target_value(
         self,
         axis: str,
         display_value: float,
-    ) -> float:
-        """Map a calibrated user-facing coordinate to a controller coordinate."""
+    ) -> float | None:
+        """Return an inverse-mapped target, or ``None`` when unavailable."""
 
-        axis = axis.upper().strip()
-        if axis == "A":
-            return self._axis_a_gcode_coordinate_for_calibrated_coordinate(display_value)
-        if axis == "Z":
-            return self._axis_z_gcode_coordinate_for_display(display_value)
-        return float(display_value)
+        try:
+            return self.calibrated_axis_raw_value(axis, display_value)
+        except StageControllerError:
+            return None
+
+    def validate_calibrated_axis_raw_target(self, axis: str, raw_value: float) -> None:
+        """Reject configured raw targets outside an enabled measured domain."""
+
+        normalized = str(axis).strip().upper()
+        try:
+            self._axis_calibration_mapper().configured_controller_to_physical(
+                normalized,
+                float(raw_value),
+            )
+        except (CalibrationOutOfDomain, CalibrationCoordinateUnavailable) as error:
+            raise self._calibration_target_error(normalized) from error
+
+    def axis_raw_limits_for_configured_mode(
+        self,
+        axis: str,
+        status: _Status | None = None,
+    ) -> tuple[float, float] | None:
+        """Intersect software limits with the enabled calibration domain."""
+
+        normalized = str(axis).strip().upper()
+        mapper = self._axis_calibration_mapper()
+        software_limits = mapper.axis_limits_for_configured_mode(
+            normalized,
+            self._axis_limits.get(normalized),
+            status,
+        )
+        try:
+            calibration_limits = mapper.controller_domain_for_configured_mode(
+                normalized,
+                status,
+            )
+        except (CalibrationOutOfDomain, CalibrationCoordinateUnavailable):
+            return None
+        if software_limits is None:
+            return calibration_limits
+        if calibration_limits is None:
+            return software_limits
+        lower = max(software_limits[0], calibration_limits[0])
+        upper = min(software_limits[1], calibration_limits[1])
+        return None if lower > upper else (lower, upper)
+
+    def calibrated_axis_display_limits(
+        self,
+        axis: str,
+        status: _Status | None = None,
+    ) -> tuple[float, float] | None:
+        """Return usable limits in the physical display coordinate."""
+
+        normalized = str(axis).strip().upper()
+        raw_limits = self.axis_raw_limits_for_configured_mode(normalized, status)
+        if raw_limits is None:
+            return None
+        mapper = self._axis_calibration_mapper()
+        try:
+            return (
+                mapper.configured_controller_to_physical(normalized, raw_limits[0], status),
+                mapper.configured_controller_to_physical(normalized, raw_limits[1], status),
+            )
+        except (CalibrationOutOfDomain, CalibrationCoordinateUnavailable):
+            return None
 
     def _axis_calibration_mapper(self) -> StageAxisCalibrationMapper:
         return StageAxisCalibrationMapper(
-            axis_a_calibration=self._axis_a_calibration,
-            axis_z_calibration=self._axis_z_calibration,
+            calibrations=self._axis_calibrations,
             position_reporting_mode=self._position_reporting_mode,
             active_work_coordinate_system=self._active_work_coordinate_system,
             controller_coordinate_offsets=self._controller_coordinate_offsets,
             axis_index=self.AXIS_INDEX,
-        )
-
-    def _axis_a_model_parameters(self) -> tuple[float, float, float, float] | None:
-        return self._axis_calibration_mapper().axis_a_model_parameters()
-
-    def _axis_a_model_calibrated_coordinate_for_commanded(
-        self,
-        commanded_lowering_mm: float,
-    ) -> float:
-        mapper = self._axis_calibration_mapper()
-        return mapper.axis_a_model_calibrated_coordinate_for_commanded(
-            commanded_lowering_mm,
-        )
-
-    def _axis_a_model_lowering_for_commanded(
-        self,
-        commanded_lowering_mm: float,
-    ) -> float:
-        return self._axis_calibration_mapper().axis_a_model_lowering_for_commanded(
-            commanded_lowering_mm,
-        )
-
-    def _axis_a_calibrated_coordinate_for_gcode_coordinate(
-        self, a_coordinate_mm: float
-    ) -> float:
-        mapper = self._axis_calibration_mapper()
-        return mapper.axis_a_calibrated_coordinate_for_gcode_coordinate(
-            a_coordinate_mm,
-        )
-
-    def _axis_a_lowering_for_gcode_coordinate(self, a_coordinate_mm: float) -> float:
-        return self._axis_calibration_mapper().axis_a_lowering_for_gcode_coordinate(
-            a_coordinate_mm,
         )
 
     def _axis_work_offset_for_configured_mode(
@@ -212,88 +199,80 @@ class StageControllerAxisCoordinatesMixin:
         status: _Status | None = None,
     ) -> float:
         mapper = self._axis_calibration_mapper()
-        return mapper.axis_a_lowering_for_configured_coordinate(
-            a_coordinate_mm,
+        machine_coordinate = float(a_coordinate_mm) + mapper.axis_work_offset_for_configured_mode(
+            "A",
             status,
         )
+        try:
+            physical = mapper.controller_to_physical("A", machine_coordinate)
+        except (CalibrationOutOfDomain, CalibrationCoordinateUnavailable) as error:
+            raise self._calibration_target_error("A") from error
+        return -physical
 
     def _axis_a_configured_coordinate_for_lowering(
         self,
         lowering_mm: float,
         status: _Status | None = None,
     ) -> float:
-        return self._axis_calibration_mapper().axis_a_configured_coordinate_for_lowering(
-            lowering_mm,
+        return self._axis_a_configured_target_for_lowering(lowering_mm, status)
+
+    def _axis_a_configured_target_for_lowering(
+        self,
+        lowering_mm: float,
+        status: _Status | None = None,
+    ) -> float:
+        mapper = self._axis_calibration_mapper()
+        try:
+            machine_coordinate = mapper.physical_to_controller(
+                "A",
+                -float(lowering_mm),
+            )
+        except (CalibrationOutOfDomain, CalibrationCoordinateUnavailable) as error:
+            raise self._calibration_target_error("A") from error
+        return machine_coordinate - mapper.axis_work_offset_for_configured_mode(
+            "A",
             status,
         )
 
-    def _axis_a_gcode_coordinate_for_calibrated_coordinate(
-        self,
-        calibrated_coordinate_mm: float,
-    ) -> float:
-        mapper = self._axis_calibration_mapper()
-        return mapper.axis_a_gcode_coordinate_for_calibrated_coordinate(
-            calibrated_coordinate_mm,
-        )
-
     def _axis_a_gcode_coordinate_for_lowering(self, lowering_mm: float) -> float:
-        return self._axis_calibration_mapper().axis_a_gcode_coordinate_for_lowering(
-            lowering_mm,
-        )
-
-    def _axis_a_commanded_lowering_for_calibrated_coordinate(
-        self,
-        calibrated_coordinate_mm: float,
-    ) -> float:
-        mapper = self._axis_calibration_mapper()
-        return mapper.axis_a_commanded_lowering_for_calibrated_coordinate(
-            calibrated_coordinate_mm,
-        )
+        return self.axis_a_gcode_coordinate_for_lowering(lowering_mm)
 
     def _axis_a_gcode_coordinate_for_lowering_step(
         self,
         current_a: float,
         requested_step_mm: float,
     ) -> float:
-        return self._axis_calibration_mapper().axis_a_gcode_coordinate_for_lowering_step(
-            current_a,
-            requested_step_mm,
+        current_lowering = self._axis_a_lowering_for_configured_coordinate(current_a)
+        return self._axis_a_configured_target_for_lowering(
+            current_lowering - float(requested_step_mm)
         )
 
-    @staticmethod
-    def _evaluate_polynomial(coefficients: tuple[float, ...], x_value: float) -> float:
-        return evaluate_polynomial(coefficients, x_value)
-
-    def _axis_z_coefficients(self) -> tuple[float, ...] | None:
-        return self._axis_calibration_mapper().axis_z_coefficients()
-
-    def _axis_z_display_for_gcode_coordinate(self, z_coordinate_mm: float) -> float:
-        return self._axis_calibration_mapper().axis_z_display_for_gcode_coordinate(
-            z_coordinate_mm,
-        )
-
-    def _axis_z_gcode_coordinate_for_display(self, display_mm: float) -> float:
-        return self._axis_calibration_mapper().axis_z_gcode_coordinate_for_display(
-            display_mm,
-        )
-
-    def _position_for_configured_mode(self, status: _Status | None) -> tuple[float, ...] | None:
+    def _position_for_configured_mode(
+        self,
+        status: _Status | None,
+    ) -> tuple[float, ...] | None:
         return self._axis_calibration_mapper().position_for_configured_mode(status)
 
     def _axis_value_for_configured_mode(
-        self, status: _Status | None, axis: str
+        self,
+        status: _Status | None,
+        axis: str,
     ) -> float | None:
-        return self._axis_calibration_mapper().axis_value_for_configured_mode(
-            status,
-            axis,
-        )
+        return self._axis_calibration_mapper().axis_value_for_configured_mode(status, axis)
 
     def _axis_limits_for_configured_mode(
-        self, axis: str, status: _Status | None
+        self,
+        axis: str,
+        status: _Status | None,
     ) -> tuple[float, float] | None:
-        limits = self._axis_limits.get(axis)
         return self._axis_calibration_mapper().axis_limits_for_configured_mode(
             axis,
-            limits,
+            self._axis_limits.get(axis),
             status,
+        )
+
+    @staticmethod
+    def _calibration_target_error(axis: str) -> StageControllerError:
+        return StageControllerError(
+            f"{axis} target cannot be represented by the calibrated axis mapping."
         )

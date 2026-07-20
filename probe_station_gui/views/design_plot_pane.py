@@ -2,16 +2,29 @@
 
 from __future__ import annotations
 
+from collections import deque
 import logging
 import math
+import os
 import threading
 from time import perf_counter, monotonic
+from typing import Callable
 
-from PySide6.QtCore import QEvent, QPointF, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QPointF, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import QApplication, QLabel, QVBoxLayout, QWidget
 
 from probe_station_gui.design.markup import MarkupDocument
+from probe_station_gui.design.navigation_bounds import (
+    Box2D,
+    GDS_FOCUS_PADDING_FRACTION,
+    VIEW_RANGE_ABS_TOLERANCE,
+    clamp_view_bounds,
+    content_bounds,
+    fit_bounds_to_aspect,
+    navigation_frame,
+    pad_bounds,
+)
 
 from probe_station_gui.design.navigation_geometry import (
     first_segment_length,
@@ -33,6 +46,7 @@ from probe_station_gui.design.klayout_types import (
     SnapRequest,
     SnapResponse,
 )
+from probe_station_gui.design.klayout_geometry import plan_snap_search
 from probe_station_gui.design.klayout_workers import KLayoutSnapWorker
 from probe_station_gui.design.selection_geometry import (
     GuideSnapCandidate,
@@ -62,6 +76,50 @@ except ImportError:  # pragma: no cover - optional runtime dependency
 
 logger = logging.getLogger(__name__)
 
+DesignContentKey = tuple[str, str, int, Box2D, str | None]
+
+
+def _design_content_key(document: DesignDocument) -> DesignContentKey:
+    return (
+        os.path.normcase(os.path.abspath(os.fspath(document.path))),
+        str(document.top_cell_name),
+        int(document.rotation_quarter_turns) % 4,
+        tuple(float(value) for value in document.bounds),
+        document.source_load_id,
+    )
+
+
+def _route_matches_document(
+    route: MeasurementRoute,
+    document: DesignDocument,
+) -> bool:
+    same_path = os.path.normcase(os.path.abspath(route.design.path)) == os.path.normcase(
+        os.path.abspath(os.fspath(document.path))
+    )
+    return (
+        same_path
+        and route.design.top_cell_name == str(document.top_cell_name)
+        and all(
+            math.isclose(route_value, document_value, rel_tol=0.0, abs_tol=1e-9)
+            for route_value, document_value in zip(
+                route.design.bounds,
+                document.bounds,
+                strict=True,
+            )
+        )
+        and math.isclose(route.design.dbu, document.dbu, rel_tol=0.0, abs_tol=1e-12)
+    )
+
+
+def _markup_matches_document(
+    markup: MarkupDocument,
+    document: DesignDocument,
+) -> bool:
+    return markup.source_path == os.path.normcase(
+        os.path.abspath(os.fspath(document.path))
+    )
+
+
 class _DesignPlotPane(QWidget):
     """Thin wrapper around pyqtgraph for design rendering."""
 
@@ -69,6 +127,7 @@ class _DesignPlotPane(QWidget):
     move_requested = Signal(float, float)
     route_point_requested = Signal(float, float)
     point_requested = Signal(float, float)
+    alignment_point_requested = Signal(float, float)
     guide_requested = Signal(object, object)
     entity_selection_requested = Signal(object, str)
     route_pick_requested = Signal(str, float, float, bool, bool)
@@ -85,18 +144,26 @@ class _DesignPlotPane(QWidget):
     def __init__(self, *, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._document: DesignDocument | None = None
+        self._navigation_content_bounds: Box2D | None = None
+        self._navigation_frame: Box2D | None = None
+        self._navigation_ignored_coordinate_count = 0
+        self._last_navigation_invalid_coordinate_count = 0
         self._targets: list[MeasurementTarget] = []
         self._selected_target_id: str | None = None
         self._probe_route: MeasurementRoute | None = None
+        self._probe_route_document_key: DesignContentKey | None = None
         self._selected_route_point_index = -1
         self._probe_route_preview_points: list[Point2D] = []
         self._probe_route_preview_offsets: list[Point2D] = []
         self._tool_measure_segments: list[tuple[Point2D, Point2D]] = []
         self._tool_measure_points: list[Point2D] = []
         self._tool_measure_label_items: list[object] = []
+        self._alignment_draft_points: list[Point2D] = []
+        self._alignment_draft_label_items: list[object] = []
         self._tool_sketch_segments: list[tuple[Point2D, Point2D]] = []
         self._tool_sketch_points: list[Point2D] = []
         self._markup: MarkupDocument | None = None
+        self._markup_document_key: DesignContentKey | None = None
         self._markup_generation = 0
         self._markup_snap_candidates: tuple[GuideSnapCandidate, ...] = ()
         self._selectable_entities: tuple[SelectableDesignEntity, ...] = ()
@@ -112,6 +179,9 @@ class _DesignPlotPane(QWidget):
         self._select_press_entity_id: str | None = None
         self._select_dragging = False
         self._select_modifiers = Qt.NoModifier
+        self._move_press_scene_pos: QPointF | None = None
+        self._move_dragging = False
+        self._suppress_move_scene_click = False
         self._source_design_marks: list[Point2D | None] = [None, None]
         self._current_design_position: Point2D | None = None
         self._fov_design_size: Point2D | None = None
@@ -129,6 +199,11 @@ class _DesignPlotPane(QWidget):
         self._snap_request_id = 0
         self._latest_hover_request_id = 0
         self._pending_clicks: dict[int, PendingClick] = {}
+        self._click_order: deque[int] = deque()
+        self._click_completions: dict[
+            int,
+            tuple[SnapResult | None, float | None],
+        ] = {}
         self._pending_hover_markup: dict[
             int,
             tuple[SnapResult | None, bool, bool],
@@ -367,6 +442,12 @@ class _DesignPlotPane(QWidget):
             size=12,
             symbol="t",
         )
+        self._alignment_draft_item = pg.ScatterPlotItem(
+            pen=pg.mkPen("#00bcd4", width=2),
+            brush=pg.mkBrush(0, 188, 212, 150),
+            size=11,
+            symbol="o",
+        )
         self._check_mark_item = pg.ScatterPlotItem(
             pen=pg.mkPen("#ab47bc", width=2),
             brush=pg.mkBrush(171, 71, 188, 180),
@@ -405,6 +486,7 @@ class _DesignPlotPane(QWidget):
         self._plot.addItem(self._current_item)
         self._plot.addItem(self._source_mark_1_item)
         self._plot.addItem(self._source_mark_2_item)
+        self._plot.addItem(self._alignment_draft_item)
         self._plot.addItem(self._check_mark_item)
         self._preview_overlay_items = tuple(
             item
@@ -433,6 +515,145 @@ class _DesignPlotPane(QWidget):
     def resizeEvent(self, event) -> None:  # type: ignore[override]
         super().resizeEvent(event)
         self._schedule_route_geometry_redraw()
+        self._update_navigation_limits()
+
+    def _viewport_size(self) -> tuple[float, float]:
+        if self._plot is None:
+            return (1.0, 1.0)
+        rect = self._plot.getViewBox().sceneBoundingRect()
+        return (max(1.0, float(rect.width())), max(1.0, float(rect.height())))
+
+    def _current_view_bounds(self) -> Box2D | None:
+        if self._plot is None:
+            return None
+        try:
+            x_range, y_range = self._plot.getViewBox().viewRange()[:2]
+            values = (
+                float(x_range[0]),
+                float(y_range[0]),
+                float(x_range[1]),
+                float(y_range[1]),
+            )
+        except (AttributeError, IndexError, TypeError, ValueError):
+            return None
+        return values if all(math.isfinite(value) for value in values) else None
+
+    def _set_view_bounds(self, bounds: Box2D) -> None:
+        if self._plot is None:
+            return
+        left, bottom, right, top = bounds
+        self._plot.getViewBox().setRange(
+            xRange=(left, right),
+            yRange=(bottom, top),
+            padding=0.0,
+        )
+
+    def _clear_navigation_limits(self) -> None:
+        self._navigation_content_bounds = None
+        self._navigation_frame = None
+        self._navigation_ignored_coordinate_count = 0
+        self._last_navigation_invalid_coordinate_count = 0
+        if self._plot is not None:
+            self._plot.getViewBox().setLimits(
+                xMin=None,
+                xMax=None,
+                yMin=None,
+                yMax=None,
+                maxXRange=None,
+                maxYRange=None,
+            )
+
+    def _update_navigation_limits(
+        self,
+        *,
+        recompute_content: bool = False,
+        focus_gds: bool = False,
+    ) -> None:
+        if self._plot is None or self._document is None:
+            self._clear_navigation_limits()
+            return
+        if recompute_content or self._navigation_content_bounds is None:
+            identity = _design_content_key(self._document)
+            route = (
+                self._probe_route
+                if not self._document_preview_active
+                and self._probe_route_document_key == identity
+                else None
+            )
+            markup = (
+                self._markup
+                if not self._document_preview_active
+                and self._markup_document_key == identity
+                else None
+            )
+            (
+                self._navigation_content_bounds,
+                self._navigation_ignored_coordinate_count,
+            ) = content_bounds(self._document.bounds, route, markup)
+        cached_content = self._navigation_content_bounds
+        if cached_content is None:
+            return
+        self._navigation_frame = navigation_frame(
+            cached_content,
+            self._viewport_size(),
+        )
+        left, bottom, right, top = self._navigation_frame
+        view_box = self._plot.getViewBox()
+        view_box.setLimits(
+            xMin=left,
+            xMax=right,
+            yMin=bottom,
+            yMax=top,
+            maxXRange=right - left,
+            maxYRange=top - bottom,
+        )
+        if (
+            self._navigation_ignored_coordinate_count
+            and self._navigation_ignored_coordinate_count
+            != self._last_navigation_invalid_coordinate_count
+        ):
+            logger.warning(
+                "Ignored %d invalid design navigation coordinates.",
+                self._navigation_ignored_coordinate_count,
+            )
+        self._last_navigation_invalid_coordinate_count = (
+            self._navigation_ignored_coordinate_count
+        )
+        if focus_gds:
+            self.focus_gds_bounds()
+            return
+        current = self._current_view_bounds()
+        if current is not None:
+            clamped = clamp_view_bounds(current, self._navigation_frame)
+            if (
+                current[0] < self._navigation_frame[0]
+                or current[1] < self._navigation_frame[1]
+                or current[2] > self._navigation_frame[2]
+                or current[3] > self._navigation_frame[3]
+            ) and clamped == self._navigation_frame:
+                epsilon = VIEW_RANGE_ABS_TOLERANCE
+                clamped = (
+                    clamped[0] + epsilon,
+                    clamped[1] + epsilon,
+                    clamped[2] - epsilon,
+                    clamped[3] - epsilon,
+                )
+            if any(
+                abs(a - b) > VIEW_RANGE_ABS_TOLERANCE
+                for a, b in zip(current, clamped, strict=True)
+            ):
+                self._set_view_bounds(clamped)
+
+    def focus_gds_bounds(self) -> None:
+        if self._document is None:
+            return
+        focused = fit_bounds_to_aspect(
+            pad_bounds(self._document.bounds, GDS_FOCUS_PADDING_FRACTION),
+            self._viewport_size(),
+        )
+        if self._navigation_frame is not None:
+            focused = clamp_view_bounds(focused, self._navigation_frame)
+        self._set_view_bounds(focused)
 
     def _schedule_route_geometry_redraw(self) -> None:
         if self._route_geometry_redraw_timer is None:
@@ -469,24 +690,47 @@ class _DesignPlotPane(QWidget):
         self._probe_route_preview_arrow_item.setData([], [])
 
     def set_document(self, document: DesignDocument | None) -> None:
+        previous_content_key = (
+            _design_content_key(self._document)
+            if self._document is not None
+            else None
+        )
+        new_content_key = (
+            _design_content_key(document)
+            if document is not None
+            else None
+        )
         same_document = document is self._document
+        same_content = (
+            self._document is not None
+            and document is not None
+            and previous_content_key == new_content_key
+        )
+        if not same_document and self._snap_worker is not None:
+            self._snap_worker.cancel_pending()
         self._document = document
         if document is None:
             self._snap_generation += 1
             self._latest_hover_request_id = 0
-            self._pending_clicks.clear()
+            self._reset_file_backed_click_order()
             self._pending_hover_markup.clear()
             self._set_hover_snap(None)
             self._detach_file_backed_document(timeout_s=0.0)
+            self._clear_navigation_limits()
             self.set_status_message("No design loaded.")
             self._redraw_document()
         elif not same_document:
             self._snap_generation += 1
             self._latest_hover_request_id = 0
-            self._pending_clicks.clear()
+            self._reset_file_backed_click_order()
             self._pending_hover_markup.clear()
             self._set_hover_snap(None)
             self.set_status_message("")
+            if not same_content:
+                self._update_navigation_limits(
+                    recompute_content=True,
+                    focus_gds=True,
+                )
             if document.file_backed:
                 self._configure_file_backed_document(document)
             else:
@@ -521,7 +765,7 @@ class _DesignPlotPane(QWidget):
     def _detach_file_backed_document(self, *, timeout_s: float) -> None:
         self._klayout_config = None
         self._latest_hover_request_id = 0
-        self._pending_clicks.clear()
+        self._reset_file_backed_click_order()
         self._pending_hover_markup.clear()
         self._stop_snap_worker(timeout_s=timeout_s)
         if self._raster_controller is not None:
@@ -596,12 +840,16 @@ class _DesignPlotPane(QWidget):
         if failure.purpose != "click":
             return
         pending = self._pending_clicks.get(failure.request_id)
-        if pending is None or pending.config_generation != config.generation:
+        if (
+            pending is None
+            or pending.config_generation != config.generation
+            or failure.request_id in self._click_completions
+        ):
             return
-        self._pending_clicks.pop(failure.request_id, None)
         self._snap_failure_visible = True
         self.set_status_message("Snap failed. Try again.")
         QTimer.singleShot(1500, self._clear_snap_failure_status)
+        self._complete_file_backed_click(failure.request_id, None)
 
     def _clear_snap_failure_status(self) -> None:
         if not self._snap_failure_visible:
@@ -621,6 +869,11 @@ class _DesignPlotPane(QWidget):
         else:
             self._status_label.hide()
             self._plot.show()
+            layout = self.layout()
+            if layout is not None:
+                layout.activate()
+            self._plot.resize(self.contentsRect().size())
+            self._plot.plotItem.setGeometry(QRectF(self._plot.rect()))
 
     def set_targets(
         self,
@@ -640,6 +893,14 @@ class _DesignPlotPane(QWidget):
     ) -> None:
         self._probe_route = route
         self._selected_route_point_index = selected_route_point_index
+        self._probe_route_document_key = (
+            _design_content_key(self._document)
+            if self._document is not None
+            and route is not None
+            and _route_matches_document(route, self._document)
+            else None
+        )
+        self._update_navigation_limits(recompute_content=True)
         self._schedule_route_geometry_redraw()
         self._redraw_overlays()
 
@@ -741,6 +1002,7 @@ class _DesignPlotPane(QWidget):
                 )
         self._document_preview_active = True
         self.set_document(document)
+        self._update_navigation_limits(recompute_content=True, focus_gds=True)
         self._set_preview_overlay_visibility(False)
         self.set_status_message("")
 
@@ -755,6 +1017,7 @@ class _DesignPlotPane(QWidget):
         previous_view_range = self._document_preview_previous_view_range
         self._document_preview_active = False
         self.set_document(document)
+        self._update_navigation_limits(recompute_content=True)
         if restore_view and self._plot is not None and previous_view_range is not None:
             self._plot.getViewBox().setRange(
                 xRange=previous_view_range[0],
@@ -773,6 +1036,7 @@ class _DesignPlotPane(QWidget):
             *self._preview_overlay_items,
             *self._probe_route_number_items,
             *self._tool_measure_label_items,
+            *self._alignment_draft_label_items,
         ):
             item.setVisible(bool(visible))
 
@@ -782,8 +1046,20 @@ class _DesignPlotPane(QWidget):
 
     def set_active_design_tool(self, tool: str) -> None:
         normalized = str(tool).strip().lower()
-        if normalized not in {"select", "point", "guide", "ruler", "array", "legacy"}:
+        if normalized not in {
+            "select",
+            "move",
+            "point",
+            "guide",
+            "ruler",
+            "array",
+            "align",
+            "legacy",
+        }:
             raise ValueError(f"Unknown design tool {tool!r}.")
+        if self._active_design_tool == "move" and normalized != "move":
+            self._clear_move_pointer_state()
+            self._cancel_pending_tool_snaps()
         if normalized != "guide":
             self._guide_anchor = None
             self._tool_sketch_points = []
@@ -792,7 +1068,7 @@ class _DesignPlotPane(QWidget):
         if self._plot is not None:
             cursor = (
                 Qt.CrossCursor
-                if normalized in {"point", "guide", "ruler", "array"}
+                if normalized in {"move", "point", "guide", "ruler", "array", "align"}
                 else Qt.ArrowCursor
             )
             self._plot.setCursor(cursor)
@@ -806,6 +1082,14 @@ class _DesignPlotPane(QWidget):
                 for request_id, (_result, shift, control) in self._pending_hover_markup.items()
             }
         self._markup = markup
+        self._markup_document_key = (
+            _design_content_key(self._document)
+            if self._document is not None
+            and markup is not None
+            and _markup_matches_document(markup, self._document)
+            else None
+        )
+        self._update_navigation_limits(recompute_content=True)
         if markup is None or not markup.visible:
             self._tool_sketch_segments = []
             self._markup_snap_candidates = ()
@@ -862,19 +1146,32 @@ class _DesignPlotPane(QWidget):
 
     def cancel_active_interaction(self) -> None:
         self._cancel_pending_tool_snaps()
+        self._clear_move_pointer_state()
         self._guide_anchor = None
         self._tool_sketch_points = []
         self._clear_selection_interaction()
         self._redraw_overlays()
 
     def _cancel_pending_tool_snaps(self) -> None:
-        self._latest_hover_request_id = 0
-        self._pending_hover_markup.clear()
-        self._pending_clicks = {
-            request_id: pending
-            for request_id, pending in self._pending_clicks.items()
-            if pending.action not in {"point", "guide_point", "route_pick"}
+        self._invalidate_file_backed_hover()
+        cancelled_actions = {
+            "point",
+            "guide_point",
+            "route_pick",
+            "alignment_point",
+            "move",
         }
+        self._cancel_file_backed_clicks(
+            lambda pending: pending.action in cancelled_actions
+        )
+
+    def _clear_move_pointer_state(self) -> None:
+        self._move_press_scene_pos = None
+        self._move_dragging = False
+        self._suppress_move_scene_click = False
+
+    def _clear_move_click_suppression(self) -> None:
+        self._suppress_move_scene_click = False
 
     @staticmethod
     def _constraint_flags(
@@ -955,6 +1252,14 @@ class _DesignPlotPane(QWidget):
             self._source_design_marks.append(None)
         self._redraw_overlays()
 
+    def set_alignment_draft_points(self, points: object) -> None:
+        self._alignment_draft_points = [
+            (float(point[0]), float(point[1]))
+            for point in points
+            if isinstance(point, (list, tuple)) and len(point) == 2
+        ] if isinstance(points, (list, tuple)) else []
+        self._redraw_alignment_draft()
+
     def set_current_design_position(
         self,
         point: Point2D | None,
@@ -1001,19 +1306,17 @@ class _DesignPlotPane(QWidget):
         normalized = bool(enabled)
         if normalized != self._snap_enabled:
             self._markup_generation += 1
-            self._pending_clicks.clear()
+            self._reset_file_backed_click_order()
             self._pending_hover_markup.clear()
+            if not normalized and self._snap_worker is not None:
+                self._snap_worker.cancel_pending()
         self._snap_enabled = normalized
         if not self._snap_enabled:
             self._pending_hover_markup.clear()
             self._set_hover_snap(None)
 
     def focus_bounds(self) -> None:
-        if self._plot is None or self._document is None:
-            return
-        left, bottom, right, top = self._document.bounds
-        self._plot.setXRange(left, right, padding=0.02)
-        self._plot.setYRange(bottom, top, padding=0.02)
+        self.focus_gds_bounds()
 
     def _redraw_document(self) -> None:
         if self._plot is None:
@@ -1025,7 +1328,6 @@ class _DesignPlotPane(QWidget):
         if self._document is None:
             return
         if self._document.file_backed:
-            self.focus_bounds()
             self._schedule_route_geometry_redraw()
             return
         point_count = 0
@@ -1039,7 +1341,6 @@ class _DesignPlotPane(QWidget):
             )
             self._layer_items.append(line)
             point_count += len(x_data)
-        self.focus_bounds()
         self._schedule_route_geometry_redraw()
         logger.debug(
             "DESIGN RENDER full items=%d points=%d elapsed_ms=%.2f",
@@ -1118,6 +1419,7 @@ class _DesignPlotPane(QWidget):
         self._redraw_mixed_preview()
         self._redraw_tool_measure()
         self._redraw_axis_triad()
+        self._redraw_alignment_draft()
 
         selected_target = next(
             (target for target in self._targets if target.id == self._selected_target_id),
@@ -1143,6 +1445,30 @@ class _DesignPlotPane(QWidget):
         else:
             self._check_mark_item.setData([], [])
         self._redraw_hover()
+
+    def _redraw_alignment_draft(self) -> None:
+        if self._plot is None or not hasattr(self, "_alignment_draft_item"):
+            return
+        for item in self._alignment_draft_label_items:
+            self._plot.removeItem(item)
+        self._alignment_draft_label_items.clear()
+        if not self._alignment_draft_points:
+            self._alignment_draft_item.setData([], [])
+            return
+        self._alignment_draft_item.setData(
+            [point[0] for point in self._alignment_draft_points],
+            [point[1] for point in self._alignment_draft_points],
+        )
+        for index, point in enumerate(self._alignment_draft_points, start=1):
+            label = pg.TextItem(
+                text=f"D{index}",
+                color="#80deea",
+                anchor=(0.0, 1.0),
+                fill=pg.mkBrush(0, 0, 0, 150),
+            )
+            label.setPos(point[0], point[1])
+            self._plot.addItem(label)
+            self._alignment_draft_label_items.append(label)
 
     def _redraw_current_position_overlay(self) -> None:
         if self._plot is None:
@@ -1548,9 +1874,12 @@ class _DesignPlotPane(QWidget):
             self._plot is None
             or watched is not self._plot.scene()
             or getattr(self, "_document_preview_active", False)
-            or self._active_design_tool != "select"
             or self._document is None
         ):
+            return super().eventFilter(watched, event)
+        if self._active_design_tool == "move":
+            return self._handle_move_scene_event(event)
+        if self._active_design_tool != "select":
             return super().eventFilter(watched, event)
         event_type = event.type()
         if event_type == QEvent.GraphicsSceneMousePress:
@@ -1612,6 +1941,35 @@ class _DesignPlotPane(QWidget):
             return True
         return super().eventFilter(watched, event)
 
+    def _handle_move_scene_event(self, event) -> bool:
+        event_type = event.type()
+        if (
+            event_type == QEvent.GraphicsSceneMousePress
+            and event.button() == Qt.LeftButton
+        ):
+            self._move_press_scene_pos = QPointF(event.scenePos())
+            self._move_dragging = False
+        elif (
+            event_type == QEvent.GraphicsSceneMouseMove
+            and self._move_press_scene_pos is not None
+        ):
+            distance = (
+                event.scenePos() - self._move_press_scene_pos
+            ).manhattanLength()
+            if distance >= QApplication.startDragDistance():
+                self._move_dragging = True
+        elif (
+            event_type == QEvent.GraphicsSceneMouseRelease
+            and event.button() == Qt.LeftButton
+        ):
+            if self._move_press_scene_pos is not None:
+                self._suppress_move_scene_click = self._move_dragging
+            self._move_press_scene_pos = None
+            self._move_dragging = False
+            if self._suppress_move_scene_click:
+                QTimer.singleShot(0, self._clear_move_click_suppression)
+        return False
+
     def _on_mouse_clicked(self, event) -> None:  # pragma: no cover - UI interaction
         if (
             self._plot is None
@@ -1626,7 +1984,14 @@ class _DesignPlotPane(QWidget):
             modifiers
         )
         active_tool = getattr(self, "_active_design_tool", "legacy")
-        route_pick = self._route_pick_mode is not None and is_left_click
+        if active_tool == "align" and not is_left_click:
+            return
+        alignment_click = active_tool == "align" and is_left_click
+        route_pick = (
+            active_tool != "move"
+            and self._route_pick_mode is not None
+            and is_left_click
+        )
         guide_click = (
             not route_pick
             and active_tool == "guide"
@@ -1640,19 +2005,23 @@ class _DesignPlotPane(QWidget):
             and active_tool in {"legacy", "point"}
         )
         select_click = active_tool == "select" and is_left_click
-        if route_pick or route_click or guide_click or select_click:
-            slot = None
-        elif self._navigation_enabled and is_left_click:
-            if not is_double_click:
+        move_click = (
+            active_tool == "move"
+            and self._navigation_enabled
+            and is_left_click
+            and modifiers == Qt.NoModifier
+        )
+        action: str
+        payload: tuple[object, ...]
+        if active_tool == "move":
+            if not move_click or is_double_click or self._suppress_move_scene_click:
                 return
-            slot = None
-        elif is_left_click:
-            slot = 0
-        elif event.button() == Qt.RightButton:
-            slot = 1
-        else:
-            return
-        if route_pick:
+            action = "move"
+            payload = ()
+        elif alignment_click:
+            action = "alignment_point"
+            payload = ()
+        elif route_pick:
             action = "route_pick"
             payload: tuple[object, ...] = (str(self._route_pick_mode),)
         elif guide_click:
@@ -1666,12 +2035,14 @@ class _DesignPlotPane(QWidget):
         elif select_click:
             action = "select"
             payload = ()
-        elif slot is None:
-            action = "move"
-            payload = ()
-        else:
+        elif active_tool == "legacy" and is_left_click:
             action = "calibration"
-            payload = (slot,)
+            payload = (0,)
+        elif active_tool == "legacy" and event.button() == Qt.RightButton:
+            action = "calibration"
+            payload = (1,)
+        else:
+            return
         position = event.scenePos()
         if not self._plot.sceneBoundingRect().contains(position):
             return
@@ -1706,34 +2077,12 @@ class _DesignPlotPane(QWidget):
             snap_result.distance,
             elapsed_ms,
         )
-        if route_pick:
-            self.route_pick_requested.emit(
-                str(self._route_pick_mode),
-                snap_result.point[0],
-                snap_result.point[1],
-                shift_constraint,
-                control_constraint,
-            )
-            return
-        if guide_click or route_click:
-            self._execute_click_action(
-                action,
-                payload,
-                snap_result,
-                shift=shift_constraint,
-                control=control_constraint,
-            )
-            return
-        if slot is None:
-            self.move_requested.emit(
-                snap_result.point[0],
-                snap_result.point[1],
-            )
-            return
-        self.calibration_point_selected.emit(
-            slot,
-            snap_result.point[0],
-            snap_result.point[1],
+        self._execute_click_action(
+            action,
+            payload,
+            snap_result,
+            shift=shift_constraint,
+            control=control_constraint,
         )
 
     def _submit_file_backed_click(
@@ -1766,22 +2115,34 @@ class _DesignPlotPane(QWidget):
             return
         snap_threshold = self._snap_distance_threshold()
         radius = 0.0 if snap_threshold is None else max(0.0, snap_threshold)
-        self._snap_request_id += 1
-        request_id = self._snap_request_id
-        self._pending_clicks[request_id] = PendingClick(
-            request_id=request_id,
-            config_generation=config.generation,
-            action=str(action),
-            raw_point=raw_point,
-            payload=tuple(payload),
+        plan = plan_snap_search(raw_point, radius, config.display_bounds)
+        if not plan.accepted:
+            logger.debug("DESIGN SNAP click skipped reason=%s", plan.skip_reason)
+            self._invalidate_file_backed_hover()
+            fallback = self._file_snap_fallback(raw_point)
+            pending = self._enqueue_file_backed_click(
+                config,
+                action,
+                raw_point,
+                payload,
+                markup_result=None,
+                shift_constraint=shift_constraint,
+                control_constraint=control_constraint,
+            )
+            self._complete_file_backed_click(pending.request_id, fallback)
+            return
+        pending = self._enqueue_file_backed_click(
+            config,
+            action,
+            raw_point,
+            payload,
             markup_result=self._best_markup_snap(raw_point),
-            markup_generation=self._markup_generation,
             shift_constraint=shift_constraint,
             control_constraint=control_constraint,
         )
         worker.submit_click(
             SnapRequest(
-                request_id=request_id,
+                request_id=pending.request_id,
                 config=config,
                 point=raw_point,
                 radius=radius,
@@ -1818,6 +2179,8 @@ class _DesignPlotPane(QWidget):
             self.route_point_requested.emit(x_value, y_value)
         elif action == "point":
             self.point_requested.emit(x_value, y_value)
+        elif action == "alignment_point":
+            self.alignment_point_requested.emit(x_value, y_value)
         elif action == "guide_point":
             self._accept_guide_point((x_value, y_value))
         elif action == "move":
@@ -1936,6 +2299,20 @@ class _DesignPlotPane(QWidget):
         if config is None or worker is None or snap_threshold is None:
             self._set_hover_snap(None)
             return
+        radius = max(0.0, snap_threshold)
+        plan = plan_snap_search(raw_point, radius, config.display_bounds)
+        if not plan.accepted:
+            logger.debug("DESIGN SNAP hover skipped reason=%s", plan.skip_reason)
+            self._latest_hover_request_id = 0
+            self._pending_hover_markup.clear()
+            worker.cancel_hover()
+            shift_constraint, control_constraint = self._constraint_flags(modifiers)
+            self._set_hover_snap(
+                self._file_snap_fallback(raw_point),
+                shift=shift_constraint,
+                control=control_constraint,
+            )
+            return
         self._snap_request_id += 1
         self._latest_hover_request_id = self._snap_request_id
         shift_constraint, control_constraint = self._constraint_flags(modifiers)
@@ -1951,12 +2328,128 @@ class _DesignPlotPane(QWidget):
                 request_id=self._snap_request_id,
                 config=config,
                 point=raw_point,
-                radius=max(0.0, snap_threshold),
+                radius=radius,
                 purpose="hover",
             )
         )
 
+    def _enqueue_file_backed_click(
+        self,
+        config: KLayoutConfig,
+        action: str,
+        raw_point: Point2D,
+        payload: tuple[object, ...],
+        *,
+        markup_result: SnapResult | None,
+        shift_constraint: bool,
+        control_constraint: bool,
+    ) -> PendingClick:
+        self._snap_request_id += 1
+        pending = PendingClick(
+            request_id=self._snap_request_id,
+            config_generation=config.generation,
+            action=str(action),
+            raw_point=raw_point,
+            payload=tuple(payload),
+            markup_result=markup_result,
+            markup_generation=self._markup_generation,
+            shift_constraint=shift_constraint,
+            control_constraint=control_constraint,
+        )
+        self._pending_clicks[pending.request_id] = pending
+        self._click_order.append(pending.request_id)
+        return pending
+
+    def _complete_file_backed_click(
+        self,
+        request_id: int,
+        result: SnapResult | None,
+        *,
+        elapsed_ms: float | None = None,
+    ) -> None:
+        if (
+            request_id not in self._pending_clicks
+            or request_id in self._click_completions
+        ):
+            return
+        self._click_completions[request_id] = (result, elapsed_ms)
+        self._drain_file_backed_clicks()
+
+    def _drain_file_backed_clicks(self) -> None:
+        while (
+            self._click_order
+            and self._click_order[0] in self._click_completions
+        ):
+            request_id = self._click_order.popleft()
+            result, elapsed_ms = self._click_completions.pop(request_id)
+            pending = self._pending_clicks.pop(request_id, None)
+            config = self._klayout_config
+            if (
+                pending is None
+                or result is None
+                or config is None
+                or pending.config_generation != config.generation
+                or pending.markup_generation != self._markup_generation
+            ):
+                continue
+            self._set_hover_snap(
+                result,
+                shift=pending.shift_constraint,
+                control=pending.control_constraint,
+            )
+            if elapsed_ms is not None:
+                logger.debug(
+                    "DESIGN SNAP click raw=(%.3f, %.3f) snapped=(%.3f, %.3f) "
+                    "mode=%s dist=%.4f elapsed_ms=%.2f",
+                    pending.raw_point[0],
+                    pending.raw_point[1],
+                    result.point[0],
+                    result.point[1],
+                    result.mode,
+                    result.distance,
+                    elapsed_ms,
+                )
+            self._execute_click_action(
+                pending.action,
+                pending.payload,
+                result,
+                shift=pending.shift_constraint,
+                control=pending.control_constraint,
+            )
+
+    def _cancel_file_backed_clicks(
+        self,
+        predicate: Callable[[PendingClick], bool],
+    ) -> None:
+        ordered_ids = set(self._click_order)
+        for request_id, pending in tuple(self._pending_clicks.items()):
+            if not predicate(pending):
+                continue
+            if request_id in ordered_ids:
+                self._click_completions[request_id] = (None, None)
+            else:
+                self._pending_clicks.pop(request_id, None)
+        self._drain_file_backed_clicks()
+
+    def _reset_file_backed_click_order(self) -> None:
+        self._pending_clicks.clear()
+        self._click_order.clear()
+        self._click_completions.clear()
+
+    def _invalidate_file_backed_hover(self) -> None:
+        self._latest_hover_request_id = 0
+        self._pending_hover_markup.clear()
+        if self._snap_worker is not None:
+            self._snap_worker.cancel_hover()
+
     def _on_file_backed_snap_ready(self, response: SnapResponse) -> None:
+        if response.unavailable_reason is not None:
+            logger.debug(
+                "DESIGN SNAP unavailable reason=%s request_id=%d purpose=%s",
+                response.unavailable_reason,
+                response.request_id,
+                response.purpose,
+            )
         config = self._klayout_config
         if config is None or response.config_generation != config.generation:
             return
@@ -1988,39 +2481,32 @@ class _DesignPlotPane(QWidget):
             return
         if response.purpose != "click":
             return
-        pending = self._pending_clicks.pop(response.request_id, None)
+        pending = self._pending_clicks.get(response.request_id)
         if (
             pending is None
             or pending.config_generation != config.generation
-            or pending.markup_generation != self._markup_generation
         ):
+            return
+        if pending.markup_generation != self._markup_generation:
+            self._complete_file_backed_click(response.request_id, None)
             return
         result = self._nearest_screen_result(
             pending.raw_point,
             response.result,
             pending.markup_result,
         )
-        self._set_hover_snap(
+        self._complete_file_backed_click(
+            response.request_id,
             result,
-            shift=pending.shift_constraint,
-            control=pending.control_constraint,
+            elapsed_ms=response.elapsed_ms,
         )
-        logger.debug(
-            "DESIGN SNAP click raw=(%.3f, %.3f) snapped=(%.3f, %.3f) mode=%s dist=%.4f elapsed_ms=%.2f",
-            pending.raw_point[0],
-            pending.raw_point[1],
-            result.point[0],
-            result.point[1],
-            result.mode,
-            result.distance,
-            response.elapsed_ms,
-        )
-        self._execute_click_action(
-            pending.action,
-            pending.payload,
-            result,
-            shift=pending.shift_constraint,
-            control=pending.control_constraint,
+
+    def _file_snap_fallback(self, raw_point: Point2D) -> SnapResult:
+        free = SnapResult(point=raw_point, mode="free", distance=0.0)
+        return self._nearest_screen_result(
+            raw_point,
+            free,
+            self._best_markup_snap(raw_point),
         )
 
     def _nearest_screen_result(
@@ -2210,7 +2696,7 @@ class _DesignPlotPane(QWidget):
         if self._shutdown:
             return
         self._shutdown = True
-        self._pending_clicks.clear()
+        self._reset_file_backed_click_order()
         self._pending_hover_markup.clear()
         self._latest_hover_request_id = 0
         if hasattr(self, "_hover_timer"):

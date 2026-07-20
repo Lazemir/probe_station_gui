@@ -56,6 +56,8 @@ def _preparation(rotation_deg: float, ratio: float = 1.0) -> AlignmentPreparatio
         design_distance_mm=1.0,
         stage_distance_mm=ratio,
         distance_ratio=ratio,
+        rms_residual_mm=0.0123,
+        max_residual_mm=0.0456,
     )
 
 
@@ -295,7 +297,7 @@ def test_design_alignment_capture_plans_first_point_rejections_apply_and_rotatio
         spacing_reasonable=True,
     )
 
-    assert first.status.endswith("Capture the other point next.")
+    assert first.status.endswith("Capture 1 remaining point.")
     assert first.expand_alignment is True
     assert prep_error.status == "Exactly two mark pairs are required for calibration."
     assert mismatch.status == (
@@ -304,7 +306,28 @@ def test_design_alignment_capture_plans_first_point_rejections_apply_and_rotatio
     )
     assert apply.apply_prepared_alignment is True
     assert apply.disable_snap is True
-    assert apply.status == "Design calibration complete. Spacing ratio 1.000."
+    assert apply.status == (
+        "Design calibration complete. Spacing ratio 1.000. "
+        "RMS 0.0123 mm, max 0.0456 mm."
+    )
     assert rotate.request_b_rotation is True
     assert rotate.pending_preparation is rotate.preparation
     assert math.isclose(rotate.rotation_deg or 0.0, 12.5)
+
+
+def test_design_alignment_waits_for_every_multipoint_capture() -> None:
+    plan = design_alignment_capture_plan(
+        slot=1,
+        stage_xy=(11.0, 20.0),
+        source="center",
+        pair_count=2,
+        required_pair_count=3,
+        preparation=None,
+        preparation_error=None,
+        spacing_reasonable=True,
+    )
+
+    assert plan.pending_preparation is None
+    assert plan.request_b_rotation is False
+    assert plan.status is not None
+    assert plan.status.endswith("Capture 1 remaining point.")

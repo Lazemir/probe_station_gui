@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
 import pytest
 
-from probe_station_gui.design.klayout_geometry import select_snap
+from probe_station_gui.design.klayout_geometry import plan_snap_search, select_snap
 from probe_station_gui.design.klayout_types import (
     KLayoutConfig,
+    SNAP_UNAVAILABLE_EXCESSIVE_COVERAGE,
+    SNAP_UNAVAILABLE_INVALID,
+    SNAP_UNAVAILABLE_OUTSIDE_BOUNDS,
     forward_rotate_point,
     inverse_rotate_box,
     inverse_rotate_point,
@@ -158,3 +162,26 @@ def test_snap_falls_back_to_raw_float_point_without_candidates() -> None:
     )
 
     assert result == SnapResult(point=(3.0, 4.0), mode="free", distance=0.0)
+
+
+def test_snap_search_rejects_nonfinite_and_outside_queries() -> None:
+    invalid = plan_snap_search((math.inf, 1.0), 2.0, (0.0, 0.0, 100.0, 100.0))
+    outside = plan_snap_search((1_000.0, 1_000.0), 2.0, (0.0, 0.0, 100.0, 100.0))
+    assert invalid.skip_reason == SNAP_UNAVAILABLE_INVALID
+    assert outside.skip_reason == SNAP_UNAVAILABLE_OUTSIDE_BOUNDS
+
+
+def test_snap_search_rejects_excessive_gds_coverage() -> None:
+    plan = plan_snap_search(
+        (50.0, 50.0),
+        10_000_000.0,
+        (0.0, 0.0, 100.0, 100.0),
+    )
+    assert plan.skip_reason == SNAP_UNAVAILABLE_EXCESSIVE_COVERAGE
+    assert plan.coverage_fraction == pytest.approx(1.0)
+
+
+def test_snap_search_keeps_normal_local_query_and_clips_edge() -> None:
+    plan = plan_snap_search((1.0, 50.0), 4.0, (0.0, 0.0, 100.0, 100.0))
+    assert plan.skip_reason is None
+    assert plan.search_box == pytest.approx((0.0, 46.0, 5.0, 54.0))

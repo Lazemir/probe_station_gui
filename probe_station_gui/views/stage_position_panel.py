@@ -3,10 +3,19 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from dataclasses import dataclass
 
 from PySide6.QtCore import QLocale, Qt, Signal
 from PySide6.QtGui import QDoubleValidator, QKeySequence, QShortcut
-from PySide6.QtWidgets import QHBoxLayout, QLabel, QLineEdit, QPushButton, QWidget
+from PySide6.QtWidgets import (
+    QHBoxLayout,
+    QFrame,
+    QLabel,
+    QLineEdit,
+    QPushButton,
+    QVBoxLayout,
+    QWidget,
+)
 
 from probe_station_gui.shared.wheel_guard import GuardedComboBox as QComboBox
 from probe_station_gui.stage.api_moves import normalize_api_coordinate_input_mode
@@ -17,12 +26,20 @@ DISABLED_BACKGROUND = "#e6e6e6"
 DISABLED_FOREGROUND = "#666666"
 EDITED_BACKGROUND = "#d7b8ff"
 EDITED_FOREGROUND = "#1f1233"
+EXACT_STRIPE = "#2e7d32"
+APPROXIMATE_STRIPE = "#d32f2f"
 DIMMED_BACKGROUNDS = {
     "#1565c0": "#6f9dd3",
     "#f0b429": "#f7d98a",
     "#c62828": "#e57373",
     "#d7b8ff": "#ead6ff",
 }
+
+
+@dataclass(frozen=True)
+class _LegendItem:
+    swatch: QFrame
+    label: QLabel
 
 
 def format_stage_axis_value(value: float) -> str:
@@ -53,6 +70,7 @@ class StagePositionPanel(QWidget):
         self._axis_names = tuple(str(axis).strip().upper() for axis in axis_names)
         self._axis_fields: dict[str, QLineEdit] = {}
         self._axis_base_styles: dict[str, tuple[str, str]] = {}
+        self._axis_confidence_roles: dict[str, str] = {}
         self._pending_targets: dict[str, tuple[float, float]] = {}
         self._return_commits: set[str] = set()
         self._axis_escape_shortcuts: dict[str, QShortcut] = {}
@@ -60,9 +78,13 @@ class StagePositionPanel(QWidget):
         self._motion_blink_dimmed = False
         self._programmatic_update_depth = 0
 
-        layout = QHBoxLayout(self)
+        outer_layout = QVBoxLayout(self)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        outer_layout.setSpacing(1)
+        layout = QHBoxLayout()
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(4)
+        outer_layout.addLayout(layout)
 
         label = QLabel("Position:", self)
         label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
@@ -131,6 +153,69 @@ class StagePositionPanel(QWidget):
         self._cancel_button.clicked.connect(self.cancel_requested.emit)
         layout.addWidget(self._cancel_button)
 
+        self._legend_titles = ("Field state:", "Accuracy:")
+        self._legend_groups: dict[str, tuple[_LegendItem, ...]] = {}
+        self._legend_widget = QWidget(self)
+        self._legend_widget.setToolTip(
+            "Green stripe: exact coordinate after the configured backlash approach. "
+            "Red stripe: approximate coordinate until that approach is completed."
+        )
+        legend_layout = QHBoxLayout(self._legend_widget)
+        legend_layout.setContentsMargins(0, 0, 0, 0)
+        legend_layout.setSpacing(10)
+
+        for group_index, (title, entries) in enumerate(
+            (
+                (
+                    "Field state:",
+                    (
+                        ("Homed", "#1565c0", (10, 10)),
+                        ("Unhomed", "#f0b429", (10, 10)),
+                        ("Limit", "#c62828", (10, 10)),
+                        ("Edited", EDITED_BACKGROUND, (10, 10)),
+                    ),
+                ),
+                (
+                    "Accuracy:",
+                    (
+                        ("Exact", EXACT_STRIPE, (14, 4)),
+                        ("Approximate", APPROXIMATE_STRIPE, (14, 4)),
+                    ),
+                ),
+            )
+        ):
+            if group_index:
+                separator = QFrame(self._legend_widget)
+                separator.setFrameShape(QFrame.VLine)
+                separator.setFrameShadow(QFrame.Sunken)
+                legend_layout.addWidget(separator, alignment=Qt.AlignVCenter)
+
+            title_label = QLabel(title, self._legend_widget)
+            title_label.setAlignment(Qt.AlignVCenter)
+            legend_layout.addWidget(title_label, alignment=Qt.AlignVCenter)
+
+            group_items: list[_LegendItem] = []
+            for label_text, color, size in entries:
+                item_layout = QHBoxLayout()
+                item_layout.setContentsMargins(0, 0, 0, 0)
+                item_layout.setSpacing(4)
+                swatch = QFrame(self._legend_widget)
+                swatch.setFixedSize(*size)
+                swatch.setStyleSheet(
+                    f"QFrame {{ background-color: {color}; border: none; }}"
+                )
+                label = QLabel(label_text, self._legend_widget)
+                label.setStyleSheet("QLabel { color: #5f6368; }")
+                label.setAlignment(Qt.AlignVCenter)
+                item_layout.addWidget(swatch, alignment=Qt.AlignVCenter)
+                item_layout.addWidget(label, alignment=Qt.AlignVCenter)
+                legend_layout.addLayout(item_layout)
+                group_items.append(_LegendItem(swatch, label))
+            self._legend_groups[title] = tuple(group_items)
+
+        legend_layout.addStretch()
+        outer_layout.addWidget(self._legend_widget)
+
         self.set_fields_available(False)
 
     @property
@@ -152,6 +237,10 @@ class StagePositionPanel(QWidget):
     @property
     def cancel_button(self) -> QPushButton:
         return self._cancel_button
+
+    @property
+    def legend_widget(self) -> QWidget:
+        return self._legend_widget
 
     @property
     def pending_targets(self) -> dict[str, tuple[float, float]]:
@@ -221,6 +310,7 @@ class StagePositionPanel(QWidget):
             for axis_name, field in self._axis_fields.items():
                 field.blockSignals(True)
                 if not available:
+                    self._axis_confidence_roles.clear()
                     field.clear()
                     field.setPlaceholderText("---")
                     field.setEnabled(False)
@@ -246,6 +336,12 @@ class StagePositionPanel(QWidget):
                     axis_plan.base_background,
                     axis_plan.base_foreground,
                 )
+                if axis_plan.confidence_role is None:
+                    self._axis_confidence_roles.pop(axis_plan.axis, None)
+                else:
+                    self._axis_confidence_roles[axis_plan.axis] = (
+                        axis_plan.confidence_role
+                    )
                 field.blockSignals(True)
                 field.setEnabled(True)
                 if not field.hasFocus():
@@ -256,6 +352,7 @@ class StagePositionPanel(QWidget):
             for axis_name in plan.missing_axes:
                 field = self._axis_fields[axis_name]
                 self._axis_base_styles.pop(axis_name, None)
+                self._axis_confidence_roles.pop(axis_name, None)
                 self._pending_targets.pop(axis_name, None)
                 self._return_commits.discard(axis_name)
                 field.blockSignals(True)
@@ -325,6 +422,23 @@ class StagePositionPanel(QWidget):
                 continue
             self._apply_axis_style(axis_name, field)
 
+    def update_confidence_roles(
+        self,
+        roles: dict[str, str | None],
+    ) -> None:
+        """Restyle only axes whose confidence changed."""
+
+        for raw_axis, role in roles.items():
+            axis = self._normalize_axis(raw_axis)
+            field = self._axis_fields.get(axis)
+            if field is None or axis not in self._axis_base_styles:
+                continue
+            if role in {"exact", "approximate"}:
+                self._axis_confidence_roles[axis] = role
+            else:
+                self._axis_confidence_roles.pop(axis, None)
+            self._apply_axis_style(axis, field)
+
     def set_action_buttons_enabled(
         self,
         apply_enabled: bool,
@@ -365,14 +479,35 @@ class StagePositionPanel(QWidget):
             foreground = EDITED_FOREGROUND
         elif axis in self._motion_axes and self._motion_blink_dimmed:
             background = DIMMED_BACKGROUNDS.get(background, background)
-        self._set_field_style(target, background, foreground)
+        self._set_field_style(
+            target,
+            background,
+            foreground,
+            confidence_role=self._axis_confidence_roles.get(axis),
+        )
 
     @staticmethod
-    def _set_field_style(field: QLineEdit, background: str, foreground: str) -> None:
+    def _set_field_style(
+        field: QLineEdit,
+        background: str,
+        foreground: str,
+        *,
+        confidence_role: str | None = None,
+    ) -> None:
+        stripe_color = {
+            "exact": EXACT_STRIPE,
+            "approximate": APPROXIMATE_STRIPE,
+        }.get(confidence_role)
+        stripe_style = (
+            f"border-bottom: 4px solid {stripe_color}; "
+            if stripe_color is not None
+            else ""
+        )
         field.setStyleSheet(
             "QLineEdit {"
             f"background-color: {background}; color: {foreground}; "
             f"border: 1px solid {background}; border-radius: 4px; "
+            f"{stripe_style}"
             "padding: 2px 5px;"
             "}"
             "QLineEdit:disabled {"

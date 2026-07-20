@@ -8,8 +8,9 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 pytest.importorskip("PySide6")
 
+from PySide6.QtCore import Qt
 from PySide6.QtGui import QDoubleValidator
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QLabel
 
 from probe_station_gui.stage.position_presenter import (
     AxisFieldPresentation,
@@ -250,6 +251,111 @@ def test_pending_target_style_overrides_base_style(
     style = panel.axis_fields["X"].styleSheet()
     assert "background-color: #d7b8ff" in style
     assert "color: #1f1233" in style
+
+    panel.deleteLater()
+
+
+def test_confidence_stripe_coexists_with_edited_target_fill(
+    qt_app: QApplication,
+) -> None:
+    panel = StagePositionPanel(("X", "Y", "Z"))
+    panel.apply_display_plan(
+        _display_plan(
+            AxisFieldPresentation(
+                "X", 1.0, 1.0, 1.0, "#1565c0", "#f5f5f5", "X axis", "exact"
+            ),
+            AxisFieldPresentation(
+                "Y",
+                2.0,
+                2.0,
+                2.0,
+                "#1565c0",
+                "#f5f5f5",
+                "Y axis",
+                "approximate",
+            ),
+            AxisFieldPresentation(
+                "Z", 3.0, 3.0, 3.0, "#c62828", "#ffffff", "Z axis", None
+            ),
+        )
+    )
+    panel.set_pending_target("X", 4.0, 4.25)
+
+    x_style = panel.axis_fields["X"].styleSheet()
+    y_style = panel.axis_fields["Y"].styleSheet()
+    z_style = panel.axis_fields["Z"].styleSheet()
+    assert "background-color: #d7b8ff" in x_style
+    assert "border-bottom: 4px solid #2e7d32" in x_style
+    assert "border-bottom: 4px solid #d32f2f" in y_style
+    assert "border-bottom: 4px solid" not in z_style
+
+    panel.deleteLater()
+
+
+def test_confidence_update_restyles_only_the_changed_axis(
+    qt_app: QApplication,
+) -> None:
+    panel = StagePositionPanel(("X", "Y"))
+    panel.apply_display_plan(
+        _display_plan(
+            AxisFieldPresentation(
+                "X", 1.0, 1.0, 1.0, "#1565c0", "#f5f5f5", "X axis", "approximate"
+            ),
+            AxisFieldPresentation(
+                "Y", 2.0, 2.0, 2.0, "#1565c0", "#f5f5f5", "Y axis", "exact"
+            ),
+        )
+    )
+    original_y_style = panel.axis_fields["Y"].styleSheet()
+
+    panel.update_confidence_roles({"X": "exact"})
+
+    assert "border-bottom: 4px solid #2e7d32" in panel.axis_fields["X"].styleSheet()
+    assert panel.axis_fields["Y"].styleSheet() == original_y_style
+    panel.deleteLater()
+
+
+def test_position_legend_uses_aligned_semantic_groups(
+    qt_app: QApplication,
+) -> None:
+    panel = StagePositionPanel(("X",))
+
+    assert tuple(panel._legend_titles) == ("Field state:", "Accuracy:")
+    assert tuple(item.label.text() for item in panel._legend_groups["Field state:"]) == (
+        "Homed",
+        "Unhomed",
+        "Limit",
+        "Edited",
+    )
+    assert tuple(item.label.text() for item in panel._legend_groups["Accuracy:"]) == (
+        "Exact",
+        "Approximate",
+    )
+    state_sizes = {
+        (item.swatch.width(), item.swatch.height())
+        for item in panel._legend_groups["Field state:"]
+    }
+    accuracy_sizes = {
+        (item.swatch.width(), item.swatch.height())
+        for item in panel._legend_groups["Accuracy:"]
+    }
+    assert state_sizes == {(10, 10)}
+    assert accuracy_sizes == {(14, 4)}
+    legend_layout = panel.legend_widget.layout()
+    assert legend_layout.spacing() == 10
+    item_layouts = tuple(
+        layout
+        for index in range(legend_layout.count())
+        if (layout := legend_layout.itemAt(index).layout()) is not None
+    )
+    assert len(item_layouts) == 6
+    assert {layout.spacing() for layout in item_layouts} == {4}
+    assert "backlash" in panel.legend_widget.toolTip().lower()
+    assert all(
+        label.textFormat() != Qt.RichText
+        and "font-size: 9px" not in label.styleSheet()
+        for label in panel.legend_widget.findChildren(QLabel)
+    )
 
     panel.deleteLater()
 

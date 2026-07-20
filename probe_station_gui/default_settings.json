@@ -169,46 +169,80 @@
       "configured": false
     }
   },
-  "axis_a_calibration": {
-    "configured": false,
-    "model": "cosine_displacement",
-    "steps_per_mm": 2600.0,
-    "commanded_lowering_min_mm": 0.0,
-    "commanded_lowering_max_mm": 5.5,
-    "offset_mm": -0.18025492860701603,
-    "amplitude_mm": -4.256281153779931,
-    "angular_frequency_rad_per_mm": 0.2560331555269034,
-    "phase_rad": 0.9304927419233507,
-    "fit_rmse_mm": 0.03390421874833405,
-    "fit_max_abs_error_mm": 0.044862806662900656,
-    "source": "calibrations/axis_a_spm2600_pulloff0p25_forward_reverse_settle1p0_20260504.png",
-    "created_at": "2026-05-06T00:00:00+03:00"
-  },
-  "axis_z_calibration": {
-    "configured": false,
-    "model": "quintic_polynomial",
-    "steps_per_mm": 6335.0,
-    "gcode_min_mm": 0.02,
-    "gcode_max_mm": 23.4,
-    "coefficients_mm": [
-      -1.1689194871855767e-06,
-      6.252947738309964e-05,
-      -0.0006221022578588869,
-      0.015449946058775076,
-      0.5416754463041403,
-      0.00910614542389841
-    ],
-    "fit_rmse_mm": 0.006126947872349345,
-    "fit_max_abs_error_mm": 0.020464954405667868,
-    "section2_indicator_offset_mm": 8.661368914604154,
-    "section3_indicator_offset_mm": 13.56547962940159,
-    "source": "calibrations/axis_z_spm6335_full_hysteresis_precise_s1_s2_s3_honest_stitches_20260505.png",
-    "created_at": "2026-05-06T00:00:00+03:00"
+  "axis_calibrations": {
+    "X": {
+      "enabled": false,
+      "calibration_file": "",
+      "controller_points": [],
+      "physical_points": []
+    },
+    "Y": {
+      "enabled": false,
+      "calibration_file": "",
+      "controller_points": [],
+      "physical_points": []
+    },
+    "Z": {
+      "enabled": false,
+      "calibration_file": "",
+      "controller_points": [],
+      "physical_points": []
+    },
+    "A": {
+      "enabled": false,
+      "calibration_file": "",
+      "controller_points": [],
+      "physical_points": []
+    },
+    "B": {
+      "enabled": false,
+      "calibration_file": "",
+      "controller_points": [],
+      "physical_points": []
+    },
+    "C": {
+      "enabled": false,
+      "calibration_file": "",
+      "controller_points": [],
+      "physical_points": []
+    }
   },
   "coordinate_system": {
     "position_mode": "work",
     "startup_mode": "controller",
     "preferred_system": "G54"
+  },
+  "precision_approach": {
+    "X": {
+      "enabled": false,
+      "backlash": 0.0,
+      "final_direction": 1
+    },
+    "Y": {
+      "enabled": false,
+      "backlash": 0.0,
+      "final_direction": 1
+    },
+    "Z": {
+      "enabled": true,
+      "backlash": 0.03,
+      "final_direction": 1
+    },
+    "A": {
+      "enabled": false,
+      "backlash": 0.0,
+      "final_direction": -1
+    },
+    "B": {
+      "enabled": false,
+      "backlash": 0.0,
+      "final_direction": 1
+    },
+    "C": {
+      "enabled": false,
+      "backlash": 0.0,
+      "final_direction": 1
+    }
   },
   "objectives": {
     "active_name": "X5",

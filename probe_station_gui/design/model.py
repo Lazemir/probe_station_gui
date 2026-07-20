@@ -114,6 +114,8 @@ class DesignRegistration:
     check_stage_marks: tuple[Point2D, ...] = ()
     matrix: np.ndarray = field(default_factory=lambda: np.eye(2, dtype=float))
     offset: np.ndarray = field(default_factory=lambda: np.zeros(2, dtype=float))
+    source_residuals: tuple[float, ...] = ()
+    source_residual_summary: ResidualSummary = field(default_factory=ResidualSummary)
     residuals: tuple[float, ...] = ()
     residual_summary: ResidualSummary = field(default_factory=ResidualSummary)
     valid: bool = False
@@ -141,56 +143,52 @@ class DesignRegistration:
     ) -> "DesignRegistration":
         """Build a similarity transform from design and stage mark pairs."""
 
-        design_marks = tuple((float(x), float(y)) for x, y in source_design_marks)
-        stage_marks = tuple((float(x), float(y)) for x, y in source_stage_marks)
-        check_design = tuple((float(x), float(y)) for x, y in check_design_marks)
-        check_stage = tuple((float(x), float(y)) for x, y in check_stage_marks)
-        if len(design_marks) < 2 or len(stage_marks) < 2:
-            raise DesignModelError("At least two source mark pairs are required.")
+        design_marks = cls._finite_points(source_design_marks, label="Design source")
+        stage_marks = cls._finite_points(source_stage_marks, label="Stage source")
+        check_design = cls._finite_points(check_design_marks, label="Design check")
+        check_stage = cls._finite_points(check_stage_marks, label="Stage check")
         if len(design_marks) != len(stage_marks):
             raise DesignModelError("Design and stage source mark counts must match.")
+        if len(design_marks) < 2:
+            raise DesignModelError("At least two source mark pairs are required.")
         if len(check_design) != len(check_stage):
             raise DesignModelError("Design and stage check mark counts must match.")
 
-        d1 = np.asarray(design_marks[0], dtype=float)
-        d2 = np.asarray(design_marks[1], dtype=float)
-        s1 = np.asarray(stage_marks[0], dtype=float)
-        s2 = np.asarray(stage_marks[1], dtype=float)
-        design_vector = d2 - d1
-        stage_vector = s2 - s1
-        design_norm = float(np.linalg.norm(design_vector))
-        stage_norm = float(np.linalg.norm(stage_vector))
-        if design_norm <= 1e-9 or stage_norm <= 1e-9:
-            raise DesignModelError("Registration marks are too close together.")
+        source = np.asarray(design_marks, dtype=float)
+        stage = np.asarray(stage_marks, dtype=float)
+        source_center = np.mean(source, axis=0)
+        stage_center = np.mean(stage, axis=0)
+        source_centered = source - source_center
+        stage_centered = stage - stage_center
+        source_energy = float(np.sum(np.square(source_centered)))
+        if source_energy <= 1e-18:
+            raise DesignModelError("Design source geometry is degenerate.")
 
-        scale = stage_norm / design_norm
-        design_angle = math.atan2(float(design_vector[1]), float(design_vector[0]))
-        stage_angle = math.atan2(float(stage_vector[1]), float(stage_vector[0]))
-        theta = stage_angle - design_angle
-        rotation = np.array(
-            [
-                [math.cos(theta), -math.sin(theta)],
-                [math.sin(theta), math.cos(theta)],
-            ],
-            dtype=float,
+        covariance = stage_centered.T @ source_centered
+        u, singular_values, vt = np.linalg.svd(covariance)
+        determinant_sign = 1.0 if float(np.linalg.det(u @ vt)) >= 0.0 else -1.0
+        correction = np.diag([1.0, determinant_sign])
+        rotation = u @ correction @ vt
+        scale = float(
+            np.sum(singular_values * np.asarray([1.0, determinant_sign]))
+            / source_energy
         )
+        if not math.isfinite(scale) or scale <= 1e-15:
+            raise DesignModelError("Stage source geometry is degenerate.")
         matrix = scale * rotation
-        offset = s1 - matrix @ d1
+        offset = stage_center - matrix @ source_center
+
+        predicted_source = (matrix @ source.T).T + offset
+        source_errors = np.linalg.norm(stage - predicted_source, axis=1)
+        source_residuals = tuple(float(value) for value in source_errors)
+        source_summary = cls._residual_summary(source_residuals)
 
         residuals: list[float] = []
         for design_point, stage_point in zip(check_design, check_stage):
             predicted = matrix @ np.asarray(design_point, dtype=float) + offset
             actual = np.asarray(stage_point, dtype=float)
             residuals.append(float(np.linalg.norm(actual - predicted)))
-        if residuals:
-            residual_array = np.asarray(residuals, dtype=float)
-            summary = ResidualSummary(
-                count=len(residuals),
-                rms=float(np.sqrt(np.mean(np.square(residual_array)))),
-                max_error=float(np.max(residual_array)),
-            )
-        else:
-            summary = ResidualSummary()
+        summary = cls._residual_summary(residuals)
 
         return cls(
             source_design_marks=design_marks,
@@ -199,9 +197,59 @@ class DesignRegistration:
             check_stage_marks=check_stage,
             matrix=matrix,
             offset=offset,
+            source_residuals=source_residuals,
+            source_residual_summary=source_summary,
             residuals=tuple(residuals),
             residual_summary=summary,
             valid=True,
+        )
+
+    @property
+    def scale(self) -> float:
+        """Return the fitted uniform design-to-stage scale."""
+
+        return float(math.sqrt(max(0.0, float(np.linalg.det(self.matrix)))))
+
+    @property
+    def rotation_deg(self) -> float:
+        """Return the fitted proper-rotation angle in degrees."""
+
+        return float(
+            math.degrees(
+                math.atan2(float(self.matrix[1, 0]), float(self.matrix[0, 0]))
+            )
+        )
+
+    @staticmethod
+    def _finite_points(
+        points: Iterable[Point2D],
+        *,
+        label: str,
+    ) -> tuple[Point2D, ...]:
+        normalized: list[Point2D] = []
+        for point in points:
+            try:
+                if len(point) != 2:
+                    raise ValueError
+                x_value = float(point[0])
+                y_value = float(point[1])
+            except (TypeError, ValueError, IndexError) as exc:
+                raise DesignModelError(f"{label} marks must be finite 2D points.") from exc
+            if not math.isfinite(x_value) or not math.isfinite(y_value):
+                raise DesignModelError(f"{label} marks must be finite 2D points.")
+            normalized.append((x_value, y_value))
+        return tuple(normalized)
+
+    @staticmethod
+    def _residual_summary(residuals: Iterable[float]) -> ResidualSummary:
+        values = tuple(float(value) for value in residuals)
+        if not values:
+            return ResidualSummary()
+        residual_array = np.asarray(values, dtype=float)
+        return ResidualSummary(
+            count=len(values),
+            rms=float(np.sqrt(np.mean(np.square(residual_array)))),
+            max_error=float(np.max(residual_array)),
         )
 
     def design_to_stage(self, point: Point2D) -> Point2D:

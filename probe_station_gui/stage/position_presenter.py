@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from collections.abc import Mapping
 from typing import Callable, Iterable
 
 
@@ -13,6 +14,7 @@ class AxisFieldPresentation:
     base_background: str
     base_foreground: str
     tooltip: str
+    confidence_role: str | None = None
 
 
 @dataclass(frozen=True)
@@ -78,6 +80,8 @@ def stage_position_display_plan(
     pending_targets: dict[str, tuple[float, float]],
     display_axis_value: Callable[[str, float], float],
     feedrate_mm_min: float,
+    precision_enabled_axes: Iterable[object] | None = None,
+    coordinate_confidence: Mapping[str, object] | None = None,
 ) -> StagePositionDisplayPlan:
     if not isinstance(position, tuple) or len(position) < 2:
         return _invalid_stage_position_display_plan()
@@ -85,6 +89,7 @@ def stage_position_display_plan(
     normalized_axis_names = _normalized_axis_names(axis_names)
     normalized_homed_axes = _normalized_axes(homed_axes)
     normalized_limit_axes = _normalized_axes(limit_axes)
+    normalized_precision_axes = _normalized_axes(precision_enabled_axes)
     display_axis_names = _available_axis_names(
         normalized_axis_names,
         available_axes,
@@ -97,6 +102,8 @@ def stage_position_display_plan(
         pending_targets=pending_targets,
         display_axis_value=display_axis_value,
         feedrate_mm_min=feedrate_mm_min,
+        precision_enabled_axes=normalized_precision_axes,
+        coordinate_confidence=coordinate_confidence,
     )
     updated_axes = {item.axis for item in axis_updates}
 
@@ -371,6 +378,8 @@ def _build_axis_updates(
     pending_targets: dict[str, tuple[float, float]],
     display_axis_value: Callable[[str, float], float],
     feedrate_mm_min: float,
+    precision_enabled_axes: frozenset[str],
+    coordinate_confidence: Mapping[str, object] | None,
 ) -> tuple[tuple[AxisFieldPresentation, ...], tuple[str, ...]]:
     axis_updates: list[AxisFieldPresentation] = []
     invalid_axes: list[str] = []
@@ -383,6 +392,8 @@ def _build_axis_updates(
             pending_targets=pending_targets,
             display_axis_value=display_axis_value,
             feedrate_mm_min=feedrate_mm_min,
+            precision_enabled_axes=precision_enabled_axes,
+            coordinate_confidence=coordinate_confidence,
         )
         if axis_update is None:
             invalid_axes.append(axis_name)
@@ -400,16 +411,27 @@ def _axis_field_presentation(
     pending_targets: dict[str, tuple[float, float]],
     display_axis_value: Callable[[str, float], float],
     feedrate_mm_min: float,
+    precision_enabled_axes: frozenset[str],
+    coordinate_confidence: Mapping[str, object] | None,
 ) -> AxisFieldPresentation | None:
     try:
         raw_value = float(axis_value)
     except (TypeError, ValueError):
         return None
-    display_value = float(display_axis_value(axis_name, raw_value))
+    try:
+        display_value = float(display_axis_value(axis_name, raw_value))
+    except (RuntimeError, TypeError, ValueError):
+        return None
     background, foreground = _axis_base_style(
         axis_name,
         homed_axes=homed_axes,
         limit_axes=limit_axes,
+    )
+    confidence_role = coordinate_confidence_role(
+        axis_name,
+        precision_enabled_axes=precision_enabled_axes,
+        limit_axes=limit_axes,
+        coordinate_confidence=coordinate_confidence,
     )
     return AxisFieldPresentation(
         axis=axis_name,
@@ -422,8 +444,33 @@ def _axis_field_presentation(
         ),
         base_background=background,
         base_foreground=foreground,
-        tooltip=_axis_tooltip(axis_name, feedrate_mm_min),
+        tooltip=_axis_tooltip(
+            axis_name,
+            feedrate_mm_min,
+            confidence_role=confidence_role,
+        ),
+        confidence_role=confidence_role,
     )
+
+
+def coordinate_confidence_role(
+    axis_name: str,
+    *,
+    precision_enabled_axes: Iterable[object] | None,
+    limit_axes: Iterable[object] | None,
+    coordinate_confidence: Mapping[str, object] | None,
+) -> str | None:
+    """Return the independent bottom-stripe role for an available axis."""
+
+    axis = str(axis_name).strip().upper()
+    if axis not in _normalized_axes(precision_enabled_axes):
+        return None
+    if axis in _normalized_axes(limit_axes):
+        return None
+    confidence = None
+    if coordinate_confidence is not None:
+        confidence = coordinate_confidence.get(axis)
+    return "exact" if bool(getattr(confidence, "exact", False)) else "approximate"
 
 
 def _axis_base_style(
@@ -450,11 +497,27 @@ def _visible_axis_value(
     return float(pending_target[1])
 
 
-def _axis_tooltip(axis_name: str, feedrate_mm_min: float) -> str:
-    return (
+def _axis_tooltip(
+    axis_name: str,
+    feedrate_mm_min: float,
+    *,
+    confidence_role: str | None = None,
+) -> str:
+    tooltip = (
         f"{axis_name} coordinate. Enter targets and press Apply. "
         f"Move feedrate: {float(feedrate_mm_min):.1f} mm/min."
     )
+    accuracy_detail = {
+        "exact": (
+            " Accuracy: Exact; coordinate confirmed by the configured "
+            "backlash approach."
+        ),
+        "approximate": (
+            " Accuracy: Approximate; the configured backlash approach has not "
+            "completed."
+        ),
+    }.get(confidence_role, "")
+    return tooltip + accuracy_detail
 
 
 def _missing_axis_names(

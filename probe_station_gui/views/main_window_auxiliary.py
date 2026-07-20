@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Protocol
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QDialog
 
 from probe_station_gui.camera import microscope_scan
@@ -30,7 +31,7 @@ class MainWindowAuxiliaryOwner(Protocol):
     serial_connection: Any
     serial_connection_dialog: Any
     serial_connection_panel: Any
-    serial_connection_tabs: Any
+    serial_terminal_panel: Any
     settings_manager: Any
     lcr_controller: Any
     grabber: Any
@@ -44,6 +45,7 @@ class MainWindowAuxiliaryOwner(Protocol):
     def _request_stop_microscope_scan(self) -> None: ...
     def _clear_microscope_scan_dialog(self) -> None: ...
     def _show_status(self, message: str) -> None: ...
+    def _on_manual_terminal_command(self, *args: Any) -> None: ...
     def _preload_design_layout_window(self) -> None: ...
     def _collapse_alignment_panel_if_ready(self) -> None: ...
     def _stop_telegram_bot_service(self) -> None: ...
@@ -86,6 +88,8 @@ class MainWindowAuxiliaryOwner(Protocol):
     def _on_design_target_selected(self, *args: Any) -> None: ...
     def _on_design_snap_enabled_changed(self, *args: Any) -> None: ...
     def _on_design_layout_point_selected(self, *args: Any) -> None: ...
+    def _on_alignment_draft_accepted(self, *args: Any) -> None: ...
+    def _on_alignment_draft_discarded(self, *args: Any) -> None: ...
     def _move_to_design_window_point(self, *args: Any) -> None: ...
     def _add_design_route_point(self, *args: Any) -> None: ...
 
@@ -242,6 +246,7 @@ def open_settings_dialog(
         initial_tab=tab_name,
         camera_settings_source=owner.grabber,
         exposure_policy_source=getattr(owner, "_exposure_policy_adapter", None),
+        axis_position_source=owner.stage_controller,
         api_key_store=owner._api_key_store,
     )
 
@@ -260,7 +265,6 @@ def open_settings_dialog(
 
 def show_connection_dialog(
     owner: MainWindowAuxiliaryOwner,
-    tab_name: object = None,
 ) -> None:
     """Show the existing serial/LCR connection dialog."""
 
@@ -270,13 +274,37 @@ def show_connection_dialog(
         owner.serial_connection_panel.set_lcr_resource(
             owner.lcr_controller.connection_label()
         )
-    if owner.serial_connection_tabs is not None:
-        owner.serial_connection_tabs.setCurrentIndex(
-            1 if tab_name == "terminal" else 0
-        )
     owner.serial_connection_dialog.show()
     owner.serial_connection_dialog.raise_()
     owner.serial_connection_dialog.activateWindow()
+
+
+def show_serial_terminal_window(
+    owner: MainWindowAuxiliaryOwner,
+    window_class: object | None = None,
+) -> None:
+    """Create the standalone serial terminal only when the user opens it."""
+
+    if owner.serial_terminal_panel is None:
+        if window_class is None:
+            from probe_station_gui.views.serial_terminal_window import (
+                SerialTerminalWindow,
+            )
+
+            window_class = SerialTerminalWindow
+        terminal = window_class(owner)
+        terminal.setWindowFlag(Qt.Window, True)
+        terminal.setWindowTitle("Terminal")
+        terminal.resize(760, 520)
+        terminal.set_stage_controller(owner.stage_controller)
+        terminal.set_serial(owner.serial_connection)
+        terminal.manual_command_sent.connect(owner._on_manual_terminal_command)
+        owner.serial_terminal_panel = terminal
+
+    owner.serial_terminal_panel.show()
+    owner.serial_terminal_panel.raise_()
+    owner.serial_terminal_panel.activateWindow()
+    owner.serial_terminal_panel.setFocus(Qt.ActiveWindowFocusReason)
 
 
 def create_design_layout_window(
@@ -431,6 +459,12 @@ def _connect_design_layout_window_signals(
 ) -> None:
     owner.design_layout_window.calibration_point_selected.connect(
         owner._on_design_layout_point_selected
+    )
+    owner.design_layout_window.alignment_draft_accepted.connect(
+        owner._on_alignment_draft_accepted
+    )
+    owner.design_layout_window.alignment_draft_discarded.connect(
+        owner._on_alignment_draft_discarded
     )
     owner.design_layout_window.move_requested.connect(
         lambda x_value, y_value: owner._move_to_design_window_point(

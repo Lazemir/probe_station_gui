@@ -98,8 +98,7 @@ JogSettings = settings_manager.JogSettings
 ClickToMoveSettings = settings_manager.ClickToMoveSettings
 NeedleCalibrationSettings = settings_manager.NeedleCalibrationSettings
 LCR_METER_TYPE_KEITHLEY = settings_manager.LCR_METER_TYPE_KEITHLEY
-AxisACalibrationSettings = settings_manager.AxisACalibrationSettings
-AxisZCalibrationSettings = settings_manager.AxisZCalibrationSettings
+AxisCalibrationSettings = settings_manager.AxisCalibrationSettings
 OscillationSettings = settings_manager.OscillationSettings
 ObjectiveCalibrationSettings = settings_manager.ObjectiveCalibrationSettings
 ObjectivesSettings = settings_manager.ObjectivesSettings
@@ -469,82 +468,21 @@ class ApiSettingsTest(unittest.TestCase):
         self.assertEqual(parsed.port, 8766)
 
 
-class AxisACalibrationSettingsTest(unittest.TestCase):
-    def test_axis_a_calibration_defaults_to_disabled(self) -> None:
-        self.assertFalse(AxisACalibrationSettings().configured)
+class AxisCalibrationSettingsTest(unittest.TestCase):
+    def test_axis_calibration_defaults_to_disabled(self) -> None:
+        self.assertFalse(AxisCalibrationSettings().enabled)
 
-    def test_axis_a_calibration_round_trip_preserves_sine_model(self) -> None:
-        settings = AxisACalibrationSettings(
-            configured=True,
-            steps_per_mm=2600.0,
-            commanded_lowering_min_mm=0.0,
-            commanded_lowering_max_mm=5.5,
-            offset_mm=-0.18025492860701603,
-            amplitude_mm=-4.256281153779931,
-            angular_frequency_rad_per_mm=0.2560331555269034,
-            phase_rad=0.9304927419233507,
+    def test_axis_calibration_round_trip_preserves_curve_snapshot(self) -> None:
+        settings = AxisCalibrationSettings(
+            enabled=True,
+            calibration_file="axis.npz",
+            controller_points=[0.0, 1.0],
+            physical_points=[2.0, 3.0],
         )
 
-        restored = AxisACalibrationSettings(**settings.to_dict())
+        restored = AxisCalibrationSettings(**settings.to_dict())
 
         self.assertEqual(restored, settings)
-
-    def test_parse_axis_a_calibration_disables_invalid_model(self) -> None:
-        manager = object.__new__(SettingsManager)
-
-        parsed = manager._parse_axis_a_calibration(
-            {
-                "configured": True,
-                "steps_per_mm": 0,
-            }
-        )
-
-        self.assertFalse(parsed.configured)
-
-    def test_parse_axis_a_calibration_migrates_positive_parameters_to_signed_model(self) -> None:
-        manager = object.__new__(SettingsManager)
-
-        parsed = manager._parse_axis_a_calibration(
-            {
-                "configured": True,
-                "offset_mm": 0.18025492860701603,
-                "amplitude_mm": 4.256281153779931,
-            }
-        )
-
-        self.assertLess(parsed.offset_mm, 0.0)
-        self.assertLess(parsed.amplitude_mm, 0.0)
-
-
-class AxisZCalibrationSettingsTest(unittest.TestCase):
-    def test_axis_z_calibration_defaults_to_disabled(self) -> None:
-        self.assertFalse(AxisZCalibrationSettings().configured)
-
-    def test_axis_z_calibration_round_trip_preserves_polynomial_model(self) -> None:
-        settings = AxisZCalibrationSettings(
-            configured=True,
-            steps_per_mm=6335.0,
-            gcode_min_mm=0.02,
-            gcode_max_mm=23.4,
-            coefficients_mm=[1, 2, 3, 4, 5, 6],
-        )
-
-        restored = AxisZCalibrationSettings(**settings.to_dict())
-
-        self.assertEqual(restored, settings)
-
-    def test_parse_axis_z_calibration_disables_invalid_range(self) -> None:
-        manager = object.__new__(SettingsManager)
-
-        parsed = manager._parse_axis_z_calibration(
-            {
-                "configured": True,
-                "gcode_min_mm": 5,
-                "gcode_max_mm": 5,
-            }
-        )
-
-        self.assertFalse(parsed.configured)
 
 
 class SerialConnectionStateTest(unittest.TestCase):

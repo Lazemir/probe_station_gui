@@ -227,7 +227,8 @@ def test_close_event_preserves_shutdown_order(monkeypatch) -> None:
         serial_terminal_panel=SimpleNamespace(
             set_serial=lambda serial_connection: events.append(
                 ("terminal_serial", serial_connection)
-            )
+            ),
+            close=lambda: events.append(("terminal_close",)),
         ),
         serial_connection_panel=SimpleNamespace(
             shutdown=lambda: events.append(("serial_panel_shutdown",))
@@ -294,6 +295,7 @@ def test_close_event_preserves_shutdown_order(monkeypatch) -> None:
         ("lcr_shutdown",),
         ("running", False),
         ("route_close",),
+        ("terminal_close",),
         ("serial_panel_shutdown",),
         ("event_accept",),
     ]
@@ -445,6 +447,9 @@ def test_close_auxiliary_windows_forces_route_presenter_before_dialog_close() ->
             close=lambda: events.append(("surface_close",))
         ),
         microscope_scan_dialog=None,
+        serial_terminal_panel=SimpleNamespace(
+            close=lambda: events.append(("terminal_close",))
+        ),
         serial_connection_dialog=SimpleNamespace(
             close=lambda: events.append(("serial_dialog_close",))
         ),
@@ -457,6 +462,7 @@ def test_close_auxiliary_windows_forces_route_presenter_before_dialog_close() ->
         ("route_close",),
         ("design_close",),
         ("surface_close",),
+        ("terminal_close",),
         ("serial_dialog_close",),
     ]
 

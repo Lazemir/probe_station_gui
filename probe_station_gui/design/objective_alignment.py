@@ -558,18 +558,22 @@ def design_alignment_capture_plan(
     stage_xy: Point2D,
     source: str,
     pair_count: int,
+    required_pair_count: int = 2,
     preparation: AlignmentPreparation | None,
     preparation_error: str | None,
     spacing_reasonable: bool,
 ) -> AlignmentCapturePlan:
     label = _alignment_source_label(source)
-    if pair_count < 2:
+    required = max(2, int(required_pair_count))
+    if pair_count < required:
+        remaining = required - pair_count
+        point_label = "point" if remaining == 1 else "points"
         return AlignmentCapturePlan(
             expand_alignment=True,
             status=(
                 f"Design alignment: point {slot + 1} captured from {label} "
                 f"at X={stage_xy[0]:.3f}, Y={stage_xy[1]:.3f}. "
-                "Capture the other point next."
+                f"Capture {remaining} remaining {point_label}."
             ),
             status_timeout_ms=6000,
         )
@@ -597,7 +601,9 @@ def design_alignment_capture_plan(
             collapse_alignment_if_ready=True,
             status=(
                 "Design calibration complete. "
-                f"Spacing ratio {preparation.distance_ratio:.3f}."
+                f"Spacing ratio {preparation.distance_ratio:.3f}. "
+                f"RMS {preparation.rms_residual_mm:.4f} mm, "
+                f"max {preparation.max_residual_mm:.4f} mm."
             ),
             status_timeout_ms=7000,
         )
@@ -608,7 +614,9 @@ def design_alignment_capture_plan(
         request_b_rotation=True,
         rotation_deg=preparation.rotation_deg,
         status=(
-            "Two mark pairs captured. "
+            f"{required} mark pairs captured. "
+            f"RMS {preparation.rms_residual_mm:.4f} mm, "
+            f"max {preparation.max_residual_mm:.4f} mm. "
             f"Rotating chip by {preparation.rotation_deg:+.3f} deg to match the design."
         ),
         status_timeout_ms=7000,
@@ -621,9 +629,11 @@ def alignment_presentation(
     design_stage_marks: Sequence[Point2D | None],
     manual_points: Sequence[Point2D | None],
     pick_slot: int | None,
+    required_design_mark_count: int = 2,
 ) -> AlignmentPresentation:
-    points = list((design_stage_marks if design_backed else manual_points)[:2])
-    while len(points) < 2:
+    required = max(2, int(required_design_mark_count)) if design_backed else 2
+    points = list((design_stage_marks if design_backed else manual_points)[:required])
+    while len(points) < required:
         points.append(None)
     if pick_slot is None:
         instruction = ""

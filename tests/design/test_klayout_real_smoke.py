@@ -421,6 +421,4 @@ def test_shape_contours_handles_real_klayout_edge() -> None:
     assert len(contours) == 1
     points, closed = contours[0]
     assert closed is False
-    assert [(point.x, point.y) for point in points] == pytest.approx(
-        [(1.0, 2.0), (4.0, 6.0)]
-    )
+    assert list(points) == pytest.approx([(1.0, 2.0), (4.0, 6.0)])

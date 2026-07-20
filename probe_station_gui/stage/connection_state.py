@@ -156,6 +156,7 @@ class StageControllerConnectionMixin:
                 axis: float(rate)
                 for axis, rate in self._axis_max_feedrates.items()
             },
+            "coordinate_confidence": self._export_coordinate_confidence_state(),
         }
 
     def import_cached_controller_state(self, data: dict[str, object]) -> None:
@@ -196,6 +197,7 @@ class StageControllerConnectionMixin:
         )
 
         self._controller_state_stale = True
+        self._import_coordinate_confidence_state(data)
         self._controller_session_marker = marker
         if isinstance(coordinate_system, str):
             normalized_system = coordinate_system.strip().upper()
@@ -286,6 +288,12 @@ class StageControllerConnectionMixin:
         self._axis_limits.clear()
         self._axis_max_feedrates.clear()
         self._controller_state_stale = True
+        self._pending_coordinate_confidence_restore = None
+        self._invalidate_coordinate_confidence(
+            self.AXIS_INDEX,
+            reason="Controller session changed.",
+            emit=False,
+        )
         self._update_homing_status(set())
         self._update_limit_axes(set())
         self._set_needles_state(False, known=False)

@@ -24,6 +24,14 @@ def test_normalize_default_settings_data_builds_current_shape_from_invalid_input
         "configured": False,
     }
     assert data["design_last_directory"] == ""
+    assert data["precision_approach"] == {
+        "X": {"enabled": False, "backlash": 0.0, "final_direction": 1},
+        "Y": {"enabled": False, "backlash": 0.0, "final_direction": 1},
+        "Z": {"enabled": True, "backlash": 0.03, "final_direction": 1},
+        "A": {"enabled": False, "backlash": 0.0, "final_direction": -1},
+        "B": {"enabled": False, "backlash": 0.0, "final_direction": 1},
+        "C": {"enabled": False, "backlash": 0.0, "final_direction": 1},
+    }
 
 
 def test_normalize_default_settings_data_replaces_invalid_camera_exposure() -> None:
@@ -91,4 +99,48 @@ def test_bundled_defaults_include_camera_exposure_policy() -> None:
     assert data["camera"]["exposure"] == {
         "auto_enabled": True,
         "engine": "software",
+    }
+
+
+def test_normalize_default_settings_data_merges_partial_precision_profiles() -> None:
+    data = normalize_default_settings_data(
+        {
+            "precision_approach": {
+                "Z": {"enabled": False},
+                "B": {"enabled": True, "backlash": 1.5, "final_direction": -1},
+            }
+        },
+        log_path="runtime.log",
+    )
+
+    assert data["precision_approach"]["Z"] == {
+        "enabled": False,
+        "backlash": 0.03,
+        "final_direction": 1,
+    }
+    assert data["precision_approach"]["B"] == {
+        "enabled": True,
+        "backlash": 1.5,
+        "final_direction": -1,
+    }
+    assert data["precision_approach"]["A"] == {
+        "enabled": False,
+        "backlash": 0.0,
+        "final_direction": -1,
+    }
+
+
+def test_bundled_defaults_include_precision_approach_profiles() -> None:
+    path = resources.files("probe_station_gui").joinpath("default_settings.json")
+    data = json.loads(path.read_text(encoding="utf-8-sig"))
+
+    assert data["precision_approach"]["Z"] == {
+        "enabled": True,
+        "backlash": 0.03,
+        "final_direction": 1,
+    }
+    assert data["precision_approach"]["A"] == {
+        "enabled": False,
+        "backlash": 0.0,
+        "final_direction": -1,
     }

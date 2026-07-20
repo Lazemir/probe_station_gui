@@ -117,3 +117,19 @@ def test_send_current_line_preserves_busy_message(qt_app: QApplication) -> None:
         "[ Cannot send while automated move is running. ]"
     )
     widget.deleteLater()
+
+
+def test_close_hides_terminal_without_disconnecting(qt_app: QApplication) -> None:
+    widget = SerialTerminalWindow()
+    serial_connection = _FakeSerialConnection()
+    widget.set_serial(serial_connection)
+    widget.show()
+    qt_app.processEvents()
+
+    widget.close()
+    qt_app.processEvents()
+
+    assert widget.isVisible() is False
+    assert widget.serial_connection is serial_connection
+    widget.set_serial(None)
+    widget.deleteLater()

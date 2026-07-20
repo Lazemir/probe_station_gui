@@ -160,6 +160,156 @@ def test_design_tools_are_exclusive_and_markup_eye_is_independent(
 
     assert panel._guide_tool_button.isChecked()
     assert tools[-2:] == ["point", "guide"]
+    panel.set_design_registration_active(True)
+    panel._markup_visibility_button.setChecked(True)
+    panel._move_tool_button.click()
+    assert panel._move_tool_button.isChecked()
+    assert not panel._guide_tool_button.isChecked()
+    assert panel._markup_visibility_button.isChecked()
+    panel._markup_visibility_button.click()
+    assert panel._move_tool_button.isChecked()
+    assert tools[-1] == "move"
+    panel.deleteLater()
+
+
+def test_move_tool_is_adjacent_to_select_and_requires_registration(qt_app) -> None:
+    panel = DesignNavigatorPanel()
+    panel._document = object()
+    panel._update_enabled_state()
+
+    assert panel._move_tool_button.isEnabled() is False
+    toolbar_layout = panel._tool_toolbar_widget.layout()
+    assert toolbar_layout.itemAt(0).widget() is panel._select_tool_button
+    assert toolbar_layout.itemAt(1).widget() is panel._move_tool_button
+
+    panel.set_design_registration_active(True)
+    assert panel._move_tool_button.isEnabled() is True
+
+    panel._move_tool_button.click()
+    assert panel._active_design_tool == "move"
+    panel.set_design_registration_active(False)
+    assert panel._active_design_tool == "select"
+    panel.deleteLater()
+
+
+def test_route_run_disables_move_tool(qt_app) -> None:
+    panel = DesignNavigatorPanel()
+    panel._document = object()
+    panel._update_enabled_state()
+    panel.set_design_registration_active(True)
+    panel._move_tool_button.click()
+    panel.set_route_measurement_running(True)
+    assert panel._move_tool_button.isEnabled() is False
+    assert panel._active_design_tool == "select"
+    panel.deleteLater()
+
+
+def test_design_load_disables_move_tool_and_returns_to_select(qt_app) -> None:
+    panel = DesignNavigatorPanel()
+    panel._document = object()
+    panel._update_enabled_state()
+    panel.set_design_registration_active(True)
+    panel._move_tool_button.click()
+
+    panel.set_design_load_pending(True)
+
+    assert panel._move_tool_button.isEnabled() is False
+    assert panel._active_design_tool == "select"
+    panel.deleteLater()
+
+
+def test_move_tool_is_exclusive_and_escape_returns_select(qt_app) -> None:
+    panel = DesignNavigatorPanel()
+    panel._document = object()
+    panel.set_design_registration_active(True)
+    tools: list[str] = []
+    panel.active_design_tool_changed.connect(tools.append)
+
+    panel._move_tool_button.click()
+    assert panel._move_tool_button.isChecked()
+    assert not panel._select_tool_button.isChecked()
+    assert panel._active_design_tool == "move"
+
+    panel.cancel_active_tool()
+    assert panel._select_tool_button.isChecked()
+    assert not panel._move_tool_button.isChecked()
+    assert panel._active_design_tool == "select"
+    assert tools[-2:] == ["move", "select"]
+    panel.deleteLater()
+
+
+def test_align_tool_builds_numbered_draft_with_undo_clear_and_done(
+    qt_app: QApplication,
+) -> None:
+    panel = DesignNavigatorPanel()
+    panel._document = object()
+    panel._update_enabled_state()
+    accepted: list[object] = []
+    changed: list[object] = []
+    panel.alignment_draft_accepted.connect(accepted.append)
+    panel.alignment_draft_changed.connect(changed.append)
+
+    panel._align_tool_button.click()
+    panel.append_alignment_point(1.0, 2.0)
+    panel.append_alignment_point(5.0, 6.0)
+    panel.append_alignment_point(9.0, 3.0)
+
+    assert panel._active_design_tool == "align"
+    assert panel.alignment_draft_points == (
+        (1.0, 2.0),
+        (5.0, 6.0),
+        (9.0, 3.0),
+    )
+    assert "D1" in panel._alignment_points_label.text()
+    assert "D3" in panel._alignment_points_label.text()
+    assert panel._alignment_done_button.isEnabled()
+
+    panel._alignment_undo_button.click()
+    assert panel.alignment_draft_points == ((1.0, 2.0), (5.0, 6.0))
+    panel._alignment_done_button.click()
+
+    assert accepted == [((1.0, 2.0), (5.0, 6.0))]
+    assert panel._active_design_tool == "select"
+    assert changed
+    panel.deleteLater()
+
+
+def test_align_done_requires_two_distinct_points_and_clear_keeps_tool_active(
+    qt_app: QApplication,
+) -> None:
+    panel = DesignNavigatorPanel()
+    panel._document = object()
+    panel._update_enabled_state()
+    panel._align_tool_button.click()
+    panel.append_alignment_point(1.0, 2.0)
+    panel.append_alignment_point(1.0, 2.0)
+
+    assert not panel._alignment_done_button.isEnabled()
+    panel._alignment_clear_button.click()
+    assert panel.alignment_draft_points == ()
+    assert panel._active_design_tool == "align"
+    panel.deleteLater()
+
+
+@pytest.mark.parametrize("with_point", [False, True])
+def test_escape_discards_align_draft_and_returns_to_select(
+    qt_app: QApplication,
+    with_point: bool,
+) -> None:
+    panel = DesignNavigatorPanel()
+    panel._document = object()
+    panel._update_enabled_state()
+    discarded: list[bool] = []
+    panel.alignment_draft_discarded.connect(lambda: discarded.append(True))
+    panel._align_tool_button.click()
+    if with_point:
+        panel.append_alignment_point(1.0, 2.0)
+
+    panel.cancel_active_tool()
+
+    assert panel.alignment_draft_points == ()
+    assert panel._active_design_tool == "select"
+    assert discarded == [True]
     panel.deleteLater()
 
 

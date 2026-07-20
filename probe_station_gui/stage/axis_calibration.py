@@ -1,70 +1,130 @@
-"""Coordinate conversion helpers for calibrated stage axes."""
+"""Compose measured axis curves with controller coordinate systems."""
 
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
+from probe_station_gui.settings.axis_calibration_config import AxisCalibrationSettings
 from probe_station_gui.stage.axis_mapping import (
-    axis_a_calibrated_coordinate_for_gcode_coordinate,
-    axis_a_commanded_lowering_for_calibrated_coordinate,
-    axis_a_gcode_coordinate_for_calibrated_coordinate,
-    axis_a_gcode_coordinate_for_lowering,
-    axis_a_lowering_for_gcode_coordinate,
-    axis_a_model_calibrated_coordinate_for_commanded,
-    axis_a_model_lowering_for_commanded,
-    axis_a_model_parameters,
-    axis_z_coefficients,
-    axis_z_display_for_gcode_coordinate,
-    axis_z_gcode_coordinate_for_display,
+    AxisCalibrationCurve,
+    controller_to_physical,
+    curve_from_settings,
+    physical_to_controller,
 )
+
+
+class CalibrationCoordinateUnavailable(ValueError):
+    """Required controller coordinate-system state is not available."""
 
 
 @dataclass(frozen=True)
 class StageAxisCalibrationMapper:
-    """Map calibrated user coordinates to controller coordinates."""
+    """Map all calibrated user coordinates without performing hardware I/O."""
 
-    axis_a_calibration: object | None
-    axis_z_calibration: object | None
+    calibrations: Mapping[str, AxisCalibrationSettings | AxisCalibrationCurve]
     position_reporting_mode: str
     active_work_coordinate_system: str | None
     controller_coordinate_offsets: Mapping[str, Sequence[float]]
     axis_index: Mapping[str, int]
+    _curves: Mapping[str, AxisCalibrationCurve] = field(init=False, repr=False)
 
-    def axis_a_model_parameters(self) -> tuple[float, float, float, float] | None:
-        return axis_a_model_parameters(self.axis_a_calibration)
-
-    def axis_a_model_calibrated_coordinate_for_commanded(
-        self,
-        commanded_lowering_mm: float,
-    ) -> float:
-        return axis_a_model_calibrated_coordinate_for_commanded(
-            self.axis_a_calibration,
-            commanded_lowering_mm,
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "_curves",
+            {
+                axis.upper(): curve
+                for axis, settings in self.calibrations.items()
+                if (
+                    curve := (
+                        settings
+                        if isinstance(settings, AxisCalibrationCurve)
+                        else curve_from_settings(settings)
+                    )
+                )
+                is not None
+            },
         )
 
-    def axis_a_model_lowering_for_commanded(
+    def has_calibration(self, axis: str) -> bool:
+        return self._curve(axis) is not None
+
+    def controller_to_physical(self, axis: str, value: float) -> float:
+        curve = self._curve(axis)
+        return float(value) if curve is None else controller_to_physical(curve, value)
+
+    def physical_to_controller(self, axis: str, value: float) -> float:
+        curve = self._curve(axis)
+        return float(value) if curve is None else physical_to_controller(curve, value)
+
+    def controller_domain(self, axis: str) -> tuple[float, float] | None:
+        curve = self._curve(axis)
+        return None if curve is None else (curve.controller[0], curve.controller[-1])
+
+    def physical_domain(self, axis: str) -> tuple[float, float] | None:
+        curve = self._curve(axis)
+        return None if curve is None else (curve.physical[0], curve.physical[-1])
+
+    def machine_controller_to_physical(self, axis: str, value: float) -> float:
+        """Map a cached raw machine coordinate for the settings preview."""
+
+        return self.controller_to_physical(axis, value)
+
+    def configured_controller_to_physical(
         self,
-        commanded_lowering_mm: float,
+        axis: str,
+        value: float,
+        status: object | None = None,
     ) -> float:
-        return axis_a_model_lowering_for_commanded(
-            self.axis_a_calibration,
-            commanded_lowering_mm,
+        curve = self._curve(axis)
+        if curve is None:
+            return float(value)
+        origin = self._configured_origin(axis, status)
+        machine_value = float(value) + origin
+        return controller_to_physical(curve, machine_value) - controller_to_physical(
+            curve,
+            origin,
         )
 
-    def axis_a_calibrated_coordinate_for_gcode_coordinate(
+    def physical_to_configured_controller(
         self,
-        a_coordinate_mm: float,
+        axis: str,
+        value: float,
+        status: object | None = None,
     ) -> float:
-        return axis_a_calibrated_coordinate_for_gcode_coordinate(
-            self.axis_a_calibration,
-            a_coordinate_mm,
-        )
+        curve = self._curve(axis)
+        if curve is None:
+            return float(value)
+        origin = self._configured_origin(axis, status)
+        physical_origin = controller_to_physical(curve, origin)
+        machine_value = physical_to_controller(curve, float(value) + physical_origin)
+        return machine_value - origin
 
-    def axis_a_lowering_for_gcode_coordinate(self, a_coordinate_mm: float) -> float:
-        return axis_a_lowering_for_gcode_coordinate(
-            self.axis_a_calibration,
-            a_coordinate_mm,
+    def controller_domain_for_configured_mode(
+        self,
+        axis: str,
+        status: object | None = None,
+    ) -> tuple[float, float] | None:
+        domain = self.controller_domain(axis)
+        if domain is None:
+            return None
+        origin = self._configured_origin(axis, status)
+        return domain[0] - origin, domain[1] - origin
+
+    def physical_domain_for_configured_mode(
+        self,
+        axis: str,
+        status: object | None = None,
+    ) -> tuple[float, float] | None:
+        curve = self._curve(axis)
+        if curve is None:
+            return None
+        origin = self._configured_origin(axis, status)
+        physical_origin = controller_to_physical(curve, origin)
+        return (
+            curve.physical[0] - physical_origin,
+            curve.physical[-1] - physical_origin,
         )
 
     def axis_work_offset_for_configured_mode(
@@ -74,18 +134,8 @@ class StageAxisCalibrationMapper:
     ) -> float:
         if self.position_reporting_mode == "machine":
             return 0.0
-        idx = self.axis_index.get(axis.upper().strip())
-        if idx is None:
-            return 0.0
-        work_offset = None if status is None else getattr(status, "work_offset", None)
-        coordinate_system = (
-            None if status is None else getattr(status, "coordinate_system", None)
-        ) or self.active_work_coordinate_system
-        if work_offset is None and coordinate_system:
-            work_offset = self.controller_coordinate_offsets.get(coordinate_system)
-        if work_offset is None or idx >= len(work_offset):
-            return 0.0
-        return float(work_offset[idx])
+        offset = self._work_offset(axis, status)
+        return 0.0 if offset is None else offset
 
     def position_for_configured_mode(
         self,
@@ -108,12 +158,10 @@ class StageAxisCalibrationMapper:
         axis: str,
     ) -> float | None:
         position = self.position_for_configured_mode(status)
-        if position is None:
+        index = self.axis_index.get(str(axis).upper())
+        if position is None or index is None or index >= len(position):
             return None
-        idx = self.axis_index.get(axis.upper())
-        if idx is None or idx >= len(position):
-            return None
-        return float(position[idx])
+        return position[index]
 
     def axis_limits_for_configured_mode(
         self,
@@ -121,90 +169,39 @@ class StageAxisCalibrationMapper:
         limits: tuple[float, float] | None,
         status: object | None,
     ) -> tuple[float, float] | None:
-        if not limits:
+        if limits is None:
             return None
         if self.position_reporting_mode == "machine":
-            return limits
-        idx = self.axis_index.get(axis.upper())
-        if idx is None:
-            return limits
-        work_offset = None if status is None else getattr(status, "work_offset", None)
-        if work_offset is None and self.active_work_coordinate_system:
-            work_offset = self.controller_coordinate_offsets.get(
-                self.active_work_coordinate_system
-            )
-        if work_offset is None or idx >= len(work_offset):
+            return float(limits[0]), float(limits[1])
+        offset = self._work_offset(axis, status)
+        if offset is None:
             return None
-        min_value, max_value = limits
-        offset = float(work_offset[idx])
-        return (float(min_value) - offset, float(max_value) - offset)
+        return float(limits[0]) - offset, float(limits[1]) - offset
 
-    def axis_a_lowering_for_configured_coordinate(
-        self,
-        a_coordinate_mm: float,
-        status: object | None = None,
-    ) -> float:
-        machine_coordinate = (
-            float(a_coordinate_mm)
-            + self.axis_work_offset_for_configured_mode("A", status)
-        )
-        return self.axis_a_lowering_for_gcode_coordinate(machine_coordinate)
+    def _configured_origin(self, axis: str, status: object | None) -> float:
+        if self.position_reporting_mode == "machine":
+            return 0.0
+        offset = self._work_offset(axis, status)
+        if offset is None:
+            raise CalibrationCoordinateUnavailable(
+                f"{str(axis).upper()} work offset is unavailable."
+            )
+        return offset
 
-    def axis_a_configured_coordinate_for_lowering(
-        self,
-        lowering_mm: float,
-        status: object | None = None,
-    ) -> float:
-        machine_coordinate = self.axis_a_gcode_coordinate_for_lowering(lowering_mm)
-        return machine_coordinate - self.axis_work_offset_for_configured_mode(
-            "A",
-            status,
-        )
+    def _work_offset(self, axis: str, status: object | None) -> float | None:
+        index = self.axis_index.get(str(axis).upper())
+        if index is None:
+            return None
+        status_offset = None if status is None else getattr(status, "work_offset", None)
+        coordinate_system = (
+            None if status is None else getattr(status, "coordinate_system", None)
+        ) or self.active_work_coordinate_system
+        offset = status_offset
+        if offset is None and coordinate_system:
+            offset = self.controller_coordinate_offsets.get(coordinate_system)
+        if offset is None or index >= len(offset):
+            return None
+        return float(offset[index])
 
-    def axis_a_gcode_coordinate_for_calibrated_coordinate(
-        self,
-        calibrated_coordinate_mm: float,
-    ) -> float:
-        return axis_a_gcode_coordinate_for_calibrated_coordinate(
-            self.axis_a_calibration,
-            calibrated_coordinate_mm,
-        )
-
-    def axis_a_gcode_coordinate_for_lowering(self, lowering_mm: float) -> float:
-        return axis_a_gcode_coordinate_for_lowering(
-            self.axis_a_calibration,
-            lowering_mm,
-        )
-
-    def axis_a_commanded_lowering_for_calibrated_coordinate(
-        self,
-        calibrated_coordinate_mm: float,
-    ) -> float:
-        return axis_a_commanded_lowering_for_calibrated_coordinate(
-            self.axis_a_calibration,
-            calibrated_coordinate_mm,
-        )
-
-    def axis_a_gcode_coordinate_for_lowering_step(
-        self,
-        current_a: float,
-        requested_step_mm: float,
-    ) -> float:
-        current_physical = self.axis_a_lowering_for_configured_coordinate(current_a)
-        target_physical = current_physical - float(requested_step_mm)
-        return self.axis_a_configured_coordinate_for_lowering(target_physical)
-
-    def axis_z_coefficients(self) -> tuple[float, ...] | None:
-        return axis_z_coefficients(self.axis_z_calibration)
-
-    def axis_z_display_for_gcode_coordinate(self, z_coordinate_mm: float) -> float:
-        return axis_z_display_for_gcode_coordinate(
-            self.axis_z_calibration,
-            z_coordinate_mm,
-        )
-
-    def axis_z_gcode_coordinate_for_display(self, display_mm: float) -> float:
-        return axis_z_gcode_coordinate_for_display(
-            self.axis_z_calibration,
-            display_mm,
-        )
+    def _curve(self, axis: str) -> AxisCalibrationCurve | None:
+        return self._curves.get(str(axis).upper())

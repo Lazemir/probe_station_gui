@@ -6,7 +6,10 @@ from typing import Any, Protocol
 
 from PySide6.QtCore import Qt
 
-from probe_station_gui.stage.position_presenter import stage_position_display_plan
+from probe_station_gui.stage.position_presenter import (
+    coordinate_confidence_role,
+    stage_position_display_plan,
+)
 from probe_station_gui.views.stage_position_panel import StagePositionPanel
 
 
@@ -73,7 +76,17 @@ def raw_axis_value_from_display(
     owner: MainWindowStagePositionPanelOwner,
     axis_name: str,
     display_value: float,
-) -> float:
+) -> float | None:
+    checked_converter = getattr(
+        getattr(owner, "stage_controller", None),
+        "calibrated_axis_raw_target_value",
+        None,
+    )
+    if callable(checked_converter):
+        return checked_converter(
+            axis_name.strip().upper(),
+            float(display_value),
+        )
     converter = getattr(
         getattr(owner, "stage_controller", None),
         "calibrated_axis_raw_value",
@@ -95,6 +108,33 @@ def refresh_stage_axis_styles(owner: MainWindowStagePositionPanelOwner) -> None:
         owner._stage_motion_axes,
         owner._stage_motion_blink_dimmed,
     )
+
+
+def update_coordinate_confidence(
+    owner: MainWindowStagePositionPanelOwner,
+    confidence_updates: object,
+) -> None:
+    """Apply confidence signal changes without rebuilding the position fields."""
+
+    panel = getattr(owner, "_stage_position_panel", None)
+    if panel is None or not isinstance(confidence_updates, dict):
+        return
+    enabled_getter = getattr(
+        getattr(owner, "stage_controller", None),
+        "precision_approach_enabled_axes",
+        None,
+    )
+    enabled_axes = enabled_getter() if callable(enabled_getter) else frozenset()
+    roles = {
+        str(axis).strip().upper(): coordinate_confidence_role(
+            str(axis),
+            precision_enabled_axes=enabled_axes,
+            limit_axes=owner._stage_limit_axes,
+            coordinate_confidence={str(axis).strip().upper(): confidence},
+        )
+        for axis, confidence in confidence_updates.items()
+    }
+    panel.update_confidence_roles(roles)
 
 
 def set_stage_motion_axes(
@@ -153,6 +193,9 @@ def update_stage_position_display(
     position: object | None,
 ) -> None:
     panel = getattr(owner, "_stage_position_panel", None)
+    controller = getattr(owner, "stage_controller", None)
+    enabled_getter = getattr(controller, "precision_approach_enabled_axes", None)
+    confidence_getter = getattr(controller, "coordinate_confidence", None)
     plan = stage_position_display_plan(
         position,
         axis_names=owner.STAGE_AXIS_NAMES,
@@ -170,6 +213,12 @@ def update_stage_position_display(
             raw_value,
         ),
         feedrate_mm_min=owner._current_linear_feedrate(),
+        precision_enabled_axes=(
+            enabled_getter() if callable(enabled_getter) else frozenset()
+        ),
+        coordinate_confidence=(
+            confidence_getter() if callable(confidence_getter) else None
+        ),
     )
     if plan.reset_all:
         owner._stage_unhomed_display_origins.clear()
@@ -227,5 +276,6 @@ __all__ = [
     "raw_axis_value_from_display",
     "refresh_stage_axis_styles",
     "set_stage_motion_axes",
+    "update_coordinate_confidence",
     "update_stage_position_display",
 ]

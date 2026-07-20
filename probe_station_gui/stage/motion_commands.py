@@ -235,13 +235,10 @@ class StageControllerMotionCommandsMixin:
                 f"{target_text} F{self._format_gcode_value(feedrate_text)}."
             )
             with self._serial_session() as serial_connection:
-                self._send_absolute_axis_targets_move(
+                self._execute_precision_axis_targets_locked(
                     ordered_targets,
-                    ignore_needle_safety=self._motion_safety_disabled,
                     feedrate=feedrate,
-                    wait_for_completion=True,
                     allow_unhomed=allow_unhomed,
-                    as_jog=True,
                 )
                 self._query_status(serial_connection)
             message = f"Coordinate move complete (G90 {target_text})."
@@ -276,11 +273,18 @@ class StageControllerMotionCommandsMixin:
                 if abs(delta_deg) < 1e-3:
                     self.movement_finished.emit(True, "Chip is already aligned.")
                     return
+                status = self._query_current_status_with_required_coordinates(
+                    axes=("B",),
+                )
+                current_b = self._axis_value_for_configured_mode(status, "B")
+                if current_b is None:
+                    raise StageControllerError("Unable to read B axis position.")
                 self.status_message.emit(f"Chip alignment: rotating B by {delta_deg:+.3f} deg.")
-                self._send_relative_move(
-                    MoveVector(b=delta_deg),
-                    allow_relative=True,
-                    as_jog=True,
+                self._execute_precision_axis_targets_locked(
+                    {"B": float(current_b) + float(delta_deg)},
+                    feedrate=None,
+                    allow_unhomed=True,
+                    before_first_segment=self.b_rotation_started.emit,
                 )
             self.movement_finished.emit(
                 True,
@@ -321,14 +325,11 @@ class StageControllerMotionCommandsMixin:
                     f"{axis}{target_value:+.3f} "
                     f"F{self._format_gcode_value(feedrate_text)}."
                 )
-                self._send_absolute_axis_move(
-                    axis,
-                    target_value,
-                    ignore_needle_safety=self._motion_safety_disabled,
+                self._execute_precision_axis_targets_locked(
+                    {axis: target_value},
                     feedrate=feedrate,
-                    wait_for_completion=False,
                     allow_unhomed=allow_unhomed or mode == "G91",
-                    as_jog=True,
+                    wait_for_completion=False,
                 )
             self.movement_finished.emit(
                 True,
@@ -366,13 +367,10 @@ class StageControllerMotionCommandsMixin:
                     "Coordinate move (G90): "
                     f"{target_text} F{self._format_gcode_value(feedrate_text)}."
                 )
-                self._send_absolute_axis_targets_move(
+                self._execute_precision_axis_targets_locked(
                     ordered_targets,
-                    ignore_needle_safety=self._motion_safety_disabled,
                     feedrate=feedrate,
-                    wait_for_completion=True,
                     allow_unhomed=allow_unhomed,
-                    as_jog=True,
                 )
             self.movement_finished.emit(
                 True,
@@ -581,6 +579,7 @@ class StageControllerMotionCommandsMixin:
         wait_for_completion: bool = True,
         allow_unhomed: bool = False,
         as_jog: bool = False,
+        motion_started_callback: Callable[[], None] | None = None,
     ) -> None:
         ordered_targets = ordered_absolute_axis_targets(
             targets,
@@ -626,6 +625,8 @@ class StageControllerMotionCommandsMixin:
                     effective_feedrate,
                 ),
             )
+            if motion_started_callback is not None:
+                motion_started_callback()
             if wait_for_completion:
                 move_distance = self._absolute_move_distance_for_timeout(
                     ordered_targets,
@@ -644,6 +645,8 @@ class StageControllerMotionCommandsMixin:
         self._write_current_command_and_wait(
             absolute_axis_g1_command(ordered_targets, effective_feedrate),
         )
+        if motion_started_callback is not None:
+            motion_started_callback()
         if wait_for_completion:
             move_distance = self._absolute_move_distance_for_timeout(
                 ordered_targets,
@@ -654,6 +657,40 @@ class StageControllerMotionCommandsMixin:
                     move_distance, effective_feedrate
                 ),
             )
+
+    def _validate_absolute_axis_targets_move(
+        self,
+        targets: dict[str, float],
+        *,
+        allow_unhomed: bool,
+        status: _Status | None = None,
+    ) -> None:
+        """Validate a target map without sending controller commands."""
+
+        ordered_targets = ordered_absolute_axis_targets(
+            targets,
+            axis_order=self.AXIS_INDEX,
+        )
+        if not ordered_targets or self._motion_safety_disabled:
+            return
+        self._ensure_axis_limits(required_axes=tuple(ordered_targets))
+        if status is None:
+            status = self._query_current_status_with_required_coordinates(
+                axes=tuple(ordered_targets),
+            )
+        if status is None:
+            raise StageControllerError("Unable to read position for absolute move.")
+        self._require_homed_axes(
+            status,
+            set(ordered_targets),
+            allow_relative=allow_unhomed,
+        )
+        for axis, value in ordered_targets.items():
+            limits = self._axis_limits_for_configured_mode(axis, status)
+            if limits and self._axis_software_limit_ready(status, axis):
+                error = absolute_axis_target_limit_error(axis, value, limits)
+                if error is not None:
+                    raise StageControllerError(error)
 
     def _send_absolute_axis_move(
         self,

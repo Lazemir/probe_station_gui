@@ -716,6 +716,7 @@ class StageControllerAbsoluteMoveTest(unittest.TestCase):
         controller._position_reporting_mode = "machine"
 
         sent_targets = []
+        precise_targets = []
         statuses = [
             types.SimpleNamespace(
                 state="Idle",
@@ -737,6 +738,11 @@ class StageControllerAbsoluteMoveTest(unittest.TestCase):
         controller._send_absolute_axis_targets_move = (
             lambda targets, **kwargs: sent_targets.append((dict(targets), dict(kwargs)))
         )
+        controller._execute_precision_axis_targets_locked = (
+            lambda targets, **kwargs: precise_targets.append(
+                (dict(targets), dict(kwargs))
+            )
+        )
         controller.movement_started = types.SimpleNamespace(emit=lambda *args, **kwargs: None)
         controller.status_message = types.SimpleNamespace(emit=lambda *args, **kwargs: None)
         movement_results = []
@@ -750,8 +756,19 @@ class StageControllerAbsoluteMoveTest(unittest.TestCase):
             sent_targets,
             [
                 ({"Z": 3.0}, {"as_jog": True}),
-                ({"X": 30.0, "Y": 40.0}, {"as_jog": True}),
-                ({"Z": 6.0}, {"as_jog": True}),
+            ],
+        )
+        self.assertEqual(
+            precise_targets,
+            [
+                (
+                    {"X": 30.0, "Y": 40.0},
+                    {"feedrate": None, "allow_unhomed": False},
+                ),
+                (
+                    {"Z": 6.0},
+                    {"feedrate": None, "allow_unhomed": False},
+                ),
             ],
         )
         self.assertEqual(movement_results[-1][0], True)
@@ -770,6 +787,11 @@ class StageControllerAbsoluteMoveTest(unittest.TestCase):
             None,
         )
         controller._get_frame_snapshot = lambda timeout=3.0: (object(), 1)
+        controller._query_current_status_with_required_coordinates = (
+            lambda **_kwargs: types.SimpleNamespace(
+                display_position=(0.0, 0.0, 0.0),
+            )
+        )
         controller._wait_for_new_frame = (
             lambda frame_counter, timeout=4.0: (object(), frame_counter + 1)
         )
@@ -784,7 +806,7 @@ class StageControllerAbsoluteMoveTest(unittest.TestCase):
         )
         observed = []
 
-        def _send_relative_move(_move, **_kwargs) -> None:
+        def _execute_precision_move(_targets, **_kwargs) -> None:
             def _probe() -> None:
                 acquired = controller._serial_session_lock.acquire(blocking=False)
                 observed.append(acquired)
@@ -795,7 +817,7 @@ class StageControllerAbsoluteMoveTest(unittest.TestCase):
             thread.start()
             thread.join()
 
-        controller._send_relative_move = _send_relative_move
+        controller._execute_precision_axis_targets_locked = _execute_precision_move
 
         controller._run_move(10.0, -5.0)
 
@@ -1035,7 +1057,7 @@ class StageControllerAutofocusTest(unittest.TestCase):
                 edge_peak=False,
             )
         )
-        controller._approach_z_from_below_locked = lambda *_args, **_kwargs: None
+        controller._move_to_autofocus_final_z_locked = lambda *_args, **_kwargs: None
         try:
             controller._run_autofocus()
         finally:
@@ -1181,12 +1203,12 @@ class StageControllerAutofocusTest(unittest.TestCase):
                 edge_peak=False,
             )
 
-        def _approach(target_z, *, min_z, fine_step_mm):
-            calls.append(("approach", target_z, min_z, fine_step_mm))
+        def _final(target_z):
+            calls.append(("final", target_z))
 
         controller._prepare_autofocus_context_locked = _prepare
         controller._run_static_focus_refinement_locked = _static
-        controller._approach_z_from_below_locked = _approach
+        controller._move_to_autofocus_final_z_locked = _final
 
         result = controller.run_external_local_autofocus(range_mm=0.030)
 
@@ -1200,7 +1222,7 @@ class StageControllerAutofocusTest(unittest.TestCase):
             [
                 ("prepare", 0.030, None),
                 ("static", 10.000, 9.970, 10.030, 0.010),
-                ("approach", 10.012, 0.0, 0.010),
+                ("final", 10.012),
             ],
         )
 
@@ -1243,10 +1265,11 @@ class StageControllerAutofocusTest(unittest.TestCase):
                 homed_axes={"Z"},
             )
 
-        def _send_relative_move(move, **_kwargs) -> None:
+        def _restore_final_z(target_z) -> None:
             self.assertFalse(controller._cancel_event.is_set())
-            current_z[0] += move.z
-            moves.append(move.z)
+            delta_z = float(target_z) - current_z[0]
+            current_z[0] = float(target_z)
+            moves.append(delta_z)
 
         controller._prepare_autofocus_context_locked = _prepare
         controller._run_static_focus_refinement_locked = _static
@@ -1255,7 +1278,7 @@ class StageControllerAutofocusTest(unittest.TestCase):
             lambda status: status.display_position
         )
         controller._wait_for_idle = lambda timeout=10.0: None
-        controller._send_relative_move = _send_relative_move
+        controller._move_to_autofocus_final_z_locked = _restore_final_z
 
         with self.assertRaisesRegex(StageControllerError, "Operation cancelled"):
             controller.run_external_local_autofocus(range_mm=0.030)
@@ -1340,8 +1363,18 @@ class StageControllerObjectiveTest(unittest.TestCase):
             current[0] += move.x
             current[1] += move.y
 
+        def _execute_precision_move(targets, **_kwargs) -> None:
+            move = MoveVector(
+                x=float(targets["X"]) - current[0],
+                y=float(targets["Y"]) - current[1],
+            )
+            moves.append(move)
+            current[0] = float(targets["X"])
+            current[1] = float(targets["Y"])
+
         controller._query_status = lambda _serial: _status()
         controller._send_relative_move = _send_relative_move
+        controller._execute_precision_axis_targets_locked = _execute_precision_move
         controller._get_frame_snapshot = (
             lambda timeout=3.0: (np.zeros((8, 8), dtype=np.uint8), 10)
         )
@@ -1395,6 +1428,15 @@ class StageControllerObjectiveTest(unittest.TestCase):
             current[0] += move.x
             current[1] += move.y
 
+        def _execute_precision_move(targets, **_kwargs) -> None:
+            move = MoveVector(
+                x=float(targets["X"]) - current[0],
+                y=float(targets["Y"]) - current[1],
+            )
+            moves.append(move)
+            current[0] = float(targets["X"])
+            current[1] = float(targets["Y"])
+
         def _calibrate_axis_series(_frame, _origin, axis: str):
             axis_calls.append(axis)
             if axis == "Y":
@@ -1413,6 +1455,7 @@ class StageControllerObjectiveTest(unittest.TestCase):
 
         controller._query_status = lambda _serial: _status()
         controller._send_relative_move = _send_relative_move
+        controller._execute_precision_axis_targets_locked = _execute_precision_move
         controller._get_frame_snapshot = (
             lambda timeout=3.0: (np.zeros((8, 8), dtype=np.uint8), 12)
         )

@@ -4,6 +4,10 @@ import threading
 import unittest
 from pathlib import Path
 
+from probe_station_gui.settings.precision_approach import (
+    PrecisionApproachProfile,
+    PrecisionApproachSettings,
+)
 from probe_station_gui.route.measurement import (
     CSV_FIELDS,
     ROUTE_OPERATION_MEASURE,
@@ -15,6 +19,7 @@ from probe_station_gui.route.measurement import (
     latest_route_measurement_statuses,
 )
 from probe_station_gui.route.measurement_csv import RouteMeasurementCsvWriter
+from tests.stage.controller_test_support import StageController, _LineFakeSerial
 
 try:
     from .measurement_test_support import (
@@ -487,6 +492,113 @@ class RouteMeasurementRunnerTest(unittest.TestCase):
         self.assertFalse(thread.is_alive())
         self.assertEqual(len(finished), 1)
         self.assertTrue(finished[0][0], finished[0][1])
+
+    def test_interrupt_after_precision_preparation_skips_final_and_contact_work(
+        self,
+    ) -> None:
+        point = _point(1)
+        stage = StageController()
+        serial_connection = _LineFakeSerial([b"ok\n", b"ok\n"])
+        stage._serial = serial_connection
+        stage._motion_safety_disabled = True
+        stage._move_safety_check = lambda: None
+        stage.queue_jog_stop = lambda: None
+        settings = PrecisionApproachSettings()
+        for axis in settings.profiles:
+            settings.profiles[axis] = PrecisionApproachProfile()
+        settings.profiles["X"] = PrecisionApproachProfile(True, 0.1, 1)
+        stage.apply_precision_approach_configuration(settings)
+
+        current = {"X": point.stage_xy[0], "Y": point.stage_xy[1]}
+
+        def status_for_current(**_kwargs: object):
+            values = tuple(current.get(axis, 0.0) for axis in stage.AXIS_INDEX)
+            return type(
+                "Status",
+                (),
+                {
+                    "state": "Idle",
+                    "position": values,
+                    "display_position": values,
+                    "work_position": values,
+                    "work_offset": tuple(0.0 for _axis in stage.AXIS_INDEX),
+                    "coordinate_system": "G54",
+                    "homed_axes": set(stage.AXIS_INDEX),
+                    "values": dict(current),
+                },
+            )()
+
+        stage._query_synced_status_for_absolute_motion = status_for_current
+        stage._query_current_status_with_required_coordinates = status_for_current
+        stage._require_homed_axes = lambda *_args, **_kwargs: None
+        stage._require_position_for_absolute_motion = (
+            lambda status, **_kwargs: status.display_position
+        )
+        stage._axis_value_for_configured_mode = (
+            lambda status, axis: status.values.get(axis)
+        )
+        needle_calls: list[tuple[str, float | None]] = []
+        stage.run_external_needles_action = (
+            lambda action, feedrate=None: needle_calls.append((action, feedrate))
+            or f"{action} done"
+        )
+
+        lcr = _FakeLCR([5.0])
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runner = RouteMeasurementRunner(
+                points=[point],
+                csv_path=Path(tmpdir) / "route.csv",
+                stage_controller=stage,
+                lcr_controller=lcr,
+                needle_feedrate=75.0,
+                operation_mode=ROUTE_OPERATION_MEASURE,
+                contact_settle_s=0.0,
+            )
+            accepted_segments: list[dict[str, float]] = []
+
+            def accept_segment_then_interrupt(
+                targets: dict[str, float],
+                **_kwargs: object,
+            ) -> None:
+                accepted_segments.append(dict(targets))
+                current.update(targets)
+                if len(accepted_segments) == 1:
+                    runner.request_current_point_correction()
+                    stage.cancel_active_task()
+
+            stage._wait_for_idle_at_targets = accept_segment_then_interrupt
+            finished: list[tuple[bool, str]] = []
+            thread = threading.Thread(
+                target=lambda: finished.append(runner.run()),
+                daemon=True,
+            )
+
+            thread.start()
+            try:
+                self.assertTrue(runner.wait_until_waiting(timeout_s=2.0))
+                jog_writes = [
+                    payload
+                    for payload in serial_connection.writes
+                    if payload.startswith(b"$J=G90 G21 ")
+                ]
+                self.assertEqual(
+                    accepted_segments,
+                    [{"X": point.stage_xy[0] - 0.1, "Y": point.stage_xy[1]}],
+                )
+                self.assertEqual(len(jog_writes), 1)
+                self.assertIn(b"X0.9 Y11", jog_writes[0])
+                self.assertNotIn(b"X1 Y11", b"".join(jog_writes))
+                self.assertNotIn(("lower", 75.0), needle_calls)
+                self.assertEqual(lcr.values, [5.0])
+            finally:
+                if thread.is_alive():
+                    runner.submit_confirmation("skip")
+                    thread.join(timeout=2.0)
+
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(len(finished), 1)
+        self.assertTrue(finished[0][0], finished[0][1])
+        stage.shutdown()
 
     def test_interrupted_cancelled_lower_waits_for_shift_and_confirmation(self) -> None:
         point = RouteMeasurementPoint(

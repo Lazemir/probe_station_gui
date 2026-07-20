@@ -1,5 +1,6 @@
 """Settings dialog widget modules."""
 
+from probe_station_gui.dialogs.settings.axis_settings import AxisSettingsWidget
 from probe_station_gui.dialogs.settings.controls import (
     ControlsSettingsWidget,
     KeyBindingListEditor,
@@ -17,6 +18,7 @@ from probe_station_gui.dialogs.settings.measurement import MeasurementSettingsWi
 from probe_station_gui.dialogs.settings.objectives import ObjectivesSettingsWidget
 
 __all__ = [
+    "AxisSettingsWidget",
     "ControlsSettingsWidget",
     "CoordinateSystemSettingsWidget",
     "FeedrateGroupEditor",
