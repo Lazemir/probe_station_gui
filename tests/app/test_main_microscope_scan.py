@@ -424,7 +424,7 @@ def test_microscope_scan_actual_position_reads_latest_stage_position() -> None:
     assert actual == (1.25, -2.5, 3.0)
 
 
-def test_microscope_scan_tile_move_uses_consistent_positive_approach() -> None:
+def test_microscope_scan_tile_move_uses_coordinate_motion_once() -> None:
     window = Main.__new__(Main)
     moves: list[tuple[float, float]] = []
     window.stage_controller = types.SimpleNamespace(
@@ -432,20 +432,7 @@ def test_microscope_scan_tile_move_uses_consistent_positive_approach() -> None:
     )
     tile = types.SimpleNamespace(stage_xy=(1.25, -2.5))
 
-    Main._move_to_microscope_scan_tile(window, tile, tile_approach_mm=0.01)
-
-    assert moves == [(1.24, -2.51), (1.25, -2.5)]
-
-
-def test_microscope_scan_tile_move_skips_approach_when_disabled() -> None:
-    window = Main.__new__(Main)
-    moves: list[tuple[float, float]] = []
-    window.stage_controller = types.SimpleNamespace(
-        run_external_move_to_xy=lambda x_mm, y_mm: moves.append((x_mm, y_mm))
-    )
-    tile = types.SimpleNamespace(stage_xy=(1.25, -2.5))
-
-    Main._move_to_microscope_scan_tile(window, tile, tile_approach_mm=0.0)
+    Main._move_to_microscope_scan_tile(window, tile)
 
     assert moves == [(1.25, -2.5)]
 
@@ -940,7 +927,6 @@ def test_microscope_scan_captures_every_tile_at_session_fixed_exposure(
         output_dir=str(tmp_path / "scan"),
         overlap_fraction=0.25,
         settle_s=0.0,
-        tile_approach_mm=0.0,
         scan_pattern="grid",
         refine_scale_from_overlaps=False,
         flat_field_options=microscope_scan.FlatFieldScanOptions(enabled=False),
@@ -1056,7 +1042,6 @@ def _returning_scan_runner(
         output_dir=str(tmp_path / "scan"),
         overlap_fraction=0.25,
         settle_s=0.0,
-        tile_approach_mm=0.0,
         scan_pattern="grid",
         refine_scale_from_overlaps=False,
         flat_field_options=microscope_scan.FlatFieldScanOptions(enabled=False),
@@ -1141,7 +1126,6 @@ def _scan_runner_configuration(tmp_path):
         output_dir=str(tmp_path / "scan"),
         overlap_fraction=0.25,
         settle_s=0.0,
-        tile_approach_mm=0.0,
         flat_field_options=microscope_scan.FlatFieldScanOptions(enabled=False),
         camera_lock_settings=microscope_scan.CameraLockSettings(enabled=True),
     )
@@ -1297,3 +1281,19 @@ def test_api_microscope_area_scan_rejects_removed_auto_exposure(monkeypatch) -> 
         "message": "auto_exposure is no longer supported for area scans.",
     }
     assert created_threads == []
+
+
+@pytest.mark.parametrize("field", ("tile_approach_mm", "approach_mm"))
+def test_api_microscope_area_scan_rejects_removed_approach(field: str) -> None:
+    window = Main.__new__(Main)
+    window._microscope_scan_running = lambda: pytest.fail(
+        "obsolete approach must be rejected before scan state is read"
+    )
+
+    response = Main._api_microscope_area_scan(window, {field: 0.01})
+
+    assert response == {
+        "accepted": False,
+        "status_code": 400,
+        "message": f"{field} is no longer supported for area scans.",
+    }

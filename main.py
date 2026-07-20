@@ -678,8 +678,6 @@ class Main(QMainWindow):
     MICROSCOPE_AREA_SCAN_MAX_TILES = 121
     MICROSCOPE_AREA_SCAN_DEFAULT_OVERLAP_FRACTION = 0.25
     MICROSCOPE_AREA_SCAN_DEFAULT_SETTLE_S = 0.2
-    MICROSCOPE_AREA_SCAN_DEFAULT_TILE_APPROACH_MM = 0.010
-    MICROSCOPE_AREA_SCAN_MAX_TILE_APPROACH_MM = 0.200
     MICROSCOPE_AREA_SCAN_STITCH_DEBUG_STRUCTURE_MM = 1.0
     MICROSCOPE_AREA_SCAN_STITCH_DEBUG_PLACEMENT_FRACTION = 1.0
     MICROSCOPE_AREA_SCAN_STITCH_DEBUG_OVERLAP_FRACTION = 0.25
@@ -3319,6 +3317,13 @@ class Main(QMainWindow):
                 "status_code": 400,
                 "message": "auto_exposure is no longer supported for area scans.",
             }
+        for field in ("tile_approach_mm", "approach_mm"):
+            if field in payload:
+                return {
+                    "accepted": False,
+                    "status_code": 400,
+                    "message": f"{field} is no longer supported for area scans.",
+                }
         if self._microscope_scan_running():
             return {
                 "accepted": False,
@@ -3399,18 +3404,6 @@ class Main(QMainWindow):
                 minimum=0.0,
                 maximum=10.0,
             )
-            tile_approach_mm = self._microscope_area_scan_float(
-                payload.get(
-                    "tile_approach_mm",
-                    payload.get(
-                        "approach_mm",
-                        self.MICROSCOPE_AREA_SCAN_DEFAULT_TILE_APPROACH_MM,
-                    ),
-                ),
-                "tile_approach_mm",
-                minimum=0.0,
-                maximum=self.MICROSCOPE_AREA_SCAN_MAX_TILE_APPROACH_MM,
-            )
             flat_field_options = microscope_scan.flat_field_options_from_payload(
                 payload,
                 default_enabled=True,
@@ -3454,7 +3447,6 @@ class Main(QMainWindow):
             output_dir=output_dir,
             overlap_fraction=overlap_fraction,
             settle_s=settle_s,
-            tile_approach_mm=tile_approach_mm,
             scan_pattern=scan_pattern,
             refine_scale_from_overlaps=(scan_pattern != "stitch_debug"),
             structure_size_mm=structure_size_mm,
@@ -10911,12 +10903,7 @@ class Main(QMainWindow):
                     microscope_scan.tile_status(tile, len(plan.tiles))
                 )
                 stage_position_changed = True
-                self._move_to_microscope_scan_tile(
-                    tile,
-                    tile_approach_mm=float(
-                        getattr(configuration, "tile_approach_mm", 0.0)
-                    ),
-                )
+                self._move_to_microscope_scan_tile(tile)
                 if not self._sleep_microscope_scan_settle(configuration.settle_s):
                     message = "Microscope scan stopped by user."
                     break
@@ -11139,17 +11126,9 @@ class Main(QMainWindow):
     def _move_to_microscope_scan_tile(
         self,
         tile: MicroscopeScanTile,
-        *,
-        tile_approach_mm: float,
     ) -> None:
         target_x = float(tile.stage_xy[0])
         target_y = float(tile.stage_xy[1])
-        approach = max(0.0, float(tile_approach_mm))
-        if approach > 1e-9:
-            self.stage_controller.run_external_move_to_xy(
-                target_x - approach,
-                target_y - approach,
-            )
         self.stage_controller.run_external_move_to_xy(target_x, target_y)
 
     def _sleep_microscope_scan_settle(self, settle_s: float) -> bool:

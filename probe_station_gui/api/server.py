@@ -784,6 +784,16 @@ class ProbeStationApiServer:
                         )
                     },
                 )
+            for field in ("tile_approach_mm", "approach_mm"):
+                if field in body:
+                    raise HTTPException(
+                        status_code=400,
+                        detail={
+                            "message": (
+                                f"{field} is no longer supported for area scans."
+                            )
+                        },
+                    )
             result = dispatch_command_result(
                 "microscope_area_scan",
                 body,

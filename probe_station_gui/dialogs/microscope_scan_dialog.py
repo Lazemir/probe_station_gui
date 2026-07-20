@@ -27,7 +27,6 @@ class MicroscopeScanConfiguration:
     output_dir: str
     overlap_fraction: float
     settle_s: float
-    tile_approach_mm: float = 0.010
 
 
 class MicroscopeScanDialog(QDialog):
@@ -78,15 +77,6 @@ class MicroscopeScanDialog(QDialog):
         self._settle_spin.setValue(0.2)
         form.addRow(QLabel("Settle", self), self._settle_spin)
 
-        self._approach_spin = QDoubleSpinBox(self)
-        self._approach_spin.setLocale(QLocale.c())
-        self._approach_spin.setDecimals(4)
-        self._approach_spin.setRange(0.0, 0.2)
-        self._approach_spin.setSingleStep(0.002)
-        self._approach_spin.setSuffix(" mm")
-        self._approach_spin.setValue(0.010)
-        form.addRow(QLabel("Approach", self), self._approach_spin)
-
         layout.addLayout(form)
 
         self._status_label = QLabel("Idle.", self)
@@ -115,7 +105,6 @@ class MicroscopeScanDialog(QDialog):
             output_dir=self._output_dir_edit.text().strip(),
             overlap_fraction=float(self._overlap_spin.value()) / 100.0,
             settle_s=float(self._settle_spin.value()),
-            tile_approach_mm=float(self._approach_spin.value()),
         )
 
     def set_status(self, message: str) -> None:
@@ -128,7 +117,6 @@ class MicroscopeScanDialog(QDialog):
             self._browse_button,
             self._overlap_spin,
             self._settle_spin,
-            self._approach_spin,
         ):
             widget.setEnabled(not self._running)
         self._start_button.setEnabled(not self._running)
