@@ -330,6 +330,17 @@ class StageControllerJogQueueMixin:
                 continue
             if axis == "B":
                 clipped_delta = self._clip_b_relative_delta(delta)
+                calibration_limits = self._axis_calibration_mapper().controller_domain_for_configured_mode(
+                    axis,
+                )
+                if calibration_limits is not None:
+                    current = float(position[idx])
+                    target = current + clipped_delta
+                    clipped_target = min(
+                        max(target, calibration_limits[0]),
+                        calibration_limits[1],
+                    )
+                    clipped_delta = clipped_target - current
                 if emit_status and abs(clipped_delta - delta) >= 1e-6:
                     self.status_message.emit(
                         "Jog limited by software soft limit: "
@@ -337,7 +348,14 @@ class StageControllerJogQueueMixin:
                     )
                 values[axis] = clipped_delta
                 continue
-            limits = self._axis_limits_for_configured_mode(axis, None)
+            limits = self.axis_raw_limits_for_configured_mode(axis, None)
+            if limits is None:
+                values[axis] = 0.0
+                if emit_status:
+                    self.status_message.emit(
+                        f"Jog calibration range unavailable on {axis}."
+                    )
+                continue
             current = float(position[idx])
             min_value, max_value = limits
             target = current + float(delta)

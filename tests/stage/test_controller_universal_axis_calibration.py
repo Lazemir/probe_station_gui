@@ -119,3 +119,20 @@ def test_preview_reports_none_when_cached_coordinate_is_outside_curve() -> None:
         assert controller.axis_calibration_preview_position("X") is None
     finally:
         controller.shutdown()
+
+
+def test_continuous_jog_is_clipped_to_calibration_controller_domain() -> None:
+    controller = StageController()
+    try:
+        controller._position_reporting_mode = "machine"
+        controller.apply_axis_calibrations(_curve("X"))
+        controller._axis_limits = {"X": (-100.0, 100.0)}
+        controller._homed_axes = {"X"}
+        controller._last_stage_position = (2.5, 0.0, 0.0, 0.0, 0.0, 0.0)
+        controller.status_message = SimpleNamespace(emit=lambda _message: None)
+
+        constrained = controller.constrain_jog_distances((("X", 1000.0),))
+
+        assert constrained == (("X", pytest.approx(0.5)),)
+    finally:
+        controller.shutdown()
