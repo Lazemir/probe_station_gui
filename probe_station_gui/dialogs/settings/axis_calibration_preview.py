@@ -6,7 +6,7 @@ from collections.abc import Sequence
 
 import numpy as np
 import pyqtgraph as pg
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QEvent, Qt
 from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
 
 from probe_station_gui.settings.axis_calibration_config import axis_unit
@@ -30,7 +30,8 @@ def _curve_arrays(
         or controller_values.size != physical_values.size
         or not np.isfinite(controller_values).all()
         or not np.isfinite(physical_values).all()
-        or np.any(np.diff(controller_values) < 0)
+        or np.any(np.diff(controller_values) <= 0)
+        or np.any(np.diff(physical_values) <= 0)
     ):
         return None
     return controller_values, physical_values
@@ -96,6 +97,7 @@ class AxisCalibrationPreview(QWidget):
         self.plot_widget.getPlotItem().getViewBox().setBorder(pg.mkPen("#757575"))
         self.plot_widget.showGrid(x=True, y=True, alpha=0.12)
         self.plot_widget.setMenuEnabled(True)
+        self.plot_widget.viewport().installEventFilter(self)
         layout.addWidget(self.plot_widget)
 
         self.curve_item = self.plot_widget.plot(
@@ -276,6 +278,12 @@ class AxisCalibrationPreview(QWidget):
 
     def _place_hover_label(self, x: float, y: float) -> None:
         (x_min, x_max), (y_min, y_max) = self.plot_widget.viewRange()
+        self.hover_label.setAnchor(
+            (
+                0 if x <= (x_min + x_max) / 2 else 1,
+                1 if y <= (y_min + y_max) / 2 else 0,
+            )
+        )
         self.hover_label.setPos(
             min(max(x, x_min), x_max),
             min(max(y, y_min), y_max),
@@ -289,6 +297,14 @@ class AxisCalibrationPreview(QWidget):
             return
         view_position = plot_item.getViewBox().mapSceneToView(scene_position)
         self.set_hover_controller_value(view_position.x())
+
+    def eventFilter(self, watched, event) -> bool:
+        if (
+            watched is self.plot_widget.viewport()
+            and event.type() == QEvent.Type.Leave
+        ):
+            self.set_hover_controller_value(0.0, visible=False)
+        return super().eventFilter(watched, event)
 
     def _show_hover_tooltip(self, _item, points, _event) -> None:
         if not points:

@@ -9,6 +9,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 pytest.importorskip("PySide6")
 pytest.importorskip("pyqtgraph")
 
+from PySide6.QtCore import QEvent
 from PySide6.QtWidgets import QApplication
 
 from probe_station_gui.dialogs.settings import axis_calibration_preview
@@ -132,6 +133,41 @@ def test_interpolated_curve_position_rejects_unusable_data(
     assert interpolated_curve_position(controller, physical, x) is None
 
 
+@pytest.mark.parametrize(
+    ("controller", "physical"),
+    [
+        ((0.0, 0.0, 2.0), (1.0, 3.0, 5.0)),
+        ((0.0, 2.0, 1.0), (1.0, 3.0, 5.0)),
+        ((0.0, 1.0, 2.0), (1.0, 1.0, 5.0)),
+        ((0.0, 1.0, 2.0), (1.0, 3.0, 2.0)),
+    ],
+)
+def test_interpolated_curve_position_rejects_non_increasing_curves(
+    controller, physical
+) -> None:
+    assert interpolated_curve_position(controller, physical, 1.0) is None
+
+
+@pytest.mark.parametrize(
+    ("controller", "physical"),
+    [
+        ((0.0, 0.0, 2.0), (1.0, 3.0, 5.0)),
+        ((0.0, 1.0, 2.0), (1.0, 1.0, 5.0)),
+    ],
+)
+def test_set_curve_discards_non_increasing_arrays(qtbot, controller, physical) -> None:
+    preview = AxisCalibrationPreview("X")
+    qtbot.addWidget(preview)
+
+    preview.set_curve(controller, physical)
+    preview.set_hover_controller_value(1.0)
+
+    curve_x = preview.curve_item.getData()[0]
+    assert curve_x is None or curve_x.size == 0
+    assert len(preview.samples_item.points()) == 0
+    assert preview.hover_position is None
+
+
 def test_preview_uses_light_palette_with_dark_axis_text(qtbot) -> None:
     preview = AxisCalibrationPreview("X")
     qtbot.addWidget(preview)
@@ -193,3 +229,38 @@ def test_hiding_hover_keeps_curve_and_view_but_clear_curve_hides_hover(qtbot) ->
     assert not preview.hover_vertical_line.isVisible()
     assert not preview.hover_horizontal_line.isVisible()
     assert not preview.hover_label.isVisible()
+
+
+def test_leaving_plot_viewport_hides_hover_without_clearing_curve_or_marker(qtbot) -> None:
+    preview = AxisCalibrationPreview("X")
+    qtbot.addWidget(preview)
+    preview.set_curve((0.0, 2.0), (1.0, 5.0))
+    preview.set_current_position(0.5, 2.0, visible=True)
+    preview.set_hover_controller_value(0.5)
+
+    QApplication.sendEvent(preview.plot_widget.viewport(), QEvent(QEvent.Leave))
+
+    assert preview.curve_item.isVisible()
+    assert preview.marker_item.isVisible()
+    assert preview.position_line.isVisible()
+    assert not preview.hover_vertical_line.isVisible()
+    assert not preview.hover_horizontal_line.isVisible()
+    assert not preview.hover_label.isVisible()
+
+
+def test_hover_label_anchor_flips_at_visible_range_boundaries(qtbot) -> None:
+    preview = AxisCalibrationPreview("X")
+    qtbot.addWidget(preview)
+    preview.set_curve((0.0, 2.0), (1.0, 5.0))
+    preview.plot_widget.setXRange(0.0, 2.0, padding=0)
+    preview.plot_widget.setYRange(1.0, 5.0, padding=0)
+    before = preview.plot_widget.viewRange()
+
+    preview.set_hover_controller_value(0.1)
+
+    assert tuple(preview.hover_label.anchor) == pytest.approx((0.0, 1.0))
+
+    preview.set_hover_controller_value(1.9)
+
+    assert tuple(preview.hover_label.anchor) == pytest.approx((1.0, 0.0))
+    assert preview.plot_widget.viewRange() == before
