@@ -19,6 +19,7 @@ from PySide6.QtCore import QObject, Signal
 from probe_station_gui.stage.autofocus_flow import StageControllerAutofocusMixin
 from probe_station_gui.stage.click_move import StageControllerClickMoveMixin
 from probe_station_gui.stage.axis_coordinates import StageControllerAxisCoordinatesMixin
+from probe_station_gui.stage.axis_mapping import CalibrationOutOfDomain
 from probe_station_gui.stage.connection_state import StageControllerConnectionMixin
 from probe_station_gui.stage.autofocus_math import (
     autofocus_sweep_feedrate_mm_min as autofocus_sweep_feedrate_mm_min,
@@ -261,8 +262,7 @@ class StageController(
         self._needle_down_lowering_mm: Optional[float] = None
         self._needle_contact_zone_mm = self.DEFAULT_NEEDLE_CONTACT_ZONE_MM
         self._axis_max_feedrates: dict[str, float] = {}
-        self._axis_a_calibration: dict[str, float | str] | None = None
-        self._axis_z_calibration: dict[str, float | str | tuple[float, ...]] | None = None
+        self._axis_calibrations = {}
         self._active_objective_name = "X5"
         self._objective_calibration_target_pixels = self.CALIBRATION_PIXEL_TARGET
         self._objective_autofocus_range_mm = 1.0
@@ -586,7 +586,7 @@ class StageController(
     def axis_display_limits(self, axis: str) -> tuple[float, float] | None:
         """Return software limits in the same coordinate basis as the GUI."""
 
-        return self._axis_limits_for_configured_mode(axis.upper().strip(), None)
+        return self.calibrated_axis_display_limits(axis.upper().strip(), None)
 
     def set_current_axis_work_coordinate(
         self,
@@ -924,6 +924,34 @@ class StageController(
         if self._last_stage_position is None:
             return None
         return tuple(self._last_stage_position)
+
+    def latest_machine_position(self) -> tuple[float, ...] | None:
+        """Return the latest cached raw machine coordinates without controller I/O."""
+
+        if self._last_machine_position is None:
+            return None
+        return tuple(self._last_machine_position)
+
+    def axis_calibration_preview_position(
+        self,
+        axis: str,
+    ) -> tuple[float, float] | None:
+        """Return cached raw and mapped machine coordinates for a preview marker."""
+
+        normalized = str(axis).strip().upper()
+        index = self.AXIS_INDEX.get(normalized)
+        machine_position = self.latest_machine_position()
+        if index is None or machine_position is None or index >= len(machine_position):
+            return None
+        controller_value = float(machine_position[index])
+        try:
+            physical_value = self._axis_calibration_mapper().machine_controller_to_physical(
+                normalized,
+                controller_value,
+            )
+        except CalibrationOutOfDomain:
+            return None
+        return controller_value, physical_value
 
     def latest_a_position(self) -> float | None:
         """Return the latest cached A position, if known."""

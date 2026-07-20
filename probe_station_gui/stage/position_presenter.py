@@ -418,7 +418,10 @@ def _axis_field_presentation(
         raw_value = float(axis_value)
     except (TypeError, ValueError):
         return None
-    display_value = float(display_axis_value(axis_name, raw_value))
+    try:
+        display_value = float(display_axis_value(axis_name, raw_value))
+    except (RuntimeError, TypeError, ValueError):
+        return None
     background, foreground = _axis_base_style(
         axis_name,
         homed_axes=homed_axes,

@@ -3873,11 +3873,8 @@ class Main(QMainWindow):
         self.stage_controller.set_motion_safety_disabled(jog.motion_safety_disabled)
         needle_settings = self.settings_manager.needle_calibration_configuration()
         oscillation_settings = self.settings_manager.oscillation_configuration()
-        self.stage_controller.apply_axis_a_calibration(
-            self.settings_manager.axis_a_calibration_configuration()
-        )
-        self.stage_controller.apply_axis_z_calibration(
-            self.settings_manager.axis_z_calibration_configuration()
+        self.stage_controller.apply_axis_calibrations(
+            self.settings_manager.axis_calibrations_configuration()
         )
         self.stage_controller.apply_precision_approach_configuration(
             self.settings_manager.precision_approach_configuration()

@@ -321,11 +321,15 @@ class StageControllerPrecisionMotionMixin:
         }
 
     def _precision_axis_fingerprint(self, axis: str) -> str:
-        calibration: object = None
-        if axis == "A":
-            calibration = getattr(self, "_axis_a_calibration", None)
-        elif axis == "Z":
-            calibration = getattr(self, "_axis_z_calibration", None)
+        curve = getattr(self, "_axis_calibrations", {}).get(axis)
+        calibration = (
+            None
+            if curve is None
+            else {
+                "controller": curve.controller,
+                "physical": curve.physical,
+            }
+        )
         payload = {
             "profile": self._precision_approach_settings.profiles[axis].to_dict(),
             "calibration": calibration,

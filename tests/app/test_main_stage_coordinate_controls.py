@@ -19,8 +19,8 @@ from tests.app.main_coordinate_feedrate_support import (
 )
 from probe_station_gui.stage import move_lifecycle as stage_move_lifecycle
 from probe_station_gui.settings.axis_calibration_config import (
-    AxisACalibrationSettings,
-    AxisZCalibrationSettings,
+    AxisCalibrationSettings,
+    default_axis_calibrations,
 )
 from probe_station_gui.stage.controller import StageController
 from probe_station_gui.views import main_window_homing as homing_ui
@@ -31,6 +31,22 @@ from probe_station_gui.views import (
 
 
 class MainStageCoordinateControlsTest(unittest.TestCase):
+    @staticmethod
+    def _apply_curve(
+        controller: StageController,
+        axis: str,
+        controller_points: list[float],
+        physical_points: list[float],
+    ) -> None:
+        settings = default_axis_calibrations()
+        settings[axis] = AxisCalibrationSettings(
+            enabled=True,
+            calibration_file=f"{axis}.npz",
+            controller_points=controller_points,
+            physical_points=physical_points,
+        )
+        controller.apply_axis_calibrations(settings)
+
     def test_manual_terminal_command_invalidates_needles_and_coordinate_confidence(
         self,
     ) -> None:
@@ -75,6 +91,24 @@ class MainStageCoordinateControlsTest(unittest.TestCase):
             window._stage_axis_fields["X"].tool_tip,
             "X coordinate. Enter targets and press Apply. Move feedrate: 123.0 mm/min.",
         )
+
+    def test_unavailable_calibrated_coordinate_does_not_break_status_update(self) -> None:
+        window, stage_controller = _make_stage_position_display_main()
+        stage_controller.calibrated_axis_display_value = (
+            lambda axis, value: (_ for _ in ()).throw(
+                RuntimeError(f"{axis} unavailable at {value}")
+            )
+            if axis == "X"
+            else value
+        )
+
+        stage_position_panel_adapter.update_stage_position_display(
+            window,
+            (1.0, 2.0, 3.0),
+        )
+
+        self.assertNotIn("X", window._stage_axis_display_values)
+        self.assertEqual(window._stage_axis_display_values["Y"], 2.0)
 
     def test_stage_position_display_preserves_focused_pending_coordinate_edit(self) -> None:
         window, _stage_controller = _make_stage_position_display_main()
@@ -223,13 +257,12 @@ class MainStageCoordinateControlsTest(unittest.TestCase):
     def test_display_needle_target_outside_curve_is_rejected_without_save(self) -> None:
         controller = StageController()
         try:
-            controller.apply_axis_a_calibration(
-                AxisACalibrationSettings(
-                    configured=True,
-                    model="linear_interpolation",
-                    interpolation_gcode_mm=[-2.0, -1.0, 0.0],
-                    interpolation_display_mm=[-2.0, -1.0, 0.0],
-                )
+            controller._position_reporting_mode = "machine"
+            self._apply_curve(
+                controller,
+                "A",
+                [-2.0, -1.0, 0.0],
+                [-2.0, -1.0, 0.0],
             )
             settings_manager = _FakeSettingsManager()
             statuses: list[str] = []
@@ -257,13 +290,12 @@ class MainStageCoordinateControlsTest(unittest.TestCase):
     def test_display_needle_target_at_curve_endpoint_is_saved(self) -> None:
         controller = StageController()
         try:
-            controller.apply_axis_a_calibration(
-                AxisACalibrationSettings(
-                    configured=True,
-                    model="linear_interpolation",
-                    interpolation_gcode_mm=[-2.0, -1.0, 0.0],
-                    interpolation_display_mm=[-2.0, -1.0, 0.0],
-                )
+            controller._position_reporting_mode = "machine"
+            self._apply_curve(
+                controller,
+                "A",
+                [-2.0, -1.0, 0.0],
+                [-2.0, -1.0, 0.0],
             )
             settings_manager = _FakeSettingsManager()
             statuses: list[str] = []
@@ -319,13 +351,11 @@ class MainStageCoordinateControlsTest(unittest.TestCase):
         window, stage_controller, _joystick, _timer, _statuses = _make_main(120.0)
         calibrated_controller = StageController()
         try:
-            calibrated_controller.apply_axis_z_calibration(
-                AxisZCalibrationSettings(
-                    configured=True,
-                    model="linear_interpolation",
-                    interpolation_gcode_mm=[0.0, 1.0, 3.0],
-                    interpolation_display_mm=[0.0, 2.0, 5.0],
-                )
+            self._apply_curve(
+                calibrated_controller,
+                "Z",
+                [0.0, 1.0, 3.0],
+                [0.0, 2.0, 5.0],
             )
             stage_controller.calibrated_axis_raw_value = (
                 calibrated_controller.calibrated_axis_raw_value

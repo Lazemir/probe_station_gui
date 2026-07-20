@@ -22,7 +22,7 @@ class CalibrationCoordinateUnavailable(ValueError):
 class StageAxisCalibrationMapper:
     """Map all calibrated user coordinates without performing hardware I/O."""
 
-    calibrations: Mapping[str, AxisCalibrationSettings]
+    calibrations: Mapping[str, AxisCalibrationSettings | AxisCalibrationCurve]
     position_reporting_mode: str
     active_work_coordinate_system: str | None
     controller_coordinate_offsets: Mapping[str, Sequence[float]]
@@ -36,7 +36,14 @@ class StageAxisCalibrationMapper:
             {
                 axis.upper(): curve
                 for axis, settings in self.calibrations.items()
-                if (curve := curve_from_settings(settings)) is not None
+                if (
+                    curve := (
+                        settings
+                        if isinstance(settings, AxisCalibrationCurve)
+                        else curve_from_settings(settings)
+                    )
+                )
+                is not None
             },
         )
 
@@ -198,4 +205,3 @@ class StageAxisCalibrationMapper:
 
     def _curve(self, axis: str) -> AxisCalibrationCurve | None:
         return self._curves.get(str(axis).upper())
-

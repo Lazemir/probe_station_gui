@@ -6,7 +6,7 @@ import pytest
 
 try:
     from .controller_test_support import (
-        AxisZCalibrationSettings,
+        AxisCalibrationSettings,
         StageController,
         StageControllerError,
         _FakeSerial,
@@ -15,7 +15,7 @@ try:
     )
 except ImportError:
     from controller_test_support import (
-        AxisZCalibrationSettings,
+        AxisCalibrationSettings,
         StageController,
         StageControllerError,
         _FakeSerial,
@@ -27,6 +27,7 @@ from probe_station_gui.settings.precision_approach import (
     PrecisionApproachProfile,
     PrecisionApproachSettings,
 )
+from probe_station_gui.settings.axis_calibration_config import default_axis_calibrations
 from probe_station_gui.stage.coordinate_confidence import AxisCoordinateConfidence
 
 
@@ -36,6 +37,22 @@ def _settings(**profiles: PrecisionApproachProfile) -> PrecisionApproachSettings
         settings.profiles[axis] = PrecisionApproachProfile()
     settings.profiles.update(profiles)
     return settings
+
+
+def _apply_curve(
+    controller: StageController,
+    axis: str,
+    controller_points: list[float],
+    physical_points: list[float],
+) -> None:
+    settings = default_axis_calibrations()
+    settings[axis] = AxisCalibrationSettings(
+        enabled=True,
+        calibration_file=f"{axis}.npz",
+        controller_points=controller_points,
+        physical_points=physical_points,
+    )
+    controller.apply_axis_calibrations(settings)
 
 
 def _configure_fake_precision_runtime(
@@ -199,13 +216,7 @@ def test_invalid_preparation_is_rejected_before_any_segment_is_sent() -> None:
 
 def test_calibrated_z_boundary_rejects_clamped_preparation_before_send() -> None:
     controller = StageController()
-    controller._axis_z_calibration = {
-        "model": "quintic_polynomial",
-        "steps_per_mm": 1.0,
-        "min": 0.0,
-        "max": 10.0,
-        "coefficients": (0.0, 0.0, 0.0, 0.0, 2.0, 1.0),
-    }
+    _apply_curve(controller, "Z", [0.0, 10.0], [0.0, 20.0])
     controller.apply_precision_approach_configuration(
         _settings(Z=PrecisionApproachProfile(True, 0.03, 1))
     )
@@ -225,14 +236,7 @@ def test_calibrated_z_boundary_rejects_clamped_preparation_before_send() -> None
 
 def test_interpolated_z_boundary_rejects_clamped_preparation_before_send() -> None:
     controller = StageController()
-    controller.apply_axis_z_calibration(
-        AxisZCalibrationSettings(
-            configured=True,
-            model="linear_interpolation",
-            interpolation_gcode_mm=[0.0, 1.0, 3.0],
-            interpolation_display_mm=[0.0, 2.0, 5.0],
-        )
-    )
+    _apply_curve(controller, "Z", [0.0, 1.0, 3.0], [0.0, 2.0, 5.0])
     controller.apply_precision_approach_configuration(
         _settings(Z=PrecisionApproachProfile(True, 0.03, 1))
     )
@@ -252,14 +256,7 @@ def test_interpolated_z_boundary_rejects_clamped_preparation_before_send() -> No
 
 def test_interpolated_z_rejects_direct_raw_target_outside_curve_before_send() -> None:
     controller = StageController()
-    controller.apply_axis_z_calibration(
-        AxisZCalibrationSettings(
-            configured=True,
-            model="linear_interpolation",
-            interpolation_gcode_mm=[0.0, 1.0, 3.0],
-            interpolation_display_mm=[0.0, 2.0, 5.0],
-        )
-    )
+    _apply_curve(controller, "Z", [0.0, 1.0, 3.0], [0.0, 2.0, 5.0])
     controller.apply_precision_approach_configuration(
         _settings(Z=PrecisionApproachProfile(True, 0.03, 1))
     )
@@ -286,16 +283,7 @@ def test_interpolated_z_rejects_direct_raw_target_outside_curve_before_send() ->
 
 def test_calibrated_a_boundary_rejects_clamped_preparation_before_send() -> None:
     controller = StageController()
-    controller._axis_a_calibration = {
-        "model": "cosine_displacement",
-        "steps_per_mm": 2600.0,
-        "min": 0.0,
-        "max": 5.5,
-        "offset": -0.18025492860701603,
-        "amplitude": -4.256281153779931,
-        "angular_frequency": 0.2560331555269034,
-        "phase": 0.9304927419233507,
-    }
+    _apply_curve(controller, "A", [-5.5, 0.0], [-5.5, 0.0])
     controller.apply_precision_approach_configuration(
         _settings(A=PrecisionApproachProfile(True, 0.03, 1))
     )
