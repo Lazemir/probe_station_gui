@@ -139,8 +139,6 @@ def test_application_settings_clone_and_serialize_axis_calibrations() -> None:
 
     assert settings.axis_calibrations["B"].controller_points == [0.0, 90.0]
     serialized = settings.to_dict()
-    assert "axis_a_calibration" not in serialized
-    assert "axis_z_calibration" not in serialized
     assert serialized["axis_calibrations"]["B"]["physical_points"] == [1.0, 92.0]
 
 

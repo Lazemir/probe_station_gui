@@ -76,4 +76,3 @@ def test_preparer_rejects_unusable_source(tmp_path: Path, payload: dict) -> None
 
     with pytest.raises(ValueError):
         prepare_forward_calibration(source, tmp_path / "forward.npz", axis="Z")
-

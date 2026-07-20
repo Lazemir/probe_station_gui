@@ -86,8 +86,6 @@ def _ensure_axis_calibrations_section(data: dict) -> None:
             continue
         for key, value in axis_defaults.items():
             stored.setdefault(key, list(value) if isinstance(value, list) else value)
-    data.pop("axis_a_calibration", None)
-    data.pop("axis_z_calibration", None)
 
 
 def _ensure_logging_section(data: dict, *, log_path: str) -> None:
