@@ -11,38 +11,72 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 pytest.importorskip("PySide6")
 
-from PySide6.QtWidgets import (
-    QApplication,
-    QDialogButtonBox,
-    QFileDialog,
-    QFormLayout,
-)
+from PySide6.QtCore import QObject, Signal
+from PySide6.QtWidgets import QApplication, QDialogButtonBox, QFileDialog
 
-from probe_station_gui.dialogs.settings.axis_settings import AxisSettingsWidget
 from probe_station_gui.dialogs.settings import axis_settings as axis_settings_module
+from probe_station_gui.dialogs.settings.axis_settings import AxisSettingsWidget
 from probe_station_gui.dialogs.settings_dialog import SettingsDialog
+from probe_station_gui.settings.axis_calibration_config import (
+    CALIBRATION_AXES,
+    AxisCalibrationSettings,
+)
 from probe_station_gui.settings.axis_calibration_npz import ImportedAxisCalibration
 from probe_station_gui.settings.manager import Settings
 from probe_station_gui.settings.precision_approach import PrecisionApproachProfile
 
 
-def _qt_app() -> QApplication:
-    app = QApplication.instance()
-    if app is None:
-        app = QApplication([])
-    return app
+class _PositionSource(QObject):
+    stage_position_changed = Signal(object)
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.machine_position: tuple[float, ...] | None = None
+
+    def latest_machine_position(self) -> tuple[float, ...] | None:
+        return self.machine_position
 
 
-def _widget(settings: Settings) -> AxisSettingsWidget:
-    _qt_app()
-    return AxisSettingsWidget(
-        settings.axis_a_calibration,
-        settings.axis_z_calibration,
-        settings.precision_approach,
+class _QtBot:
+    def __init__(self) -> None:
+        self.widgets = []
+
+    def addWidget(self, widget) -> None:
+        self.widgets.append(widget)
+
+
+@pytest.fixture
+def qtbot():
+    app = QApplication.instance() or QApplication([])
+    bot = _QtBot()
+    yield bot
+    for widget in bot.widgets:
+        widget.deleteLater()
+    app.processEvents()
+
+
+def _curve(axis: str, *, enabled: bool = True) -> AxisCalibrationSettings:
+    return AxisCalibrationSettings(
+        enabled=enabled,
+        calibration_file=f"C:/{axis.lower()}.npz",
+        controller_points=[0.0, 1.0, 2.0],
+        physical_points=[10.0, 11.5, 14.0],
     )
 
 
-def _wait_for_calibration_import(widget: AxisSettingsWidget) -> None:
+def _widget(
+    settings: Settings,
+    *,
+    position_source: object | None = None,
+) -> AxisSettingsWidget:
+    return AxisSettingsWidget(
+        settings.axis_calibrations,
+        settings.precision_approach,
+        position_source=position_source,
+    )
+
+
+def _wait_for_import(widget: AxisSettingsWidget) -> None:
     deadline = time.monotonic() + 5.0
     while widget._calibration_tasks_running and time.monotonic() < deadline:
         QApplication.processEvents()
@@ -50,445 +84,200 @@ def _wait_for_calibration_import(widget: AxisSettingsWidget) -> None:
     assert widget._calibration_tasks_running == 0
 
 
-def _form_labels(widget: AxisSettingsWidget) -> set[str]:
-    labels: set[str] = set()
-    for layout in widget.findChildren(QFormLayout):
-        for row in range(layout.rowCount()):
-            item = layout.itemAt(row, QFormLayout.ItemRole.LabelRole)
-            if item is not None and item.widget() is not None:
-                labels.add(item.widget().text())
-    return labels
+def test_every_axis_has_precision_and_calibration_controls(qtbot) -> None:
+    widget = _widget(Settings())
+    qtbot.addWidget(widget)
+
+    assert tuple(widget._rows) == CALIBRATION_AXES
+    assert tuple(widget._calibration_checkboxes) == CALIBRATION_AXES
+    assert tuple(widget._calibration_file_edits) == CALIBRATION_AXES
 
 
-def test_axis_settings_selector_and_per_axis_content() -> None:
+@pytest.mark.parametrize("axis", CALIBRATION_AXES)
+def test_axis_selection_shows_requested_page(qtbot, axis: str) -> None:
+    widget = _widget(Settings())
+    qtbot.addWidget(widget)
+
+    widget.select_axis(axis)
+
+    assert widget.selected_axis() == axis
+    assert widget._stack.currentWidget() is widget._pages[axis]
+
+
+def test_precision_settings_remain_independent_from_calibration(qtbot) -> None:
     settings = Settings()
     widget = _widget(settings)
-
-    assert [widget._axis_list.item(index).text() for index in range(6)] == [
-        "X",
-        "Y",
-        "Z",
-        "A",
-        "B",
-        "C",
-    ]
-    assert widget.selected_axis() == "Z"
-    assert tuple(widget._pages) == ("X", "Y", "Z", "A", "B", "C")
-    assert widget._rows["A"].backlash_spin.suffix() == " mm"
-    assert widget._rows["B"].backlash_spin.suffix() == " °"
-    assert widget._rows["Z"].enabled_checkbox.isChecked()
-    assert widget._calibration_messages["X"].text() == (
-        "No calibration curve for this axis."
-    )
-    assert tuple(widget._calibration_checkboxes) == ("Z", "A")
-    assert tuple(widget._calibration_file_edits) == ("Z", "A")
-    assert widget._calibration_file_edits["Z"].isReadOnly()
-    assert widget._calibration_browse_buttons["A"].text() == "Browse"
-    assert widget._calibration_reset_buttons["Z"].text() == "Reset"
-    assert {"Path", "Curve source", "Fit error"}.isdisjoint(_form_labels(widget))
-
-    widget.deleteLater()
-
-
-def test_axis_switch_preserves_unapplied_precision_values() -> None:
-    settings = Settings()
-    widget = _widget(settings)
-    b_row = widget._rows["B"]
-
-    b_row.enabled_checkbox.setChecked(True)
-    b_row.backlash_spin.setValue(1.25)
-    b_row.direction_combo.setCurrentIndex(b_row.direction_combo.findData(-1))
-    widget.select_axis("X")
-    widget.select_axis("B")
+    qtbot.addWidget(widget)
+    row = widget._rows["X"]
+    row.enabled_checkbox.setChecked(True)
+    row.backlash_spin.setValue(0.125)
+    row.direction_combo.setCurrentIndex(row.direction_combo.findData(-1))
 
     widget.to_settings(settings)
-    assert settings.precision_approach.profiles["B"] == PrecisionApproachProfile(
-        True,
-        1.25,
-        -1,
-    )
 
-    widget.deleteLater()
-
-
-def test_axis_calibration_controls_show_persisted_interpolation_snapshot() -> None:
-    settings = Settings()
-    calibration = settings.axis_z_calibration
-    calibration.configured = True
-    calibration.model = "linear_interpolation"
-    calibration.calibration_file = r"C:\calibration\z-axis.npz"
-    calibration.interpolation_gcode_mm = [0.0, 1.0, 2.0]
-    calibration.interpolation_display_mm = [0.1, 1.1, 2.1]
-    calibration.interpolation_direction = 1
-    calibration.source = r"C:\legacy\z-axis.png"
-    widget = _widget(settings)
-
-    assert widget._calibration_file_edits["Z"].text() == calibration.calibration_file
-    assert widget._calibration_status_labels["Z"].text() == (
-        "3 points \N{MIDDLE DOT} 0.000\N{EN DASH}2.000 mm"
-    )
-
-    widget.to_settings(settings)
-    assert settings.axis_z_calibration.configured is True
-    assert settings.axis_z_calibration.source == ""
-
-    widget.deleteLater()
-
-
-def test_successful_npz_browse_replaces_calibration_snapshot(
-    tmp_path,
-    monkeypatch,
-) -> None:
-    settings = Settings()
-    path = tmp_path / "z-axis.npz"
-    np.savez(path, gcode=[2.0, 0.0, 1.0], indicator=[2.1, 0.1, 1.1])
-    widget = _widget(settings)
-    selected: dict[str, str] = {}
-
-    def choose_file(*args, **kwargs):
-        selected["filter"] = args[3]
-        return str(path), args[3]
-
-    monkeypatch.setattr(QFileDialog, "getOpenFileName", choose_file)
-
-    widget._calibration_browse_buttons["Z"].click()
-    _wait_for_calibration_import(widget)
-    widget.to_settings(settings)
-
-    assert selected["filter"] == "NumPy calibration (*.npz)"
-    assert settings.axis_z_calibration.model == "linear_interpolation"
-    assert settings.axis_z_calibration.calibration_file == str(path.resolve())
-    assert settings.axis_z_calibration.interpolation_gcode_mm == [0.0, 1.0, 2.0]
-    assert settings.axis_z_calibration.interpolation_display_mm == [0.1, 1.1, 2.1]
-    assert settings.axis_z_calibration.interpolation_direction is None
-    assert settings.axis_z_calibration.configured is True
-    assert settings.axis_z_calibration.source == ""
-    assert widget._calibration_status_labels["Z"].text() == (
-        "3 points \N{MIDDLE DOT} 0.000\N{EN DASH}2.000 mm"
-    )
-
-    widget.deleteLater()
-
-
-def test_invalid_npz_import_keeps_previous_calibration(tmp_path) -> None:
-    settings = Settings()
-    valid_path = tmp_path / "valid.npz"
-    invalid_path = tmp_path / "invalid.npz"
-    np.savez(valid_path, gcode=[0.0, 1.0], indicator=[0.0, 1.0])
-    np.savez(invalid_path, gcode=[0.0], indicator=[0.0])
-    widget = _widget(settings)
-
-    widget._start_calibration_import("Z", str(valid_path))
-    _wait_for_calibration_import(widget)
-    widget.to_settings(settings)
-    accepted = settings.axis_z_calibration.clone()
-
-    widget._start_calibration_import("Z", str(invalid_path))
-    _wait_for_calibration_import(widget)
-    widget.to_settings(settings)
-
-    assert settings.axis_z_calibration == accepted
-    assert widget._calibration_file_edits["Z"].text() == str(valid_path.resolve())
-    assert "at least two" in widget._calibration_status_labels["Z"].text()
-    assert widget._calibration_browse_buttons["Z"].isEnabled()
-    assert widget._calibration_reset_buttons["Z"].isEnabled()
-
-    widget.deleteLater()
-
-
-def test_direction_change_during_import_does_not_enable_wrong_branch(
-    monkeypatch,
-) -> None:
-    settings = Settings()
-    settings.axis_a_calibration.configured = True
-    widget = _widget(settings)
-    started = threading.Event()
-    release = threading.Event()
-
-    def controlled_import(path, *, axis, final_direction):
-        started.set()
-        release.wait(timeout=5.0)
-        return ImportedAxisCalibration(
-            calibration_file=path,
-            gcode_points_mm=(0.0, 1.0),
-            display_points_mm=(0.0, 1.0),
-            branch_direction=final_direction,
-        )
-
-    monkeypatch.setattr(
-        axis_settings_module,
-        "load_axis_calibration_npz",
-        controlled_import,
-    )
-
-    widget._start_calibration_import("A", r"C:\calibration\a-axis.npz")
-    assert started.wait(timeout=1.0)
-    widget._rows["A"].direction_combo.setCurrentIndex(
-        widget._rows["A"].direction_combo.findData(1)
-    )
-    release.set()
-    _wait_for_calibration_import(widget)
-
-    assert widget._calibration_checkboxes["A"].isChecked() is False
-    assert widget._calibration_status_labels["A"].text() == (
-        "Choose a curve for this direction."
-    )
-
-    widget.to_settings(settings)
-    assert settings.axis_a_calibration.configured is False
-    assert settings.axis_a_calibration.interpolation_direction == -1
-
-    widget.deleteLater()
-
-
-def test_cancelled_calibration_file_dialog_is_a_no_op(monkeypatch) -> None:
-    settings = Settings()
-    settings.axis_a_calibration.configured = True
-    original = settings.axis_a_calibration.clone()
-    widget = _widget(settings)
-    monkeypatch.setattr(
-        QFileDialog,
-        "getOpenFileName",
-        lambda *args, **kwargs: ("", ""),
-    )
-
-    widget._calibration_browse_buttons["A"].click()
-    widget.to_settings(settings)
-
-    assert widget._calibration_tasks_running == 0
-    assert settings.axis_a_calibration == original
-
-    widget.deleteLater()
-
-
-def test_reset_clears_imported_snapshot_and_disables_calibration() -> None:
-    settings = Settings()
-    calibration = settings.axis_z_calibration
-    calibration.configured = True
-    calibration.model = "linear_interpolation"
-    calibration.calibration_file = r"C:\calibration\z-axis.npz"
-    calibration.interpolation_gcode_mm = [0.0, 1.0]
-    calibration.interpolation_display_mm = [0.1, 1.1]
-    calibration.interpolation_direction = 1
-    calibration.source = r"C:\legacy\z-curve.png"
-    original_profile = settings.precision_approach.profiles["Z"]
-    widget = _widget(settings)
-
-    widget._calibration_reset_buttons["Z"].click()
-    widget.to_settings(settings)
-
-    result = settings.axis_z_calibration
-    assert result.configured is False
-    assert result.calibration_file == ""
-    assert result.interpolation_gcode_mm == []
-    assert result.interpolation_display_mm == []
-    assert result.interpolation_direction is None
-    assert result.source == ""
-    assert widget._calibration_file_edits["Z"].text() == ""
-    assert widget._calibration_status_labels["Z"].text() == ""
-    assert settings.precision_approach.profiles["Z"] == original_profile
-
-    widget.deleteLater()
-
-
-def test_direction_mismatch_disables_imported_calibration(tmp_path) -> None:
-    settings = Settings()
-    path = tmp_path / "a-axis.npz"
-    np.savez(
-        path,
-        gcode=[0.0, 1.0, 2.0],
-        indicator=[0.0, -1.0, -2.0],
-        direction=[-1, -1, -1],
-    )
-    widget = _widget(settings)
-
-    widget._start_calibration_import("A", str(path))
-    _wait_for_calibration_import(widget)
-    assert widget._calibration_checkboxes["A"].isChecked()
-
-    row = widget._rows["A"]
-    row.direction_combo.setCurrentIndex(row.direction_combo.findData(1))
-    widget.to_settings(settings)
-
-    assert widget._calibration_checkboxes["A"].isChecked() is False
-    assert settings.axis_a_calibration.configured is False
-    assert widget._calibration_status_labels["A"].text() == (
-        "Choose a curve for this direction."
-    )
-
-    widget.deleteLater()
-
-
-def test_interpolation_checkbox_cannot_enable_missing_snapshot() -> None:
-    settings = Settings()
-    settings.axis_z_calibration.model = "linear_interpolation"
-    settings.axis_z_calibration.configured = False
-    widget = _widget(settings)
-
-    widget._calibration_checkboxes["Z"].setChecked(True)
-    widget.to_settings(settings)
-
-    assert widget._calibration_checkboxes["Z"].isChecked() is False
-    assert settings.axis_z_calibration.configured is False
-
-    widget.deleteLater()
-
-
-def test_invalid_configured_interpolation_starts_unchecked() -> None:
-    settings = Settings()
-    settings.axis_z_calibration.model = "linear_interpolation"
-    settings.axis_z_calibration.configured = True
-
-    widget = _widget(settings)
-
-    assert widget._calibration_checkboxes["Z"].isChecked() is False
-
-    widget.deleteLater()
-
-
-def test_interpolation_checkbox_cannot_enable_non_monotonic_snapshot() -> None:
-    settings = Settings()
-    calibration = settings.axis_z_calibration
-    calibration.model = "linear_interpolation"
-    calibration.configured = False
-    calibration.interpolation_gcode_mm = [0.0, 1.0]
-    calibration.interpolation_display_mm = [1.0, 0.0]
-    widget = _widget(settings)
-
-    widget._calibration_checkboxes["Z"].setChecked(True)
-    widget.to_settings(settings)
-
-    assert widget._calibration_checkboxes["Z"].isChecked() is False
-    assert settings.axis_z_calibration.configured is False
-
-    widget.deleteLater()
-
-
-def test_legacy_calibration_ignores_stale_import_direction() -> None:
-    settings = Settings()
-    calibration = settings.axis_a_calibration
-    calibration.configured = True
-    calibration.interpolation_direction = 1
-    widget = _widget(settings)
-
-    assert widget._rows["A"].direction_combo.currentData() == -1
-    assert widget._calibration_checkboxes["A"].isChecked() is True
-
-    widget.to_settings(settings)
-    assert settings.axis_a_calibration.configured is True
-
-    widget.deleteLater()
-
-
-@pytest.mark.parametrize(
-    "initial_tab",
-    ["Axes", "Axis Calibration", "Precision approach"],
-)
-def test_settings_dialog_uses_one_axes_tab_and_legacy_aliases(
-    initial_tab: str,
-) -> None:
-    _qt_app()
-    dialog = SettingsDialog(Settings(), initial_tab=initial_tab)
-
-    labels = [dialog._tabs.tabText(index) for index in range(dialog._tabs.count())]
-    assert "Coordinates" in labels
-    assert "Axes" in labels
-    assert "Axis Calibration" not in labels
-    assert "Precision approach" not in labels
-    assert dialog._tabs.currentWidget() is dialog._axes_tab
-
-    dialog.reject()
-
-
-def test_settings_dialog_collects_axis_settings_and_preserves_non_png_source() -> None:
-    _qt_app()
-    settings = Settings()
-    settings.axis_a_calibration.configured = True
-    settings.axis_a_calibration.source = "indicator-calibration.csv"
-    original_a = settings.axis_a_calibration.clone()
-    dialog = SettingsDialog(settings)
-    x_row = dialog._axes_tab._rows["X"]
-
-    x_row.enabled_checkbox.setChecked(True)
-    x_row.backlash_spin.setValue(0.125)
-    x_row.direction_combo.setCurrentIndex(x_row.direction_combo.findData(-1))
-    dialog._axes_tab._calibration_checkboxes["A"].setChecked(False)
-    dialog._collect_settings()
-
-    result = dialog.result_settings()
-    assert result.precision_approach.profiles["X"] == PrecisionApproachProfile(
+    assert settings.precision_approach.profiles["X"] == PrecisionApproachProfile(
         enabled=True,
         backlash=0.125,
         final_direction=-1,
     )
-    assert result.axis_a_calibration.configured is False
-    assert result.axis_a_calibration.amplitude_mm == original_a.amplitude_mm
-    assert result.axis_a_calibration.source == original_a.source
-
-    dialog.reject()
+    assert settings.axis_calibrations["X"] == AxisCalibrationSettings()
 
 
-def test_settings_dialog_blocks_save_and_apply_during_calibration_import(
-    tmp_path,
-    monkeypatch,
-) -> None:
-    _qt_app()
+def test_valid_saved_snapshot_creates_preview_for_only_that_axis(qtbot) -> None:
     settings = Settings()
-    old = settings.axis_z_calibration
-    old.configured = True
-    old.model = "linear_interpolation"
-    old.calibration_file = "old-z-axis.npz"
-    old.interpolation_gcode_mm = [0.0, 1.0]
-    old.interpolation_display_mm = [0.0, 1.0]
+    settings.axis_calibrations["B"] = _curve("B")
+
+    widget = _widget(settings)
+    qtbot.addWidget(widget)
+
+    assert tuple(widget._calibration_previews) == ("B",)
+    assert widget._calibration_previews["B"].unit == "deg"
+
+
+def test_disabled_snapshot_keeps_curve_but_hides_current_marker(qtbot) -> None:
+    settings = Settings()
+    settings.axis_calibrations["Z"] = _curve("Z", enabled=False)
+    source = _PositionSource()
+    source.machine_position = (0.0, 0.0, 1.0, 0.0, 0.0, 0.0)
+    widget = _widget(settings, position_source=source)
+    qtbot.addWidget(widget)
+
+    preview = widget._calibration_previews["Z"]
+    assert preview.curve_item.isVisible()
+    assert not preview.marker_item.isVisible()
+    assert not preview.position_line.isVisible()
+
+
+def test_live_status_updates_marker_from_cached_machine_coordinate(qtbot) -> None:
+    settings = Settings()
+    settings.axis_calibrations["Z"] = _curve("Z")
+    source = _PositionSource()
+    source.machine_position = (0.0, 0.0, 1.0, 0.0, 0.0, 0.0)
+    widget = _widget(settings, position_source=source)
+    qtbot.addWidget(widget)
+
+    source.stage_position_changed.emit(source.machine_position)
+
+    preview = widget._calibration_previews["Z"]
+    assert preview.marker_item.isVisible()
+    assert preview.current_position == pytest.approx((1.0, 11.5))
+
+
+def test_current_position_outside_curve_hides_marker_and_reports_range(qtbot) -> None:
+    settings = Settings()
+    settings.axis_calibrations["X"] = _curve("X")
+    source = _PositionSource()
+    source.machine_position = (3.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+    widget = _widget(settings, position_source=source)
+    qtbot.addWidget(widget)
+
+    source.stage_position_changed.emit(source.machine_position)
+
+    preview = widget._calibration_previews["X"]
+    assert not preview.marker_item.isVisible()
+    assert preview.range_status.text() == "Current position is outside the calibration range"
+
+
+def test_import_uses_new_schema_and_replaces_selected_axis(qtbot, tmp_path) -> None:
+    path = tmp_path / "y.npz"
+    np.savez(path, axis=np.array("Y"), controller=[0.0, 1.0], physical=[2.0, 4.0])
+    settings = Settings()
+    widget = _widget(settings)
+    qtbot.addWidget(widget)
+
+    widget._start_calibration_import("Y", str(path))
+    _wait_for_import(widget)
+    widget.to_settings(settings)
+
+    saved = settings.axis_calibrations["Y"]
+    assert saved.enabled
+    assert saved.calibration_file == str(path.resolve())
+    assert saved.controller_points == [0.0, 1.0]
+    assert saved.physical_points == [2.0, 4.0]
+    assert "Y" in widget._calibration_previews
+
+
+def test_invalid_import_preserves_previous_snapshot_and_preview(qtbot, tmp_path) -> None:
+    path = tmp_path / "invalid.npz"
+    np.savez(path, axis=np.array("Z"), controller=[0.0, 1.0], physical=[1.0, 0.0])
+    settings = Settings()
+    settings.axis_calibrations["Z"] = _curve("Z")
+    widget = _widget(settings)
+    qtbot.addWidget(widget)
+    preview = widget._calibration_previews["Z"]
+
+    widget._start_calibration_import("Z", str(path))
+    _wait_for_import(widget)
+    widget.to_settings(settings)
+
+    assert settings.axis_calibrations["Z"] == _curve("Z")
+    assert widget._calibration_previews["Z"] is preview
+    assert "strictly increasing" in widget._calibration_status_labels["Z"].text()
+
+
+def test_reset_clears_snapshot_file_and_preview(qtbot) -> None:
+    settings = Settings()
+    settings.axis_calibrations["A"] = _curve("A")
+    widget = _widget(settings)
+    qtbot.addWidget(widget)
+
+    widget._calibration_reset_buttons["A"].click()
+    widget.to_settings(settings)
+
+    assert settings.axis_calibrations["A"] == AxisCalibrationSettings()
+    assert widget._calibration_file_edits["A"].text() == ""
+    assert "A" not in widget._calibration_previews
+
+
+def test_cancelled_file_dialog_changes_nothing(qtbot, monkeypatch) -> None:
+    settings = Settings()
+    settings.axis_calibrations["A"] = _curve("A")
+    widget = _widget(settings)
+    qtbot.addWidget(widget)
+    monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *args, **kwargs: ("", ""))
+
+    widget._calibration_browse_buttons["A"].click()
+    widget.to_settings(settings)
+
+    assert settings.axis_calibrations["A"] == _curve("A")
+
+
+def test_settings_dialog_passes_explicit_position_source(qtbot) -> None:
+    source = _PositionSource()
+    dialog = SettingsDialog(Settings(), axis_position_source=source, initial_tab="Axes")
+    qtbot.addWidget(dialog)
+
+    assert dialog._axes_tab._position_source is source
+    assert dialog._tabs.currentWidget() is dialog._axes_tab
+
+
+def test_settings_dialog_blocks_apply_while_import_is_active(qtbot, monkeypatch) -> None:
+    settings = Settings()
     started = threading.Event()
     release = threading.Event()
-    new_path = str((tmp_path / "new-z-axis.npz").resolve())
 
-    def controlled_import(path, *, axis, final_direction):
+    def controlled_import(path, *, expected_axis):
         started.set()
         release.wait(timeout=5.0)
         return ImportedAxisCalibration(
-            calibration_file=new_path,
-            gcode_points_mm=(0.0, 1.0, 2.0),
-            display_points_mm=(0.1, 1.1, 2.1),
-            branch_direction=None,
+            axis=expected_axis,
+            calibration_file=path,
+            controller_points=(0.0, 1.0),
+            physical_points=(2.0, 3.0),
         )
 
-    monkeypatch.setattr(
-        axis_settings_module,
-        "load_axis_calibration_npz",
-        controlled_import,
-    )
+    monkeypatch.setattr(axis_settings_module, "load_axis_calibration_npz", controlled_import)
     dialog = SettingsDialog(settings)
-    applied: list[Settings] = []
-    dialog.settings_applied.connect(applied.append)
-    save_button = dialog._button_box.button(QDialogButtonBox.Save)
-    apply_button = dialog._button_box.button(QDialogButtonBox.Apply)
-    cancel_button = dialog._button_box.button(QDialogButtonBox.Cancel)
+    qtbot.addWidget(dialog)
+    save = dialog._button_box.button(QDialogButtonBox.Save)
+    apply = dialog._button_box.button(QDialogButtonBox.Apply)
 
-    dialog._axes_tab._start_calibration_import("Z", new_path)
+    dialog._axes_tab._start_calibration_import("C", "C:/c.npz")
     assert started.wait(timeout=1.0)
-
-    assert save_button.isEnabled() is False
-    assert apply_button.isEnabled() is False
-    assert cancel_button.isEnabled() is True
-    dialog._apply_without_closing()
-    dialog.accept()
-    assert applied == []
-    assert dialog.was_applied() is False
-    assert dialog.result_settings().axis_z_calibration.calibration_file == (
-        "old-z-axis.npz"
-    )
+    assert not save.isEnabled()
+    assert not apply.isEnabled()
 
     release.set()
-    _wait_for_calibration_import(dialog._axes_tab)
-
-    assert save_button.isEnabled() is True
-    assert apply_button.isEnabled() is True
-    assert cancel_button.isEnabled() is True
-    dialog._apply_without_closing()
-    assert len(applied) == 1
-    assert applied[0].axis_z_calibration.calibration_file == new_path
-    assert applied[0].axis_z_calibration.interpolation_gcode_mm == [0.0, 1.0, 2.0]
-
-    dialog.reject()
+    _wait_for_import(dialog._axes_tab)
+    assert save.isEnabled()
+    assert apply.isEnabled()

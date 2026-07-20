@@ -240,6 +240,7 @@ def open_settings_dialog(
         owner,
         initial_tab=tab_name,
         camera_settings_source=owner.grabber,
+        axis_position_source=owner.stage_controller,
         api_key_store=owner._api_key_store,
     )
     dialog.settings_applied.connect(owner._apply_settings_from_dialog)

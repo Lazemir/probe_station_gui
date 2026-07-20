@@ -871,6 +871,7 @@ class SettingsDialog(QDialog):
         *,
         initial_tab: str | None = None,
         camera_settings_source: object | None = None,
+        axis_position_source: object | None = None,
         api_key_store: ApiKeyStore | None = None,
     ) -> None:
         super().__init__(parent)
@@ -909,10 +910,10 @@ class SettingsDialog(QDialog):
             self,
         )
         self._axes_tab = AxisSettingsWidget(
-            self._settings.axis_a_calibration,
-            self._settings.axis_z_calibration,
+            self._settings.axis_calibrations,
             self._settings.precision_approach,
             self,
+            position_source=axis_position_source,
         )
         if camera_settings_source is not None:
             self._camera_tab = CameraSettingsWidget(camera_settings_source, self)
