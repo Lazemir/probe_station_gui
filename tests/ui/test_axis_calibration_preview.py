@@ -11,8 +11,10 @@ pytest.importorskip("pyqtgraph")
 
 from PySide6.QtWidgets import QApplication
 
+from probe_station_gui.dialogs.settings import axis_calibration_preview
 from probe_station_gui.dialogs.settings.axis_calibration_preview import (
     AxisCalibrationPreview,
+    interpolated_curve_position,
 )
 
 
@@ -96,3 +98,98 @@ def test_clear_curve_removes_curve_and_live_items(qtbot) -> None:
     assert curve_x is None or curve_x.size == 0
     assert len(preview.samples_item.points()) == 0
     assert not preview.marker_item.isVisible()
+
+
+def test_interpolated_curve_position_interpolates_within_domain() -> None:
+    assert interpolated_curve_position(
+        (0.0, 2.0), (1.0, 5.0), 0.5
+    ) == pytest.approx((0.5, 2.0))
+    assert interpolated_curve_position(
+        (0.0, 2.0), (1.0, 5.0), 0.0
+    ) == pytest.approx((0.0, 1.0))
+    assert interpolated_curve_position(
+        (0.0, 2.0), (1.0, 5.0), 2.0
+    ) == pytest.approx((2.0, 5.0))
+
+
+def test_interpolation_helper_is_publicly_exported() -> None:
+    assert "interpolated_curve_position" in axis_calibration_preview.__all__
+
+
+@pytest.mark.parametrize(
+    ("controller", "physical", "x"),
+    [
+        ((0.0, 2.0), (1.0, 5.0), -0.1),
+        ((), (), 0.0),
+        ((0.0,), (1.0, 2.0), 0.0),
+        ((0.0, float("nan")), (1.0, 5.0), 0.5),
+        ((0.0, 2.0), (1.0, float("inf")), 0.5),
+    ],
+)
+def test_interpolated_curve_position_rejects_unusable_data(
+    controller, physical, x
+) -> None:
+    assert interpolated_curve_position(controller, physical, x) is None
+
+
+def test_preview_uses_light_palette_with_dark_axis_text(qtbot) -> None:
+    preview = AxisCalibrationPreview("X")
+    qtbot.addWidget(preview)
+
+    assert preview.plot_widget.backgroundBrush().color().name() == "#ffffff"
+    assert preview.plot_widget.getAxis("bottom").textPen().color().name() == "#212121"
+    assert preview.plot_widget.getAxis("left").textPen().color().name() == "#212121"
+
+
+def test_hover_updates_interpolated_guides_and_label_without_resetting_view(qtbot) -> None:
+    preview = AxisCalibrationPreview("X")
+    qtbot.addWidget(preview)
+    preview.set_curve((0.0, 2.0), (1.0, 5.0))
+    preview.plot_widget.setXRange(0.2, 0.8, padding=0)
+    preview.plot_widget.setYRange(1.5, 2.5, padding=0)
+    before = preview.plot_widget.viewRange()
+
+    preview.set_hover_controller_value(0.5)
+
+    assert preview.hover_position == pytest.approx((0.5, 2.0))
+    assert preview.hover_vertical_line.isVisible()
+    assert preview.hover_horizontal_line.isVisible()
+    assert preview.hover_label.isVisible()
+    assert "X: 0.5 mm" in preview.hover_label.toPlainText()
+    assert "Y: 2 mm" in preview.hover_label.toPlainText()
+    assert preview.plot_widget.viewRange() == before
+
+
+def test_hiding_hover_keeps_curve_and_view_but_clear_curve_hides_hover(qtbot) -> None:
+    preview = AxisCalibrationPreview("X")
+    qtbot.addWidget(preview)
+    preview.set_curve((0.0, 2.0), (1.0, 5.0))
+    preview.plot_widget.setXRange(0.2, 0.8, padding=0)
+    preview.plot_widget.setYRange(1.5, 2.5, padding=0)
+    before = preview.plot_widget.viewRange()
+    preview.set_hover_controller_value(0.5)
+
+    preview.set_hover_controller_value(-0.1)
+
+    assert preview.curve_item.isVisible()
+    assert preview.plot_widget.viewRange() == before
+    assert not preview.hover_vertical_line.isVisible()
+    assert not preview.hover_horizontal_line.isVisible()
+    assert not preview.hover_label.isVisible()
+
+    preview.set_hover_controller_value(0.5)
+    preview.set_hover_controller_value(0.5, visible=False)
+
+    assert preview.curve_item.isVisible()
+    assert preview.plot_widget.viewRange() == before
+    assert not preview.hover_vertical_line.isVisible()
+    assert not preview.hover_horizontal_line.isVisible()
+    assert not preview.hover_label.isVisible()
+
+    preview.set_hover_controller_value(0.5)
+    preview.clear_curve()
+
+    assert preview.plot_widget.viewRange() == before
+    assert not preview.hover_vertical_line.isVisible()
+    assert not preview.hover_horizontal_line.isVisible()
+    assert not preview.hover_label.isVisible()
