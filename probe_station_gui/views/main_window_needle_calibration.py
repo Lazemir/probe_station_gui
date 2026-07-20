@@ -104,8 +104,10 @@ def apply_needle_calibration_runtime(
 
 
 def save_needle_calibration_settings(owner: object, settings: object) -> None:
-    owner.settings_manager.replace(settings)
-    owner.settings_manager.save()
+    owner.settings_manager.replace_and_save(
+        settings,
+        preserve_exposure_policy=True,
+    )
     apply_needle_calibration_runtime(owner, settings.needle_calibration)
 
 

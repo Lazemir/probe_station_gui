@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+import uuid
+from collections.abc import Callable, Mapping
 from typing import Any
 
-from PySide6.QtCore import QTimer, Qt
+from PySide6.QtCore import QTimer, Qt, Signal
 from PySide6.QtGui import QDoubleValidator
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QFrame,
+    QGroupBox,
     QGridLayout,
     QHBoxLayout,
     QLabel,
@@ -519,6 +521,8 @@ class _FeatureListPage(QWidget):
 class CameraSettingsWidget(QWidget):
     """Operator-facing camera controls for probe-station work."""
 
+    apply_finished = Signal(bool)
+
     LIVE_REFRESH_INTERVAL_MS = 1500
 
     OPERATOR_NODE_NAMES = (
@@ -530,11 +534,6 @@ class CameraSettingsWidget(QWidget):
         "TriggerOverlap",
         "TriggerDelay",
         "TriggerSoftware",
-        "ExposureMode",
-        "ExposureAuto",
-        "ExposureTime",
-        "ExposureCompensationAuto",
-        "ExposureCompensation",
         "GainAuto",
         "Gain",
         "BlackLevel",
@@ -543,17 +542,38 @@ class CameraSettingsWidget(QWidget):
         "BalanceRatio",
     )
 
-    def __init__(self, grabber: object, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        grabber: object,
+        parent: QWidget | None = None,
+        *,
+        exposure_policy_source: object | None = None,
+    ) -> None:
         super().__init__(parent)
         self._grabber = grabber
+        self._exposure_policy_source = exposure_policy_source
         self._pending_settings: dict[tuple[str, str], object] = {}
         self._applying_settings: dict[tuple[str, str], object] = {}
         self._snapshot_pending = False
+        self._snapshot_request_id: str | None = None
         self._snapshot_show_status = False
         self._status_text = ""
         self._loaded_once = False
+        self._policy_state: dict[str, object] = {}
+        self._exposure_time_node: NodePayload | None = None
+        self._exposure_mode_node: NodePayload | None = None
+        self._updating_exposure_controls = False
+        self._pending_policy: tuple[bool, str] | None = None
+        self._apply_actions: list[tuple[object, ...]] = []
+        self._active_apply_action: tuple[object, ...] | None = None
+        self._active_setting_request_id: str | None = None
+        self._adjust_exposure_apply = False
+        self._adjust_once_after_apply = False
 
         layout = QVBoxLayout(self)
+
+        if exposure_policy_source is not None:
+            self._create_exposure_controls(layout)
 
         self._page = _FeatureListPage(
             "camera",
@@ -570,16 +590,25 @@ class CameraSettingsWidget(QWidget):
         self._live_refresh_timer.setInterval(self.LIVE_REFRESH_INTERVAL_MS)
         self._live_refresh_timer.timeout.connect(self._refresh_live_snapshot)
 
+        if exposure_policy_source is not None:
+            exposure_policy_source.state_changed.connect(
+                self._on_exposure_policy_state_changed
+            )
+            exposure_policy_source.command_finished.connect(
+                self._on_exposure_policy_command_finished
+            )
+            self._apply_exposure_policy_state(self._exposure_policy_snapshot())
+
     def has_loaded(self) -> bool:
         return self._loaded_once
 
     def refresh(self) -> None:
-        if self._pending_settings or self._applying_settings:
+        if self._has_pending_changes() or self._is_applying():
             self._set_status("Apply pending camera settings before refreshing.")
             return
         self._request_snapshot(
             show_status=True,
-            node_names=list(self.OPERATOR_NODE_NAMES),
+            node_names=self._snapshot_node_names(),
         )
 
     def _refresh_live_snapshot(self) -> None:
@@ -587,11 +616,11 @@ class CameraSettingsWidget(QWidget):
             return
         if not self.isVisible():
             return
-        if self._pending_settings or self._applying_settings:
+        if self._has_pending_changes() or self._is_applying():
             return
         if self._has_edit_focus():
             return
-        node_names = self._page.node_names()
+        node_names = self._snapshot_node_names(self._page.node_names())
         if not node_names:
             return
         self._request_snapshot(
@@ -608,26 +637,32 @@ class CameraSettingsWidget(QWidget):
         if self._snapshot_pending:
             return
         self._snapshot_pending = True
+        self._snapshot_request_id = uuid.uuid4().hex
         self._snapshot_show_status = show_status
         if show_status:
             self._set_status("Loading camera controls.")
         self._grabber.request_camera_settings_snapshot(
             map_key="camera",
-            node_names=node_names or list(self.OPERATOR_NODE_NAMES),
+            node_names=node_names or self._snapshot_node_names(),
+            request_id=self._snapshot_request_id,
         )
 
     def _has_edit_focus(self) -> bool:
         return self._page.has_edit_focus()
 
     def _on_snapshot(self, payload: object) -> None:
+        if not isinstance(payload, dict):
+            return
+        if str(payload.get("request_id") or "") != str(
+            self._snapshot_request_id or ""
+        ):
+            return
         self._snapshot_pending = False
+        self._snapshot_request_id = None
         show_status = self._snapshot_show_status
         self._snapshot_show_status = False
-        if self._pending_settings or self._applying_settings:
+        if self._has_pending_changes() or self._is_applying():
             self._set_pending_status()
-            return
-        if not isinstance(payload, dict):
-            self._set_status("Camera settings response was invalid.")
             return
         if not payload.get("ok", False):
             self._set_status(str(payload.get("message") or "Camera error."))
@@ -650,12 +685,21 @@ class CameraSettingsWidget(QWidget):
         if camera_map is not None:
             nodes = camera_map.get("nodes")
             camera_nodes = nodes if isinstance(nodes, list) else []
+            self._update_exposure_time_node(camera_nodes)
+            self._update_exposure_mode_node(camera_nodes)
+            operator_nodes = [
+                node
+                for node in camera_nodes
+                if isinstance(node, dict)
+                and str(node.get("name") or "")
+                not in {"ExposureAuto", "ExposureMode", "ExposureTime"}
+            ]
             if self._loaded_once:
-                for node in camera_nodes:
+                for node in operator_nodes:
                     if isinstance(node, dict):
                         self._page.update_node(node)
             else:
-                self._page.set_nodes(camera_nodes)
+                self._page.set_nodes(operator_nodes)
 
         self._loaded_once = True
         if not self._live_refresh_timer.isActive():
@@ -671,32 +715,45 @@ class CameraSettingsWidget(QWidget):
         if not isinstance(payload, dict):
             self._set_status("Camera setting response was invalid.")
             return
-        self._set_status(str(payload.get("message") or "Camera setting updated."))
         map_key = str(payload.get("map_key") or "")
         node_name = str(payload.get("node_name") or "")
         key = (map_key, node_name)
-        had_applied_value = key in self._applying_settings
-        applied_value = self._applying_settings.pop(key, None)
-        if payload.get("ok", False):
-            node = payload.get("node")
-            if isinstance(node, dict):
-                self._update_pages_for_node(map_key, node)
-            if had_applied_value and self._pending_settings.get(key) == applied_value:
-                self._pending_settings.pop(key, None)
-            if self._pending_settings:
-                self._set_pending_status()
-        else:
+        active = self._active_apply_action
+        if active is None or active[:3] != ("setting", map_key, node_name):
+            self._set_status(str(payload.get("message") or "Camera setting updated."))
+            if payload.get("ok", False):
+                node = payload.get("node")
+                if isinstance(node, dict):
+                    self._update_pages_for_node(map_key, node)
+            return
+        if node_name != "ExposureTime" and str(payload.get("request_id") or "") != str(
+            self._active_setting_request_id or ""
+        ):
+            return
+
+        applied_value = active[3]
+        self._applying_settings.pop(key, None)
+        self._active_apply_action = None
+        self._active_setting_request_id = None
+        if not payload.get("ok", False):
+            self._set_status(str(payload.get("message") or "Camera setting failed."))
+            self._finish_apply(False)
+            return
+        node = payload.get("node")
+        if isinstance(node, dict):
+            self._update_pages_for_node(map_key, node)
+        if self._pending_settings.get(key) == applied_value:
             self._pending_settings.pop(key, None)
+        self._run_next_apply_action()
 
     def _queue_setting(self, map_key: str, node_name: str, value: object) -> None:
         if not node_name:
             return
         self._pending_settings[(map_key, node_name)] = value
         self._set_pending_status()
-        self._write_pending_settings()
 
     def _set_pending_status(self) -> None:
-        pending_count = len(self._pending_settings)
+        pending_count = len(self._pending_settings) + int(self._pending_policy is not None)
         if pending_count == 1:
             self._set_status("1 camera setting pending.")
         else:
@@ -704,26 +761,122 @@ class CameraSettingsWidget(QWidget):
 
     def apply_pending_settings(self) -> bool:
         self._page.queue_current_editor_value()
-        return self._write_pending_settings()
-
-    def _write_pending_settings(self) -> bool:
-        if not self._pending_settings:
+        if self._exposure_time_edit.hasFocus():
+            self._queue_exposure_time()
+        if self._is_applying() or not self._has_pending_changes():
             return False
-        pending_items = [
-            item
-            for item in self._pending_settings.items()
-            if item[0] not in self._applying_settings
-        ]
-        if not pending_items:
+        self._apply_actions = self._build_apply_actions()
+        if not self._apply_actions:
             return False
-        self._set_status(f"Writing {len(pending_items)} camera settings.")
-        for (map_key, node_name), value in pending_items:
-            self._applying_settings[(map_key, node_name)] = value
-            self._grabber.request_camera_setting_update(map_key, node_name, value)
+        self._adjust_exposure_apply = False
+        self._adjust_once_after_apply = False
+        self._page.setEnabled(False)
+        self._exposure_group.setEnabled(False)
+        self._set_status(f"Applying {len(self._apply_actions)} camera settings.")
+        self._run_next_apply_action()
         return True
+
+    def _build_apply_actions(self) -> list[tuple[object, ...]]:
+        pending = list(self._pending_settings.items())
+        mode_item = next(
+            (item for item in pending if item[0] == ("camera", "ExposureMode")),
+            None,
+        )
+        exposure_item = next(
+            (item for item in pending if item[0] == ("camera", "ExposureTime")),
+            None,
+        )
+        regular = [
+            item
+            for item in pending
+            if item is not mode_item and item is not exposure_item
+        ]
+        actions: list[tuple[object, ...]] = [
+            ("setting", key[0], key[1], value) for key, value in regular
+        ]
+        actual_auto = bool(self._policy_state.get("auto_enabled", True))
+        desired_auto, desired_engine = self._selected_exposure_policy()
+        if mode_item is not None and str(mode_item[1]) == "Timed":
+            key, value = mode_item
+            actions.append(("setting", key[0], key[1], value))
+        if exposure_item is not None and not actual_auto:
+            key, value = exposure_item
+            actions.append(("setting", key[0], key[1], value))
+        if self._pending_policy is not None:
+            actions.append(("policy", desired_auto, desired_engine))
+        if mode_item is not None and str(mode_item[1]) != "Timed":
+            key, value = mode_item
+            actions.append(("setting", key[0], key[1], value))
+        if exposure_item is not None and actual_auto and not desired_auto:
+            key, value = exposure_item
+            actions.append(("setting", key[0], key[1], value))
+        return actions
+
+    def _run_next_apply_action(self) -> None:
+        if not self._apply_actions:
+            self._finish_apply(True)
+            return
+        action = self._apply_actions.pop(0)
+        self._active_apply_action = action
+        if action[0] == "policy":
+            if self._exposure_policy_source is None:
+                self._set_status("Camera exposure policy is unavailable.")
+                self._finish_apply(False)
+                return
+            self._exposure_policy_source.request_update(bool(action[1]), str(action[2]))
+            return
+
+        _kind, map_key, node_name, value = action
+        key = (str(map_key), str(node_name))
+        self._applying_settings[key] = value
+        if key == ("camera", "ExposureTime") and self._exposure_policy_source is not None:
+            self._exposure_policy_source.request_exposure_time(float(value))
+            return
+        request_id = uuid.uuid4().hex
+        self._active_setting_request_id = request_id
+        self._grabber.request_camera_setting_update(
+            key[0],
+            key[1],
+            value,
+            request_id=request_id,
+        )
+
+    def _finish_apply(self, success: bool) -> None:
+        adjust_exposure = self._adjust_exposure_apply
+        run_once = bool(success and self._adjust_once_after_apply)
+        self._adjust_exposure_apply = False
+        self._adjust_once_after_apply = False
+        self._apply_actions.clear()
+        self._active_apply_action = None
+        self._active_setting_request_id = None
+        self._applying_settings.clear()
+        self._page.setEnabled(True)
+        self._apply_exposure_policy_state(self._exposure_policy_snapshot())
+        if run_once:
+            self._set_status("Adjusting exposure.")
+        elif success and adjust_exposure:
+            self._set_status("Exposure method applied.")
+        elif success:
+            self._set_status("Camera settings applied.")
+        self.apply_finished.emit(bool(success))
+        if run_once and self._exposure_policy_source is not None:
+            self._exposure_policy_source.request_once()
+
+    def _has_pending_changes(self) -> bool:
+        return bool(self._pending_settings or self._pending_policy is not None)
+
+    def _is_applying(self) -> bool:
+        return self._active_apply_action is not None or bool(self._apply_actions)
 
     def _update_pages_for_node(self, map_key: str, node: NodePayload) -> None:
         if map_key == "camera":
+            node_name = str(node.get("name") or "")
+            if node_name == "ExposureTime":
+                self._update_exposure_time_node([node])
+                return
+            if node_name == "ExposureMode":
+                self._update_exposure_mode_node([node])
+                return
             self._page.update_node(node)
 
     def _execute_command(self, map_key: str, node_name: str) -> None:
@@ -731,6 +884,382 @@ class CameraSettingsWidget(QWidget):
             return
         self._set_status(f"Executing {node_name}.")
         self._grabber.request_camera_command_execute(map_key, node_name)
+
+    def _create_exposure_controls(self, layout: QVBoxLayout) -> None:
+        self._exposure_group = QGroupBox("Exposure", self)
+        controls = QGridLayout(self._exposure_group)
+        controls.setColumnStretch(1, 1)
+        controls.setHorizontalSpacing(12)
+        controls.setVerticalSpacing(6)
+
+        controls.addWidget(QLabel("Control", self._exposure_group), 0, 0)
+        self._control_combo = QComboBox(self._exposure_group)
+        self._control_combo.addItem("Manual", False)
+        self._control_combo.addItem("Auto", True)
+        controls.addWidget(self._control_combo, 0, 1)
+
+        controls.addWidget(QLabel("Method", self._exposure_group), 1, 0)
+        self._method_combo = QComboBox(self._exposure_group)
+        self._method_combo.addItem("Software", "software")
+        self._method_combo.addItem("Camera", "camera")
+        controls.addWidget(self._method_combo, 1, 1)
+
+        controls.addWidget(QLabel("Timing", self._exposure_group), 2, 0)
+        self._timing_combo = QComboBox(self._exposure_group)
+        self._timing_combo.addItem("Timed", "Timed")
+        self._timing_combo.setToolTip(
+            "Trigger width is available only with the Camera method."
+        )
+        self._timing_combo.setEnabled(False)
+        controls.addWidget(self._timing_combo, 2, 1)
+
+        controls.addWidget(QLabel("Exposure time", self._exposure_group), 3, 0)
+        exposure_time_row = QHBoxLayout()
+        self._exposure_time_edit = QLineEdit(self._exposure_group)
+        self._exposure_time_edit.setFixedWidth(96)
+        self._exposure_time_edit.setPlaceholderText("Exposure time")
+        self._exposure_time_unit = QLabel(self._exposure_group)
+        exposure_time_row.addWidget(self._exposure_time_edit)
+        exposure_time_row.addWidget(self._exposure_time_unit)
+        exposure_time_row.addStretch(1)
+        controls.addLayout(exposure_time_row, 3, 1)
+
+        self._adjust_exposure_button = QPushButton(
+            "Adjust Exposure", self._exposure_group
+        )
+        self._adjust_exposure_button.setToolTip(
+            "Run one exposure adjustment with the selected method."
+        )
+        controls.addWidget(
+            self._adjust_exposure_button, 4, 1, alignment=Qt.AlignLeft
+        )
+        layout.addWidget(self._exposure_group)
+
+        self._control_combo.currentIndexChanged.connect(
+            self._request_exposure_policy_update
+        )
+        self._method_combo.currentIndexChanged.connect(
+            self._request_exposure_policy_update
+        )
+        self._timing_combo.currentIndexChanged.connect(
+            self._queue_exposure_mode
+        )
+        self._adjust_exposure_button.clicked.connect(self._request_exposure_once)
+        self._exposure_time_edit.editingFinished.connect(self._queue_exposure_time)
+
+    def _snapshot_node_names(
+        self,
+        operator_nodes: list[str] | None = None,
+    ) -> list[str]:
+        names = list(operator_nodes or self.OPERATOR_NODE_NAMES)
+        if self._exposure_policy_source is not None:
+            for node_name in ("ExposureMode", "ExposureTime"):
+                if node_name not in names:
+                    names.append(node_name)
+        return names
+
+    def _exposure_policy_snapshot(self) -> dict[str, object]:
+        source = self._exposure_policy_source
+        if source is None:
+            return {}
+        try:
+            state = source.snapshot()
+        except Exception:
+            return {}
+        return dict(state) if isinstance(state, Mapping) else {}
+
+    def _on_exposure_policy_state_changed(self, state: object) -> None:
+        if isinstance(state, Mapping):
+            self._apply_exposure_policy_state(dict(state))
+
+    def _on_exposure_policy_command_finished(self, result: object) -> None:
+        if not isinstance(result, Mapping):
+            return
+        if result.get("operation") == "manual_exposure_write":
+            self._on_exposure_time_write_finished(result)
+            return
+        active = self._active_apply_action
+        if active is not None and active[0] == "policy":
+            if not bool(result.get("accepted", False)):
+                self._set_status(
+                    str(result.get("message") or "Camera exposure failed.")
+                )
+                self._finish_apply(False)
+                return
+            applied_policy = (bool(active[1]), str(active[2]))
+            if self._pending_policy == applied_policy:
+                self._pending_policy = None
+            self._policy_state.update(self._exposure_policy_snapshot())
+            self._active_apply_action = None
+            self._run_next_apply_action()
+            return
+        if not bool(result.get("accepted", False)):
+            self._set_status(str(result.get("message") or "Camera exposure failed."))
+            self._apply_exposure_policy_state(self._exposure_policy_snapshot())
+
+    def _on_exposure_time_write_finished(
+        self,
+        result: Mapping[str, object],
+    ) -> None:
+        nodes = result.get("nodes")
+        node = (
+            next(
+                (
+                    item
+                    for item in nodes
+                    if isinstance(item, dict)
+                    and str(item.get("name") or "") == "ExposureTime"
+                ),
+                None,
+            )
+            if isinstance(nodes, list)
+            else None
+        )
+        self._on_setting_changed(
+            {
+                "ok": bool(result.get("accepted", False)),
+                "message": str(
+                    result.get("message") or "Camera exposure time updated."
+                ),
+                "map_key": "camera",
+                "node_name": "ExposureTime",
+                "node": node,
+            }
+        )
+        if not bool(result.get("accepted", False)):
+            self._apply_exposure_policy_state(self._exposure_policy_snapshot())
+
+    def _apply_exposure_policy_state(self, state: Mapping[str, object]) -> None:
+        if self._exposure_policy_source is None:
+            return
+        self._policy_state.update(state)
+        auto_enabled = bool(self._policy_state.get("auto_enabled", True))
+        engine = str(self._policy_state.get("engine") or "software")
+        active_policy = bool(
+            self._active_apply_action is not None
+            and self._active_apply_action[0] == "policy"
+        )
+        if self._pending_policy is None and not active_policy:
+            self._updating_exposure_controls = True
+            try:
+                self._set_combo_data(self._control_combo, auto_enabled)
+                self._set_combo_data(
+                    self._method_combo,
+                    "camera" if engine == "camera" else "software",
+                )
+            finally:
+                self._updating_exposure_controls = False
+        busy = (
+            bool(self._policy_state.get("busy", False))
+            or bool(self._policy_state.get("session_active", False))
+            or self._is_applying()
+        )
+        self._exposure_group.setEnabled(not busy)
+        self._sync_timing_control()
+        self._set_exposure_time_edit_enabled()
+
+    def _request_exposure_policy_update(self, _index: int) -> None:
+        if (
+            self._updating_exposure_controls
+            or self._exposure_policy_source is None
+            or not self._exposure_group.isEnabled()
+        ):
+            return
+        engine = str(self._method_combo.currentData() or "software")
+        auto_enabled = bool(self._control_combo.currentData())
+        if (
+            engine == "software"
+            and str(self._timing_combo.currentData() or "Timed") != "Timed"
+        ):
+            node = self._exposure_mode_node
+            if not (node and node.get("available") and node.get("writable")):
+                self._set_status("Software exposure requires timed exposure.")
+                self._apply_exposure_policy_state(self._exposure_policy_snapshot())
+                return
+            self._use_timed_exposure_mode()
+        current = (
+            bool(self._policy_state.get("auto_enabled", True)),
+            str(self._policy_state.get("engine") or "software"),
+        )
+        selected = (auto_enabled, engine)
+        self._pending_policy = None if selected == current else selected
+        self._set_pending_status()
+        self._sync_timing_control()
+        self._set_exposure_time_edit_enabled()
+
+    def _request_exposure_once(self) -> None:
+        if (
+            self._exposure_policy_source is None
+            or not self._exposure_group.isEnabled()
+            or self._is_applying()
+        ):
+            return
+        selected_engine = self._selected_exposure_engine()
+        actual_auto = bool(self._policy_state.get("auto_enabled", True))
+        actual_engine = str(self._policy_state.get("engine") or "software")
+        actions: list[tuple[object, ...]] = []
+        mode_key = ("camera", "ExposureMode")
+        if (
+            selected_engine == "software"
+            and self._pending_settings.get(mode_key) == "Timed"
+        ):
+            actions.append(("setting", *mode_key, "Timed"))
+        method_changed = selected_engine != actual_engine
+        if method_changed:
+            actions.append(("policy", actual_auto, selected_engine))
+        if not actions:
+            self._set_status("Adjusting exposure.")
+            self._exposure_policy_source.request_once()
+            return
+        self._apply_actions = actions
+        self._adjust_exposure_apply = True
+        self._adjust_once_after_apply = not (actual_auto and method_changed)
+        self._page.setEnabled(False)
+        self._exposure_group.setEnabled(False)
+        self._set_status("Applying exposure method.")
+        self._run_next_apply_action()
+
+    def _update_exposure_mode_node(self, nodes: list[object]) -> None:
+        if self._exposure_policy_source is None:
+            return
+        node = next(
+            (
+                item
+                for item in nodes
+                if isinstance(item, dict)
+                and str(item.get("name") or "") == "ExposureMode"
+            ),
+            None,
+        )
+        if node is None:
+            return
+        self._exposure_mode_node = dict(node)
+        entries = [str(entry) for entry in node.get("entries") or []]
+        value = str(node.get("value") or "")
+        if value and value not in entries:
+            entries.insert(0, value)
+        self._updating_exposure_controls = True
+        try:
+            self._timing_combo.clear()
+            for entry in entries:
+                self._timing_combo.addItem(
+                    "Trigger width" if entry == "TriggerWidth" else entry,
+                    entry,
+                )
+            if not entries:
+                self._timing_combo.addItem("Timed", "Timed")
+            self._set_combo_data(self._timing_combo, value or "Timed")
+        finally:
+            self._updating_exposure_controls = False
+        self._sync_timing_control()
+
+    def _queue_exposure_mode(self, _index: int) -> None:
+        if self._updating_exposure_controls or not self._timing_combo.isEnabled():
+            return
+        value = str(self._timing_combo.currentData() or "Timed")
+        if value == "TriggerWidth" and self._selected_exposure_engine() != "camera":
+            self._use_timed_exposure_mode()
+            return
+        self._queue_setting("camera", "ExposureMode", value)
+
+    def _sync_timing_control(self) -> None:
+        node = self._exposure_mode_node
+        camera_method = self._selected_exposure_engine() == "camera"
+        writable = bool(node and node.get("available") and node.get("writable"))
+        has_choices = self._timing_combo.count() > 1
+        if not camera_method:
+            self._use_timed_exposure_mode()
+        self._timing_combo.setEnabled(
+            self._exposure_group.isEnabled()
+            and camera_method
+            and writable
+            and has_choices
+        )
+
+    def _use_timed_exposure_mode(self) -> None:
+        current = str(self._timing_combo.currentData() or "Timed")
+        if current == "Timed":
+            return
+        self._updating_exposure_controls = True
+        try:
+            self._set_combo_data(self._timing_combo, "Timed")
+        finally:
+            self._updating_exposure_controls = False
+        node = self._exposure_mode_node
+        if node and node.get("available") and node.get("writable"):
+            self._queue_setting("camera", "ExposureMode", "Timed")
+
+    def _selected_exposure_engine(self) -> str:
+        return str(self._method_combo.currentData() or "software")
+
+    def _selected_exposure_policy(self) -> tuple[bool, str]:
+        return bool(self._control_combo.currentData()), self._selected_exposure_engine()
+
+    @staticmethod
+    def _set_combo_data(combo: QComboBox, value: object) -> None:
+        index = combo.findData(value)
+        if index >= 0:
+            combo.setCurrentIndex(index)
+
+    def _update_exposure_time_node(self, nodes: list[object]) -> None:
+        if self._exposure_policy_source is None:
+            return
+        node = next(
+            (
+                item
+                for item in nodes
+                if isinstance(item, dict)
+                and str(item.get("name") or "") == "ExposureTime"
+            ),
+            None,
+        )
+        if node is None:
+            return
+        self._exposure_time_node = dict(node)
+        if not self._exposure_time_edit.hasFocus():
+            value = node.get("value")
+            self._exposure_time_edit.setText("" if value is None else str(value))
+        minimum = self._exposure_time_value(node.get("minimum"))
+        maximum = self._exposure_time_value(node.get("maximum"))
+        validator = QDoubleValidator(self._exposure_time_edit)
+        if minimum is not None:
+            validator.setBottom(minimum)
+        if maximum is not None:
+            validator.setTop(maximum)
+        validator.setNotation(QDoubleValidator.StandardNotation)
+        self._exposure_time_edit.setValidator(validator)
+        self._exposure_time_unit.setText(str(node.get("unit") or ""))
+        self._set_exposure_time_edit_enabled()
+
+    def _set_exposure_time_edit_enabled(self) -> None:
+        if self._exposure_policy_source is None:
+            return
+        node = self._exposure_time_node
+        manual = not bool(self._control_combo.currentData())
+        busy = bool(self._policy_state.get("busy", False)) or bool(
+            self._policy_state.get("session_active", False)
+        )
+        writable = bool(node and node.get("available") and node.get("writable"))
+        self._exposure_time_edit.setEnabled(
+            manual and not busy and not self._is_applying() and writable
+        )
+
+    def _queue_exposure_time(self) -> None:
+        if self._exposure_policy_source is None or not self._exposure_time_edit.isEnabled():
+            return
+        if not self._exposure_time_edit.hasAcceptableInput():
+            return
+        value = self._exposure_time_value(self._exposure_time_edit.text())
+        if value is None:
+            return
+        self._queue_setting("camera", "ExposureTime", value)
+
+    @staticmethod
+    def _exposure_time_value(value: object) -> float | None:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
 
     def _set_status(self, message: str) -> None:
         self._status_text = message

@@ -25,6 +25,7 @@ class MainWindowShutdownOwner(Protocol):
     surface_map_window: Any
     microscope_scan_dialog: Any
     _api_server: Any
+    _api_bridge: Any
     _design_position_timer: Any
     _manual_jog_timer: Any
     _stage_motion_blink_timer: Any
@@ -33,12 +34,23 @@ class MainWindowShutdownOwner(Protocol):
     _route_measurement_thread: Any
     _microscope_scan_thread: Any
     _microscope_scan_stop_requested: Any
+    _manual_alignment_capture_context: Any
+    _manual_alignment_pick_slot: Any
+    _flat_field_calibration_thread: Any
+    _lens_distortion_thread: Any
+    _optical_calibration_outer_close_thread: Any
+    _live_camera_frame_processor: Any
+    _exposure_policy_adapter: Any
+    _exposure_policy_controller: Any
     _route_measurement_dialog: Any
 
     def _stop_telegram_bot_service(self) -> None: ...
     def _save_pending_linear_feedrate_default(self) -> None: ...
     def _stop_design_markup_store(self) -> None: ...
     def _route_runtime_presenter(self) -> Any: ...
+    def _show_status(self, message: str, timeout: int) -> None: ...
+    def _cancel_optical_calibration_wizard(self) -> None: ...
+    def _schedule_optical_calibration_outer_close(self) -> None: ...
 
 
 def close_event(owner: MainWindowShutdownOwner, event: Any) -> None:
@@ -52,9 +64,19 @@ def close_event(owner: MainWindowShutdownOwner, event: Any) -> None:
         lcr_was_connected=lcr_was_connected,
     )
     _stop_services_and_timers(owner)
-    _stop_route_worker(owner)
-    _stop_microscope_scan(owner)
-    _close_serial_and_panels(owner)
+    try:
+        _stop_api_stage_command_workers(owner)
+        _drain_and_close_api_bridge(owner)
+        _stop_route_worker(owner)
+        _stop_microscope_scan(owner)
+        _stop_manual_alignment_capture(owner)
+        _stop_optical_calibration(owner)
+        _close_serial_and_panels(owner)
+    except Exception as exc:
+        logger.exception("Camera shutdown blocked before worker teardown")
+        owner._show_status(f"Camera shutdown blocked: {exc}", 10000)
+        event.ignore()
+        return
     _shutdown_controllers(owner)
     close_auxiliary_windows(owner, force_route_dialog=True)
     if owner.serial_connection_panel:
@@ -75,6 +97,9 @@ def _persist_shutdown_state(
 
 
 def _stop_services_and_timers(owner: MainWindowShutdownOwner) -> None:
+    api_bridge = getattr(owner, "_api_bridge", None)
+    if api_bridge is not None:
+        api_bridge.stop_accepting()
     if owner._api_server is not None:
         owner._api_server.stop()
     owner._stop_telegram_bot_service()
@@ -107,8 +132,67 @@ def _stop_microscope_scan(owner: MainWindowShutdownOwner) -> None:
         owner._microscope_scan_thread.join(timeout=2.0)
 
 
+def _stop_api_stage_command_workers(owner: MainWindowShutdownOwner) -> None:
+    wait = getattr(owner, "_wait_for_api_stage_command_workers", None)
+    if callable(wait) and not wait(timeout_s=2.0):
+        raise RuntimeError("API stage command is still stopping.")
+
+
+def _stop_manual_alignment_capture(owner: MainWindowShutdownOwner) -> None:
+    context = getattr(owner, "_manual_alignment_capture_context", None)
+    if context is None:
+        return
+    context.cancelled.set()
+    owner.stage_controller.cancel_clicked_point_resolution(
+        context.request_id,
+        "Alignment point capture cancelled for shutdown."
+    )
+    if not owner.stage_controller.wait_for_active_task(timeout_s=2.0):
+        raise RuntimeError("Alignment point capture is still stopping.")
+    owner._manual_alignment_capture_context = None
+    owner._manual_alignment_pick_slot = None
+
+
+def _drain_and_close_api_bridge(owner: MainWindowShutdownOwner) -> None:
+    bridge = getattr(owner, "_api_bridge", None)
+    if bridge is None:
+        return
+    if not bridge.wait_for_inflight(timeout_s=2.0):
+        raise RuntimeError("API request completion is still pending.")
+    if not bridge.close():
+        raise RuntimeError("API request completion could not be published.")
+
+
+def _stop_optical_calibration(owner: MainWindowShutdownOwner) -> None:
+    cancel = getattr(owner, "_cancel_optical_calibration_wizard", None)
+    if cancel is None:
+        return
+    cancel()
+    for attribute in (
+        "_flat_field_calibration_thread",
+        "_lens_distortion_thread",
+    ):
+        thread = getattr(owner, attribute, None)
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=2.0)
+        if thread is not None and thread.is_alive():
+            raise RuntimeError("Optical calibration is still stopping.")
+
+    owner._schedule_optical_calibration_outer_close()
+    close_thread = getattr(owner, "_optical_calibration_outer_close_thread", None)
+    if close_thread is not None and close_thread.is_alive():
+        close_thread.join(timeout=2.0)
+    if close_thread is not None and close_thread.is_alive():
+        raise RuntimeError("Optical calibration exposure restore is still running.")
+    if getattr(owner, "_optical_calibration_outer_lease", None) is not None:
+        raise RuntimeError("Optical calibration exposure session is still active.")
+
+
 def _close_serial_and_panels(owner: MainWindowShutdownOwner) -> None:
     stop_jog_before_serial_close(owner, "application shutdown")
+    owner._exposure_policy_adapter.shutdown(timeout_s=2.0)
+    owner._exposure_policy_controller.shutdown(timeout_s=2.0)
+    owner._live_camera_frame_processor.shutdown(timeout_s=2.0)
     owner.grabber.stop()
     owner.thread.quit()
     owner.thread.wait()

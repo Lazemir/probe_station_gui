@@ -12,13 +12,13 @@ import re
 import threading
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from importlib import resources
 from pathlib import Path
 import sys
 from types import SimpleNamespace
-from typing import Any, Sequence, TYPE_CHECKING
+from typing import Any, Mapping, Sequence, TYPE_CHECKING
 
 _STARTUP_T0 = time.perf_counter()
 _STARTUP_LAST_ELAPSED_MS = 0.0
@@ -135,12 +135,35 @@ from probe_station_gui.design.selection_model import (
 )
 from probe_station_gui.design.session import AlignmentPreparation, DesignSession
 from probe_station_gui.shared.diagnostics import configure_crash_diagnostics
-from probe_station_gui.api.request_bridge import ApiRequestBridge
+from probe_station_gui.api.request_bridge import ApiRequestBridge, DeferredApiResponse
 from probe_station_gui.api.server import ProbeStationApiServer
 from probe_station_gui.api.keys import API_KEY_FILENAME, ApiKeyStore
+from probe_station_gui.camera.api_control import (
+    CameraApiBroker,
+    connect_camera_api_results,
+    encode_camera_frame_png,
+)
+from probe_station_gui.camera.auto_exposure import (
+    AutoExposureFrame,
+    CameraAutoExposureController,
+)
+from probe_station_gui.camera.exposure_policy import (
+    ExposurePolicyBusyError,
+    ExposurePolicyController,
+    OpticalSessionManager,
+)
+from probe_station_gui.camera.exposure_policy_qt import ExposurePolicyQtAdapter
+from probe_station_gui.camera.live_correction import (
+    LatestFrameProcessor,
+    LiveCameraCorrectionPipeline,
+    LiveCameraCorrectionRequest,
+    LiveCameraCorrectionResult,
+)
+from probe_station_gui.camera.flat_field_calibration import FlatFieldCalibrationStore
 from probe_station_gui.api.command_dispatch import (
     ApiBridgeRequestHandlers,
     ApiCommandDispatchHandlers,
+    GUI_STAGE_WORKER_ACTIONS,
     api_command_action_payload as command_dispatch_action_payload,
     dispatch_api_command_request as command_dispatch_request,
     handle_api_request as command_dispatch_handle_api_request,
@@ -183,6 +206,7 @@ from probe_station_gui.stage import move_lifecycle as stage_move_lifecycle
 from probe_station_gui.stage import position_update as stage_position_update
 from probe_station_gui.shared.wheel_guard import GuardedComboBox as QComboBox
 from probe_station_gui.stage.controller import StageControllerError
+from probe_station_gui.stage.types import StageTaskToken
 from probe_station_gui.views import (
     main_window_stage_position_panel as stage_position_panel_adapter,
 )
@@ -328,10 +352,10 @@ from probe_station_gui.camera.imaging import (
 from probe_station_gui.camera.distortion import (
     DistortionCorrection,
     GridCalibrationFrame,
+    StageGeometryCorrection,
     apply_distortion_correction,
     correction_from_payload,
-    detect_bright_feature_bounds,
-    fit_stage_geometry_from_grid_frames,
+    fit_stage_geometry_from_observations,
 )
 from probe_station_gui.camera import microscope_scan
 from probe_station_gui.settings.manager import (
@@ -360,6 +384,10 @@ from probe_station_gui.views.contact_oscillation_window import (
 )
 from probe_station_gui.dialogs.click_calibration_dialog import ClickCalibrationDialog
 from probe_station_gui.dialogs.lens_distortion_dialog import LensDistortionDialog
+from probe_station_gui.dialogs.optical_calibration_wizard import (
+    OpticalCalibrationMode,
+    OpticalCalibrationWizard,
+)
 from probe_station_gui.views.dock_widgets import CollapsibleDockWidget
 from probe_station_gui.views.oscillation_panel import OscillationPanel
 from probe_station_gui.views.resistance_monitor_panel import ResistanceMonitorPanel
@@ -397,12 +425,141 @@ class _MicroscopeScanCapturedFrame:
 
 
 @dataclass(frozen=True)
+class _MicroscopeScanLaunchSnapshot:
+    objective_name: str
+    magnification: float | None
+    scan_name: str
+    document_identity: str
+    scale: object
+    registration_matrix: (
+        tuple[tuple[float, float], tuple[float, float]] | None
+    )
+    registration_offset: tuple[float, float] | None
+    objective_xy_offset: tuple[float, float]
+
+    def design_to_raw_stage(
+        self,
+        design_xy: tuple[float, float],
+    ) -> tuple[float, float]:
+        if self.registration_matrix is None or self.registration_offset is None:
+            raise RuntimeError("Design registration is unavailable.")
+        x_value = float(design_xy[0])
+        y_value = float(design_xy[1])
+        camera_x = (
+            self.registration_matrix[0][0] * x_value
+            + self.registration_matrix[0][1] * y_value
+            + self.registration_offset[0]
+        )
+        camera_y = (
+            self.registration_matrix[1][0] * x_value
+            + self.registration_matrix[1][1] * y_value
+            + self.registration_offset[1]
+        )
+        return (
+            camera_x + self.objective_xy_offset[0],
+            camera_y + self.objective_xy_offset[1],
+        )
+
+    def raw_stage_to_design(
+        self,
+        raw_stage_xy: tuple[float, float],
+    ) -> tuple[float, float] | None:
+        if self.registration_matrix is None or self.registration_offset is None:
+            return None
+        camera_x = float(raw_stage_xy[0]) - self.objective_xy_offset[0]
+        camera_y = float(raw_stage_xy[1]) - self.objective_xy_offset[1]
+        shifted_x = camera_x - self.registration_offset[0]
+        shifted_y = camera_y - self.registration_offset[1]
+        (a, b), (c, d) = self.registration_matrix
+        determinant = a * d - b * c
+        if abs(determinant) < 1e-18:
+            raise RuntimeError("Design registration is singular.")
+        return (
+            (d * shifted_x - b * shifted_y) / determinant,
+            (-c * shifted_x + a * shifted_y) / determinant,
+        )
+
+    def metadata(self) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "objective_name": self.objective_name,
+            "magnification": self.magnification,
+            "scan_name": self.scan_name,
+            "document_identity": self.document_identity,
+            "objective_xy_offset_mm": list(self.objective_xy_offset),
+        }
+        if self.registration_matrix is not None:
+            payload["registration_matrix"] = [
+                list(row) for row in self.registration_matrix
+            ]
+        if self.registration_offset is not None:
+            payload["registration_offset"] = list(self.registration_offset)
+        return payload
+
+
+@dataclass(frozen=True)
+class _MicroscopeDesignScanRequest:
+    bounds: tuple[float, float, float, float]
+    overlap_fraction: float
+
+
+@dataclass(frozen=True)
+class _MicroscopeAreaScanRequest:
+    row_count: int
+    column_count: int
+    overlap_fraction: float
+    scan_pattern: str
+    structure_size_mm: float | None = None
+    placement_fraction: float | None = None
+
+
+@dataclass(frozen=True)
 class _PendingDesignMarkupLoad:
     generation: int
     session: DesignSession
     plan: design_navigation.DesignLoadResultPlan
     show_window: bool
     previous_markup: MarkupDocument | None
+
+
+@dataclass(frozen=True)
+class _OpticalCalibrationRunContext:
+    """Identity captured before an optical-calibration worker starts."""
+
+    operation_id: str
+    wizard_run_id: int | None
+    objective_name: str
+    parent_session_token: str | None = None
+    full_wizard: bool = False
+
+
+@dataclass(frozen=True)
+class _ManualAlignmentCaptureContext:
+    request_id: str
+    slot: int
+    cancelled: threading.Event
+
+
+@dataclass
+class _ApiStageCommandReservation:
+    operation_id: str
+    action: str
+    completion: DeferredApiResponse
+    thread: threading.Thread | None = None
+    state: str = "reserved"
+
+
+@dataclass(frozen=True)
+class _LensDistortionCalibrationOutput:
+    payload: dict[str, object]
+    before_preview: QImage
+    after_preview: QImage
+    session_restore_error: str = ""
+
+
+def _load_geometry_mask_backend() -> object:
+    from probe_station_gui.camera import geometry_mask
+
+    return geometry_mask
 
 
 def _application_icon() -> QIcon:
@@ -461,7 +618,10 @@ class Main(QMainWindow):
     telegram_bot_request_received: Signal = Signal(object)
     microscope_scan_status: Signal = Signal(str)
     microscope_scan_finished: Signal = Signal(bool, str)
-    lens_distortion_calibration_finished: Signal = Signal(bool, str, object)
+    flat_field_calibration_progress: Signal = Signal(object, str)
+    flat_field_calibration_finished: Signal = Signal(object, bool, str, object)
+    lens_distortion_calibration_progress: Signal = Signal(object, str)
+    lens_distortion_calibration_finished: Signal = Signal(object, bool, str, object)
     contact_seek_status: Signal = Signal(str)
     contact_seek_calibration_found: Signal = Signal(float, str)
     contact_seek_finished: Signal = Signal(bool, str)
@@ -509,6 +669,7 @@ class Main(QMainWindow):
     STAGE_AXIS_EDITED_FOREGROUND = "#1f1233"
     B_POSITION_CHANGE_TOLERANCE_DEG = 1e-3
     CAMERA_UI_FRAME_GAP_WARNING_S = 0.25
+    EXPOSURE_POLICY_START_RETRY_BACKOFF_S = 1.0
     CLICK_TO_MOVE_PENDING_RETRY_MS = 150
     CLICK_TARGET_ANIMATION_PADDING_S = 0.03
     MICROSCOPE_AREA_SCAN_DEFAULT_ROWS = 3
@@ -538,17 +699,19 @@ class Main(QMainWindow):
     SAMPLE_LOAD_Y_MM = sample_handling.SAMPLE_LOAD_Y_MM
     SAMPLE_UNLOAD_X_MM = sample_handling.SAMPLE_UNLOAD_X_MM
     SAMPLE_UNLOAD_Y_MM = sample_handling.SAMPLE_UNLOAD_Y_MM
-    LENS_DISTORTION_GRID_STEP_MM = 0.05
-    LENS_DISTORTION_GRID_CELL_COUNT = 4
-    LENS_DISTORTION_CAPTURE_GRID_SIZE = 5
+    LENS_DISTORTION_CAPTURE_GRID_SIZE = 3
     LENS_DISTORTION_FOV_FRACTION = 0.35
-    LENS_DISTORTION_EDGE_MARGIN_FRACTION = 0.85
-    LENS_DISTORTION_FEATURE_EDGE_MARGIN_FRACTION = 0.02
-    LENS_DISTORTION_MIN_CAPTURE_SHIFT_PX = 24.0
+    LENS_DISTORTION_CLUSTER_TOLERANCE_PX = 12.0
+    LENS_DISTORTION_MIN_FEATURE_COUNT = 4
+    LENS_DISTORTION_MIN_OBSERVATION_COUNT = 12
     LENS_DISTORTION_MAX_RESIDUAL_MEAN_PX = 3.0
     LENS_DISTORTION_MAX_RESIDUAL_MAX_PX = 12.0
     LENS_DISTORTION_CAPTURE_SETTLE_S = 0.12
     LENS_DISTORTION_CAMERA_TIMEOUT_S = 2.0
+    FLAT_FIELD_CAPTURE_GRID_SIZE = 3
+    FLAT_FIELD_CAPTURE_OVERLAP_FRACTION = 0.8
+    FLAT_FIELD_CAPTURE_SETTLE_S = 0.12
+    FLAT_FIELD_CAMERA_TIMEOUT_S = 2.0
 
     def __init__(self) -> None:
         _startup_trace("Main.__init__ entered")
@@ -579,6 +742,11 @@ class Main(QMainWindow):
         )
         self._api_bridge: ApiRequestBridge | None = None
         self._api_server: ProbeStationApiServer | None = None
+        self._api_stage_command_worker_lock = threading.Lock()
+        self._api_stage_command_worker_changed = threading.Condition(
+            self._api_stage_command_worker_lock
+        )
+        self._api_stage_command_reservation: _ApiStageCommandReservation | None = None
         self._api_settings_signature: tuple[bool, str, int] | None = None
         self._telegram_bot_service: TelegramBotCommandService | None = None
         self._telegram_bot_signature: tuple[str, str] | None = None
@@ -626,8 +794,10 @@ class Main(QMainWindow):
         self._microscope_scan_action: QAction | None = None
         self._design_layout_window_action: QAction | None = None
         self._click_calibration_action: QAction | None = None
+        self._optical_calibration_action: QAction | None = None
         self._lens_distortion_calibration_action: QAction | None = None
         self._click_calibration_dialog: ClickCalibrationDialog | None = None
+        self._optical_calibration_wizard: OpticalCalibrationWizard | None = None
         self._lens_distortion_dialog: LensDistortionDialog | None = None
         self._sample_load_action: QAction | None = None
         self._sample_unload_action: QAction | None = None
@@ -641,6 +811,9 @@ class Main(QMainWindow):
         self._pending_quick_alignment_rotation = False
         self._manual_alignment_pick_slot: int | None = None
         self._manual_alignment_points: list[tuple[float, float] | None] = [None, None]
+        self._manual_alignment_capture_context: (
+            _ManualAlignmentCaptureContext | None
+        ) = None
         self._manual_jog_prediction = ManualJogPredictionState(
             ManualJogPredictionConfig(
                 axis_names=self.STAGE_AXIS_NAMES,
@@ -681,12 +854,33 @@ class Main(QMainWindow):
         self._design_snap_enabled = True
         self._last_reported_b_position: float | None = None
         self._last_camera_frame_ui_timestamp: float | None = None
+        self._suppress_next_camera_ui_gap = False
         self._latest_camera_frame: QImage | None = None
         self._latest_camera_frame_counter = 0
         self._latest_raw_camera_frame: QImage | None = None
         self._latest_raw_camera_frame_counter = 0
+        self._exposure_policy_start_in_flight = False
+        self._exposure_policy_started = False
+        self._exposure_policy_start_retry_after = 0.0
         self._latest_camera_frame_condition = threading.Condition()
         self._latest_camera_frame_for_notifications: QImage | None = None
+        self._live_camera_correction_pipeline = LiveCameraCorrectionPipeline(
+            self.settings_manager.config_dir()
+        )
+        self._flat_field_calibration_store = FlatFieldCalibrationStore(
+            self.settings_manager.config_dir()
+        )
+        self._live_camera_frame_processor = LatestFrameProcessor(
+            self._live_camera_correction_pipeline.process
+        )
+        self._live_camera_frame_processor.frame_ready.connect(
+            self._on_live_camera_frame_processed,
+            Qt.ConnectionType.QueuedConnection,
+        )
+        self._live_camera_frame_processor.error.connect(
+            self._on_live_camera_frame_processing_error,
+            Qt.ConnectionType.QueuedConnection,
+        )
         self._distortion_correction_cache_signature: tuple[str, str] | None = None
         self._distortion_correction_cache_model: DistortionCorrection | None = None
         self._stage_unhomed_display_origins: dict[str, float] = {}
@@ -735,7 +929,17 @@ class Main(QMainWindow):
         self._api_route_offset_xy: tuple[float, float] = (0.0, 0.0)
         self._microscope_scan_thread: threading.Thread | None = None
         self._microscope_scan_stop_requested = threading.Event()
+        self._flat_field_calibration_thread: threading.Thread | None = None
+        self._flat_field_calibration_context: _OpticalCalibrationRunContext | None = None
         self._lens_distortion_thread: threading.Thread | None = None
+        self._lens_distortion_context: _OpticalCalibrationRunContext | None = None
+        self._optical_calibration_state_lock = threading.RLock()
+        self._optical_calibration_cancel_event_state = threading.Event()
+        self._optical_calibration_outer_lease: object | None = None
+        self._optical_calibration_outer_token: str | None = None
+        self._optical_calibration_outer_close_requested = False
+        self._optical_calibration_outer_close_in_progress = False
+        self._optical_calibration_outer_close_thread: threading.Thread | None = None
         self._sample_handling_thread: threading.Thread | None = None
         self._last_sample_focus_z_by_objective: dict[str, float] = {}
         self._route_telegram = RouteTelegramPhotoState()
@@ -763,6 +967,18 @@ class Main(QMainWindow):
             Qt.ConnectionType.QueuedConnection,
         )
         self.grabber = Grabber()
+        self._camera_api_broker = CameraApiBroker(
+            snapshot_submit=self._submit_camera_settings_snapshot,
+            batch_submit=self._submit_camera_settings_batch,
+            frame_counter=self._latest_raw_camera_counter,
+        )
+        self._camera_auto_exposure_controller = CameraAutoExposureController(
+            settings_read=self._camera_api_broker.read_settings,
+            settings_write=self._write_camera_auto_exposure_settings,
+            frame_read=self._read_camera_auto_exposure_frame,
+        )
+        self._compose_camera_exposure_policy()
+        connect_camera_api_results(self.grabber, self._camera_api_broker)
         self.thread = QThread()
         self.grabber.moveToThread(self.thread)
         self.thread.started.connect(self.grabber.start)
@@ -776,6 +992,9 @@ class Main(QMainWindow):
             lambda: toggle_design_layout_window(self, True)
         )
         self.grabber.frame_ready.connect(self._on_camera_frame)
+        self.grabber.frame_gap_suppressed.connect(
+            self._on_camera_frame_gap_suppressed
+        )
         self.grabber.error.connect(self.on_error)
         self.design_layout_module_ready.connect(self._on_design_layout_module_ready)
         self.design_document_loaded.connect(self._on_design_document_loaded)
@@ -796,6 +1015,15 @@ class Main(QMainWindow):
         )
         self.microscope_scan_status.connect(self._on_microscope_scan_status)
         self.microscope_scan_finished.connect(self._on_microscope_scan_finished)
+        self.flat_field_calibration_progress.connect(
+            self._on_flat_field_calibration_progress
+        )
+        self.flat_field_calibration_finished.connect(
+            self._on_flat_field_calibration_finished
+        )
+        self.lens_distortion_calibration_progress.connect(
+            self._on_lens_distortion_calibration_progress
+        )
         self.lens_distortion_calibration_finished.connect(
             self._on_lens_distortion_calibration_finished
         )
@@ -835,7 +1063,7 @@ class Main(QMainWindow):
             )
         )
 
-        self.stage_controller = StageController()
+        self.stage_controller = self._create_stage_controller()
         self.stage_controller.status_message.connect(self._show_status)
         self.stage_controller.movement_finished.connect(
             lambda success, message: stage_move_lifecycle.on_move_finished(
@@ -854,6 +1082,10 @@ class Main(QMainWindow):
         )
         self.stage_controller.objective_mismatch_detected.connect(
             self._on_objective_mismatch_detected
+        )
+        self.stage_controller.clicked_point_resolved.connect(
+            self._on_manual_alignment_point_resolved,
+            Qt.ConnectionType.QueuedConnection,
         )
         self.stage_controller.autofocus_finished.connect(self.on_autofocus_finished)
         self.stage_controller.stage_position_changed.connect(
@@ -944,6 +1176,52 @@ class Main(QMainWindow):
         if message:
             self._show_status(message, 5000)
 
+    def _compose_camera_exposure_policy(self) -> None:
+        self._exposure_policy_controller = ExposurePolicyController(
+            initial_policy=self.settings_manager.exposure_policy_configuration(),
+            software_once=self._camera_auto_exposure_controller.run,
+            settings_read=self._camera_api_broker.read_settings,
+            settings_write=self._camera_api_broker.write_settings_trusted,
+            frame_read=self._read_camera_auto_exposure_frame,
+            persist=self.settings_manager.set_exposure_policy_configuration,
+        )
+        self._optical_session_manager = OpticalSessionManager(
+            self._exposure_policy_controller
+        )
+        self._exposure_policy_adapter = ExposurePolicyQtAdapter(
+            self._exposure_policy_controller,
+            settings_write=self._camera_api_broker.write_settings_trusted,
+        )
+        self._exposure_policy_adapter.command_finished.connect(
+            self._on_exposure_policy_command_finished
+        )
+        self._camera_api_broker.set_manual_exposure_write(
+            lambda command: self._exposure_policy_controller.run_manual_exposure_write(
+                command
+            )
+        )
+
+    def _create_stage_controller(self) -> StageController:
+        controller = StageController()
+        controller.set_optical_session_manager(self._optical_session_manager)
+        return controller
+
+    def _on_exposure_policy_command_finished(self, result: object) -> None:
+        if not isinstance(result, Mapping) or result.get("operation") != "start":
+            return
+        self._exposure_policy_start_in_flight = False
+        if bool(result.get("accepted", False)):
+            self._exposure_policy_started = True
+            self._exposure_policy_start_retry_after = 0.0
+            return
+        self._exposure_policy_started = False
+        self._exposure_policy_start_retry_after = (
+            time.monotonic() + self.EXPOSURE_POLICY_START_RETRY_BACKOFF_S
+        )
+        message = str(result.get("message") or "Camera exposure setup failed.")
+        logger.warning("Camera exposure policy startup failed: %s", message)
+        self._show_status(f"Camera exposure setup failed: {message}", 8000)
+
     def _configure_api_server_from_settings(self, *, start_if_enabled: bool) -> None:
         api_settings = self.settings_manager.api_configuration()
         signature = (
@@ -966,6 +1244,16 @@ class Main(QMainWindow):
             status_callback=self._submit_api_status_request,
             command_callback=self._submit_api_command_request_from_api_thread,
             auth_callback=self._authorize_api_request,
+            camera_settings_read_callback=self._camera_api_broker.read_settings,
+            camera_settings_write_callback=self._camera_api_broker.write_settings,
+            camera_frame_callback=self._api_camera_frame,
+            camera_exposure_policy_snapshot_callback=(
+                self._exposure_policy_controller.snapshot
+            ),
+            camera_exposure_policy_set_callback=(
+                self._exposure_policy_controller.set_policy
+            ),
+            camera_exposure_once_callback=self._exposure_policy_controller.run_once,
             host=api_settings.host,
             port=api_settings.port,
         )
@@ -978,6 +1266,95 @@ class Main(QMainWindow):
         permission: str,
     ) -> dict[str, Any]:
         return self._api_key_store.authorize(api_key, permission)
+
+    def _submit_camera_settings_snapshot(
+        self,
+        request_id: str,
+        names: list[str],
+    ) -> None:
+        self.grabber.request_camera_settings_snapshot(
+            "camera",
+            names,
+            request_id=request_id,
+        )
+
+    def _submit_camera_settings_batch(
+        self,
+        request_id: str,
+        settings: list[tuple[str, object]],
+    ) -> None:
+        self.grabber.request_camera_settings_batch(
+            settings,
+            request_id=request_id,
+            map_key="camera",
+        )
+
+    def _write_camera_auto_exposure_settings(
+        self,
+        settings: list[tuple[str, object]],
+    ) -> dict[str, Any]:
+        return self._camera_api_broker.write_settings_trusted(settings)
+
+    def _read_camera_auto_exposure_frame(
+        self,
+        after_counter: int,
+        timeout_s: float,
+    ) -> AutoExposureFrame:
+        import numpy as np
+
+        frame, counter = self._wait_for_raw_camera_frame(
+            after_counter=int(after_counter),
+            timeout_s=float(timeout_s),
+        )
+        if frame is None:
+            raise RuntimeError("Fresh raw camera frame is unavailable.")
+        image = frame.convertToFormat(QImage.Format_RGB888)
+        width = int(image.width())
+        height = int(image.height())
+        stride = int(image.bytesPerLine())
+        rows = np.frombuffer(
+            image.bits(),
+            dtype=np.uint8,
+            count=height * stride,
+        ).reshape((height, stride))
+        rgb = rows[:, : width * 3].reshape((height, width, 3)).copy(order="C")
+        return AutoExposureFrame(rgb=rgb, counter=int(counter))
+
+    def _api_camera_frame(
+        self,
+        space: str,
+        after_counter: int | None,
+        timeout_s: float,
+    ) -> dict[str, Any]:
+        if space == "raw":
+            frame, counter = self._wait_for_raw_camera_frame(
+                after_counter=after_counter,
+                timeout_s=timeout_s,
+            )
+        elif space == "corrected":
+            frame, counter = self._wait_for_camera_frame(
+                after_counter=after_counter,
+                timeout_s=timeout_s,
+            )
+        else:
+            return {
+                "accepted": False,
+                "status_code": 400,
+                "message": f"Unsupported camera frame space: {space!r}.",
+            }
+        if frame is None:
+            return {
+                "accepted": False,
+                "status_code": 504 if after_counter is not None else 503,
+                "message": (
+                    "No newer camera frame arrived before timeout."
+                    if after_counter is not None
+                    else "Camera frame is not available."
+                ),
+                "counter": int(counter),
+                "space": space,
+            }
+        return encode_camera_frame_png(frame, counter=counter, space=space)
 
     def _configure_telegram_bot_from_settings(self) -> None:
         telegram_settings = self.settings_manager.telegram_configuration()
@@ -1211,11 +1588,137 @@ class Main(QMainWindow):
             }
         return self._api_bridge.submit({"action": "status"})
 
-    def _submit_api_command_request(self, command_request: dict[str, Any]) -> dict[str, Any]:
+    def _submit_api_command_request(
+        self,
+        command_request: dict[str, Any],
+    ) -> dict[str, Any] | DeferredApiResponse:
+        action, payload = self._api_command_action_payload(command_request)
+        if action in GUI_STAGE_WORKER_ACTIONS:
+            route_guard = self._probe_route_api_window_guard(action, payload)
+            if route_guard is not None:
+                return route_guard
+            return self._start_deferred_api_stage_command(command_request, action)
         return self._dispatch_api_command_request(
             command_request,
             apply_route_control_guard=True,
         )
+
+    def _api_stage_command_worker_state(
+        self,
+    ) -> tuple[threading.Lock, threading.Condition]:
+        lock = getattr(self, "_api_stage_command_worker_lock", None)
+        changed = getattr(self, "_api_stage_command_worker_changed", None)
+        if lock is None or changed is None:
+            lock = threading.Lock()
+            changed = threading.Condition(lock)
+            self._api_stage_command_worker_lock = lock
+            self._api_stage_command_worker_changed = changed
+        if not hasattr(self, "_api_stage_command_reservation"):
+            self._api_stage_command_reservation = None
+        return lock, changed
+
+    def _api_stage_command_worker_active(self) -> bool:
+        lock, _changed = self._api_stage_command_worker_state()
+        with lock:
+            reservation = self._api_stage_command_reservation
+            return bool(reservation is not None and reservation.state != "released")
+
+    def _wait_for_api_stage_command_workers(self, *, timeout_s: float) -> bool:
+        _lock, changed = self._api_stage_command_worker_state()
+        with changed:
+            return bool(
+                changed.wait_for(
+                    lambda: self._api_stage_command_reservation is None,
+                    timeout=max(0.0, float(timeout_s)),
+                )
+            )
+
+    def _release_api_stage_command_reservation(
+        self,
+        reservation: _ApiStageCommandReservation,
+    ) -> bool:
+        lock, changed = self._api_stage_command_worker_state()
+        with lock:
+            if (
+                self._api_stage_command_reservation is not reservation
+                or reservation.state == "released"
+            ):
+                return False
+            reservation.state = "released"
+            self._api_stage_command_reservation = None
+            changed.notify_all()
+            return True
+
+    def _start_deferred_api_stage_command(
+        self,
+        command_request: dict[str, Any],
+        action: str,
+    ) -> dict[str, Any] | DeferredApiResponse:
+        completion = DeferredApiResponse()
+        reservation = _ApiStageCommandReservation(
+            operation_id=uuid.uuid4().hex,
+            action=str(action),
+            completion=completion,
+        )
+        lock, changed = self._api_stage_command_worker_state()
+        with lock:
+            active = self._api_stage_command_reservation
+            if active is not None and active.state != "released":
+                return {
+                    "accepted": False,
+                    "status_code": 409,
+                    "message": f"API stage command is already running: {active.action}.",
+                }
+            self._api_stage_command_reservation = reservation
+            changed.notify_all()
+        request = dict(command_request)
+        try:
+            thread = threading.Thread(
+                target=self._run_deferred_api_stage_command,
+                args=(request, reservation),
+                name=f"ApiStageCommand-{action}",
+                daemon=True,
+            )
+            with lock:
+                reservation.thread = thread
+                reservation.state = "running"
+                changed.notify_all()
+            thread.start()
+        except Exception as exc:
+            self._release_api_stage_command_reservation(reservation)
+            return {
+                "accepted": False,
+                "status_code": 500,
+                "message": f"API stage command could not start: {exc}",
+            }
+        return completion
+
+    def _run_deferred_api_stage_command(
+        self,
+        command_request: dict[str, Any],
+        reservation: _ApiStageCommandReservation,
+    ) -> None:
+        try:
+            response = self._dispatch_api_command_request(
+                command_request,
+                apply_route_control_guard=False,
+            )
+        except Exception as exc:
+            logger.exception("API stage command failed.")
+            response = {
+                "accepted": False,
+                "status_code": 500,
+                "message": str(exc),
+            }
+        lock, changed = self._api_stage_command_worker_state()
+        with lock:
+            if self._api_stage_command_reservation is reservation:
+                reservation.state = "publishing"
+                changed.notify_all()
+        try:
+            reservation.completion.complete(response)
+        finally:
+            self._release_api_stage_command_reservation(reservation)
 
     def _submit_api_command_request_from_api_thread(
         self,
@@ -1356,7 +1859,10 @@ class Main(QMainWindow):
                 return False
         return True
 
-    def _handle_api_request(self, request: dict[str, Any]) -> dict[str, Any]:
+    def _handle_api_request(
+        self,
+        request: dict[str, Any],
+    ) -> dict[str, Any] | DeferredApiResponse:
         return command_dispatch_handle_api_request(
             request,
             ApiBridgeRequestHandlers(
@@ -2720,36 +3226,17 @@ class Main(QMainWindow):
         payload: dict[str, Any],
     ) -> dict[str, Any]:
         if bool(payload.get("reset", False)):
-            self._reset_lens_distortion_calibration()
+            accepted, message = self._reset_lens_distortion_calibration()
             return {
-                "accepted": True,
-                "status_code": 200,
-                "message": "Lens distortion calibration reset requested.",
+                "accepted": accepted,
+                "status_code": 200 if accepted else 409,
+                "message": (
+                    "Lens distortion calibration reset requested."
+                    if accepted
+                    else message
+                ),
             }
-        if self._lens_distortion_calibration_running():
-            return {
-                "accepted": False,
-                "status_code": 409,
-                "message": "Lens distortion calibration is already running.",
-            }
-        if not self._stage_serial_ready():
-            return {
-                "accepted": False,
-                "status_code": 409,
-                "message": "Connect the stage controller before calibration.",
-            }
-        if self.stage_controller.is_busy():
-            return {
-                "accepted": False,
-                "status_code": 409,
-                "message": "Stage is busy; lens distortion calibration not started.",
-            }
-        self._start_lens_distortion_calibration()
-        return {
-            "accepted": True,
-            "status_code": 202,
-            "message": "Lens distortion calibration started.",
-        }
+        return self._start_lens_distortion_calibration()
 
     def _api_click_to_move_calibration(
         self,
@@ -2777,14 +3264,23 @@ class Main(QMainWindow):
                 "status_code": 409,
                 "message": "Connect the stage controller before calibration.",
             }
-        if self.stage_controller.is_busy():
+        if self._objective_mutation_busy():
             return {
                 "accepted": False,
                 "status_code": 409,
-                "message": "Stage is busy; click-to-move calibration not started.",
+                "message": (
+                    "Click-to-move calibration cannot start while a scan, "
+                    "calibration, or stage task is active."
+                ),
             }
         if force:
-            self.stage_controller.reset_calibration("Click-to-move calibration reset.")
+            reset, message = self._reset_click_calibration()
+            if not reset:
+                return {
+                    "accepted": False,
+                    "status_code": 409,
+                    "message": message,
+                }
         if not self._start_click_to_move(dx_px, dy_px):
             return {
                 "accepted": False,
@@ -2798,6 +3294,12 @@ class Main(QMainWindow):
         }
 
     def _api_microscope_area_scan(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if "auto_exposure" in payload:
+            return {
+                "accepted": False,
+                "status_code": 400,
+                "message": "auto_exposure is no longer supported for area scans.",
+            }
         if self._microscope_scan_running():
             return {
                 "accepted": False,
@@ -2822,20 +3324,6 @@ class Main(QMainWindow):
                 "accepted": False,
                 "status_code": 409,
                 "message": "Calibrate click-to-move for the active objective before scanning.",
-            }
-        frame, _counter = self._wait_for_camera_frame(timeout_s=0.5)
-        if frame is None:
-            return {
-                "accepted": False,
-                "status_code": 409,
-                "message": "Camera frame is unavailable; cannot scan.",
-            }
-        latest_position = self.stage_controller.latest_stage_position()
-        if latest_position is None or len(latest_position) < 2:
-            return {
-                "accepted": False,
-                "status_code": 409,
-                "message": "Unable to read X/Y stage position.",
             }
         try:
             scan_pattern = self._microscope_area_scan_pattern(payload)
@@ -2922,8 +3410,6 @@ class Main(QMainWindow):
         output_dir = str(payload.get("output_dir") or "").strip()
         if not output_dir:
             output_dir = self._microscope_area_scan_default_output_dir()
-        center_stage_xy = (float(latest_position[0]), float(latest_position[1]))
-        frame_size_px = (int(frame.width()), int(frame.height()))
         pixels_to_mm = getattr(scale, "pixels_to_mm", None)
         if scan_pattern == "stitch_debug":
             if pixels_to_mm is None:
@@ -2932,42 +3418,19 @@ class Main(QMainWindow):
                     "status_code": 409,
                     "message": "Stitch debug scan requires full pixel-to-stage calibration.",
                 }
-            try:
-                plan = microscope_scan.stitch_debug_scan_plan_from_pixel_matrix(
-                    center_stage_xy=center_stage_xy,
-                    frame_size_px=frame_size_px,
-                    pixels_to_mm=pixels_to_mm,
-                    structure_size_mm=float(structure_size_mm),
-                    placement_fraction=float(placement_fraction),
-                    overlap_fraction=float(overlap_fraction),
-                )
-            except ValueError as exc:
-                return {
-                    "accepted": False,
-                    "status_code": 400,
-                    "message": str(exc),
-                }
-        elif pixels_to_mm is not None:
-            plan = microscope_scan.centered_area_scan_plan_from_pixel_matrix(
-                center_stage_xy=center_stage_xy,
-                frame_size_px=frame_size_px,
-                pixels_to_mm=pixels_to_mm,
-                row_count=rows,
-                column_count=columns,
-                overlap_fraction=overlap_fraction,
+        design_session = getattr(self, "_design_session", None)
+        try:
+            launch_snapshot = self._capture_microscope_scan_launch_snapshot(
+                scale=scale,
+                document=getattr(design_session, "document", None),
+                registration=getattr(design_session, "registration", None),
             )
-        else:
-            fov_size_mm = (
-                float(frame.width()) * float(scale.pixel_size_x_mm),
-                float(frame.height()) * float(scale.pixel_size_y_mm),
-            )
-            plan = microscope_scan.centered_area_scan_plan(
-                center_stage_xy=center_stage_xy,
-                fov_size_mm=fov_size_mm,
-                row_count=rows,
-                column_count=columns,
-                overlap_fraction=overlap_fraction,
-            )
+        except (AttributeError, IndexError, TypeError, ValueError) as exc:
+            return {
+                "accepted": False,
+                "status_code": 409,
+                "message": f"Microscope scan launch state is invalid: {exc}",
+            }
         configuration = SimpleNamespace(
             output_dir=output_dir,
             overlap_fraction=overlap_fraction,
@@ -2980,19 +3443,38 @@ class Main(QMainWindow):
             flat_field_options=flat_field_options,
             camera_lock_settings=camera_lock_settings,
         )
+        planning_request = _MicroscopeAreaScanRequest(
+            row_count=rows,
+            column_count=columns,
+            overlap_fraction=overlap_fraction,
+            scan_pattern=scan_pattern,
+            structure_size_mm=structure_size_mm,
+            placement_fraction=placement_fraction,
+        )
         self._microscope_scan_stop_requested.clear()
-        self._microscope_scan_thread = threading.Thread(
+        thread = threading.Thread(
             target=self._run_microscope_scan,
-            args=(configuration, plan),
+            args=(configuration, planning_request, launch_snapshot),
             name="MicroscopeAreaScan",
             daemon=True,
         )
-        self._microscope_scan_thread.start()
+        self._microscope_scan_thread = thread
+        try:
+            thread.start()
+        except Exception as exc:
+            if self._microscope_scan_thread is thread:
+                self._microscope_scan_thread = None
+            self._update_stage_coordinate_apply_state()
+            return {
+                "accepted": False,
+                "status_code": 500,
+                "message": f"Microscope area scan could not start: {exc}",
+            }
         self._update_stage_coordinate_apply_state()
         return {
             "accepted": True,
             "status_code": 202,
-            "message": f"Microscope area scan started: {len(plan.tiles)} tiles.",
+            "message": "Microscope area scan started.",
             "output_dir": output_dir,
             "rows": rows,
             "columns": columns,
@@ -3266,7 +3748,7 @@ class Main(QMainWindow):
         )
 
     def _start_click_to_move(self, dx: float, dy: float) -> bool:
-        if not self._stage_serial_ready() or self.stage_controller.is_busy():
+        if not self._stage_serial_ready() or self._objective_mutation_busy():
             return False
         accepted = self.stage_controller.request_move(dx, dy)
         if accepted:
@@ -3393,29 +3875,75 @@ class Main(QMainWindow):
         )
 
     def _on_camera_frame(self, qimg: QImage) -> None:
-        now = time.monotonic()
-        if self._last_camera_frame_ui_timestamp is not None:
-            frame_gap = now - self._last_camera_frame_ui_timestamp
-            if frame_gap > self.CAMERA_UI_FRAME_GAP_WARNING_S:
-                logger.warning(
-                    "Camera UI frame gap %.3fs before display update",
-                    frame_gap,
-                )
-        self._last_camera_frame_ui_timestamp = now
-        frame = self._correct_camera_frame_for_active_objective(qimg)
         with self._latest_camera_frame_condition:
             self._latest_raw_camera_frame = qimg.copy()
             self._latest_raw_camera_frame_counter = (
                 int(getattr(self, "_latest_raw_camera_frame_counter", 0)) + 1
             )
-            self._latest_camera_frame = frame.copy()
-            self._latest_camera_frame_counter = (
-                int(getattr(self, "_latest_camera_frame_counter", 0)) + 1
-            )
+            sequence = int(self._latest_raw_camera_frame_counter)
             self._latest_camera_frame_condition.notify_all()
+        exposure_adapter = getattr(self, "_exposure_policy_adapter", None)
+        now = time.monotonic()
+        if (
+            not qimg.isNull()
+            and exposure_adapter is not None
+            and not getattr(self, "_exposure_policy_start_in_flight", False)
+            and not getattr(self, "_exposure_policy_started", False)
+            and now >= getattr(self, "_exposure_policy_start_retry_after", 0.0)
+        ):
+            self._exposure_policy_start_in_flight = True
+            exposure_adapter.request_start()
+        objective = self.settings_manager.active_objective_configuration()
+        request = LiveCameraCorrectionRequest(
+            sequence=sequence,
+            frame=qimg.copy(),
+            objective_name=str(getattr(objective, "name", "") or ""),
+            distortion_configured=bool(
+                getattr(objective, "distortion_correction_configured", False)
+            ),
+            distortion_payload=getattr(objective, "distortion_correction", {}),
+            suppress_gap_warning=bool(
+                getattr(self, "_suppress_next_camera_ui_gap", False)
+            ),
+        )
+        if not self._live_camera_frame_processor.submit(request):
+            logger.debug("Live camera frame ignored during processor shutdown.")
+
+    def _on_live_camera_frame_processed(
+        self,
+        result: LiveCameraCorrectionResult,
+    ) -> None:
+        now = time.monotonic()
+        suppress_gap_warning = bool(result.suppress_gap_warning)
+        if self._last_camera_frame_ui_timestamp is not None:
+            frame_gap = now - self._last_camera_frame_ui_timestamp
+            if (
+                frame_gap > self.CAMERA_UI_FRAME_GAP_WARNING_S
+                and not suppress_gap_warning
+            ):
+                logger.warning(
+                    "Camera UI frame gap %.3fs before display update",
+                    frame_gap,
+                )
+        self._last_camera_frame_ui_timestamp = now
+        frame = result.frame
+        with self._latest_camera_frame_condition:
+            if int(result.sequence) <= int(self._latest_camera_frame_counter):
+                return
+            self._latest_camera_frame = frame.copy()
+            self._latest_camera_frame_counter = int(result.sequence)
+            self._latest_camera_frame_condition.notify_all()
+        if suppress_gap_warning:
+            self._suppress_next_camera_ui_gap = False
         self._latest_camera_frame_for_notifications = frame
         self.stage_controller.on_frame_ready(frame)
         self.view.set_frame(frame)
+
+    def _on_live_camera_frame_processing_error(self, message: str) -> None:
+        logger.warning("Live camera frame correction failed: %s", message)
+
+    def _on_camera_frame_gap_suppressed(self) -> None:
+        self._suppress_next_camera_ui_gap = True
 
     def _correct_camera_frame_for_active_objective(self, qimg: QImage) -> QImage:
         objective = self.settings_manager.active_objective_configuration()
@@ -3474,6 +4002,13 @@ class Main(QMainWindow):
             return int(self._latest_camera_frame_counter)
 
     def _latest_raw_camera_counter(self) -> int:
+        direct_counter = getattr(
+            getattr(self, "grabber", None),
+            "latest_frame_counter",
+            None,
+        )
+        if callable(direct_counter):
+            return int(direct_counter())
         with self._latest_camera_frame_condition:
             return int(getattr(self, "_latest_raw_camera_frame_counter", 0))
 
@@ -3504,6 +4039,16 @@ class Main(QMainWindow):
         after_counter: int | None = None,
         timeout_s: float = 2.0,
     ) -> tuple[QImage | None, int]:
+        direct_wait = getattr(
+            getattr(self, "grabber", None),
+            "wait_for_frame",
+            None,
+        )
+        if callable(direct_wait):
+            return direct_wait(
+                after_counter=after_counter,
+                timeout_s=timeout_s,
+            )
         deadline = time.monotonic() + max(0.0, float(timeout_s))
         with self._latest_camera_frame_condition:
             while True:
@@ -3533,6 +4078,98 @@ class Main(QMainWindow):
         if magnification is not None and not math.isfinite(magnification):
             magnification = None
         return name, magnification
+
+    def _capture_microscope_scan_launch_snapshot(
+        self,
+        *,
+        scale: object,
+        document: object | None,
+        registration: object | None,
+    ) -> _MicroscopeScanLaunchSnapshot:
+        objective_name, magnification = self._active_objective_metadata()
+        objective_offset = tuple(
+            float(value) for value in self._active_objective_xy_offset()
+        )
+        if len(objective_offset) != 2 or not all(
+            math.isfinite(value) for value in objective_offset
+        ):
+            raise ValueError("Active objective offset is invalid.")
+
+        registration_matrix = None
+        registration_offset = None
+        if registration is not None and bool(getattr(registration, "valid", False)):
+            matrix = getattr(registration, "matrix")
+            offset_value = getattr(registration, "offset")
+            registration_matrix = (
+                (float(matrix[0][0]), float(matrix[0][1])),
+                (float(matrix[1][0]), float(matrix[1][1])),
+            )
+            registration_offset = (
+                float(offset_value[0]),
+                float(offset_value[1]),
+            )
+            transform_values = (
+                *registration_matrix[0],
+                *registration_matrix[1],
+                *registration_offset,
+            )
+            determinant = (
+                registration_matrix[0][0] * registration_matrix[1][1]
+                - registration_matrix[0][1] * registration_matrix[1][0]
+            )
+            if not all(math.isfinite(value) for value in transform_values):
+                raise ValueError("Design registration is invalid.")
+            if abs(determinant) < 1e-18:
+                raise ValueError("Design registration is singular.")
+
+        document_path = (
+            getattr(document, "path", None) if document is not None else None
+        )
+        document_identity = str(document_path or "")
+        scan_name = (
+            Path(document_identity).stem
+            if document_identity
+            else microscope_scan.scan_name_from_document(None)
+        )
+        return _MicroscopeScanLaunchSnapshot(
+            objective_name=str(objective_name),
+            magnification=magnification,
+            scan_name=scan_name,
+            document_identity=document_identity,
+            scale=scale,
+            registration_matrix=registration_matrix,
+            registration_offset=registration_offset,
+            objective_xy_offset=(objective_offset[0], objective_offset[1]),
+        )
+
+    def _optical_calibration_objective_metadata(
+        self,
+        context: _OpticalCalibrationRunContext | None,
+    ) -> tuple[str, float | None, object]:
+        if context is None:
+            objective_name, magnification = self._active_objective_metadata()
+            objective_name = normalize_objective_name(objective_name)
+            if not objective_name:
+                raise RuntimeError("No active objective selected.")
+            return objective_name, magnification, self._active_microscope_scale()
+
+        objectives = self.settings_manager.objectives_configuration()
+        objective = objectives.objectives.get(context.objective_name)
+        if objective is None:
+            raise RuntimeError(
+                f"Objective profile {context.objective_name} is missing."
+            )
+        try:
+            magnification = float(getattr(objective, "magnification"))
+        except (AttributeError, TypeError, ValueError):
+            magnification = None
+        if magnification is not None and not math.isfinite(magnification):
+            magnification = None
+        return (
+            context.objective_name,
+            magnification,
+            objective_scale_calibration(objective),
+        )
 
     def _stage_position_for_image_metadata(
         self,
@@ -3813,7 +4450,7 @@ class Main(QMainWindow):
             4000,
         )
 
-    def _apply_settings(self) -> None:
+    def _apply_settings(self, *, apply_objective_runtime: bool = True) -> None:
         connection_flow.apply_axis_feedrate_limits(
             self,
             self.stage_controller.axis_max_feedrates(),
@@ -3840,7 +4477,8 @@ class Main(QMainWindow):
             startup_mode=coordinate_settings.startup_mode,
             preferred_system=coordinate_settings.preferred_system,
         )
-        self._apply_objective_settings()
+        if apply_objective_runtime:
+            self._apply_objective_settings()
         if self.design_navigator_panel is not None:
             self.design_navigator_panel.set_design_dialog_directory(
                 self.settings_manager.design_last_directory()
@@ -3897,9 +4535,49 @@ class Main(QMainWindow):
     def _apply_settings_from_dialog(self, new_settings: object) -> None:
         if not isinstance(new_settings, Settings):
             return
-        self.settings_manager.replace(new_settings)
-        self.settings_manager.save()
-        self._apply_settings()
+        settings_to_apply = new_settings.clone()
+        active_objective_update_rejected = False
+        objective_mutation_busy = self._objective_mutation_busy()
+        if objective_mutation_busy:
+            current_objectives = self.settings_manager.objectives_configuration()
+            current_active_name = normalize_objective_name(
+                current_objectives.active_name
+            )
+            submitted_objectives = settings_to_apply.objectives
+            submitted_active_name = normalize_objective_name(
+                submitted_objectives.active_name
+            )
+            current_active_profile = current_objectives.objectives.get(
+                current_active_name
+            )
+            submitted_active_profile = submitted_objectives.objectives.get(
+                current_active_name
+            )
+            active_objective_update_rejected = (
+                submitted_active_name != current_active_name
+                or submitted_active_profile != current_active_profile
+            )
+            if active_objective_update_rejected:
+                submitted_objectives.active_name = current_active_name
+                if current_active_profile is None:
+                    submitted_objectives.objectives.pop(current_active_name, None)
+                else:
+                    submitted_objectives.objectives[current_active_name] = (
+                        current_active_profile.clone()
+                    )
+        self.settings_manager.replace_and_save(
+            settings_to_apply,
+            preserve_exposure_policy=True,
+        )
+        if objective_mutation_busy:
+            self._apply_settings(apply_objective_runtime=False)
+        else:
+            self._apply_settings()
+        if active_objective_update_rejected:
+            self._show_status(
+                "Stage is busy; active objective settings not changed.",
+                4000,
+            )
         logger.info("Settings updated from dialog")
 
     def _send_telegram_alert(
@@ -3998,14 +4676,19 @@ class Main(QMainWindow):
             self._set_active_objective(objective_name, apply_motion=True)
 
     def _set_active_objective(
-        self, objective_name: str, *, apply_motion: bool, allow_busy: bool = False
+        self,
+        objective_name: str,
+        *,
+        apply_motion: bool,
+        allow_stage_task: bool = False,
     ) -> None:
         plan = alignment.select_active_objective(
             self.settings_manager.settings,
             objective_name,
-            is_busy=self.stage_controller.is_busy(),
+            is_busy=self._objective_mutation_busy(
+                allow_stage_task=allow_stage_task,
+            ),
             apply_motion=apply_motion,
-            allow_busy=allow_busy,
         )
         if plan.refresh_calibration_ui:
             self._refresh_objective_calibration_ui()
@@ -4018,6 +4701,67 @@ class Main(QMainWindow):
         if plan.apply_offset_motion:
             self._apply_objective_change_offset(plan.old_name, plan.new_name)
         self._show_plan_status(plan)
+
+    def _objective_mutation_busy(
+        self,
+        *,
+        allow_stage_task: bool = False,
+        optical_context: _OpticalCalibrationRunContext | None = None,
+    ) -> bool:
+        if self._api_stage_command_worker_active():
+            return True
+        if self._microscope_scan_running():
+            return True
+        optical_owner = self._optical_mutation_context_is_current(optical_context)
+        if (
+            self._optical_calibration_worker_active()
+            or self._optical_calibration_outer_owned_or_closing()
+        ) and not optical_owner:
+            return True
+        stage_controller = getattr(self, "stage_controller", None)
+        return (
+            stage_controller is not None
+            and stage_controller.is_busy()
+            and not allow_stage_task
+        )
+
+    def _optical_mutation_context_is_current(
+        self,
+        context: _OpticalCalibrationRunContext | None,
+    ) -> bool:
+        if not isinstance(context, _OpticalCalibrationRunContext):
+            return False
+        if self._optical_calibration_should_stop(context):
+            return False
+        for attribute in (
+            "_flat_field_calibration_context",
+            "_lens_distortion_context",
+        ):
+            active_context = getattr(self, attribute, None)
+            if (
+                isinstance(active_context, _OpticalCalibrationRunContext)
+                and active_context.operation_id == context.operation_id
+            ):
+                return True
+        return False
+
+    def _objective_profile_mutation_busy(
+        self,
+        objective_name: str,
+        *,
+        allow_stage_task: bool = False,
+        optical_context: _OpticalCalibrationRunContext | None = None,
+    ) -> bool:
+        name = normalize_objective_name(objective_name)
+        active_name = normalize_objective_name(
+            self.settings_manager.settings.objectives.active_name
+        )
+        if not name or name != active_name:
+            return False
+        return self._objective_mutation_busy(
+            allow_stage_task=allow_stage_task,
+            optical_context=optical_context,
+        )
 
     def _apply_objective_change_offset(self, old_name: str, new_name: str) -> None:
         plan = alignment.objective_change_offset_plan(
@@ -4070,14 +4814,22 @@ class Main(QMainWindow):
         if plan.status:
             self._show_status(plan.status, plan.status_timeout_ms)
 
-    def _persist_objective_plan(self, plan, *, show_status: bool = True) -> bool:
+    def _persist_objective_plan(
+        self,
+        plan,
+        *,
+        show_status: bool = True,
+        apply_objective_runtime: bool = True,
+    ) -> bool:
         if plan.settings is None:
             if show_status:
                 self._show_plan_status(plan)
             return False
-        self.settings_manager.replace(plan.settings)
-        self.settings_manager.save()
-        if getattr(plan, "apply_settings", False):
+        self.settings_manager.replace_and_save(
+            plan.settings,
+            preserve_exposure_policy=True,
+        )
+        if getattr(plan, "apply_settings", False) and apply_objective_runtime:
             self._apply_objective_settings()
         if getattr(plan, "refresh_design_position", False):
             self._refresh_design_position()
@@ -4105,10 +4857,63 @@ class Main(QMainWindow):
         self._click_calibration_dialog.raise_()
         self._click_calibration_dialog.activateWindow()
 
+    def _show_optical_calibration_wizard(
+        self,
+        mode: OpticalCalibrationMode | None = None,
+    ) -> None:
+        if self._optical_calibration_wizard is None:
+            wizard = OpticalCalibrationWizard(self)
+            wizard.start_flat_field_requested.connect(
+                self._start_flat_field_calibration_from_wizard
+            )
+            wizard.start_lens_distortion_requested.connect(
+                self._start_lens_distortion_calibration_from_wizard
+            )
+            wizard.cancel_requested.connect(self._cancel_optical_calibration_wizard)
+            self._optical_calibration_wizard = wizard
+
+        if self._optical_calibration_outer_owned_or_closing():
+            self._show_status("Optical calibration is still active.", 5000)
+            self._optical_calibration_wizard.show()
+            self._optical_calibration_wizard.raise_()
+            self._optical_calibration_wizard.activateWindow()
+            return
+
+        objectives = self.settings_manager.objectives_configuration()
+        active_name = normalize_objective_name(objectives.active_name)
+        profile = objectives.objectives.get(active_name)
+        flat_field_configured = False
+        if active_name:
+            try:
+                flat_field_configured = (
+                    self._flat_field_calibration_store.current_manifest_path(
+                        active_name
+                    ).is_file()
+                )
+            except (OSError, ValueError):
+                flat_field_configured = False
+        self._optical_calibration_wizard.set_objective(
+            active_name,
+            flat_field_configured=flat_field_configured,
+            lens_configured=bool(
+                profile is not None
+                and profile.distortion_correction_configured
+            ),
+        )
+        if not self._optical_calibration_wizard.prepare(mode):
+            self._show_status("Optical calibration is already running.", 4000)
+        self._optical_calibration_wizard.show()
+        self._optical_calibration_wizard.raise_()
+        self._optical_calibration_wizard.activateWindow()
+
     def _show_lens_distortion_dialog(self) -> None:
         if self._lens_distortion_dialog is None:
             dialog = LensDistortionDialog(self)
-            dialog.calibrate_requested.connect(self._start_lens_distortion_calibration)
+            dialog.calibrate_requested.connect(
+                lambda: self._show_optical_calibration_wizard(
+                    OpticalCalibrationMode.LENS_DISTORTION
+                )
+            )
             dialog.reset_requested.connect(self._reset_lens_distortion_calibration)
             self._lens_distortion_dialog = dialog
         self._refresh_lens_distortion_ui()
@@ -4117,11 +4922,14 @@ class Main(QMainWindow):
         self._lens_distortion_dialog.activateWindow()
 
     def _add_objective_profile(self) -> None:
-        if self.stage_controller.is_busy():
+        if self._objective_mutation_busy():
             self._show_status("Stage is busy; objective not added.", 4000)
             return
         raw_name, accepted = QInputDialog.getText(self, "Add Objective", "Objective name")
         if not accepted:
+            return
+        if self._objective_mutation_busy():
+            self._show_status("Stage is busy; objective not added.", 4000)
             return
         plan = alignment.profile_add_plan(self.settings_manager.settings, raw_name)
         if plan.select_existing_name is not None:
@@ -4131,7 +4939,7 @@ class Main(QMainWindow):
         self._persist_objective_plan(plan)
 
     def _delete_objective_profile(self, objective_name: str) -> None:
-        if self.stage_controller.is_busy():
+        if self._objective_mutation_busy():
             self._show_status("Stage is busy; objective not deleted.", 4000)
             self._refresh_click_calibration_ui()
             return
@@ -4150,13 +4958,17 @@ class Main(QMainWindow):
         )
         if response != QMessageBox.Yes:
             return
+        if self._objective_mutation_busy():
+            self._show_status("Stage is busy; objective not deleted.", 4000)
+            self._refresh_click_calibration_ui()
+            return
         plan = alignment.profile_delete_plan(
             self.settings_manager.settings, name, confirmed=True
         )
         self._persist_objective_plan(plan)
 
     def _set_objective_offset_reference(self) -> None:
-        if self.stage_controller.is_busy():
+        if self._objective_mutation_busy():
             self._show_status("Stage is busy; objective offset reference not set.", 4000)
             return
         raw_stage_xy = self._resolve_alignment_capture_stage_position()
@@ -4175,7 +4987,7 @@ class Main(QMainWindow):
         self._show_plan_status(plan)
 
     def _save_active_objective_offset(self) -> None:
-        if self.stage_controller.is_busy():
+        if self._objective_mutation_busy():
             self._show_status("Stage is busy; objective offset not saved.", 4000)
             return
         if self._objective_offset_reference is None:
@@ -4190,7 +5002,7 @@ class Main(QMainWindow):
         self._persist_objective_plan(plan)
 
     def _reset_active_objective_offset(self) -> None:
-        if self.stage_controller.is_busy():
+        if self._objective_mutation_busy():
             self._show_status("Stage is busy; objective offset not reset.", 4000)
             return
         plan = alignment.reset_active_objective_offset(self.settings_manager.settings)
@@ -4222,74 +5034,363 @@ class Main(QMainWindow):
         self._refresh_click_calibration_ui()
         self._refresh_lens_distortion_ui()
 
-    def _start_lens_distortion_calibration(self) -> None:
+    def _start_flat_field_calibration_from_wizard(self) -> None:
+        wizard = self._optical_calibration_wizard
+        if wizard is None:
+            return
+        run_id = wizard.active_run_id()
+        full_wizard = wizard.mode() is OpticalCalibrationMode.FULL
+        if not self._optical_calibration_objective_matches_wizard(wizard):
+            wizard.set_flat_field_result(
+                False,
+                "Active objective changed. Reopen optical calibration.",
+                run_id=run_id,
+            )
+            return
+        self._optical_calibration_cancel_event().clear()
+        if self._start_flat_field_calibration(
+            wizard_run_id=run_id,
+            full_wizard=full_wizard,
+        ):
+            return
+        if full_wizard:
+            self._cancel_optical_calibration_wizard(run_id)
+        wizard.set_flat_field_result(
+            False,
+            "Flat-field calibration did not start.",
+            run_id=run_id,
+        )
+
+    def _optical_calibration_lock(self) -> threading.RLock:
+        lock = getattr(self, "_optical_calibration_state_lock", None)
+        if lock is None:
+            lock = threading.RLock()
+            self._optical_calibration_state_lock = lock
+        return lock
+
+    def _optical_calibration_cancel_event(self) -> threading.Event:
+        event = getattr(self, "_optical_calibration_cancel_event_state", None)
+        if event is None:
+            event = threading.Event()
+            self._optical_calibration_cancel_event_state = event
+        return event
+
+    def _optical_calibration_should_stop(
+        self,
+        context: _OpticalCalibrationRunContext | None,
+    ) -> bool:
+        return bool(
+            context is not None
+            and context.wizard_run_id is not None
+            and self._optical_calibration_cancel_event().is_set()
+        )
+
+    def _wait_optical_calibration_settle(
+        self,
+        seconds: float,
+        context: _OpticalCalibrationRunContext | None,
+    ) -> bool:
+        duration = max(0.0, float(seconds))
+        if context is not None and context.wizard_run_id is not None:
+            return not self._optical_calibration_cancel_event().wait(duration)
+        time.sleep(duration)
+        return True
+
+    def _open_optical_calibration_stage_session(
+        self,
+        operation: str,
+        context: _OpticalCalibrationRunContext,
+    ) -> tuple[object, _OpticalCalibrationRunContext]:
+        parent_token = context.parent_session_token
+        opened_outer = False
+        if context.full_wizard and parent_token is None:
+            outer_lease = self._optical_session_manager.open("optical calibration")
+            parent_token = str(outer_lease.token)
+            with self._optical_calibration_lock():
+                if getattr(self, "_optical_calibration_outer_lease", None) is not None:
+                    outer_lease.close()
+                    raise RuntimeError("Optical calibration session is already active.")
+                self._optical_calibration_outer_lease = outer_lease
+                self._optical_calibration_outer_token = parent_token
+                self._optical_calibration_outer_close_requested = False
+                self._optical_calibration_outer_close_in_progress = False
+            context = replace(context, parent_session_token=parent_token)
+            opened_outer = True
+        try:
+            lease = self._optical_session_manager.open(
+                operation,
+                parent_token=parent_token,
+            )
+        except Exception:
+            if opened_outer:
+                self._close_optical_calibration_outer_session()
+            raise
+        return lease, context
+
+    def _optical_calibration_outer_parent_token(self) -> str | None:
+        with self._optical_calibration_lock():
+            token = getattr(self, "_optical_calibration_outer_token", None)
+            return None if token is None else str(token)
+
+    def _optical_calibration_outer_owned_or_closing(self) -> bool:
+        with self._optical_calibration_lock():
+            thread = getattr(
+                self,
+                "_optical_calibration_outer_close_thread",
+                None,
+            )
+            return bool(
+                getattr(self, "_optical_calibration_outer_lease", None) is not None
+                or getattr(
+                    self,
+                    "_optical_calibration_outer_close_in_progress",
+                    False,
+                )
+                or (thread is not None and thread.is_alive())
+            )
+
+    def _optical_calibration_outer_close_was_requested(self) -> bool:
+        with self._optical_calibration_lock():
+            return bool(
+                getattr(self, "_optical_calibration_outer_close_requested", False)
+            )
+
+    def _close_optical_calibration_outer_session(self) -> str:
+        with self._optical_calibration_lock():
+            lease = getattr(self, "_optical_calibration_outer_lease", None)
+            if lease is None:
+                return ""
+            if getattr(self, "_optical_calibration_outer_close_in_progress", False):
+                return ""
+            self._optical_calibration_outer_close_in_progress = True
+
+        error = ""
+        closed = False
+        try:
+            while True:
+                try:
+                    result = lease.close()
+                    error = str(result.get("warning") or "")
+                    closed = True
+                    break
+                except ExposurePolicyBusyError:
+                    time.sleep(0.05)
+                except Exception as exc:
+                    error = str(exc) or type(exc).__name__
+                    try:
+                        closed = not bool(lease.is_active())
+                    except Exception:
+                        closed = False
+                    break
+        finally:
+            with self._optical_calibration_lock():
+                if closed:
+                    self._optical_calibration_outer_lease = None
+                    self._optical_calibration_outer_token = None
+                    self._optical_calibration_outer_close_requested = False
+                else:
+                    self._optical_calibration_outer_close_requested = True
+                self._optical_calibration_outer_close_in_progress = False
+        return error
+
+    def _cancel_optical_calibration_wizard(self, _run_id: object = None) -> None:
+        self._optical_calibration_cancel_event().set()
+        with self._optical_calibration_lock():
+            self._optical_calibration_outer_close_requested = True
+        if not self._optical_calibration_worker_active():
+            self._schedule_optical_calibration_outer_close()
+
+    def _schedule_optical_calibration_outer_close(self) -> bool:
+        with self._optical_calibration_lock():
+            if getattr(self, "_optical_calibration_outer_lease", None) is None:
+                return True
+            thread = getattr(self, "_optical_calibration_outer_close_thread", None)
+            if thread is not None and thread.is_alive():
+                return True
+            thread = threading.Thread(
+                target=self._run_optical_calibration_outer_close,
+                name="OpticalCalibrationSessionClose",
+                daemon=True,
+            )
+            self._optical_calibration_outer_close_thread = thread
+        try:
+            thread.start()
+        except Exception as exc:
+            with self._optical_calibration_lock():
+                if self._optical_calibration_outer_close_thread is thread:
+                    self._optical_calibration_outer_close_thread = None
+                self._optical_calibration_outer_close_requested = True
+            try:
+                self.status_message_requested.emit(
+                    f"Exposure policy restore could not start: {exc}",
+                    10000,
+                )
+            except RuntimeError:
+                pass
+            return False
+        return True
+
+    def _run_optical_calibration_outer_close(self) -> None:
+        error = self._close_optical_calibration_outer_session()
+        with self._optical_calibration_lock():
+            self._optical_calibration_outer_close_thread = None
+        if error:
+            try:
+                self.status_message_requested.emit(
+                    f"Exposure policy restore failed: {error}",
+                    10000,
+                )
+            except RuntimeError:
+                pass
+
+    def _start_lens_distortion_calibration_from_wizard(self) -> None:
+        wizard = self._optical_calibration_wizard
+        if wizard is None:
+            return
+        run_id = wizard.active_run_id()
+        full_wizard = wizard.mode() is OpticalCalibrationMode.FULL
+        if not self._optical_calibration_objective_matches_wizard(wizard):
+            if full_wizard:
+                self._cancel_optical_calibration_wizard(run_id)
+            wizard.set_lens_distortion_result(
+                False,
+                "Active objective changed. Reopen optical calibration.",
+                run_id=run_id,
+            )
+            return
+        parent_session_token = (
+            self._optical_calibration_outer_parent_token() if full_wizard else None
+        )
+        if full_wizard and parent_session_token is None:
+            wizard.set_lens_distortion_result(
+                False,
+                "Optical calibration exposure session is unavailable.",
+                run_id=run_id,
+            )
+            return
+        self._optical_calibration_cancel_event().clear()
+        start_result = self._start_lens_distortion_calibration(
+            wizard_run_id=run_id,
+            parent_session_token=parent_session_token,
+            full_wizard=full_wizard,
+        )
+        if bool(start_result["accepted"]):
+            return
+        if full_wizard:
+            self._cancel_optical_calibration_wizard(run_id)
+        wizard.set_lens_distortion_result(
+            False,
+            str(start_result["message"]),
+            run_id=run_id,
+        )
+
+    def _optical_calibration_objective_matches_wizard(
+        self,
+        wizard: OpticalCalibrationWizard,
+    ) -> bool:
+        current_name, _magnification = self._active_objective_metadata()
+        return normalize_objective_name(current_name) == normalize_objective_name(
+            wizard.objective_text()
+        )
+
+    def _start_flat_field_calibration(
+        self,
+        *,
+        wizard_run_id: int | None = None,
+        full_wizard: bool = False,
+    ) -> bool:
+        if self._flat_field_calibration_running():
+            self._show_status("Flat-field calibration is already running.", 4000)
+            return False
         if self._lens_distortion_calibration_running():
             self._show_status("Lens distortion calibration is already running.", 4000)
-            return
+            return False
         if not self._stage_serial_ready():
             self._show_status("Connect the stage controller before calibration.", 5000)
-            return
+            return False
         if self.stage_controller.is_busy():
-            self._show_status("Stage is busy; lens distortion calibration not started.", 5000)
-            return
-        try:
-            position = self.stage_controller.current_stage_position()
-        except StageControllerError as exc:
-            self._show_status(str(exc), 5000)
-            return
-        if len(position) < 2:
-            self._show_status("Unable to read X/Y stage position.", 5000)
-            return
+            self._show_status("Stage is busy; flat-field calibration not started.", 5000)
+            return False
+        objective_name, _magnification = self._active_objective_metadata()
+        objective_name = normalize_objective_name(objective_name)
+        if not objective_name:
+            self._show_status("No active objective selected.", 5000)
+            return False
 
-        start_xy = (float(position[0]), float(position[1]))
-        linear_feedrate = self._coordinate_feedrate_for_axes(("X", "Y"))
-        needle_feedrate = self._current_needle_feedrate()
+        context = _OpticalCalibrationRunContext(
+            operation_id=uuid.uuid4().hex,
+            wizard_run_id=wizard_run_id,
+            objective_name=objective_name,
+            full_wizard=bool(full_wizard),
+        )
         thread = threading.Thread(
-            target=self._run_lens_distortion_calibration,
-            args=(start_xy, linear_feedrate, needle_feedrate),
+            target=self._run_flat_field_calibration,
+            args=(
+                self._coordinate_feedrate_for_axes(("X", "Y")),
+                self._current_needle_feedrate(),
+                context,
+            ),
+            name="FlatFieldCalibration",
             daemon=True,
         )
-        self._lens_distortion_thread = thread
-        if self._lens_distortion_dialog is not None:
-            self._lens_distortion_dialog.set_running(True)
-            self._lens_distortion_dialog.set_status(
-                "Lens distortion calibration started."
-            )
-        self._show_status("Lens distortion calibration started.", 4000)
-        thread.start()
-
-    def _reset_lens_distortion_calibration(self) -> None:
-        if self._lens_distortion_calibration_running():
-            self._show_status("Wait for lens distortion calibration to finish.", 4000)
-            return
-        if self.stage_controller.is_busy():
-            self._show_status("Stage is busy; lens correction not reset.", 5000)
-            return
+        self._flat_field_calibration_thread = thread
+        self._flat_field_calibration_context = context
         try:
-            self._save_active_objective_distortion(None)
+            thread.start()
         except Exception as exc:
-            logger.exception("Unable to reset lens distortion correction")
-            self._show_status(f"Lens correction reset failed: {exc}", 8000)
-            return
-        self._show_status(
-            "Lens correction cleared. Recalibrate click-to-move.",
-            8000,
+            if self._flat_field_calibration_thread is thread:
+                self._flat_field_calibration_thread = None
+                self._flat_field_calibration_context = None
+            self._show_status(
+                f"Flat-field calibration could not start: {exc}",
+                8000,
+            )
+            return False
+        self._show_status("Flat-field calibration started.", 4000)
+        return True
+
+    def _flat_field_calibration_running(self) -> bool:
+        thread = getattr(self, "_flat_field_calibration_thread", None)
+        return (
+            getattr(self, "_flat_field_calibration_context", None) is not None
+            or (thread is not None and thread.is_alive())
         )
 
-    def _lens_distortion_calibration_running(self) -> bool:
-        thread = getattr(self, "_lens_distortion_thread", None)
-        return thread is not None and thread.is_alive()
+    def _optical_calibration_worker_active(self) -> bool:
+        return (
+            self._flat_field_calibration_running()
+            or self._lens_distortion_calibration_running()
+        )
 
-    def _run_lens_distortion_calibration(
+    def _report_flat_field_calibration_progress(
         self,
-        start_xy: tuple[float, float],
+        message: str,
+        context: _OpticalCalibrationRunContext | None = None,
+    ) -> None:
+        try:
+            self.status_message_requested.emit(message, 0)
+        except RuntimeError:
+            pass
+        try:
+            self.flat_field_calibration_progress.emit(context, message)
+        except RuntimeError:
+            pass
+
+    def _run_flat_field_calibration(
+        self,
         linear_feedrate: float | None = None,
         needle_feedrate: float | None = None,
+        context: _OpticalCalibrationRunContext | None = None,
     ) -> None:
         payload: dict[str, object] | None = None
         success = False
-        message = "Lens distortion calibration stopped."
-        reserved = False
+        message = "Flat-field calibration stopped."
+        stage_reserved = False
+        stage_position_changed = False
+        start_xy: tuple[float, float] | None = None
+        camera_restore_key: str | None = None
+        optical_session: object | None = None
+        optical_session_snapshot: dict[str, object] = {}
         feedrate = (
             self._coordinate_feedrate_for_axes(("X", "Y"))
             if linear_feedrate is None
@@ -4301,14 +5402,449 @@ class Main(QMainWindow):
             else float(needle_feedrate)
         )
         try:
-            self.stage_controller.begin_external_task("lens distortion calibration")
-            reserved = True
-            self._show_status("Lens distortion calibration: raising needles.")
+            objective_name, magnification, scale = (
+                self._optical_calibration_objective_metadata(context)
+            )
+            if context is None:
+                optical_session = self._optical_session_manager.open(
+                    "flat-field calibration"
+                )
+            else:
+                optical_session, context = (
+                    self._open_optical_calibration_stage_session(
+                        "flat-field calibration",
+                        context,
+                    )
+                )
+            optical_session_snapshot = optical_session.snapshot()
+            if self._optical_calibration_should_stop(context):
+                raise RuntimeError("Flat-field calibration stopped by user.")
+            self.stage_controller.begin_external_task("flat-field calibration")
+            stage_reserved = True
+            start_xy = self._reserved_stage_start_xy()
+
+            if scale is None:
+                raise RuntimeError(
+                    "Flat-field calibration requires click-to-move calibration."
+                )
+            initial_frame, _counter = self._wait_for_raw_camera_frame(
+                timeout_s=self.FLAT_FIELD_CAMERA_TIMEOUT_S,
+            )
+            if initial_frame is None:
+                raise RuntimeError("Camera frame timeout.")
+            frame_size = self._lens_distortion_frame_size(initial_frame)
+            capture_offsets = self._flat_field_capture_offsets_mm(frame_size, scale)
+
+            camera_restore_key = self._apply_microscope_scan_camera_lock(
+                microscope_scan.CameraLockSettings(
+                    enabled=True,
+                    settings=microscope_scan.DEFAULT_CAMERA_LOCK_SETTINGS,
+                )
+            )
+            self._report_flat_field_calibration_progress(
+                "Flat-field calibration: raising needles.", context
+            )
             self.stage_controller.run_external_needles_action(
                 "raise",
                 needle_feedrate_value,
             )
-            scale = self._active_microscope_scale()
+
+            frames: list[QImage] = []
+            total = len(capture_offsets)
+            for index, (dx_mm, dy_mm) in enumerate(capture_offsets, start=1):
+                if self._optical_calibration_should_stop(context):
+                    raise RuntimeError("Flat-field calibration stopped by user.")
+                self._report_flat_field_calibration_progress(
+                    f"Flat-field calibration: capture {index}/{total}.", context
+                )
+                stage_position_changed = True
+                self.stage_controller.run_external_move_to_xy(
+                    start_xy[0] + dx_mm,
+                    start_xy[1] + dy_mm,
+                    feedrate=feedrate,
+                )
+                if not self._wait_optical_calibration_settle(
+                    self.FLAT_FIELD_CAPTURE_SETTLE_S,
+                    context,
+                ):
+                    raise RuntimeError("Flat-field calibration stopped by user.")
+                before_counter = self._latest_raw_camera_counter()
+                frame, _counter = self._wait_for_raw_camera_frame(
+                    after_counter=before_counter,
+                    timeout_s=self.FLAT_FIELD_CAMERA_TIMEOUT_S,
+                )
+                if frame is None:
+                    raise RuntimeError("Camera frame timeout.")
+                if self._lens_distortion_frame_size(frame) != frame_size:
+                    raise RuntimeError("Camera frame size changed during calibration.")
+                frames.append(frame)
+
+            stored = self._flat_field_calibration_store.install(
+                objective_name,
+                frames,
+                metadata={
+                    "calibrated_at": utc_timestamp(),
+                    "magnification": magnification,
+                    "capture_grid": [
+                        self.FLAT_FIELD_CAPTURE_GRID_SIZE,
+                        self.FLAT_FIELD_CAPTURE_GRID_SIZE,
+                    ],
+                    "overlap_fraction": self.FLAT_FIELD_CAPTURE_OVERLAP_FRACTION,
+                    "start_stage_xy_mm": [float(value) for value in start_xy],
+                    "capture_offsets_mm": [
+                        [float(dx_mm), float(dy_mm)]
+                        for dx_mm, dy_mm in capture_offsets
+                    ],
+                    "optical_session": dict(optical_session_snapshot),
+                },
+            )
+            payload = {
+                "objective": objective_name,
+                "current_manifest": str(stored.current_manifest),
+                "reference_image": str(getattr(stored, "reference_image", "")),
+            }
+            success = True
+            message = "Flat-field calibration saved."
+        except Exception as exc:
+            logger.exception("Flat-field calibration failed")
+            message = f"Flat-field calibration failed: {exc}"
+        finally:
+            if stage_reserved:
+                if stage_position_changed:
+                    try:
+                        self._report_flat_field_calibration_progress(
+                            "Flat-field calibration: returning to start.", context
+                        )
+                        self.stage_controller.run_external_move_to_xy(
+                            start_xy[0],
+                            start_xy[1],
+                            feedrate=feedrate,
+                        )
+                    except Exception as exc:
+                        logger.exception("Flat-field calibration restore failed")
+                        success = False
+                        message = f"Flat-field calibration restore failed: {exc}"
+                if camera_restore_key is not None:
+                    restore_error = self._restore_microscope_scan_camera_lock(
+                        camera_restore_key
+                    )
+                    if restore_error:
+                        success = False
+                        message = (
+                            "Flat-field camera settings restore failed: "
+                            f"{restore_error}"
+                        )
+                self.stage_controller.finish_external_task()
+            if optical_session is not None:
+                try:
+                    session_result = optical_session.close()
+                    session_error = str(session_result.get("warning") or "")
+                except Exception as exc:
+                    session_error = str(exc) or type(exc).__name__
+                if session_error:
+                    logger.error(
+                        "Flat-field exposure policy restore failed: %s",
+                        session_error,
+                    )
+                    if success:
+                        success = False
+                        message = (
+                            "Flat-field calibration saved, but exposure policy "
+                            f"restore failed: {session_error}"
+                        )
+                    else:
+                        message = f"{message} Exposure policy restore failed: {session_error}"
+            if (
+                context is not None
+                and context.full_wizard
+                and (
+                    not success
+                    or self._optical_calibration_should_stop(context)
+                    or self._optical_calibration_outer_close_was_requested()
+                )
+            ):
+                outer_error = self._close_optical_calibration_outer_session()
+                if outer_error:
+                    success = False
+                    message = (
+                        f"{message} Exposure policy restore failed: {outer_error}"
+                    )
+            if context is None:
+                self._emit_flat_field_calibration_finished(success, message, payload)
+            else:
+                self._emit_flat_field_calibration_finished(
+                    success,
+                    message,
+                    payload,
+                    context=context,
+                )
+
+    @classmethod
+    def _flat_field_capture_offsets_mm(
+        cls,
+        frame_size: tuple[int, int],
+        scale: object,
+    ) -> tuple[tuple[float, float], ...]:
+        width_px, height_px = frame_size
+        try:
+            fov_x_mm = abs(float(width_px) * float(scale.pixel_size_x_mm))
+            fov_y_mm = abs(float(height_px) * float(scale.pixel_size_y_mm))
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise RuntimeError(
+                "Flat-field calibration requires click-to-move calibration."
+            ) from exc
+        step_fraction = 1.0 - float(cls.FLAT_FIELD_CAPTURE_OVERLAP_FRACTION)
+        step_x = fov_x_mm * step_fraction
+        step_y = fov_y_mm * step_fraction
+        if not (
+            math.isfinite(step_x)
+            and math.isfinite(step_y)
+            and step_x > 0.0
+            and step_y > 0.0
+        ):
+            raise RuntimeError("Flat-field capture spacing is invalid.")
+
+        x_offsets = (-step_x, 0.0, step_x)
+        y_offsets = (-step_y, 0.0, step_y)
+        offsets: list[tuple[float, float]] = [(0.0, 0.0)]
+        for row_index, y_offset in enumerate(y_offsets):
+            row_x_offsets = x_offsets if row_index % 2 == 0 else reversed(x_offsets)
+            for x_offset in row_x_offsets:
+                if abs(x_offset) <= 1e-15 and abs(y_offset) <= 1e-15:
+                    continue
+                offsets.append((float(x_offset), float(y_offset)))
+        return tuple(offsets)
+
+    def _emit_flat_field_calibration_finished(
+        self,
+        success: bool,
+        message: str,
+        payload: dict[str, object] | None,
+        *,
+        context: _OpticalCalibrationRunContext | None = None,
+    ) -> None:
+        self.flat_field_calibration_finished.emit(context, success, message, payload)
+
+    def _on_flat_field_calibration_progress(self, *args: object) -> None:
+        if len(args) == 1:
+            context = getattr(self, "_flat_field_calibration_context", None)
+            message = str(args[0])
+        elif len(args) == 2:
+            context, message = args
+            message = str(message)
+        else:
+            raise TypeError("Invalid flat-field calibration progress event.")
+        if not self._optical_calibration_context_is_current("flat", context):
+            return
+        wizard = getattr(self, "_optical_calibration_wizard", None)
+        run_id = context.wizard_run_id
+        if wizard is not None and run_id is not None:
+            wizard.set_progress(message, run_id=run_id)
+
+    def _on_flat_field_calibration_finished(self, *args: object) -> None:
+        if len(args) == 3:
+            context = getattr(self, "_flat_field_calibration_context", None)
+            success, message, _payload = args
+        elif len(args) == 4:
+            context, success, message, _payload = args
+            if not self._optical_calibration_context_is_current("flat", context):
+                return
+        else:
+            raise TypeError("Invalid flat-field calibration completion event.")
+        if context is not None and not self._optical_calibration_context_is_current(
+            "flat", context
+        ):
+            return
+        thread = getattr(self, "_flat_field_calibration_thread", None)
+        if thread is not None and not thread.is_alive():
+            thread.join(timeout=0.1)
+        self._flat_field_calibration_thread = None
+        self._flat_field_calibration_context = None
+        if (
+            context is not None
+            and context.full_wizard
+            and self._optical_calibration_outer_close_was_requested()
+        ):
+            self._schedule_optical_calibration_outer_close()
+        run_id = context.wizard_run_id if context is not None else None
+        wizard = getattr(self, "_optical_calibration_wizard", None)
+        if wizard is not None and run_id is not None:
+            wizard.set_flat_field_result(
+                bool(success),
+                str(message),
+                run_id=run_id,
+            )
+        self._show_status(str(message), 10000 if success else 8000)
+
+    def _start_lens_distortion_calibration(
+        self,
+        *,
+        wizard_run_id: int | None = None,
+        parent_session_token: str | None = None,
+        full_wizard: bool = False,
+    ) -> dict[str, Any]:
+        if self._lens_distortion_calibration_running():
+            message = "Lens distortion calibration is already running."
+            self._show_status(message, 4000)
+            return {"accepted": False, "status_code": 409, "message": message}
+        if self._flat_field_calibration_running():
+            message = "Flat-field calibration is already running."
+            self._show_status(message, 4000)
+            return {"accepted": False, "status_code": 409, "message": message}
+        if not self._stage_serial_ready():
+            message = "Connect the stage controller before calibration."
+            self._show_status(message, 5000)
+            return {"accepted": False, "status_code": 409, "message": message}
+        if self.stage_controller.is_busy():
+            message = "Stage is busy; lens distortion calibration not started."
+            self._show_status(message, 5000)
+            return {"accepted": False, "status_code": 409, "message": message}
+        objective_name, _magnification = self._active_objective_metadata()
+        objective_name = normalize_objective_name(objective_name)
+        if not objective_name:
+            message = "No active objective selected."
+            self._show_status(message, 5000)
+            return {"accepted": False, "status_code": 409, "message": message}
+
+        linear_feedrate = self._coordinate_feedrate_for_axes(("X", "Y"))
+        needle_feedrate = self._current_needle_feedrate()
+        context = _OpticalCalibrationRunContext(
+            operation_id=uuid.uuid4().hex,
+            wizard_run_id=wizard_run_id,
+            objective_name=objective_name,
+            parent_session_token=parent_session_token,
+            full_wizard=bool(full_wizard),
+        )
+        thread = threading.Thread(
+            target=self._run_lens_distortion_calibration,
+            args=(linear_feedrate, needle_feedrate, context),
+            daemon=True,
+        )
+        self._lens_distortion_thread = thread
+        self._lens_distortion_context = context
+        if self._lens_distortion_dialog is not None:
+            self._lens_distortion_dialog.set_running(True)
+            self._lens_distortion_dialog.set_status(
+                "Lens distortion calibration started."
+            )
+        try:
+            thread.start()
+        except Exception as exc:
+            if self._lens_distortion_thread is thread:
+                self._lens_distortion_thread = None
+                self._lens_distortion_context = None
+            message = f"Lens distortion calibration could not start: {exc}"
+            if self._lens_distortion_dialog is not None:
+                self._lens_distortion_dialog.set_running(False)
+                self._lens_distortion_dialog.set_status(message)
+            self._show_status(message, 8000)
+            return {"accepted": False, "status_code": 500, "message": message}
+        message = "Lens distortion calibration started."
+        self._show_status(message, 4000)
+        return {"accepted": True, "status_code": 202, "message": message}
+
+    def _reset_lens_distortion_calibration(self) -> tuple[bool, str]:
+        active_name = normalize_objective_name(
+            self.settings_manager.settings.objectives.active_name
+        )
+        if self._objective_profile_mutation_busy(active_name):
+            message = (
+                "Lens correction cannot be reset while a scan or calibration is active."
+            )
+            self._show_status(message, 5000)
+            return False, message
+        try:
+            self._save_active_objective_distortion(None)
+        except Exception as exc:
+            logger.exception("Unable to reset lens distortion correction")
+            message = f"Lens correction reset failed: {exc}"
+            self._show_status(message, 8000)
+            return False, message
+        message = "Lens correction cleared. Recalibrate click-to-move."
+        self._show_status(message, 8000)
+        return True, message
+
+    def _lens_distortion_calibration_running(self) -> bool:
+        thread = getattr(self, "_lens_distortion_thread", None)
+        return (
+            getattr(self, "_lens_distortion_context", None) is not None
+            or (thread is not None and thread.is_alive())
+        )
+
+    def _report_lens_distortion_calibration_progress(
+        self,
+        message: str,
+        context: _OpticalCalibrationRunContext | None = None,
+    ) -> None:
+        try:
+            self.status_message_requested.emit(message, 0)
+        except RuntimeError:
+            pass
+        try:
+            self.lens_distortion_calibration_progress.emit(context, message)
+        except RuntimeError:
+            pass
+
+    def _run_lens_distortion_calibration(
+        self,
+        linear_feedrate: float | None = None,
+        needle_feedrate: float | None = None,
+        context: _OpticalCalibrationRunContext | None = None,
+    ) -> None:
+        output: _LensDistortionCalibrationOutput | None = None
+        success = False
+        message = "Lens distortion calibration stopped."
+        reserved = False
+        stage_position_changed = False
+        start_xy: tuple[float, float] | None = None
+        camera_restore_key: str | None = None
+        optical_session: object | None = None
+        optical_session_snapshot: dict[str, object] = {}
+        feedrate = (
+            self._coordinate_feedrate_for_axes(("X", "Y"))
+            if linear_feedrate is None
+            else float(linear_feedrate)
+        )
+        needle_feedrate_value = (
+            self._current_needle_feedrate()
+            if needle_feedrate is None
+            else float(needle_feedrate)
+        )
+        try:
+            _objective_name, _magnification, scale = (
+                self._optical_calibration_objective_metadata(context)
+            )
+            if context is None:
+                optical_session = self._optical_session_manager.open(
+                    "lens distortion calibration"
+                )
+            else:
+                optical_session, context = (
+                    self._open_optical_calibration_stage_session(
+                        "lens distortion calibration",
+                        context,
+                    )
+                )
+            optical_session_snapshot = optical_session.snapshot()
+            if self._optical_calibration_should_stop(context):
+                raise RuntimeError("Lens distortion calibration stopped by user.")
+            self.stage_controller.begin_external_task("lens distortion calibration")
+            reserved = True
+            start_xy = self._reserved_stage_start_xy()
+
+            camera_restore_key = self._apply_microscope_scan_camera_lock(
+                microscope_scan.CameraLockSettings(
+                    enabled=True,
+                    settings=microscope_scan.DEFAULT_CAMERA_LOCK_SETTINGS,
+                )
+            )
+            self._report_lens_distortion_calibration_progress(
+                "Lens distortion calibration: raising needles.", context
+            )
+            self.stage_controller.run_external_needles_action(
+                "raise",
+                needle_feedrate_value,
+            )
             initial_frame, _counter = self._wait_for_raw_camera_frame(
                 timeout_s=self.LENS_DISTORTION_CAMERA_TIMEOUT_S,
             )
@@ -4323,16 +5859,23 @@ class Main(QMainWindow):
             frames: list[GridCalibrationFrame] = []
             total = len(capture_offsets)
             for index, offset in enumerate(capture_offsets, start=1):
+                if self._optical_calibration_should_stop(context):
+                    raise RuntimeError("Lens distortion calibration stopped by user.")
                 dx_mm, dy_mm = offset
-                self._show_status(
-                    f"Lens distortion calibration: capture {index}/{total}."
+                self._report_lens_distortion_calibration_progress(
+                    f"Lens distortion calibration: capture {index}/{total}.", context
                 )
+                stage_position_changed = True
                 self.stage_controller.run_external_move_to_xy(
                     start_xy[0] + dx_mm,
                     start_xy[1] + dy_mm,
                     feedrate=feedrate,
                 )
-                time.sleep(self.LENS_DISTORTION_CAPTURE_SETTLE_S)
+                if not self._wait_optical_calibration_settle(
+                    self.LENS_DISTORTION_CAPTURE_SETTLE_S,
+                    context,
+                ):
+                    raise RuntimeError("Lens distortion calibration stopped by user.")
                 before_counter = self._latest_raw_camera_counter()
                 frame, _counter = self._wait_for_raw_camera_frame(
                     after_counter=before_counter,
@@ -4345,75 +5888,237 @@ class Main(QMainWindow):
                     raise RuntimeError("Camera frame size changed during calibration.")
                 frames.append(GridCalibrationFrame(frame, (dx_mm, dy_mm)))
 
-            payload = self._fit_lens_distortion_payload(
+            self._report_lens_distortion_calibration_progress(
+                "Lens distortion calibration: returning to start.", context
+            )
+            self.stage_controller.run_external_move_to_xy(
+                start_xy[0],
+                start_xy[1],
+                feedrate=feedrate,
+            )
+            stage_position_changed = False
+            output = self._fit_lens_distortion_output(
                 frames,
                 frame_size=frame_size,
                 scale=scale,
             )
+            output.payload["optical_session"] = dict(optical_session_snapshot)
             success = True
-            message = "Lens distortion calibration saved."
+            message = self._lens_distortion_fit_success_message(output.payload)
         except Exception as exc:
             logger.exception("Lens distortion calibration failed")
             message = f"Lens distortion calibration failed: {exc}"
         finally:
             if reserved:
-                try:
-                    self._show_status("Lens distortion calibration: returning to start.")
-                    self.stage_controller.run_external_move_to_xy(
-                        start_xy[0],
-                        start_xy[1],
-                        feedrate=feedrate,
+                if stage_position_changed:
+                    try:
+                        self._report_lens_distortion_calibration_progress(
+                            "Lens distortion calibration: returning to start.", context
+                        )
+                        self.stage_controller.run_external_move_to_xy(
+                            start_xy[0],
+                            start_xy[1],
+                            feedrate=feedrate,
+                        )
+                    except Exception as exc:
+                        logger.exception("Lens distortion calibration restore failed")
+                        success = False
+                        message = f"Lens distortion calibration restore failed: {exc}"
+                if camera_restore_key is not None:
+                    restore_error = self._restore_microscope_scan_camera_lock(
+                        camera_restore_key
                     )
+                    if restore_error:
+                        success = False
+                        message = (
+                            "Lens distortion camera settings restore failed: "
+                            f"{restore_error}"
+                        )
+                self.stage_controller.finish_external_task()
+            if optical_session is not None:
+                try:
+                    session_result = optical_session.close()
+                    session_error = str(session_result.get("warning") or "")
                 except Exception as exc:
-                    logger.exception("Lens distortion calibration restore failed")
+                    session_error = str(exc) or type(exc).__name__
+                if session_error:
+                    logger.error(
+                        "Lens distortion exposure policy restore failed: %s",
+                        session_error,
+                    )
+                    if success:
+                        if output is not None:
+                            output = replace(
+                                output,
+                                session_restore_error=session_error,
+                            )
+                        success = False
+                        message = (
+                            "Lens distortion calibration complete, but exposure "
+                            f"policy restore failed: {session_error}"
+                        )
+                    else:
+                        message = f"{message} Exposure policy restore failed: {session_error}"
+            if context is not None and context.full_wizard:
+                outer_error = self._close_optical_calibration_outer_session()
+                if outer_error:
+                    if success and output is not None:
+                        output = replace(
+                            output,
+                            session_restore_error=outer_error,
+                        )
                     success = False
-                    message = f"Lens distortion calibration restore failed: {exc}"
-                finally:
-                    self.stage_controller.finish_external_task()
-            self._emit_lens_distortion_finished(success, message, payload)
+                    message = (
+                        f"{message} Exposure policy restore failed: {outer_error}"
+                    )
+            if context is None:
+                self._emit_lens_distortion_finished(success, message, output)
+            else:
+                self._emit_lens_distortion_finished(
+                    success,
+                    message,
+                    output,
+                    context=context,
+                )
 
     def _emit_lens_distortion_finished(
         self,
         success: bool,
         message: str,
-        payload: dict[str, object] | None,
+        output: _LensDistortionCalibrationOutput | None,
+        *,
+        context: _OpticalCalibrationRunContext | None = None,
     ) -> None:
-        self.lens_distortion_calibration_finished.emit(success, message, payload)
+        self.lens_distortion_calibration_finished.emit(context, success, message, output)
 
     @staticmethod
-    def _fit_lens_distortion_payload(
+    def _fit_lens_distortion_output(
         frames: Sequence[GridCalibrationFrame],
         *,
         frame_size: tuple[int, int],
         scale: object,
-    ) -> dict[str, object]:
-        pixels_to_mm = getattr(scale, "pixels_to_mm", None)
-        if pixels_to_mm is None:
+    ) -> _LensDistortionCalibrationOutput:
+        geometry_mask = _load_geometry_mask_backend()
+
+        stored_pixels_to_mm = parse_pixels_to_mm_matrix(
+            getattr(scale, "pixels_to_mm", None)
+        )
+        if not stored_pixels_to_mm:
             raise RuntimeError(
                 "Lens distortion calibration requires click-to-move calibration."
             )
-        fit = fit_stage_geometry_from_grid_frames(
+        persisted_pixels_to_mm = tuple(
+            tuple(float(value) for value in row) for row in stored_pixels_to_mm
+        )
+        image_pixels_to_mm = Main._flip_pixel_matrix_y(persisted_pixels_to_mm)
+        masks = tuple(
+            geometry_mask.segment_metal_geometry(frame.frame) for frame in frames
+        )
+        observations = geometry_mask.build_geometry_feature_observations(
             frames,
+            masks,
             frame_size=frame_size,
-            pixels_to_mm=pixels_to_mm,
+            image_pixels_to_mm=image_pixels_to_mm,
+            match_gate_px=float(
+                Main.LENS_DISTORTION_CLUSTER_TOLERANCE_PX
+            ),
+        )
+        fit = fit_stage_geometry_from_observations(
+            observations,
+            frame_size=frame_size,
+            initial_pixels_to_mm=image_pixels_to_mm,
         )
         payload = fit.to_payload()
+        if not isinstance(payload, dict):
+            raise RuntimeError("Lens distortion fit returned an invalid payload.")
+        for key in ("pixels_to_mm", "calibrated_pixels_to_mm"):
+            fitted_matrix = parse_pixels_to_mm_matrix(payload.get(key))
+            if fitted_matrix:
+                payload[key] = [
+                    [float(value) for value in row]
+                    for row in Main._flip_pixel_matrix_y(fitted_matrix)
+                ]
         Main._validate_lens_distortion_fit_payload(payload)
-        return payload
+        before_preview, after_preview = geometry_mask.build_geometry_alignment_previews(
+            frames,
+            masks,
+            persisted_pixels_to_mm,
+            payload,
+        )
+        return _LensDistortionCalibrationOutput(
+            payload=payload,
+            before_preview=before_preview,
+            after_preview=after_preview,
+        )
+
+    @staticmethod
+    def _lens_distortion_fit_success_message(payload: dict[str, object]) -> str:
+        Main._validate_lens_distortion_fit_payload(payload)
+        try:
+            mean_px = float(payload.get("residual_mean_px"))
+            max_px = float(payload.get("residual_max_px"))
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(
+                "Lens distortion calibration residual metrics are invalid."
+            ) from exc
+        if not math.isfinite(mean_px) or not math.isfinite(max_px):
+            raise RuntimeError(
+                "Lens distortion calibration residual metrics are not finite."
+            )
+        return (
+            "Lens distortion calibration saved "
+            f"(raw geometry, {mean_px:.2f} px mean, {max_px:.2f} px max)."
+        )
+
+    @staticmethod
+    def _flip_pixel_matrix_y(
+        matrix: Sequence[Sequence[float]],
+    ) -> tuple[tuple[float, float], tuple[float, float]]:
+        """Convert between GUI Y-up and camera-image Y-down matrix conventions."""
+
+        return (
+            (float(matrix[0][0]), -float(matrix[0][1])),
+            (float(matrix[1][0]), -float(matrix[1][1])),
+        )
 
     @staticmethod
     def _validate_lens_distortion_fit_payload(payload: object) -> None:
         if not isinstance(payload, dict):
-            return
-        if str(payload.get("model_type") or "") != "stage_geometry":
-            return
-        try:
-            residual_mean_px = float(payload.get("residual_mean_px"))
-            residual_max_px = float(payload.get("residual_max_px"))
-        except (TypeError, ValueError):
-            return
-        if not math.isfinite(residual_mean_px) or not math.isfinite(residual_max_px):
-            raise RuntimeError("Lens distortion calibration residual is not finite.")
+            raise RuntimeError("Lens distortion fit returned an invalid payload.")
+        model_type = payload.get("model_type")
+        if not isinstance(model_type, str) or model_type != "stage_geometry":
+            raise RuntimeError(
+                "Lens distortion calibration model_type must be stage_geometry."
+            )
+        residuals: dict[str, float] = {}
+        for field in (
+            "baseline_residual_mean_px",
+            "baseline_residual_max_px",
+            "residual_mean_px",
+            "residual_max_px",
+        ):
+            value = payload.get(field)
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise RuntimeError(
+                    f"Lens distortion calibration {field} is not numeric."
+                )
+            try:
+                residual = float(value)
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError(
+                    f"Lens distortion calibration {field} is not numeric."
+                ) from exc
+            if not math.isfinite(residual):
+                raise RuntimeError(
+                    f"Lens distortion calibration {field} is not finite."
+                )
+            if residual < 0.0:
+                raise RuntimeError(
+                    f"Lens distortion calibration {field} is negative."
+                )
+            residuals[field] = residual
+        residual_mean_px = residuals["residual_mean_px"]
+        residual_max_px = residuals["residual_max_px"]
         if (
             residual_mean_px > float(Main.LENS_DISTORTION_MAX_RESIDUAL_MEAN_PX)
             or residual_max_px > float(Main.LENS_DISTORTION_MAX_RESIDUAL_MAX_PX)
@@ -4422,6 +6127,73 @@ class Main(QMainWindow):
                 "Lens distortion calibration residual is too high "
                 f"({residual_mean_px:.2f} px mean, {residual_max_px:.2f} px max)."
             )
+        required_fields = (
+            "model_version",
+            "frame_size",
+            "pixels_to_mm",
+            "calibrated_pixels_to_mm",
+            "center_px",
+            "k1",
+            "k2",
+            "p1",
+            "p2",
+            "feature_count",
+            "observation_count",
+            "optimizer_success",
+        )
+        missing_fields = [
+            field for field in required_fields if field not in payload
+        ]
+        if missing_fields:
+            raise RuntimeError(
+                "Lens distortion calibration payload is incomplete: "
+                + ", ".join(missing_fields)
+                + "."
+            )
+        if (
+            isinstance(payload.get("model_version"), bool)
+            or payload.get("model_version") != 1
+        ):
+            raise RuntimeError("Lens distortion calibration model_version is invalid.")
+        pixels_to_mm = parse_pixels_to_mm_matrix(payload.get("pixels_to_mm"))
+        calibrated_pixels_to_mm = parse_pixels_to_mm_matrix(
+            payload.get("calibrated_pixels_to_mm")
+        )
+        if not pixels_to_mm or not calibrated_pixels_to_mm:
+            raise RuntimeError(
+                "Lens distortion calibration pixel matrices are invalid."
+            )
+        for field, minimum in (
+            ("feature_count", Main.LENS_DISTORTION_MIN_FEATURE_COUNT),
+            ("observation_count", Main.LENS_DISTORTION_MIN_OBSERVATION_COUNT),
+        ):
+            value = payload.get(field)
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, int)
+                or value < minimum
+            ):
+                raise RuntimeError(
+                    f"Lens distortion calibration {field} is insufficient."
+                )
+        if payload.get("optimizer_success") is not True:
+            raise RuntimeError("Lens distortion calibration optimizer did not converge.")
+        try:
+            correction = correction_from_payload(payload)
+        except Exception as exc:
+            raise RuntimeError(
+                "Lens distortion calibration payload cannot be applied."
+            ) from exc
+        if not isinstance(correction, StageGeometryCorrection):
+            raise RuntimeError(
+                "Lens distortion calibration payload is not stage geometry."
+            )
+        try:
+            json.dumps(payload, allow_nan=False)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(
+                "Lens distortion calibration payload is not serializable."
+            ) from exc
 
     @staticmethod
     def _lens_distortion_frame_size(frame: object) -> tuple[int, int]:
@@ -4442,92 +6214,28 @@ class Main(QMainWindow):
         *,
         initial_frame: object | None = None,
     ) -> tuple[tuple[float, float], ...]:
-        if initial_frame is not None:
-            return cls._lens_distortion_capture_offsets_from_feature_bounds(
-                frame_size,
-                scale,
-                initial_frame,
-            )
-        extent_x, extent_y = cls._lens_distortion_capture_step_mm(frame_size, scale)
-        x_offsets = cls._lens_distortion_axis_offsets_mm(extent_x)
-        y_offsets = cls._lens_distortion_axis_offsets_mm(extent_y)
-        offsets: list[tuple[float, float]] = [(0.0, 0.0)]
-        for row_index, y_offset in enumerate(y_offsets):
-            row_x_offsets = x_offsets if row_index % 2 == 0 else tuple(reversed(x_offsets))
-            for x_offset in row_x_offsets:
-                if abs(x_offset) <= 1e-12 and abs(y_offset) <= 1e-12:
-                    continue
-                offsets.append((float(x_offset), float(y_offset)))
-        return tuple(offsets)
-
-    @classmethod
-    def _lens_distortion_capture_offsets_from_feature_bounds(
-        cls,
-        frame_size: tuple[int, int],
-        scale: object,
-        initial_frame: object,
-    ) -> tuple[tuple[float, float], ...]:
+        del initial_frame
         width_px, height_px = frame_size
-        bounds = detect_bright_feature_bounds(initial_frame)
-        if bounds is None:
-            raise RuntimeError("Lens distortion calibration structure was not detected.")
-        left = float(bounds.left)
-        top = float(bounds.top)
-        right = float(bounds.right)
-        bottom = float(bounds.bottom)
-        if (
-            not math.isfinite(left)
-            or not math.isfinite(top)
-            or not math.isfinite(right)
-            or not math.isfinite(bottom)
-            or left < 0.0
-            or top < 0.0
-            or right > float(width_px)
-            or bottom > float(height_px)
-            or right <= left
-            or bottom <= top
-        ):
-            raise RuntimeError("Lens distortion calibration structure bounds are invalid.")
-        edge_margin_px = max(
-            8.0,
-            min(float(width_px), float(height_px))
-            * float(cls.LENS_DISTORTION_FEATURE_EDGE_MARGIN_FRACTION),
-        )
-        safe_x_px = min(
-            left - edge_margin_px,
-            float(width_px) - right - edge_margin_px,
-        )
-        safe_y_px = min(
-            top - edge_margin_px,
-            float(height_px) - bottom - edge_margin_px,
-        )
-        max_shift_x_px = min(
-            safe_x_px * float(cls.LENS_DISTORTION_EDGE_MARGIN_FRACTION),
-            float(width_px) * float(cls.LENS_DISTORTION_FOV_FRACTION),
-        )
-        max_shift_y_px = min(
-            safe_y_px * float(cls.LENS_DISTORTION_EDGE_MARGIN_FRACTION),
-            float(height_px) * float(cls.LENS_DISTORTION_FOV_FRACTION),
-        )
-        min_shift = float(cls.LENS_DISTORTION_MIN_CAPTURE_SHIFT_PX)
-        if max_shift_x_px < min_shift or max_shift_y_px < min_shift:
-            raise RuntimeError(
-                "Lens distortion calibration structure is too close to the frame edge."
-            )
-        x_shifts = cls._lens_distortion_axis_offsets_mm(max_shift_x_px)
-        y_shifts = cls._lens_distortion_axis_offsets_mm(max_shift_y_px)
+        if width_px <= 0 or height_px <= 0:
+            raise RuntimeError("Camera frame size is unavailable.")
+        extent_x_px = float(width_px) * float(cls.LENS_DISTORTION_FOV_FRACTION)
+        extent_y_px = float(height_px) * float(cls.LENS_DISTORTION_FOV_FRACTION)
+        x_offsets_px = cls._lens_distortion_axis_offsets(extent_x_px)
+        y_offsets_px = cls._lens_distortion_axis_offsets(extent_y_px)
         offsets: list[tuple[float, float]] = [(0.0, 0.0)]
-        for row_index, y_shift_px in enumerate(y_shifts):
-            row_x_shifts = (
-                x_shifts if row_index % 2 == 0 else tuple(reversed(x_shifts))
+        for row_index, y_offset_px in enumerate(y_offsets_px):
+            row_x_offsets_px = (
+                x_offsets_px
+                if row_index % 2 == 0
+                else tuple(reversed(x_offsets_px))
             )
-            for x_shift_px in row_x_shifts:
-                if abs(x_shift_px) <= 1e-12 and abs(y_shift_px) <= 1e-12:
+            for x_offset_px in row_x_offsets_px:
+                if abs(x_offset_px) <= 1e-12 and abs(y_offset_px) <= 1e-12:
                     continue
                 dx_mm, dy_mm = cls._lens_distortion_pixel_shift_to_stage_offset_mm(
                     scale,
-                    x_shift_px,
-                    y_shift_px,
+                    x_offset_px,
+                    y_offset_px,
                 )
                 offsets.append((float(dx_mm), float(dy_mm)))
         return tuple(offsets)
@@ -4561,11 +6269,11 @@ class Main(QMainWindow):
         return (pixel_delta[0] * pixel_size_x_mm, -pixel_delta[1] * pixel_size_y_mm)
 
     @classmethod
-    def _lens_distortion_axis_offsets_mm(cls, extent_mm: float) -> tuple[float, ...]:
+    def _lens_distortion_axis_offsets(cls, extent_value: float) -> tuple[float, ...]:
         count = max(3, int(cls.LENS_DISTORTION_CAPTURE_GRID_SIZE))
         if count % 2 == 0:
             count += 1
-        extent = abs(float(extent_mm))
+        extent = abs(float(extent_value))
         if not math.isfinite(extent) or extent <= 0.0:
             return (0.0,)
         midpoint = count // 2
@@ -4574,60 +6282,76 @@ class Main(QMainWindow):
         step = extent / float(midpoint)
         return tuple((index - midpoint) * step for index in range(count))
 
-    @classmethod
-    def _lens_distortion_capture_step_mm(
-        cls,
-        frame_size: tuple[int, int],
-        scale: object,
-    ) -> tuple[float, float]:
-        width_px, height_px = frame_size
-        try:
-            fov_x_mm = abs(float(width_px) * float(scale.pixel_size_x_mm))
-            fov_y_mm = abs(float(height_px) * float(scale.pixel_size_y_mm))
-        except (AttributeError, TypeError, ValueError):
-            return (cls.LENS_DISTORTION_GRID_STEP_MM, cls.LENS_DISTORTION_GRID_STEP_MM)
-        return (
-            cls._lens_distortion_axis_step_mm(fov_x_mm),
-            cls._lens_distortion_axis_step_mm(fov_y_mm),
-        )
-
-    @classmethod
-    def _lens_distortion_axis_step_mm(cls, fov_mm: float) -> float:
-        base = float(cls.LENS_DISTORTION_GRID_STEP_MM)
-        try:
-            fov = float(fov_mm)
-        except (TypeError, ValueError):
-            return base
-        if not math.isfinite(fov) or fov <= 0.0:
-            return base
-        grid_span = base * float(cls.LENS_DISTORTION_GRID_CELL_COUNT)
-        max_center_offset = (fov - grid_span) * 0.5
-        safe_edge_step = max_center_offset * float(cls.LENS_DISTORTION_EDGE_MARGIN_FRACTION)
-        if safe_edge_step <= 0.0:
-            return 0.0
-        fov_step = fov * float(cls.LENS_DISTORTION_FOV_FRACTION)
-        candidate = min(fov_step, safe_edge_step)
-        if safe_edge_step >= base:
-            candidate = max(base, candidate)
-        return min(candidate, safe_edge_step)
-
-    def _on_lens_distortion_calibration_finished(
-        self,
-        success: bool,
-        message: str,
-        payload: object,
-    ) -> None:
+    def _on_lens_distortion_calibration_finished(self, *args: object) -> None:
+        if len(args) == 3:
+            context = getattr(self, "_lens_distortion_context", None)
+            save_objective_name = None
+            success, message, output = args
+        elif len(args) == 4:
+            context, success, message, output = args
+            if not self._optical_calibration_context_is_current("lens", context):
+                return
+            save_objective_name = context.objective_name
+        else:
+            raise TypeError("Invalid lens distortion calibration completion event.")
+        if context is not None and not self._optical_calibration_context_is_current(
+            "lens", context
+        ):
+            return
         thread = getattr(self, "_lens_distortion_thread", None)
         if thread is not None and not thread.is_alive():
             thread.join(timeout=0.1)
-        self._lens_distortion_thread = None
 
-        if success:
+        payload: dict[str, object] | None = None
+        before_preview: QImage | None = None
+        after_preview: QImage | None = None
+        if isinstance(output, _LensDistortionCalibrationOutput):
+            payload = output.payload
+            before_preview = output.before_preview
+            after_preview = output.after_preview
+
+        completed_with_session_error = bool(
+            isinstance(output, _LensDistortionCalibrationOutput)
+            and output.session_restore_error
+        )
+        if success or completed_with_session_error:
             try:
+                if not isinstance(output, _LensDistortionCalibrationOutput):
+                    raise RuntimeError("Invalid lens calibration output.")
+                if payload is None:
+                    raise RuntimeError("Invalid lens calibration payload.")
+                if (
+                    not isinstance(output.before_preview, QImage)
+                    or output.before_preview.isNull()
+                    or not isinstance(output.after_preview, QImage)
+                    or output.after_preview.isNull()
+                ):
+                    raise RuntimeError("Invalid lens calibration previews.")
+                self._validate_lens_distortion_fit_payload(payload)
+                without_calibration_metrics = (
+                    float(payload["baseline_residual_mean_px"]),
+                    float(payload["baseline_residual_max_px"]),
+                )
+                with_calibration_metrics = (
+                    float(payload["residual_mean_px"]),
+                    float(payload["residual_max_px"]),
+                )
                 click_calibration_invalidated = (
                     self._lens_distortion_payload_invalidates_click_calibration(payload)
                 )
-                self._save_active_objective_distortion(payload)
+                if save_objective_name is None:
+                    self._save_active_objective_distortion(
+                        payload,
+                        optical_context=context,
+                        allow_stage_task=True,
+                    )
+                else:
+                    self._save_objective_distortion(
+                        payload,
+                        save_objective_name,
+                        optical_context=context,
+                        allow_stage_task=True,
+                    )
             except Exception as exc:
                 logger.exception("Unable to save lens distortion correction")
                 success = False
@@ -4636,20 +6360,125 @@ class Main(QMainWindow):
                 if click_calibration_invalidated:
                     message = self._append_click_recalibration_message(message)
 
+        self._lens_distortion_thread = None
+        self._lens_distortion_context = None
+        if (
+            context is not None
+            and context.full_wizard
+            and self._optical_calibration_outer_close_was_requested()
+        ):
+            self._schedule_optical_calibration_outer_close()
+
         if self._lens_distortion_dialog is not None:
             self._lens_distortion_dialog.set_running(False)
             self._lens_distortion_dialog.set_status(message)
+        run_id = context.wizard_run_id if context is not None else None
+        wizard = getattr(self, "_optical_calibration_wizard", None)
+        if wizard is not None and run_id is not None:
+            if success and isinstance(output, _LensDistortionCalibrationOutput):
+                wizard.set_lens_distortion_result(
+                    success,
+                    message,
+                    run_id=run_id,
+                    before_preview=before_preview,
+                    after_preview=after_preview,
+                    without_calibration_metrics=without_calibration_metrics,
+                    with_calibration_metrics=with_calibration_metrics,
+                )
+            else:
+                wizard.set_lens_distortion_result(
+                    success,
+                    message,
+                    run_id=run_id,
+                )
         self._show_status(message, 10000 if success else 8000)
 
-    def _save_active_objective_distortion(self, payload: object | None) -> None:
+    def _on_lens_distortion_calibration_progress(self, *args: object) -> None:
+        if len(args) == 1:
+            context = getattr(self, "_lens_distortion_context", None)
+            message = str(args[0])
+        elif len(args) == 2:
+            context, message = args
+            message = str(message)
+        else:
+            raise TypeError("Invalid lens distortion calibration progress event.")
+        if not self._optical_calibration_context_is_current("lens", context):
+            return
+        wizard = getattr(self, "_optical_calibration_wizard", None)
+        run_id = context.wizard_run_id
+        if wizard is not None and run_id is not None:
+            wizard.set_progress(message, run_id=run_id)
+
+    def _optical_calibration_context_is_current(
+        self,
+        operation: str,
+        context: object,
+    ) -> bool:
+        if not isinstance(context, _OpticalCalibrationRunContext):
+            return False
+        active_context = getattr(
+            self,
+            (
+                "_flat_field_calibration_context"
+                if operation == "flat"
+                else "_lens_distortion_context"
+            ),
+            None,
+        )
+        return (
+            isinstance(active_context, _OpticalCalibrationRunContext)
+            and active_context.operation_id == context.operation_id
+        )
+
+    def _save_active_objective_distortion(
+        self,
+        payload: object | None,
+        *,
+        optical_context: _OpticalCalibrationRunContext | None = None,
+        allow_stage_task: bool = False,
+    ) -> None:
+        active_name = normalize_objective_name(
+            self.settings_manager.settings.objectives.active_name
+        )
+        self._save_objective_distortion(
+            payload,
+            active_name,
+            optical_context=optical_context,
+            allow_stage_task=allow_stage_task,
+        )
+
+    def _save_objective_distortion(
+        self,
+        payload: object | None,
+        objective_name: str,
+        *,
+        optical_context: _OpticalCalibrationRunContext | None = None,
+        allow_stage_task: bool = False,
+    ) -> None:
         settings = self.settings_manager.settings.clone()
         objectives = settings.objectives
-        active_name = normalize_objective_name(objectives.active_name)
-        if not active_name:
+        objective_name = normalize_objective_name(objective_name)
+        if not objective_name:
             raise RuntimeError("No active objective selected.")
-        profile = objectives.objectives.get(active_name)
+        if (
+            optical_context is not None
+            and not self._optical_mutation_context_is_current(optical_context)
+        ):
+            raise RuntimeError(
+                "Optical calibration result was canceled or is no longer current."
+            )
+        if self._objective_profile_mutation_busy(
+            objective_name,
+            allow_stage_task=allow_stage_task,
+            optical_context=optical_context,
+        ):
+            raise RuntimeError(
+                "Active objective correction cannot change while a scan or "
+                "calibration is active."
+            )
+        profile = objectives.objectives.get(objective_name)
         if profile is None:
-            raise RuntimeError(f"Objective profile {active_name} is missing.")
+            raise RuntimeError(f"Objective profile {objective_name} is missing.")
 
         updated = profile.clone()
         if payload is None:
@@ -4669,9 +6498,11 @@ class Main(QMainWindow):
                 updated.xy_calibration_configured = False
         else:
             raise RuntimeError("Invalid lens correction payload.")
-        objectives.objectives[active_name] = updated
-        self.settings_manager.replace(settings)
-        self.settings_manager.save()
+        objectives.objectives[objective_name] = updated
+        self.settings_manager.replace_and_save(
+            settings,
+            preserve_exposure_policy=True,
+        )
         self._apply_objective_settings()
         self._refresh_objective_calibration_ui()
 
@@ -4698,8 +6529,49 @@ class Main(QMainWindow):
         return f"{text} {suffix}"
 
     def _on_objective_calibration_updated(
-        self, objective_name: str, pixels_to_mm: object
+        self,
+        objective_name: str,
+        pixels_to_mm: object,
+        task_token: object,
     ) -> None:
+        reset_callback = (
+            isinstance(task_token, StageTaskToken)
+            and task_token.source == "click_calibration_reset"
+        )
+        expected_sources = (
+            {"click_calibration_reset"}
+            if reset_callback
+            else {
+                "_run_move",
+                "click_calibration",
+                "_run_clicked_point_resolution",
+            }
+        )
+        if not self._calibration_callback_token_is_current(
+            task_token,
+            expected_sources=expected_sources,
+        ):
+            self._reject_objective_calibration_candidate(task_token)
+            message = (
+                "Click-to-move calibration result ignored because its stage task "
+                "is no longer current."
+            )
+            logger.warning(message)
+            self._show_status(message, 7000)
+            return
+        objective_name = normalize_objective_name(objective_name)
+        if self._objective_profile_mutation_busy(
+            objective_name,
+            allow_stage_task=True,
+        ):
+            self._reject_objective_calibration_candidate(task_token)
+            message = (
+                "Click-to-move calibration result ignored because a scan or "
+                "calibration is active."
+            )
+            logger.warning(message)
+            self._show_status(message, 7000)
+            return
         pixels_to_mm = self._objective_pixels_to_mm_for_calibration_update(
             objective_name,
             pixels_to_mm,
@@ -4708,8 +6580,126 @@ class Main(QMainWindow):
             self.settings_manager.settings, objective_name, pixels_to_mm
         )
         if plan.settings is None:
+            self._reject_objective_calibration_candidate(task_token)
             return
-        self._persist_objective_plan(plan)
+        if reset_callback:
+            self._persist_objective_plan(plan)
+            return
+
+        accept = getattr(
+            self.stage_controller,
+            "accept_objective_calibration_candidate",
+            None,
+        )
+        accepted = False
+        if callable(accept):
+            try:
+                accepted = bool(accept(task_token, pixels_to_mm))
+            except Exception:
+                logger.exception("Unable to accept click calibration candidate")
+        if not accepted:
+            self._reject_objective_calibration_candidate(task_token)
+            self._show_status(
+                "Click-to-move calibration was cancelled before it could be applied.",
+                7000,
+            )
+            return
+
+        previous_settings = self.settings_manager.settings.clone()
+        try:
+            persisted = self._persist_objective_plan(
+                plan,
+                apply_objective_runtime=False,
+            )
+        except Exception as exc:
+            logger.exception("Unable to persist accepted click calibration")
+            self._reject_objective_calibration_candidate(task_token)
+            message = (
+                "Click-to-move calibration could not be saved: "
+                f"{exc}"
+            )
+            try:
+                self.settings_manager.replace_and_save(
+                    previous_settings,
+                    preserve_exposure_policy=True,
+                )
+            except Exception as restore_exc:
+                logger.exception(
+                    "Unable to restore settings after click calibration save failure"
+                )
+                message = f"{message} Settings restore failed: {restore_exc}"
+            self._show_status(message, 7000)
+            return
+        if not persisted:
+            self._reject_objective_calibration_candidate(task_token)
+            return
+
+        publish = getattr(
+            self.stage_controller,
+            "publish_objective_calibration_candidate",
+            None,
+        )
+        published = False
+        if callable(publish):
+            try:
+                published = bool(publish(task_token))
+            except Exception:
+                logger.exception("Unable to publish click calibration candidate")
+        if published:
+            return
+
+        self._reject_objective_calibration_candidate(task_token)
+        try:
+            self.settings_manager.replace_and_save(
+                previous_settings,
+                preserve_exposure_policy=True,
+            )
+        except Exception as exc:
+            logger.exception("Unable to roll back rejected click calibration settings")
+            message = (
+                "Click-to-move calibration was cancelled before it could be applied. "
+                f"Settings restore failed: {exc}"
+            )
+        else:
+            message = "Click-to-move calibration was cancelled before it could be applied."
+        self._show_status(message, 7000)
+
+    def _reject_objective_calibration_candidate(self, task_token: object) -> None:
+        reject = getattr(
+            getattr(self, "stage_controller", None),
+            "reject_objective_calibration_candidate",
+            None,
+        )
+        if not callable(reject):
+            return
+        try:
+            reject(task_token)
+        except Exception:
+            logger.exception("Unable to reject click calibration candidate")
+
+    def _calibration_callback_token_is_current(
+        self,
+        task_token: object,
+        *,
+        expected_sources: set[str] | frozenset[str] | None = None,
+    ) -> bool:
+        if not isinstance(task_token, StageTaskToken):
+            return False
+        if expected_sources is not None and task_token.source not in expected_sources:
+            return False
+        stage_controller = getattr(self, "stage_controller", None)
+        validator = getattr(
+            stage_controller,
+            "is_calibration_task_token_current",
+            None,
+        )
+        if not callable(validator):
+            return False
+        try:
+            return bool(validator(task_token))
+        except Exception:
+            logger.exception("Unable to validate stage calibration callback token")
+            return False
 
     def _objective_pixels_to_mm_for_calibration_update(
         self,
@@ -4735,11 +6725,27 @@ class Main(QMainWindow):
         self,
         suggested_name: str,
         message: str,
+        task_token: object,
     ) -> None:
+        if not self._calibration_callback_token_is_current(
+            task_token,
+            expected_sources={"_run_move", "click_calibration_check"},
+        ):
+            stale_message = (
+                "Objective mismatch ignored because its calibration task is no "
+                "longer current."
+            )
+            logger.warning(stale_message)
+            self._show_status(stale_message, 7000)
+            return
         name = normalize_objective_name(suggested_name)
         objective_settings = self.settings_manager.objectives_configuration()
         if name in objective_settings.objectives:
-            self._set_active_objective(name, apply_motion=False, allow_busy=True)
+            self._set_active_objective(
+                name,
+                apply_motion=False,
+                allow_stage_task=True,
+            )
         if message:
             self._show_status(message, 7000)
 
@@ -4771,6 +6777,9 @@ class Main(QMainWindow):
     def _arm_manual_alignment_pick(self, slot: int) -> None:
         if slot not in (0, 1):
             return
+        if getattr(self, "_manual_alignment_capture_context", None) is not None:
+            self._show_status("Alignment point capture is already running.", 4000)
+            return
         self._manual_alignment_pick_slot = slot
         self._set_alignment_panel_expanded()
         self._refresh_manual_alignment_ui()
@@ -4782,8 +6791,15 @@ class Main(QMainWindow):
         )
 
     def _cancel_manual_alignment_pick(self) -> None:
-        if self._manual_alignment_pick_slot is None:
+        context = getattr(self, "_manual_alignment_capture_context", None)
+        if self._manual_alignment_pick_slot is None and context is None:
             return
+        if isinstance(context, _ManualAlignmentCaptureContext):
+            context.cancelled.set()
+            self.stage_controller.cancel_clicked_point_resolution(
+                context.request_id,
+                "Alignment point capture cancelled."
+            )
         self._manual_alignment_pick_slot = None
         self._refresh_manual_alignment_ui()
         self._update_coordinate_display(cursor_xy=None)
@@ -4839,6 +6855,9 @@ class Main(QMainWindow):
     def _capture_manual_alignment_center(self, slot: int) -> None:
         if slot not in (0, 1):
             return
+        if getattr(self, "_manual_alignment_capture_context", None) is not None:
+            self._show_status("Alignment point capture is already running.", 4000)
+            return
         center_xy = self._resolve_alignment_capture_stage_position()
         if center_xy is None:
             return
@@ -4859,13 +6878,30 @@ class Main(QMainWindow):
         except Exception as exc:
             self._show_status(str(exc), 5000)
 
-    def _reset_click_calibration(self) -> None:
-        try:
-            self.stage_controller.reset_calibration(
-                "Click-to-move calibration cleared. Click in the microscope view to recalibrate the active objective."
+    def _reset_click_calibration(self) -> tuple[bool, str]:
+        active_name = normalize_objective_name(
+            self.settings_manager.settings.objectives.active_name
+        )
+        if self._objective_profile_mutation_busy(active_name):
+            message = (
+                "Click-to-move calibration cannot be reset while a scan or "
+                "calibration is active."
             )
+            self._refresh_click_calibration_ui()
+            self._show_status(message, 5000)
+            return False, message
+        message = (
+            "Click-to-move calibration cleared. Click in the microscope view "
+            "to recalibrate the active objective."
+        )
+        try:
+            self.stage_controller.reset_calibration(message)
         except Exception as exc:
-            self._show_status(str(exc), 5000)
+            error = str(exc)
+            self._refresh_click_calibration_ui()
+            self._show_status(error, 5000)
+            return False, error
+        return True, message
 
     def _capture_manual_alignment_clicked(
         self, dx_pixels: float = 0.0, dy_pixels: float = 0.0
@@ -4873,15 +6909,73 @@ class Main(QMainWindow):
         slot = self._manual_alignment_pick_slot
         if slot is None:
             return
+        if getattr(self, "_manual_alignment_capture_context", None) is not None:
+            self._show_status("Alignment point capture is already running.", 4000)
+            return
+        context = _ManualAlignmentCaptureContext(
+            request_id=uuid.uuid4().hex,
+            slot=slot,
+            cancelled=threading.Event(),
+        )
+        self._manual_alignment_capture_context = context
         try:
-            center_xy, captured = self.stage_controller.resolve_clicked_point_xy(
-                dx_pixels, dy_pixels
+            accepted = self.stage_controller.request_clicked_point_resolution(
+                context.request_id,
+                dx_pixels,
+                dy_pixels,
             )
         except Exception as exc:
-            self._show_status(str(exc), 5000)
+            accepted = False
+            message = str(exc) or type(exc).__name__
+        else:
+            message = "Stage is busy; alignment point capture not started."
+        if not accepted:
+            if self._manual_alignment_capture_context is context:
+                self._manual_alignment_capture_context = None
+            self._refresh_manual_alignment_ui()
+            self._update_stage_coordinate_apply_state()
+            self._show_status(message, 5000)
             return
-        self._update_coordinate_display(center_xy=center_xy, cursor_xy=captured)
-        self._capture_manual_alignment_point(slot, captured, source="image")
+        self._refresh_manual_alignment_ui()
+        self._update_stage_coordinate_apply_state()
+
+    def _on_manual_alignment_point_resolved(
+        self,
+        request_id: object,
+        success: bool,
+        center_xy: object,
+        captured_xy: object,
+        message: str,
+    ) -> None:
+        context = getattr(self, "_manual_alignment_capture_context", None)
+        if (
+            not isinstance(context, _ManualAlignmentCaptureContext)
+            or request_id != context.request_id
+        ):
+            return
+        self._manual_alignment_capture_context = None
+        if context.cancelled.is_set() or self._manual_alignment_pick_slot != context.slot:
+            self._refresh_manual_alignment_ui()
+            self._update_stage_coordinate_apply_state()
+            return
+        if not success:
+            self._refresh_manual_alignment_ui()
+            self._update_stage_coordinate_apply_state()
+            self._show_status(
+                str(message) or "Alignment point capture failed.",
+                5000,
+            )
+            return
+        try:
+            center = (float(center_xy[0]), float(center_xy[1]))
+            captured = (float(captured_xy[0]), float(captured_xy[1]))
+        except (IndexError, TypeError, ValueError):
+            self._refresh_manual_alignment_ui()
+            self._update_stage_coordinate_apply_state()
+            self._show_status("Alignment point capture returned invalid coordinates.", 5000)
+            return
+        self._update_coordinate_display(center_xy=center, cursor_xy=captured)
+        self._capture_manual_alignment_point(context.slot, captured, source="image")
 
     def _capture_manual_alignment_point(
         self, slot: int, captured: tuple[float, float], *, source: str
@@ -4971,6 +7065,9 @@ class Main(QMainWindow):
             self.alignment_panel.set_design_marks(self._design_session.source_design_marks)
             self.alignment_panel.set_captured_points(presentation.captured_points)
             self.alignment_panel.set_pick_slot(presentation.pick_slot)
+            self.alignment_panel.set_capture_running(
+                getattr(self, "_manual_alignment_capture_context", None) is not None
+            )
             self.alignment_panel.set_registration_status(
                 self._design_session.registration_status
             )
@@ -5201,8 +7298,10 @@ class Main(QMainWindow):
         settings.jog.manual_axis_distance_mm = distance
         settings.jog.manual_axis_mode = mode
         settings.jog.manual_axis_feedrate_mm_min = feedrate
-        self.settings_manager.replace(settings)
-        self.settings_manager.save()
+        self.settings_manager.replace_and_save(
+            settings,
+            preserve_exposure_policy=True,
+        )
 
     def _save_jog_control_mode(self, mode: str) -> None:
         control_mode = str(mode).strip().lower()
@@ -5212,8 +7311,10 @@ class Main(QMainWindow):
         if settings.jog.mode == control_mode:
             return
         settings.jog.mode = control_mode
-        self.settings_manager.replace(settings)
-        self.settings_manager.save()
+        self.settings_manager.replace_and_save(
+            settings,
+            preserve_exposure_policy=True,
+        )
 
     def _save_jog_feedrate_setting(self, key: str, feedrate_mm_min: float) -> None:
         try:
@@ -5225,8 +7326,10 @@ class Main(QMainWindow):
         if current is not None and abs(float(current) - feedrate) <= 1e-9:
             return
         setattr(settings.jog, key, feedrate)
-        self.settings_manager.replace(settings)
-        self.settings_manager.save()
+        self.settings_manager.replace_and_save(
+            settings,
+            preserve_exposure_policy=True,
+        )
 
     def _on_step_feedrate_changed(self, feedrate_mm_min: float) -> None:
         self._save_jog_feedrate_setting("manual_axis_feedrate_mm_min", feedrate_mm_min)
@@ -5318,8 +7421,10 @@ class Main(QMainWindow):
         settings = self.settings_manager.settings.clone()
         if abs(settings.needle_calibration.feedrate_mm_min - feedrate) > 1e-9:
             settings.needle_calibration.feedrate_mm_min = feedrate
-            self.settings_manager.replace(settings)
-            self.settings_manager.save()
+            self.settings_manager.replace_and_save(
+                settings,
+                preserve_exposure_policy=True,
+            )
         self.stage_controller.queue_active_needles_feedrate(feedrate)
 
     def _on_needle_step_feedrate_changed(self, feedrate_mm_min: float) -> None:
@@ -5338,8 +7443,10 @@ class Main(QMainWindow):
         if abs(settings.feedrates.linear.default - feedrate) <= 1e-9:
             return
         settings.feedrates.linear.default = feedrate
-        self.settings_manager.replace(settings)
-        self.settings_manager.save()
+        self.settings_manager.replace_and_save(
+            settings,
+            preserve_exposure_policy=True,
+        )
 
     def _current_linear_feedrate(self) -> float:
         if self.joystick_panel is not None:
@@ -8400,54 +10507,129 @@ class Main(QMainWindow):
         scale_preflight = microscope_scan.start_scale_decision(scale=scale)
         if self._show_microscope_scan_start_rejection(scale_preflight):
             return
-        frame, _counter = self._wait_for_camera_frame(timeout_s=0.1)
-        frame_size_px = None if frame is None else (frame.width(), frame.height())
-        decision = microscope_scan.scan_plan_decision(
-            document=document,
-            scale=scale,
-            frame_size_px=frame_size_px,
-            overlap_fraction=configuration.overlap_fraction,
-            design_to_stage_xy=self._raw_stage_xy_from_design_xy,
-        )
-        if self._show_microscope_scan_start_rejection(decision):
-            return
-        plan = decision.plan
-        if plan is None:
+        try:
+            launch_snapshot = self._capture_microscope_scan_launch_snapshot(
+                scale=scale,
+                document=document,
+                registration=registration,
+            )
+            planning_request = _MicroscopeDesignScanRequest(
+                bounds=tuple(float(value) for value in document.bounds),
+                overlap_fraction=float(configuration.overlap_fraction),
+            )
+        except (AttributeError, IndexError, TypeError, ValueError):
+            self._show_status("Design registration is invalid.", 6000)
             return
         self._microscope_scan_stop_requested.clear()
         if self.microscope_scan_dialog is not None:
             self.microscope_scan_dialog.set_running(True)
-            self.microscope_scan_dialog.set_status(
-                microscope_scan.starting_status(plan)
-            )
-        self._microscope_scan_thread = threading.Thread(
+            self.microscope_scan_dialog.set_status("Microscope scan starting.")
+        thread = threading.Thread(
             target=self._run_microscope_scan,
-            args=(configuration, plan),
+            args=(configuration, planning_request, launch_snapshot),
             name="MicroscopeDesignScan",
             daemon=True,
         )
-        self._microscope_scan_thread.start()
+        self._microscope_scan_thread = thread
+        try:
+            thread.start()
+        except Exception as exc:
+            if self._microscope_scan_thread is thread:
+                self._microscope_scan_thread = None
+            message = f"Microscope scan could not start: {exc}"
+            if self.microscope_scan_dialog is not None:
+                self.microscope_scan_dialog.set_running(False)
+                self.microscope_scan_dialog.set_status(message)
+            self._show_status(message, 8000)
         self._update_stage_coordinate_apply_state()
+
+    def _build_microscope_scan_plan(
+        self,
+        planning_request: object,
+        frame_size_px: tuple[int, int],
+        *,
+        launch_snapshot: _MicroscopeScanLaunchSnapshot,
+        center_stage_xy: tuple[float, float] | None = None,
+    ) -> MicroscopeScanPlan:
+        width_px, height_px = (int(frame_size_px[0]), int(frame_size_px[1]))
+        if width_px <= 0 or height_px <= 0:
+            raise RuntimeError("Camera frame size is unavailable.")
+        if isinstance(planning_request, _MicroscopeDesignScanRequest):
+            decision = microscope_scan.scan_plan_decision(
+                document=planning_request,
+                scale=launch_snapshot.scale,
+                frame_size_px=(width_px, height_px),
+                overlap_fraction=planning_request.overlap_fraction,
+                design_to_stage_xy=launch_snapshot.design_to_raw_stage,
+            )
+            if not decision.accepted or decision.plan is None:
+                message = (
+                    decision.status.message
+                    if decision.status is not None
+                    else "Microscope scan plan is unavailable."
+                )
+                raise RuntimeError(message)
+            return decision.plan
+        if isinstance(planning_request, _MicroscopeAreaScanRequest):
+            if center_stage_xy is None or len(center_stage_xy) < 2:
+                raise RuntimeError("Unable to read X/Y stage position.")
+            center_stage_xy = (
+                float(center_stage_xy[0]),
+                float(center_stage_xy[1]),
+            )
+            if not all(math.isfinite(value) for value in center_stage_xy):
+                raise RuntimeError("Unable to read X/Y stage position.")
+            pixels_to_mm = getattr(launch_snapshot.scale, "pixels_to_mm", None)
+            if planning_request.scan_pattern == "stitch_debug":
+                return microscope_scan.stitch_debug_scan_plan_from_pixel_matrix(
+                    center_stage_xy=center_stage_xy,
+                    frame_size_px=(width_px, height_px),
+                    pixels_to_mm=pixels_to_mm,
+                    structure_size_mm=float(planning_request.structure_size_mm),
+                    placement_fraction=float(planning_request.placement_fraction),
+                    overlap_fraction=planning_request.overlap_fraction,
+                )
+            if pixels_to_mm is not None:
+                return microscope_scan.centered_area_scan_plan_from_pixel_matrix(
+                    center_stage_xy=center_stage_xy,
+                    frame_size_px=(width_px, height_px),
+                    pixels_to_mm=pixels_to_mm,
+                    row_count=planning_request.row_count,
+                    column_count=planning_request.column_count,
+                    overlap_fraction=planning_request.overlap_fraction,
+                )
+            fov_size_mm = (
+                float(width_px) * float(launch_snapshot.scale.pixel_size_x_mm),
+                float(height_px) * float(launch_snapshot.scale.pixel_size_y_mm),
+            )
+            return microscope_scan.centered_area_scan_plan(
+                center_stage_xy=center_stage_xy,
+                fov_size_mm=fov_size_mm,
+                row_count=planning_request.row_count,
+                column_count=planning_request.column_count,
+                overlap_fraction=planning_request.overlap_fraction,
+            )
+        if hasattr(planning_request, "tiles"):
+            return planning_request
+        raise RuntimeError("Microscope scan planning request is invalid.")
 
     def _run_microscope_scan(
         self,
         configuration: MicroscopeScanConfiguration,
-        plan: MicroscopeScanPlan,
+        planning_request: object,
+        launch_snapshot: _MicroscopeScanLaunchSnapshot,
     ) -> None:
         success = False
         message = "Microscope scan stopped."
         output_dir = microscope_scan.output_dir_from_configuration(configuration)
-        scale = self._active_microscope_scale()
-        if scale is None:
-            self.microscope_scan_finished.emit(
-                False,
-                "Active objective has no calibrated microscope scale.",
-            )
-            return
+        scale = launch_snapshot.scale
         flat_field_options = getattr(
             configuration,
             "flat_field_options",
             microscope_scan.FlatFieldScanOptions(enabled=False),
+        )
+        scan_flat_field_enabled = bool(
+            getattr(flat_field_options, "enabled", False)
         )
         camera_lock_settings = getattr(
             configuration,
@@ -8469,9 +10651,42 @@ class Main(QMainWindow):
             }
         captured_frames: list[_MicroscopeScanCapturedFrame] = []
         camera_restore_key: str | None = None
+        stage_task_started = False
+        start_stage_xy: tuple[float, float] | None = None
+        stage_position_changed = False
+        optical_session: object | None = None
         try:
-            output_dir.mkdir(parents=True, exist_ok=True)
+            self.microscope_scan_status.emit("Microscope scan: fixing exposure.")
+            optical_session = self._optical_session_manager.open("microscope scan")
+            corrections.update(
+                self._microscope_scan_corrections_metadata(
+                    flat_field_options=flat_field_options,
+                    camera_lock_settings=camera_lock_settings,
+                    optical_session=optical_session.snapshot(),
+                )
+            )
+            if scale is None:
+                raise RuntimeError(
+                    "Active objective has no calibrated microscope scale."
+                )
             self.stage_controller.begin_external_task("microscope design scan")
+            stage_task_started = True
+            start_stage_xy = self._reserved_stage_start_xy()
+            before_counter = self._latest_camera_counter()
+            frame, _counter = self._wait_for_camera_frame(
+                after_counter=before_counter,
+                timeout_s=2.0,
+            )
+            if frame is None:
+                raise RuntimeError("Camera frame is unavailable; cannot scan.")
+            plan = self._build_microscope_scan_plan(
+                planning_request,
+                (int(frame.width()), int(frame.height())),
+                launch_snapshot=launch_snapshot,
+                center_stage_xy=start_stage_xy,
+            )
+            self.microscope_scan_status.emit(microscope_scan.starting_status(plan))
+            output_dir.mkdir(parents=True, exist_ok=True)
             camera_restore_key = self._apply_microscope_scan_camera_lock(
                 camera_lock_settings
             )
@@ -8487,6 +10702,7 @@ class Main(QMainWindow):
                 self.microscope_scan_status.emit(
                     microscope_scan.tile_status(tile, len(plan.tiles))
                 )
+                stage_position_changed = True
                 self._move_to_microscope_scan_tile(
                     tile,
                     tile_approach_mm=float(
@@ -8499,7 +10715,9 @@ class Main(QMainWindow):
                 captured_frames.append(
                     _MicroscopeScanCapturedFrame(
                         tile=tile,
-                        frame=self._capture_microscope_scan_frame(),
+                        frame=self._capture_microscope_scan_frame(
+                            raw=scan_flat_field_enabled
+                        ),
                         captured_at=utc_timestamp(),
                         actual_stage_position=self._microscope_scan_actual_position(),
                     )
@@ -8512,11 +10730,14 @@ class Main(QMainWindow):
                 captured_tiles: list[tuple[MicroscopeScanTile, QImage]] = []
                 tile_results: list[MicroscopeCaptureResult] = []
                 for captured in captured_frames:
-                    corrected_frame = self._flat_field_microscope_scan_frame(
-                        captured.frame,
-                        flat_field_options,
-                        flat_field_profile=flat_field_profile,
-                    )
+                    if scan_flat_field_enabled:
+                        corrected_frame = self._correct_microscope_scan_frame(
+                            captured.frame,
+                            flat_field_options,
+                            flat_field_profile=flat_field_profile,
+                        )
+                    else:
+                        corrected_frame = captured.frame
                     result = self._save_microscope_scan_tile(
                         captured.tile,
                         plan,
@@ -8524,6 +10745,7 @@ class Main(QMainWindow):
                         captured_at=captured.captured_at,
                         output_dir=output_dir,
                         scale=scale,
+                        launch_snapshot=launch_snapshot,
                         corrections=corrections,
                         actual_stage_position=captured.actual_stage_position,
                     )
@@ -8562,6 +10784,7 @@ class Main(QMainWindow):
                                 group_plan,
                                 output_dir=output_dir,
                                 scale=stitch_scale,
+                                launch_snapshot=launch_snapshot,
                                 corrections=corrections,
                                 filename_suffix=group.name,
                                 extra={
@@ -8585,6 +10808,7 @@ class Main(QMainWindow):
                         plan,
                         output_dir=output_dir,
                         scale=stitch_scale,
+                        launch_snapshot=launch_snapshot,
                         corrections=corrections,
                     )
                 manifest_path = microscope_scan.write_manifest(
@@ -8615,20 +10839,94 @@ class Main(QMainWindow):
             logger.exception("Microscope scan failed")
             message = f"Microscope scan failed: {exc}"
         finally:
+            if (
+                stage_task_started
+                and stage_position_changed
+                and start_stage_xy is not None
+            ):
+                try:
+                    self.microscope_scan_status.emit(
+                        "Microscope scan: returning to start."
+                    )
+                    self.stage_controller.run_external_move_to_xy(
+                        start_stage_xy[0],
+                        start_stage_xy[1],
+                    )
+                except Exception as exc:
+                    logger.exception("Microscope scan return to start failed")
+                    success, message = self._microscope_scan_cleanup_failure(
+                        success,
+                        message,
+                        "return to start",
+                        exc,
+                    )
             if camera_restore_key is not None:
                 restore_error = self._restore_microscope_scan_camera_lock(
                     camera_restore_key
                 )
                 if restore_error:
                     logger.error("Microscope scan camera restore failed: %s", restore_error)
+                    success, message = self._microscope_scan_cleanup_failure(
+                        success,
+                        message,
+                        "camera settings restore",
+                        restore_error,
+                    )
+            if stage_task_started:
+                try:
+                    self.stage_controller.finish_external_task()
+                except Exception as exc:
+                    logger.exception("Microscope scan stage release failed")
+                    success, message = self._microscope_scan_cleanup_failure(
+                        success,
+                        message,
+                        "stage release",
+                        exc,
+                    )
+            if optical_session is not None:
+                try:
+                    session_result = optical_session.close()
+                    session_error = str(session_result.get("warning") or "")
+                except Exception as exc:
+                    session_error = str(exc) or type(exc).__name__
+                if session_error:
+                    logger.error(
+                        "Microscope scan exposure policy restore failed: %s",
+                        session_error,
+                    )
                     if success:
                         success = False
                         message = (
-                            "Microscope scan complete, but camera settings restore "
-                            f"failed: {restore_error}"
+                            "Microscope scan complete, but exposure policy restore "
+                            f"failed: {session_error}"
                         )
-            self.stage_controller.finish_external_task()
+                    else:
+                        message = f"{message} Exposure policy restore failed: {session_error}"
             self.microscope_scan_finished.emit(success, message)
+
+    @staticmethod
+    def _microscope_scan_cleanup_failure(
+        success: bool,
+        message: str,
+        operation: str,
+        error: object,
+    ) -> tuple[bool, str]:
+        detail = str(error) or type(error).__name__
+        if success:
+            return (
+                False,
+                f"Microscope scan complete, but {operation} failed: {detail}",
+            )
+        return False, f"{message} {operation.capitalize()} failed: {detail}"
+
+    def _reserved_stage_start_xy(self) -> tuple[float, float]:
+        position = self.stage_controller.run_external_current_stage_position()
+        if len(position) < 2:
+            raise RuntimeError("Unable to read X/Y stage position.")
+        start_xy = (float(position[0]), float(position[1]))
+        if not all(math.isfinite(value) for value in start_xy):
+            raise RuntimeError("Unable to read X/Y stage position.")
+        return start_xy
 
     def _move_to_microscope_scan_tile(
         self,
@@ -8742,6 +11040,7 @@ class Main(QMainWindow):
         *,
         flat_field_options: object,
         camera_lock_settings: object,
+        optical_session: Mapping[str, object] | None = None,
     ) -> dict[str, object]:
         corrections: dict[str, object] = {}
         if hasattr(flat_field_options, "to_metadata"):
@@ -8752,17 +11051,38 @@ class Main(QMainWindow):
             lock_metadata = camera_lock_settings.to_metadata()
             if bool(lock_metadata.get("enabled")):
                 corrections["camera_lock"] = lock_metadata
+        if optical_session is not None:
+            corrections["optical_session"] = dict(optical_session)
         return corrections
 
-    def _capture_microscope_scan_frame(self) -> QImage:
-        before_counter = self._latest_camera_counter()
-        frame, _counter = self._wait_for_camera_frame(
+    def _capture_microscope_scan_frame(self, *, raw: bool = False) -> QImage:
+        if raw:
+            before_counter = self._latest_raw_camera_counter()
+            wait_for_frame = self._wait_for_raw_camera_frame
+        else:
+            before_counter = self._latest_camera_counter()
+            wait_for_frame = self._wait_for_camera_frame
+        frame, _counter = wait_for_frame(
             after_counter=before_counter,
             timeout_s=2.0,
         )
         if frame is None:
             raise RuntimeError("Camera frame is unavailable.")
         return frame
+
+    def _correct_microscope_scan_frame(
+        self,
+        frame: QImage,
+        flat_field_options: object,
+        *,
+        flat_field_profile: object | None,
+    ) -> QImage:
+        flat_corrected = self._flat_field_microscope_scan_frame(
+            frame,
+            flat_field_options,
+            flat_field_profile=flat_field_profile,
+        )
+        return self._correct_camera_frame_for_active_objective(flat_corrected)
 
     def _save_microscope_scan_tile(
         self,
@@ -8773,26 +11093,26 @@ class Main(QMainWindow):
         captured_at: str,
         output_dir: Path,
         scale: Any,
+        launch_snapshot: _MicroscopeScanLaunchSnapshot,
         corrections: dict[str, object],
         actual_stage_position: tuple[float, ...] | None = None,
     ) -> MicroscopeCaptureResult:
-        objective_name, magnification = self._active_objective_metadata()
-        extra: dict[str, object] = {}
+        extra: dict[str, object] = {
+            "scan_launch": launch_snapshot.metadata(),
+        }
         if corrections:
             extra["corrections"] = corrections
         if actual_stage_position is not None:
             extra["actual_stage_position"] = [float(value) for value in actual_stage_position]
         save_plan = microscope_scan.tile_image_save_plan(
             output_dir=output_dir,
-            scan_name=microscope_scan.scan_name_from_document(
-                self._design_session.document
-            ),
+            scan_name=launch_snapshot.scan_name,
             tile=tile,
             plan=plan,
             captured_at=captured_at,
-            objective_name=objective_name,
-            magnification=magnification,
-            design_xy=self._design_xy_from_raw_stage_xy(tile.stage_xy),
+            objective_name=launch_snapshot.objective_name,
+            magnification=launch_snapshot.magnification,
+            design_xy=launch_snapshot.raw_stage_to_design(tile.stage_xy),
             stage_position=self._stage_position_for_image_metadata(
                 stage_xy=tile.stage_xy
             ),
@@ -8814,25 +11134,24 @@ class Main(QMainWindow):
         *,
         output_dir: Path,
         scale: Any,
+        launch_snapshot: _MicroscopeScanLaunchSnapshot,
         corrections: dict[str, object],
         filename_suffix: str = "",
         extra: dict[str, object] | None = None,
     ) -> MicroscopeCaptureResult:
-        objective_name, magnification = self._active_objective_metadata()
         metadata_extra: dict[str, object] = {}
         if corrections:
             metadata_extra["corrections"] = corrections
         if extra:
             metadata_extra.update(extra)
+        metadata_extra["scan_launch"] = launch_snapshot.metadata()
         save_plan = microscope_scan.mosaic_image_save_plan(
             output_dir=output_dir,
-            scan_name=microscope_scan.scan_name_from_document(
-                self._design_session.document
-            ),
+            scan_name=launch_snapshot.scan_name,
             plan=plan,
             captured_at=utc_timestamp(),
-            objective_name=objective_name,
-            magnification=magnification,
+            objective_name=launch_snapshot.objective_name,
+            magnification=launch_snapshot.magnification,
             filename_suffix=filename_suffix,
             extra=metadata_extra or None,
         )
@@ -9125,8 +11444,10 @@ class Main(QMainWindow):
         settings.oscillation.amplitude_mm = float(amplitude_mm)
         settings.oscillation.feedrate_mm_min = float(feedrate_mm_min)
         settings.oscillation.turns_per_sweep = float(turns_per_sweep)
-        self.settings_manager.replace(settings)
-        self.settings_manager.save()
+        self.settings_manager.replace_and_save(
+            settings,
+            preserve_exposure_policy=True,
+        )
 
 
 def _screen_available_geometry(window: QMainWindow):

@@ -574,6 +574,17 @@ class _FakeSettingsManager:
     def save(self) -> None:
         self.saved_count += 1
 
+    def replace_and_save(
+        self,
+        settings: Settings,
+        *,
+        preserve_exposure_policy: bool = False,
+    ) -> None:
+        if preserve_exposure_policy:
+            settings.exposure_policy = self.settings.exposure_policy.clone()
+        self.replace(settings)
+        self.save()
+
 
 def _coordinate_target_state() -> CoordinateTargetMoveState:
     return CoordinateTargetMoveState(

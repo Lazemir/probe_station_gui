@@ -54,17 +54,22 @@ class StageControllerAutofocusMixin:
         *,
         range_mm: float,
         step_mm: float | None = None,
+        parent_token: str | None = None,
     ) -> AutofocusResult:
         """Run a fast local Z autofocus inside an external reservation."""
 
-        self.movement_started.emit()
         try:
-            self._check_cancelled()
-            with self._serial_session():
-                result = self._run_local_autofocus_locked(
-                    range_mm=range_mm,
-                    step_mm=step_mm,
-                )
+            with self._open_optical_session(
+                "autofocus",
+                parent_token=parent_token,
+            ):
+                self.movement_started.emit()
+                self._check_cancelled()
+                with self._serial_session():
+                    result = self._run_local_autofocus_locked(
+                        range_mm=range_mm,
+                        step_mm=step_mm,
+                    )
             message = result.summary()
             self.autofocus_finished.emit(True, message)
             self.movement_finished.emit(True, message)
@@ -76,17 +81,19 @@ class StageControllerAutofocusMixin:
             raise
 
     def _run_autofocus(self) -> None:
-        self.movement_started.emit()
         try:
-            with self._serial_session():
-                self._run_autofocus_locked()
+            with self._open_optical_session("autofocus"):
+                self.movement_started.emit()
+                with self._serial_session():
+                    message = self._run_autofocus_locked()
+            self.autofocus_finished.emit(True, message)
         except StageControllerError as exc:
             self.autofocus_finished.emit(False, str(exc))
         finally:
             with self._task_lock:
                 setattr(self, "_active_thread", None)
 
-    def _run_autofocus_locked(self) -> None:
+    def _run_autofocus_locked(self) -> str:
         """Run autofocus while the caller owns serial access."""
 
         context = self._prepare_autofocus_context_locked(
@@ -153,7 +160,7 @@ class StageControllerAutofocusMixin:
         )
         if best.edge_peak:
             message += " Peak was near a search edge; consider increasing range."
-        self.autofocus_finished.emit(True, message)
+        return message
 
     def _run_local_autofocus_locked(
         self,

@@ -19,6 +19,275 @@ from tests.app.main_coordinate_feedrate_support import (
 
 
 class MainRouteControlTest(unittest.TestCase):
+    def test_gui_serialized_stage_command_runs_hardware_dispatch_in_worker(self) -> None:
+        window = Main.__new__(Main)
+        dispatch_threads: list[int] = []
+        dispatch_started = threading.Event()
+        release_dispatch = threading.Event()
+        gui_thread_id = threading.get_ident()
+        window._probe_route_api_window_guard = lambda _action, _payload: None
+
+        def dispatch(_request, *, apply_route_control_guard):
+            dispatch_threads.append(threading.get_ident())
+            dispatch_started.set()
+            self.assertTrue(release_dispatch.wait(timeout=1.0))
+            return {"accepted": True, "status_code": 200}
+
+        window._dispatch_api_command_request = dispatch
+        response = Main._submit_api_command_request(
+            window,
+            {
+                "action": "stage_local_focus",
+                "payload": {"range_mm": 0.03},
+            },
+        )
+
+        self.assertIsInstance(response, main_module.DeferredApiResponse)
+        self.assertTrue(dispatch_started.wait(timeout=1.0))
+        self.assertEqual(len(dispatch_threads), 1)
+        self.assertNotEqual(dispatch_threads[0], gui_thread_id)
+        self.assertTrue(Main._api_stage_command_worker_active(window))
+        self.assertFalse(
+            Main._wait_for_api_stage_command_workers(window, timeout_s=0.0)
+        )
+
+        release_dispatch.set()
+
+        self.assertEqual(
+            response.wait(timeout_s=1.0),
+            {"accepted": True, "status_code": 200},
+        )
+        self.assertFalse(Main._api_stage_command_worker_active(window))
+        self.assertTrue(
+            Main._wait_for_api_stage_command_workers(window, timeout_s=0.0)
+        )
+
+    def test_concurrent_route_session_starts_are_single_flight(self) -> None:
+        window = Main.__new__(Main)
+        dispatch_started = threading.Event()
+        release_dispatch = threading.Event()
+        dispatched: list[str] = []
+        window._probe_route_api_window_guard = lambda _action, _payload: None
+
+        def dispatch(request, *, apply_route_control_guard):
+            dispatched.append(str(request["action"]))
+            dispatch_started.set()
+            self.assertTrue(release_dispatch.wait(timeout=1.0))
+            return {"accepted": True, "status_code": 202}
+
+        window._dispatch_api_command_request = dispatch
+        first = Main._submit_api_command_request(
+            window,
+            {"action": "start_route_session", "payload": {"start": 1}},
+        )
+        self.assertTrue(dispatch_started.wait(timeout=1.0))
+        try:
+            second = Main._submit_api_command_request(
+                window,
+                {"action": "start_route_session", "payload": {"start": 2}},
+            )
+            self.assertEqual(
+                second,
+                {
+                    "accepted": False,
+                    "status_code": 409,
+                    "message": (
+                        "API stage command is already running: start_route_session."
+                    ),
+                },
+            )
+            self.assertEqual(dispatched, ["start_route_session"])
+        finally:
+            release_dispatch.set()
+        self.assertEqual(
+            first.wait(timeout_s=1.0),
+            {"accepted": True, "status_code": 202},
+        )
+
+    def test_route_start_rejects_concurrent_different_stage_command(self) -> None:
+        window = Main.__new__(Main)
+        dispatch_started = threading.Event()
+        release_dispatch = threading.Event()
+        dispatched: list[str] = []
+        window._probe_route_api_window_guard = lambda _action, _payload: None
+
+        def dispatch(request, *, apply_route_control_guard):
+            dispatched.append(str(request["action"]))
+            dispatch_started.set()
+            self.assertTrue(release_dispatch.wait(timeout=1.0))
+            return {"accepted": True, "status_code": 202}
+
+        window._dispatch_api_command_request = dispatch
+        first = Main._submit_api_command_request(
+            window,
+            {"action": "start_route_session", "payload": {}},
+        )
+        self.assertTrue(dispatch_started.wait(timeout=1.0))
+        try:
+            second = Main._submit_api_command_request(
+                window,
+                {"action": "stage_local_focus", "payload": {}},
+            )
+            self.assertEqual(second.get("accepted"), False)
+            self.assertEqual(second.get("status_code"), 409)
+            self.assertIn("start_route_session", str(second.get("message")))
+            self.assertEqual(dispatched, ["start_route_session"])
+        finally:
+            release_dispatch.set()
+        self.assertEqual(
+            first.wait(timeout_s=1.0),
+            {"accepted": True, "status_code": 202},
+        )
+
+    def test_worker_reservation_is_held_through_completion_publication(self) -> None:
+        window = Main.__new__(Main)
+        mutation_finished = threading.Event()
+        publication_started = threading.Event()
+        release_publication = threading.Event()
+        reservation_released = threading.Event()
+        releases: list[str] = []
+        test_case = self
+        window._probe_route_api_window_guard = lambda _action, _payload: None
+
+        def release(reservation):
+            releases.append(reservation.operation_id)
+            result = Main._release_api_stage_command_reservation(window, reservation)
+            reservation_released.set()
+            return result
+
+        class _BlockingCompletion(main_module.DeferredApiResponse):
+            def complete(self, result):
+                publication_started.set()
+                test_case.assertTrue(release_publication.wait(timeout=1.0))
+                return super().complete(result)
+
+        def dispatch(_request, *, apply_route_control_guard):
+            mutation_finished.set()
+            return {"accepted": True, "status_code": 202}
+
+        original_completion = main_module.DeferredApiResponse
+        main_module.DeferredApiResponse = _BlockingCompletion
+        window._release_api_stage_command_reservation = release
+        window._dispatch_api_command_request = dispatch
+        try:
+            response = Main._submit_api_command_request(
+                window,
+                {"action": "start_route_session", "payload": {}},
+            )
+            self.assertTrue(mutation_finished.wait(timeout=1.0))
+            self.assertTrue(publication_started.wait(timeout=1.0))
+            self.assertTrue(Main._api_stage_command_worker_active(window))
+            self.assertFalse(
+                Main._wait_for_api_stage_command_workers(window, timeout_s=0.0)
+            )
+        finally:
+            release_publication.set()
+            main_module.DeferredApiResponse = original_completion
+
+        self.assertEqual(
+            response.wait(timeout_s=1.0),
+            {"accepted": True, "status_code": 202},
+        )
+        self.assertTrue(reservation_released.wait(timeout=1.0))
+        self.assertEqual(len(releases), 1)
+        self.assertFalse(Main._api_stage_command_worker_active(window))
+
+    def test_stage_command_start_failure_releases_reservation_once(self) -> None:
+        window = Main.__new__(Main)
+        releases: list[str] = []
+        window._probe_route_api_window_guard = lambda _action, _payload: None
+
+        def release(reservation):
+            releases.append(reservation.operation_id)
+            return Main._release_api_stage_command_reservation(window, reservation)
+
+        class _FailingThread:
+            def __init__(self, **_kwargs) -> None:
+                pass
+
+            def start(self) -> None:
+                raise RuntimeError("thread unavailable")
+
+        window._release_api_stage_command_reservation = release
+        original_thread = main_module.threading.Thread
+        main_module.threading.Thread = _FailingThread
+        try:
+            response = Main._submit_api_command_request(
+                window,
+                {"action": "stage_local_focus", "payload": {}},
+            )
+        finally:
+            main_module.threading.Thread = original_thread
+
+        self.assertEqual(response.get("accepted"), False)
+        self.assertEqual(response.get("status_code"), 500)
+        self.assertEqual(len(releases), 1)
+        self.assertFalse(Main._api_stage_command_worker_active(window))
+
+    def test_stage_command_exception_releases_reservation_once(self) -> None:
+        window = Main.__new__(Main)
+        releases: list[str] = []
+        released = threading.Event()
+        window._probe_route_api_window_guard = lambda _action, _payload: None
+
+        def release(reservation):
+            releases.append(reservation.operation_id)
+            result = Main._release_api_stage_command_reservation(window, reservation)
+            released.set()
+            return result
+
+        def dispatch(_request, *, apply_route_control_guard):
+            raise RuntimeError("dispatch failed")
+
+        window._release_api_stage_command_reservation = release
+        window._dispatch_api_command_request = dispatch
+        response = Main._submit_api_command_request(
+            window,
+            {"action": "stage_local_focus", "payload": {}},
+        )
+
+        self.assertEqual(response.wait(timeout_s=1.0).get("status_code"), 500)
+        self.assertTrue(released.wait(timeout=1.0))
+        self.assertEqual(len(releases), 1)
+        self.assertFalse(Main._api_stage_command_worker_active(window))
+
+    def test_cancelled_stage_command_response_releases_reservation_once(self) -> None:
+        window = Main.__new__(Main)
+        releases: list[str] = []
+        released = threading.Event()
+        window._probe_route_api_window_guard = lambda _action, _payload: None
+
+        def release(reservation):
+            releases.append(reservation.operation_id)
+            result = Main._release_api_stage_command_reservation(window, reservation)
+            released.set()
+            return result
+
+        window._release_api_stage_command_reservation = release
+        window._dispatch_api_command_request = (
+            lambda _request, *, apply_route_control_guard: {
+                "accepted": False,
+                "status_code": 409,
+                "message": "Operation cancelled.",
+            }
+        )
+        response = Main._submit_api_command_request(
+            window,
+            {"action": "stage_local_focus", "payload": {}},
+        )
+
+        self.assertEqual(
+            response.wait(timeout_s=1.0),
+            {
+                "accepted": False,
+                "status_code": 409,
+                "message": "Operation cancelled.",
+            },
+        )
+        self.assertTrue(released.wait(timeout=1.0))
+        self.assertEqual(len(releases), 1)
+        self.assertFalse(Main._api_stage_command_worker_active(window))
+
     def test_api_route_session_opens_measurement_controls_without_starting_gui_run(self) -> None:
         window = Main.__new__(Main)
         calls: list[bool] = []
@@ -432,7 +701,7 @@ class MainRouteControlTest(unittest.TestCase):
         )
         self.assertEqual(timeout_s, 10.0)
 
-    def test_probe_route_api_guard_uses_gui_thread_before_direct_command(self) -> None:
+    def test_stage_starting_api_command_is_submitted_to_gui_bridge(self) -> None:
         window = Main.__new__(Main)
         bridge_requests: list[tuple[dict[str, object], float]] = []
         dispatch_calls: list[tuple[dict[str, object], bool]] = []
@@ -457,14 +726,12 @@ class MainRouteControlTest(unittest.TestCase):
         response = Main._submit_api_command_request_from_api_thread(window, command)
 
         self.assertTrue(response["accepted"])
-        self.assertTrue(response["dispatched"])
         self.assertEqual(len(bridge_requests), 1)
-        guard_request, timeout_s = bridge_requests[0]
-        self.assertEqual(guard_request["action"], "probe_route_window_guard")
-        self.assertEqual(guard_request["guard_action"], "move_to_contact")
-        self.assertEqual(guard_request["payload"], {"contact_number": 33})
+        bridge_request, timeout_s = bridge_requests[0]
+        self.assertEqual(bridge_request["action"], "command")
+        self.assertEqual(bridge_request["command"], command)
         self.assertEqual(timeout_s, 10.0)
-        self.assertEqual(dispatch_calls, [(command, False)])
+        self.assertEqual(dispatch_calls, [])
 
     def test_probe_route_api_guard_does_not_cover_bare_stage_move(self) -> None:
         window = Main.__new__(Main)

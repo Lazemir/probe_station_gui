@@ -22,17 +22,23 @@ API_KEY_DISPLAY_SUFFIX_LENGTH = 6
 
 API_PERMISSION_STAGE_READ = "stage_read"
 API_PERMISSION_STAGE_WRITE = "stage_write"
+API_PERMISSION_CAMERA_READ = "camera_read"
+API_PERMISSION_CAMERA_WRITE = "camera_write"
 API_PERMISSION_ROUTE_READ = "route_read"
 API_PERMISSION_ROUTE_MEASURE = "route_measure"
 API_KEY_PERMISSIONS = (
     API_PERMISSION_STAGE_READ,
     API_PERMISSION_STAGE_WRITE,
+    API_PERMISSION_CAMERA_READ,
+    API_PERMISSION_CAMERA_WRITE,
     API_PERMISSION_ROUTE_READ,
     API_PERMISSION_ROUTE_MEASURE,
 )
 DEFAULT_API_KEY_PERMISSIONS = {
     API_PERMISSION_STAGE_READ: True,
     API_PERMISSION_STAGE_WRITE: False,
+    API_PERMISSION_CAMERA_READ: True,
+    API_PERMISSION_CAMERA_WRITE: False,
     API_PERMISSION_ROUTE_READ: True,
     API_PERMISSION_ROUTE_MEASURE: True,
 }
@@ -116,6 +122,17 @@ class ApiKeyRecord:
         )
         last_used_raw = data.get("last_used_at_utc", data.get("last_used_at"))
         last_used = str(last_used_raw).strip() if last_used_raw else None
+        raw_permissions = data.get("permissions")
+        permission_defaults: dict[str, bool] = {}
+        if isinstance(raw_permissions, Mapping):
+            if API_PERMISSION_CAMERA_READ not in raw_permissions:
+                permission_defaults[API_PERMISSION_CAMERA_READ] = bool(
+                    raw_permissions.get(API_PERMISSION_STAGE_READ, False)
+                )
+            if API_PERMISSION_CAMERA_WRITE not in raw_permissions:
+                permission_defaults[API_PERMISSION_CAMERA_WRITE] = bool(
+                    raw_permissions.get(API_PERMISSION_STAGE_WRITE, False)
+                )
         return cls(
             id=record_id,
             user_name=user_name or default_api_user_name(),
@@ -127,9 +144,8 @@ class ApiKeyRecord:
             last_used_at_utc=last_used or None,
             enabled=bool(data.get("enabled", True)),
             permissions=normalize_permissions(
-                data.get("permissions")
-                if isinstance(data.get("permissions"), Mapping)
-                else None
+                raw_permissions if isinstance(raw_permissions, Mapping) else None,
+                defaults=permission_defaults,
             ),
         )
 

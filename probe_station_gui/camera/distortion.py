@@ -13,6 +13,10 @@ from probe_station_gui.camera.imaging import MicroscopeScaleCalibration, Microsc
 
 Point2D = tuple[float, float]
 MODEL_VERSION = 1
+MIN_STAGE_GEOMETRY_FEATURES = 4
+MIN_STAGE_GEOMETRY_OBSERVATIONS = 12
+MIN_STAGE_GEOMETRY_FRAMES = 5
+MIN_STAGE_GEOMETRY_COVERAGE_FRACTION = 0.15
 
 
 @dataclass(frozen=True)
@@ -586,6 +590,16 @@ def fit_stage_geometry_from_observations(
     grouped = _stage_feature_groups(prepared)
     if len(grouped) < 2:
         raise ValueError("At least two repeated features are required.")
+    used_indexes = sorted(index for indexes in grouped.values() for index in indexes)
+    prepared = tuple(prepared[index] for index in used_indexes)
+    grouped = _stage_feature_groups(prepared)
+    if optimize_distortion:
+        _validate_stage_geometry_fit_coverage(
+            prepared,
+            grouped,
+            frame_size=(width, height),
+            initial_matrix=matrix0,
+        )
     frame_center = (float(width) * 0.5, float(height) * 0.5)
     center_fraction = _positive_float(center_search_fraction, "center_search_fraction")
     center_fraction = min(center_fraction, 0.95)
@@ -815,8 +829,8 @@ def detect_bright_feature_bounds(frame: object) -> BrightFeatureBounds | None:
     link_kernel = cv2.getStructuringElement(
         cv2.MORPH_RECT,
         (
-            _odd_kernel_size(max(9, width // 80), limit=max(3, width - 1)),
-            _odd_kernel_size(max(9, height // 80), limit=max(3, height - 1)),
+            _odd_kernel_size(max(9, width // 160), limit=max(3, width - 1)),
+            _odd_kernel_size(max(9, height // 160), limit=max(3, height - 1)),
         ),
     )
     linked = cv2.dilate(mask.astype(np.uint8), link_kernel, iterations=1)
@@ -1299,6 +1313,87 @@ def _stage_feature_groups(
         for feature_id, indexes in by_feature.items()
         if len(indexes) >= 2
     }
+
+
+def _validate_stage_geometry_fit_coverage(
+    observations: Sequence[StageFeatureObservation],
+    grouped: dict[str, tuple[int, ...]],
+    *,
+    frame_size: tuple[int, int],
+    initial_matrix: object,
+) -> None:
+    import numpy as np
+
+    def reject(reason: str) -> None:
+        raise ValueError(
+            "Stage-geometry calibration has insufficient geometry coverage: "
+            f"{reason}."
+        )
+
+    if len(grouped) < MIN_STAGE_GEOMETRY_FEATURES:
+        reject(f"need at least {MIN_STAGE_GEOMETRY_FEATURES} repeated features")
+    if len(observations) < MIN_STAGE_GEOMETRY_OBSERVATIONS:
+        reject(f"need at least {MIN_STAGE_GEOMETRY_OBSERVATIONS} observations")
+    if 2 * (len(observations) - len(grouped)) < 10:
+        reject("too few independent residuals for the ten-parameter model")
+
+    frame_indexes = {int(observation.frame_index) for observation in observations}
+    if len(frame_indexes) < MIN_STAGE_GEOMETRY_FRAMES:
+        reject(f"need at least {MIN_STAGE_GEOMETRY_FRAMES} captured positions")
+
+    stage_positions = np.unique(
+        np.round(
+            np.asarray(
+                [observation.stage_xy for observation in observations],
+                dtype=float,
+            ),
+            decimals=12,
+        ),
+        axis=0,
+    )
+    if stage_positions.shape[0] < MIN_STAGE_GEOMETRY_FRAMES:
+        reject(f"need at least {MIN_STAGE_GEOMETRY_FRAMES} distinct stage positions")
+
+    width, height = frame_size
+    matrix = np.asarray(initial_matrix, dtype=float)
+    pixel_corners = np.asarray(
+        (
+            (0.0, 0.0),
+            (float(width), 0.0),
+            (0.0, float(height)),
+            (float(width), float(height)),
+        ),
+        dtype=float,
+    )
+    fov_stage_span = np.ptp(pixel_corners @ matrix.T, axis=0)
+    minimum_span = fov_stage_span * float(MIN_STAGE_GEOMETRY_COVERAGE_FRACTION)
+    stage_span = np.ptp(stage_positions, axis=0)
+    if np.any(stage_span < minimum_span):
+        reject("stage positions must span both image axes")
+
+    frame_center = (float(width) * 0.5, float(height) * 0.5)
+    world_centers: list[tuple[float, float]] = []
+    for indexes in grouped.values():
+        world_points = [
+            _world_xy_from_pixel(
+                stage_xy=observations[index].stage_xy,
+                pixel_xy=observations[index].pixel_xy,
+                frame_center_px=frame_center,
+                matrix=matrix,
+                frame_size=frame_size,
+                center_px=frame_center,
+                k1=0.0,
+                k2=0.0,
+                p1=0.0,
+                p2=0.0,
+            )
+            for index in indexes
+        ]
+        center = np.mean(np.asarray(world_points, dtype=float), axis=0)
+        world_centers.append((float(center[0]), float(center[1])))
+    feature_span = np.ptp(np.asarray(world_centers, dtype=float), axis=0)
+    if np.any(feature_span < minimum_span):
+        reject("matched features must be distributed across both image axes")
 
 
 def _world_xy_from_pixel(

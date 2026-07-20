@@ -107,6 +107,35 @@ class ObjectivesSettingsWidget(QWidget):
             },
         )
 
+    def set_objectives(self, objectives: ObjectivesSettings) -> None:
+        """Reload the effective objective settings after an apply."""
+
+        editor_name = str(
+            self._profile_combo.currentData() or self._active_editor_name
+        )
+        self._objectives = objectives.clone()
+        names = ordered_objective_names(self._objectives.objectives)
+        active_name = self._objectives.active_name
+        if active_name not in names:
+            active_name = names[0]
+        if editor_name not in names:
+            editor_name = active_name
+        for combo, selected_name in (
+            (self._active_combo, active_name),
+            (self._profile_combo, editor_name),
+        ):
+            combo.blockSignals(True)
+            combo.clear()
+            for name in names:
+                combo.addItem(name, name)
+            combo.setCurrentIndex(combo.findData(selected_name))
+            combo.blockSignals(False)
+        self._apply_offsets_checkbox.setChecked(
+            self._objectives.apply_offsets_on_change
+        )
+        self._active_editor_name = editor_name
+        self._load_profile(editor_name)
+
     def _on_profile_changed(self) -> None:
         self._save_active_profile_edits()
         self._active_editor_name = str(self._profile_combo.currentData() or "X5")

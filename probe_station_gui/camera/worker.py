@@ -6,6 +6,7 @@ import logging
 import concurrent.futures
 import importlib
 import queue
+import threading
 import time
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
@@ -53,11 +54,15 @@ class Grabber(QObject):
     FRAME_LOG_INTERVAL_S = 5.0
     FRAME_TIMEOUT_S = 0.5
     SETTINGS_TASK_WARNING_S = 0.25
+    NEW_BUFFER_TIMEOUT_CODE = -1011
+    NEW_BUFFER_TIMEOUT_ALERT_COUNT = 5
 
     frame_ready: Signal = Signal(QImage)
+    frame_gap_suppressed: Signal = Signal()
     error: Signal = Signal(str)
     camera_settings_snapshot_ready: Signal = Signal(object)
     camera_setting_changed: Signal = Signal(object)
+    camera_settings_batch_changed: Signal = Signal(object)
     camera_settings_override_changed: Signal = Signal(object)
 
     def __init__(self) -> None:
@@ -66,8 +71,14 @@ class Grabber(QObject):
         self._camera: Any | None = None
         self._acquiring = False
         self._frame_index = 0
+        self._latest_frame_condition = threading.Condition()
+        self._latest_frame: QImage | None = None
+        self._latest_frame_counter = 0
         self._last_frame_timestamp: float | None = None
         self._last_frame_log_timestamp = 0.0
+        self._new_buffer_timeout_count = 0
+        self._new_buffer_timeout_alerted = False
+        self._suppress_next_frame_gap = False
         self._camera_commands: queue.Queue[_CameraCommand] = queue.Queue()
         self._temporary_camera_settings: dict[str, list[dict[str, Any]]] = {}
         self._camera_settings_executor = concurrent.futures.ThreadPoolExecutor(
@@ -79,6 +90,8 @@ class Grabber(QObject):
         self,
         map_key: str | None = None,
         node_names: list[str] | None = None,
+        *,
+        request_id: str | None = None,
     ) -> None:
         """Request a GenICam node snapshot from the live camera."""
 
@@ -88,10 +101,13 @@ class Grabber(QObject):
                     "ok": False,
                     "message": "Camera is not ready.",
                     "maps": [],
+                    "request_id": request_id,
                 }
             )
             return
         payload: dict[str, Any] = {}
+        if request_id:
+            payload["request_id"] = str(request_id)
         if map_key and node_names:
             payload["map_key"] = str(map_key)
             payload["node_names"] = [str(name) for name in node_names if str(name)]
@@ -102,6 +118,8 @@ class Grabber(QObject):
         map_key: str,
         node_name: str,
         value: object,
+        *,
+        request_id: str | None = None,
     ) -> None:
         """Request a writable GenICam node update on the camera thread."""
 
@@ -112,6 +130,7 @@ class Grabber(QObject):
                     "message": "Camera is not ready.",
                     "map_key": map_key,
                     "node_name": node_name,
+                    "request_id": request_id,
                 }
             )
             return
@@ -122,6 +141,56 @@ class Grabber(QObject):
                     "map_key": str(map_key),
                     "node_name": str(node_name),
                     "value": value,
+                    "request_id": request_id,
+                },
+            )
+        )
+
+    def request_camera_settings_batch(
+        self,
+        settings: Mapping[str, object] | Iterable[tuple[str, object]],
+        *,
+        request_id: str,
+        map_key: str = "camera",
+    ) -> None:
+        """Request an ordered, atomic GenICam settings update."""
+
+        try:
+            setting_items = self._camera_setting_items(settings)
+        except Exception as exc:
+            self.camera_settings_batch_changed.emit(
+                {
+                    "ok": False,
+                    "message": f"Camera settings batch invalid: {exc}",
+                    "request_id": str(request_id),
+                }
+            )
+            return
+        if not setting_items:
+            self.camera_settings_batch_changed.emit(
+                {
+                    "ok": False,
+                    "message": "No camera settings provided.",
+                    "request_id": str(request_id),
+                }
+            )
+            return
+        if self._camera is None:
+            self.camera_settings_batch_changed.emit(
+                {
+                    "ok": False,
+                    "message": "Camera is not ready.",
+                    "request_id": str(request_id),
+                }
+            )
+            return
+        self._camera_commands.put(
+            _CameraCommand(
+                "batch_set",
+                {
+                    "map_key": str(map_key),
+                    "request_id": str(request_id),
+                    "settings": setting_items,
                 },
             )
         )
@@ -224,6 +293,7 @@ class Grabber(QObject):
         self._running = True
         self._last_frame_timestamp = None
         self._last_frame_log_timestamp = 0.0
+        self._reset_acquisition_timeout_state()
         CameraList, SpinSystem, import_error = _load_camera_backend()
         if CameraList is None or SpinSystem is None:
             message = "Camera backend unavailable"
@@ -244,6 +314,7 @@ class Grabber(QObject):
             cam = cams.create_camera_by_index(0)
             self._camera = cam
             cam.init_cam()
+            self._set_stream_buffer_handling_mode(cam)
             self._set_rgb8_pixel_format(cam)
             cam.begin_acquisition()
             self._acquiring = True
@@ -257,7 +328,7 @@ class Grabber(QObject):
                 try:
                     icam = cam.get_next_image(timeout=self.FRAME_TIMEOUT_S)
                 except Exception as exc:  # pragma: no cover - hardware dependent
-                    self.error.emit(str(exc))
+                    self._handle_acquisition_exception(exc)
                     time.sleep(0.1)
                     continue
                 if icam is None:  # pragma: no cover - hardware dependent
@@ -278,6 +349,41 @@ class Grabber(QObject):
     def stop(self) -> None:
         self._running = False
 
+    def latest_frame_counter(self) -> int:
+        """Return the acquisition counter without crossing the GUI event queue."""
+
+        with self._latest_frame_condition:
+            return int(self._latest_frame_counter)
+
+    def wait_for_frame(
+        self,
+        *,
+        after_counter: int | None = None,
+        timeout_s: float = 2.0,
+    ) -> tuple[QImage | None, int]:
+        """Read the latest acquired frame directly from the camera worker cache."""
+
+        deadline = time.monotonic() + max(0.0, float(timeout_s))
+        with self._latest_frame_condition:
+            while True:
+                frame = self._latest_frame
+                counter = int(self._latest_frame_counter)
+                fresh_enough = after_counter is None or counter > int(after_counter)
+                if frame is not None and fresh_enough:
+                    return frame.copy(), counter
+                remaining = deadline - time.monotonic()
+                if remaining <= 0.0:
+                    if frame is not None and after_counter is None:
+                        return frame.copy(), counter
+                    return None, counter
+                self._latest_frame_condition.wait(min(remaining, 0.1))
+
+    def _cache_latest_frame(self, frame: QImage) -> None:
+        with self._latest_frame_condition:
+            self._latest_frame = frame.copy()
+            self._latest_frame_counter = int(self._frame_index)
+            self._latest_frame_condition.notify_all()
+
     def _emit_frame(self, img: object) -> None:
         try:
             pix_fmt = str(img.get_pix_fmt())
@@ -296,7 +402,10 @@ class Grabber(QObject):
             self.error.emit(f"frame conversion: {exc!r}")
             return
 
+        suppress_frame_gap = bool(self._suppress_next_frame_gap)
+        self._reset_acquisition_timeout_state()
         self._frame_index += 1
+        self._cache_latest_frame(qimg)
         now = time.monotonic()
         frame_interval = (
             now - self._last_frame_timestamp
@@ -304,7 +413,11 @@ class Grabber(QObject):
             else None
         )
         self._last_frame_timestamp = now
-        if frame_interval is not None and frame_interval > self.FRAME_GAP_WARNING_S:
+        if (
+            frame_interval is not None
+            and frame_interval > self.FRAME_GAP_WARNING_S
+            and not suppress_frame_gap
+        ):
             logger.warning(
                 "Camera frame gap %.3fs before index=%s size=%sx%s",
                 frame_interval,
@@ -322,7 +435,45 @@ class Grabber(QObject):
                 f"{frame_interval:.3f}s" if frame_interval is not None else "first",
             )
             self._last_frame_log_timestamp = now
+        if suppress_frame_gap:
+            self.frame_gap_suppressed.emit()
         self.frame_ready.emit(qimg.copy())
+
+    def _handle_acquisition_exception(self, exc: Exception) -> bool:
+        """Classify one acquisition failure and emit only actionable errors."""
+
+        message = str(exc) or type(exc).__name__
+        if not self._is_new_buffer_timeout(exc, message):
+            self._reset_acquisition_timeout_state()
+            self.error.emit(message)
+            return True
+
+        self._new_buffer_timeout_count += 1
+        if self._new_buffer_timeout_count < self.NEW_BUFFER_TIMEOUT_ALERT_COUNT:
+            self._suppress_next_frame_gap = True
+            return False
+
+        self._suppress_next_frame_gap = False
+        if not self._new_buffer_timeout_alerted:
+            self._new_buffer_timeout_alerted = True
+            self.error.emit(message)
+            return True
+        return False
+
+    def _is_new_buffer_timeout(self, exc: Exception, message: str) -> bool:
+        try:
+            code = int(getattr(exc, "spin_error_code"))
+        except (AttributeError, TypeError, ValueError):
+            return False
+        return (
+            code == self.NEW_BUFFER_TIMEOUT_CODE
+            and "NEW_BUFFER_DATA" in str(message).upper()
+        )
+
+    def _reset_acquisition_timeout_state(self) -> None:
+        self._new_buffer_timeout_count = 0
+        self._new_buffer_timeout_alerted = False
+        self._suppress_next_frame_gap = False
 
     def _set_rgb8_pixel_format(self, cam: object) -> None:
         try:
@@ -331,6 +482,27 @@ class Grabber(QObject):
                 pixel_format.set_node_value_from_str("RGB8")
         except Exception as exc:  # pragma: no cover - hardware dependent
             logger.warning("Unable to set camera PixelFormat to RGB8: %s", exc)
+
+    def _set_stream_buffer_handling_mode(self, cam: object) -> None:
+        try:
+            node_map = cam.get_tl_stream_node_map()
+            node = node_map.get_node_by_name("StreamBufferHandlingMode")
+            if node is None:
+                logger.warning("StreamBufferHandlingMode is unavailable.")
+                return
+            if not node.is_available() or not node.is_writable():
+                logger.warning("StreamBufferHandlingMode is not writable.")
+                return
+            node.set_node_value_from_str("NewestOnly")
+            logger.info(
+                "Camera stream buffer handling mode: %s",
+                node.get_node_value_as_str(),
+            )
+        except Exception as exc:  # pragma: no cover - hardware dependent
+            logger.warning(
+                "Unable to set StreamBufferHandlingMode to NewestOnly: %s",
+                exc,
+            )
 
     def _shutdown_camera(self, cam: object | None) -> None:
         if cam is None:
@@ -374,6 +546,13 @@ class Grabber(QObject):
                     command.payload,
                     self.camera_setting_changed,
                 )
+            elif command.action == "batch_set":
+                self._submit_camera_task(
+                    "settings batch",
+                    self._apply_camera_settings_batch,
+                    command.payload,
+                    self.camera_settings_batch_changed,
+                )
             elif command.action == "execute":
                 self._submit_camera_task(
                     "command execute",
@@ -411,10 +590,19 @@ class Grabber(QObject):
                 dict(payload),
             )
         except RuntimeError as exc:
-            signal.emit({"ok": False, "message": f"Camera {task_name} failed: {exc}"})
+            result = {"ok": False, "message": f"Camera {task_name} failed: {exc}"}
+            request_id = payload.get("request_id")
+            if request_id is not None:
+                result["request_id"] = request_id
+            signal.emit(result)
             return
         future.add_done_callback(
-            lambda done: self._emit_camera_task_result(task_name, done, signal)
+            lambda done: self._emit_camera_task_result(
+                task_name,
+                done,
+                signal,
+                payload,
+            )
         )
 
     def _run_camera_task(
@@ -437,6 +625,7 @@ class Grabber(QObject):
         task_name: str,
         future: concurrent.futures.Future[dict[str, Any]],
         signal: Signal,
+        payload: dict[str, Any],
     ) -> None:
         try:
             result = future.result()
@@ -445,6 +634,9 @@ class Grabber(QObject):
                 "ok": False,
                 "message": f"Camera {task_name} failed: {exc}",
             }
+        request_id = payload.get("request_id")
+        if request_id is not None:
+            result.setdefault("request_id", request_id)
         signal.emit(result)
 
     def _camera_settings_snapshot(
@@ -455,12 +647,16 @@ class Grabber(QObject):
         if cam is None:
             return {"ok": False, "message": "Camera is not ready.", "maps": []}
         payload = payload or {}
+        request_id = payload.get("request_id")
         target_map_key = str(payload.get("map_key") or "")
         node_names = [
             str(name) for name in payload.get("node_names") or [] if str(name)
         ]
         if target_map_key and node_names:
-            return self._camera_settings_partial_snapshot(target_map_key, node_names)
+            result = self._camera_settings_partial_snapshot(target_map_key, node_names)
+            if request_id is not None:
+                result["request_id"] = request_id
+            return result
 
         maps: list[dict[str, Any]] = []
         total_nodes = 0
@@ -490,12 +686,15 @@ class Grabber(QObject):
                         "error": str(exc),
                     }
                 )
-        return {
+        result = {
             "ok": True,
             "message": f"Loaded {total_nodes} camera settings.",
             "maps": maps,
             "streaming": self._acquiring,
         }
+        if request_id is not None:
+            result["request_id"] = request_id
+        return result
 
     def _camera_settings_partial_snapshot(
         self,
@@ -511,7 +710,22 @@ class Grabber(QObject):
                 if info is not None:
                     nodes.append(info)
             except Exception as exc:  # pragma: no cover - hardware dependent
-                errors.append(f"{node_name}: {exc}")
+                error = f"{node_name}: {exc}"
+                errors.append(error)
+                nodes.append(
+                    {
+                        "map_key": map_key,
+                        "name": node_name,
+                        "display_name": node_name,
+                        "type": "",
+                        "value": "",
+                        "available": False,
+                        "readable": False,
+                        "writable": False,
+                        "entries": [],
+                        "error": error,
+                    }
+                )
 
         return {
             "ok": True,
@@ -707,6 +921,98 @@ class Grabber(QObject):
             "map_key": map_key,
             "node_name": node_name,
             "node": updated,
+        }
+
+    def _apply_camera_settings_batch(
+        self,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        map_key = str(payload.get("map_key") or "camera")
+        request_id = str(payload.get("request_id") or "")
+        settings = [
+            item
+            for item in payload.get("settings") or []
+            if isinstance(item, dict) and str(item.get("node_name") or "")
+        ]
+        node_names = [str(item.get("node_name") or "") for item in settings]
+        if not settings:
+            return {
+                "ok": False,
+                "message": "No camera settings provided.",
+                "request_id": request_id,
+                "nodes": [],
+                "rollback_errors": [],
+            }
+        duplicate_names = sorted(
+            {name for name in node_names if node_names.count(name) > 1}
+        )
+        if duplicate_names:
+            return {
+                "ok": False,
+                "message": f"Duplicate camera settings: {', '.join(duplicate_names)}.",
+                "request_id": request_id,
+                "nodes": [],
+                "rollback_errors": [],
+            }
+
+        prepared: list[tuple[dict[str, Any], object, dict[str, Any]]] = []
+        try:
+            for item in settings:
+                node_name = str(item.get("node_name") or "")
+                node = self._node_by_name(map_key, node_name)
+                info = self._read_node_info(map_key, node)
+                if info is None or not info["available"]:
+                    raise RuntimeError(f"{node_name}: camera setting is unavailable.")
+                if not info["readable"]:
+                    raise RuntimeError(f"{node_name}: camera setting cannot be restored.")
+                if not info["writable"]:
+                    raise RuntimeError(f"{node_name}: camera setting is read-only.")
+                prepared.append((item, node, info))
+        except Exception as exc:  # pragma: no cover - hardware dependent
+            return {
+                "ok": False,
+                "message": f"Camera settings batch failed: {exc}",
+                "request_id": request_id,
+                "nodes": [],
+                "rollback_errors": [],
+            }
+
+        changed_settings: list[dict[str, Any]] = []
+        updated_nodes: list[dict[str, Any]] = []
+        try:
+            for item, node, info in prepared:
+                changed_settings.append(
+                    {
+                        "map_key": map_key,
+                        "node_name": str(item.get("node_name") or ""),
+                        "value": info.get("value"),
+                    }
+                )
+                self._set_node_value(node, str(info["type"]), item.get("value"))
+                updated_nodes.append(self._read_node_info(map_key, node) or info)
+        except Exception as exc:  # pragma: no cover - hardware dependent
+            _, rollback_errors = self._restore_camera_setting_values(
+                list(reversed(changed_settings))
+            )
+            message = f"Camera settings batch failed: {exc}"
+            if rollback_errors:
+                message = f"{message}; rollback errors: {'; '.join(rollback_errors)}"
+            return {
+                "ok": False,
+                "message": message,
+                "request_id": request_id,
+                "nodes": updated_nodes,
+                "rollback_errors": rollback_errors,
+                "streaming": self._acquiring,
+            }
+
+        return {
+            "ok": True,
+            "message": f"Applied {len(updated_nodes)} camera settings.",
+            "request_id": request_id,
+            "nodes": updated_nodes,
+            "rollback_errors": [],
+            "streaming": self._acquiring,
         }
 
     def _apply_temporary_camera_settings(

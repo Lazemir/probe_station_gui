@@ -38,13 +38,119 @@ class _FakeTransport:
         )
         if not self.responses:
             return 200, {}, b'{"accepted": true}'
-        status_code, payload = self.responses.pop(0)
+        response = self.responses.pop(0)
+        if len(response) == 3:
+            status_code, response_headers, payload = response
+        else:
+            status_code, payload = response
+            response_headers = {}
         if isinstance(payload, bytes):
-            return status_code, {}, payload
-        return status_code, {}, json.dumps(payload).encode("utf-8")
+            return status_code, response_headers, payload
+        return status_code, response_headers, json.dumps(payload).encode("utf-8")
 
 
 class ProbeStationClientTest(unittest.TestCase):
+    def test_camera_client_reads_and_updates_ordered_settings(self) -> None:
+        transport = _FakeTransport(
+            (200, {"accepted": True, "nodes": []}),
+            (200, {"accepted": True, "frame_counter_at_completion": 7}),
+        )
+        client = ProbeStationClient(api_key="secret", transport=transport)
+
+        client.camera.settings(["ExposureTime", "Gain"])
+        client.camera.update_settings(
+            [
+                ("ExposureAuto", "Off"),
+                ("ExposureTime", 1800.0),
+            ]
+        )
+
+        self.assertTrue(
+            transport.calls[0]["url"].endswith(
+                "/api/v1/camera/settings?name=ExposureTime&name=Gain"
+            )
+        )
+        payload = json.loads(transport.calls[1]["body"].decode("utf-8"))
+        self.assertEqual(
+            payload["settings"],
+            [
+                {"name": "ExposureAuto", "value": "Off"},
+                {"name": "ExposureTime", "value": 1800.0},
+            ],
+        )
+
+    def test_camera_client_frame_returns_bytes_and_response_metadata(self) -> None:
+        transport = _FakeTransport(
+            (
+                200,
+                {
+                    "X-Camera-Frame-Counter": "18",
+                    "X-Camera-Frame-Space": "raw",
+                    "X-Camera-Frame-Width": "640",
+                    "X-Camera-Frame-Height": "480",
+                },
+                b"png-bytes",
+            )
+        )
+        client = ProbeStationClient(api_key="secret", transport=transport)
+
+        frame = client.camera.frame(
+            space="raw",
+            after_counter=17,
+            timeout_ms=2500,
+        )
+
+        self.assertEqual(frame.data, b"png-bytes")
+        self.assertEqual(frame.counter, 18)
+        self.assertEqual(frame.space, "raw")
+        self.assertEqual((frame.width, frame.height), (640, 480))
+        self.assertTrue(
+            transport.calls[0]["url"].endswith(
+                "/api/v1/camera/frame?space=raw&after_counter=17&timeout_ms=2500"
+            )
+        )
+
+    def test_camera_client_exposure_policy_and_once_use_exact_routes(self) -> None:
+        transport = _FakeTransport(
+            (200, {"auto_enabled": True, "engine": "software", "busy": False}),
+            (200, {"auto_enabled": False, "engine": "camera", "busy": False}),
+            (200, {"engine": "camera", "final_exposure_us": 2450.0}),
+        )
+        client = ProbeStationClient(
+            api_key="secret",
+            timeout_s=3.0,
+            transport=transport,
+        )
+
+        policy = client.camera.exposure_policy()
+        updated = client.camera.set_exposure_policy(
+            auto_enabled=False,
+            engine="camera",
+        )
+        result = client.camera.exposure_once()
+
+        self.assertEqual(policy["engine"], "software")
+        self.assertEqual(updated["engine"], "camera")
+        self.assertEqual(result["final_exposure_us"], 2450.0)
+        self.assertEqual(transport.calls[0]["method"], "GET")
+        self.assertTrue(
+            transport.calls[0]["url"].endswith("/api/v1/camera/exposure-policy")
+        )
+        self.assertEqual(
+            json.loads(transport.calls[1]["body"].decode("utf-8")),
+            {"auto_enabled": False, "engine": "camera"},
+        )
+        self.assertEqual(transport.calls[1]["method"], "PUT")
+        self.assertTrue(
+            transport.calls[1]["url"].endswith("/api/v1/camera/exposure-policy")
+        )
+        self.assertEqual(transport.calls[2]["method"], "POST")
+        self.assertTrue(
+            transport.calls[2]["url"].endswith("/api/v1/camera/exposure-once")
+        )
+        self.assertEqual(json.loads(transport.calls[2]["body"].decode("utf-8")), {})
+        self.assertEqual(transport.calls[2]["timeout_s"], 30.0)
+        self.assertFalse(hasattr(client.camera, "auto_exposure"))
     def test_stage_status_sends_bearer_token(self) -> None:
         transport = _FakeTransport((200, {"accepted": True, "state": "Idle"}))
         client = ProbeStationClient(

@@ -1,4 +1,8 @@
+import threading
 import types
+
+import pytest
+from PySide6.QtWidgets import QDialog, QInputDialog, QMessageBox
 
 from main import Main
 from probe_station_gui.design.objective_offsets import ObjectiveOffsetReference
@@ -8,6 +12,8 @@ from probe_station_gui.settings.objective_config import (
     ObjectiveCalibrationSettings,
     ObjectivesSettings,
 )
+from probe_station_gui.stage.types import StageTaskToken
+from probe_station_gui.views.main_window_auxiliary import open_settings_dialog
 
 
 class _SettingsManager:
@@ -23,6 +29,18 @@ class _SettingsManager:
     def save(self) -> None:
         self.saved_count += 1
 
+    def replace_and_save(
+        self,
+        settings: Settings,
+        *,
+        preserve_exposure_policy: bool = False,
+    ) -> None:
+        updated = settings.clone()
+        if preserve_exposure_policy:
+            updated.exposure_policy = self.settings.exposure_policy.clone()
+        self.replace(updated)
+        self.save()
+
     def objectives_configuration(self) -> ObjectivesSettings:
         return self.settings.objectives
 
@@ -37,6 +55,10 @@ class _Stage:
         self.rotations: list[float] = []
         self.applied_objectives: list[object] = []
         self.status_refreshes = 0
+        self.alignment_resolution_requests: list[
+            tuple[object, float, float, int]
+        ] = []
+        self.cancel_reasons: list[str] = []
 
     def is_busy(self) -> bool:
         return self.busy
@@ -71,6 +93,25 @@ class _Stage:
 
     def apply_objective_configuration(self, *args: object) -> None:
         self.applied_objectives.append(args)
+
+    def request_clicked_point_resolution(
+        self,
+        request_id: object,
+        dx_pixels: float,
+        dy_pixels: float,
+    ) -> bool:
+        self.alignment_resolution_requests.append(
+            (request_id, float(dx_pixels), float(dy_pixels), threading.get_ident())
+        )
+        return True
+
+    def cancel_clicked_point_resolution(
+        self,
+        request_id: object,
+        reason: str,
+    ) -> bool:
+        self.cancel_reasons.append(f"{request_id}:{reason}")
+        return True
 
 
 def _settings() -> Settings:
@@ -111,6 +152,8 @@ def _window() -> tuple[Main, _Stage, _SettingsManager, list[str]]:
     window._click_calibration_dialog = None
     window._objective_offset_reference = None
     window._design_session = types.SimpleNamespace(document=None)
+    window._manual_alignment_pick_slot = None
+    window._manual_alignment_capture_context = None
     window._current_linear_feedrate = lambda: 123.0
     window._refresh_design_position = lambda: setattr(
         window,
@@ -161,6 +204,204 @@ def test_set_active_objective_busy_restores_combo_and_does_not_save() -> None:
     assert restored == ["X5"]
     assert manager.saved_count == 0
     assert statuses == ["Stage is busy; objective not changed."]
+
+
+def test_objective_combo_change_is_rejected_for_alive_microscope_scan() -> None:
+    window, stage, manager, statuses = _window()
+    restored: list[str] = []
+    window._microscope_scan_thread = types.SimpleNamespace(is_alive=lambda: True)
+    window._objective_combo = types.SimpleNamespace(currentData=lambda: "X20")
+    window._sync_objective_combo = lambda name: restored.append(name)
+
+    Main._on_objective_combo_changed(window, 1)
+
+    assert manager.settings.objectives.active_name == "X5"
+    assert manager.saved_count == 0
+    assert stage.absolute_moves == []
+    assert restored == ["X5"]
+    assert statuses == ["Stage is busy; objective not changed."]
+
+
+def test_settings_objective_change_is_rejected_for_alive_microscope_scan() -> None:
+    window, stage, manager, statuses = _window()
+    current_profile = manager.settings.objectives.objectives["X5"]
+    current_profile.pixels_to_mm = [[0.01, 0.0], [0.0, 0.01]]
+    current_profile.xy_calibration_configured = True
+    current_profile.distortion_correction = {"camera_matrix": [[5.0]]}
+    current_profile.distortion_correction_configured = True
+    original_active_profile = current_profile.to_dict()
+
+    submitted = manager.settings.clone()
+    submitted.design_last_directory = "C:/updated-designs"
+    submitted.objectives.active_name = "X20"
+    submitted.objectives.objectives["X5"].magnification = 99.0
+    submitted.objectives.objectives["X5"].distortion_correction = {
+        "camera_matrix": [[99.0]]
+    }
+    submitted.objectives.objectives["X20"].magnification = 25.0
+
+    class _Signal:
+        def __init__(self) -> None:
+            self._slots = []
+
+        def connect(self, slot) -> None:
+            self._slots.append(slot)
+
+        def emit(self, value: object) -> None:
+            for slot in self._slots:
+                slot(value)
+
+    class _SettingsDialog:
+        instance = None
+
+        def __init__(self, *_args, **_kwargs) -> None:
+            self.settings_applied = _Signal()
+            self.restored_active_names: list[str] = []
+            type(self).instance = self
+
+        def exec(self):
+            self.settings_applied.emit(submitted.clone())
+            return QDialog.Accepted
+
+        def was_applied(self) -> bool:
+            return True
+
+        def set_objectives(self, objectives: ObjectivesSettings) -> None:
+            self.restored_active_names.append(str(objectives.active_name))
+
+    window._microscope_scan_thread = types.SimpleNamespace(is_alive=lambda: True)
+    window._sync_objective_combo = lambda _name: None
+    window._refresh_objective_calibration_ui = lambda: None
+    window._apply_settings = lambda *, apply_objective_runtime=True: (
+        Main._apply_objective_settings(window)
+        if apply_objective_runtime
+        else None
+    )
+    window._stop_telegram_bot_service = lambda: None
+    window._configure_telegram_bot_from_settings = lambda: None
+    window.grabber = None
+    window._exposure_policy_adapter = None
+    window._api_key_store = None
+
+    open_settings_dialog(window, dialog_class=_SettingsDialog)
+
+    assert manager.settings.design_last_directory == "C:/updated-designs"
+    assert manager.settings.objectives.active_name == "X5"
+    assert (
+        manager.settings.objectives.objectives["X5"].to_dict()
+        == original_active_profile
+    )
+    assert manager.settings.objectives.objectives["X20"].magnification == 25.0
+    assert stage.applied_objectives == []
+    assert _SettingsDialog.instance is not None
+    assert _SettingsDialog.instance.restored_active_names == ["X5"]
+    assert statuses == ["Stage is busy; active objective settings not changed."]
+
+
+def test_settings_apply_during_click_calibration_keeps_computed_runtime_matrix() -> None:
+    window, stage, manager, _statuses = _window()
+    stage.busy = True
+    computed_matrix = [[0.025, 0.0], [0.0, 0.025]]
+    submitted = manager.settings.clone()
+    submitted.design_last_directory = "C:/updated-designs"
+    submitted.objectives.objectives["X20"].magnification = 25.0
+    objective_runtime_applies: list[bool] = []
+    unrelated_applies: list[bool] = []
+
+    def apply_settings(*, apply_objective_runtime: bool = True) -> None:
+        unrelated_applies.append(True)
+        if apply_objective_runtime:
+            objective_runtime_applies.append(True)
+
+    window._apply_settings = apply_settings
+    stage.runtime_matrix = computed_matrix
+
+    Main._apply_settings_from_dialog(window, submitted)
+
+    assert manager.settings.design_last_directory == "C:/updated-designs"
+    assert manager.settings.objectives.objectives["X20"].magnification == 25.0
+    assert unrelated_applies == [True]
+    assert objective_runtime_applies == []
+    assert stage.runtime_matrix == computed_matrix
+
+
+def test_add_objective_rechecks_busy_after_name_dialog_returns(monkeypatch) -> None:
+    window, _stage, manager, statuses = _window()
+
+    def get_text(*_args, **_kwargs):
+        window._microscope_scan_thread = types.SimpleNamespace(is_alive=lambda: True)
+        return "X50", True
+
+    monkeypatch.setattr(QInputDialog, "getText", get_text)
+
+    Main._add_objective_profile(window)
+
+    assert "X50" not in manager.settings.objectives.objectives
+    assert manager.saved_count == 0
+    assert statuses == ["Stage is busy; objective not added."]
+
+
+def test_delete_objective_rechecks_busy_after_confirmation_returns(monkeypatch) -> None:
+    window, _stage, manager, statuses = _window()
+
+    def question(*_args, **_kwargs):
+        window._microscope_scan_thread = types.SimpleNamespace(is_alive=lambda: True)
+        return QMessageBox.Yes
+
+    monkeypatch.setattr(QMessageBox, "question", question)
+
+    Main._delete_objective_profile(window, "X20")
+
+    assert "X20" in manager.settings.objectives.objectives
+    assert manager.saved_count == 0
+    assert statuses == ["Stage is busy; objective not deleted."]
+
+
+def test_objective_mismatch_cannot_bypass_alive_scan_guard() -> None:
+    window, stage, manager, statuses = _window()
+    task_token = StageTaskToken(1, "_run_move")
+    stage.is_calibration_task_token_current = lambda token: token is task_token
+    restored: list[str] = []
+    window._microscope_scan_thread = types.SimpleNamespace(is_alive=lambda: True)
+    window._sync_objective_combo = lambda name: restored.append(name)
+
+    Main._on_objective_mismatch_detected(
+        window,
+        "X20",
+        "Objective mismatch.",
+        task_token,
+    )
+
+    assert manager.settings.objectives.active_name == "X5"
+    assert manager.saved_count == 0
+    assert stage.applied_objectives == []
+    assert restored == ["X5"]
+    assert statuses == [
+        "Stage is busy; objective not changed.",
+        "Objective mismatch.",
+    ]
+
+
+def test_stale_objective_mismatch_a_cannot_switch_objective_during_task_b() -> None:
+    window, stage, manager, statuses = _window()
+    token_a = StageTaskToken(1, "_run_move")
+    token_b = StageTaskToken(2, "_run_move")
+    stage.busy = True
+    stage.is_calibration_task_token_current = lambda token: token is token_b
+
+    Main._on_objective_mismatch_detected(
+        window,
+        "X20",
+        "Objective mismatch from calibration A.",
+        token_a,
+    )
+
+    assert manager.settings.objectives.active_name == "X5"
+    assert manager.saved_count == 0
+    assert stage.applied_objectives == []
+    assert statuses == [
+        "Objective mismatch ignored because its calibration task is no longer current."
+    ]
 
 
 def test_set_active_objective_reports_selected_after_offset_motion_status() -> None:
@@ -274,3 +515,125 @@ def test_capture_manual_alignment_point_design_near_zero_applies_without_b_rotat
     assert "collapse" in session_calls
     assert stage.rotations == []
     assert statuses == ["Design calibration complete. Spacing ratio 1.000."]
+
+
+def test_clicked_alignment_capture_dispatches_worker_without_gui_resolution() -> None:
+    window, stage, _manager, _statuses = _window()
+    window._manual_alignment_pick_slot = 0
+    window._refresh_manual_alignment_ui = lambda: None
+    window._update_stage_coordinate_apply_state = lambda: None
+    stage.resolve_clicked_point_xy = lambda *_args: pytest.fail(
+        "GUI path called blocking point resolution"
+    )
+
+    Main._capture_manual_alignment_clicked(window, 12.0, -4.0)
+
+    assert len(stage.alignment_resolution_requests) == 1
+    request_id, dx_pixels, dy_pixels, launch_thread = (
+        stage.alignment_resolution_requests[0]
+    )
+    assert request_id == window._manual_alignment_capture_context.request_id
+    assert (dx_pixels, dy_pixels) == (12.0, -4.0)
+    assert launch_thread == threading.get_ident()
+    assert window._manual_alignment_pick_slot == 0
+
+
+def test_duplicate_clicked_alignment_capture_is_rejected() -> None:
+    window, stage, _manager, statuses = _window()
+    window._manual_alignment_pick_slot = 1
+    window._refresh_manual_alignment_ui = lambda: None
+    window._update_stage_coordinate_apply_state = lambda: None
+
+    Main._capture_manual_alignment_clicked(window, 1.0, 2.0)
+    Main._capture_manual_alignment_clicked(window, 3.0, 4.0)
+
+    assert len(stage.alignment_resolution_requests) == 1
+    assert statuses[-1] == "Alignment point capture is already running."
+
+
+def test_clicked_alignment_completion_preserves_requested_slot_order() -> None:
+    window, stage, _manager, _statuses = _window()
+    window._manual_alignment_pick_slot = 1
+    coordinate_updates: list[tuple[object, object]] = []
+    captured: list[tuple[int, tuple[float, float], str]] = []
+    window._refresh_manual_alignment_ui = lambda: None
+    window._update_stage_coordinate_apply_state = lambda: None
+    window._update_coordinate_display = lambda **kwargs: coordinate_updates.append(
+        (kwargs.get("center_xy"), kwargs.get("cursor_xy"))
+    )
+    window._capture_manual_alignment_point = (
+        lambda slot, point, *, source: captured.append((slot, point, source))
+    )
+
+    Main._capture_manual_alignment_clicked(window, 5.0, -7.0)
+    request_id = stage.alignment_resolution_requests[0][0]
+    Main._on_manual_alignment_point_resolved(
+        window,
+        request_id,
+        True,
+        (10.0, 20.0),
+        (11.0, 19.0),
+        "",
+    )
+
+    assert window._manual_alignment_capture_context is None
+    assert coordinate_updates == [((10.0, 20.0), (11.0, 19.0))]
+    assert captured == [(1, (11.0, 19.0), "image")]
+
+
+def test_cancelled_clicked_alignment_capture_restores_ui_and_ignores_late_point() -> None:
+    window, stage, _manager, statuses = _window()
+    window._manual_alignment_pick_slot = 0
+    refreshes: list[str] = []
+    captures: list[object] = []
+    window._refresh_manual_alignment_ui = lambda: refreshes.append("refresh")
+    window._update_coordinate_display = lambda **_kwargs: None
+    window._update_stage_coordinate_apply_state = lambda: None
+    window._capture_manual_alignment_point = lambda *_args, **_kwargs: captures.append(
+        "captured"
+    )
+
+    Main._capture_manual_alignment_clicked(window, 0.0, 0.0)
+    request_id = stage.alignment_resolution_requests[0][0]
+    Main._cancel_manual_alignment_pick(window)
+    Main._on_manual_alignment_point_resolved(
+        window,
+        request_id,
+        True,
+        (10.0, 20.0),
+        (10.0, 20.0),
+        "",
+    )
+
+    assert window._manual_alignment_pick_slot is None
+    assert window._manual_alignment_capture_context is None
+    assert stage.cancel_reasons == [
+        f"{request_id}:Alignment point capture cancelled."
+    ]
+    assert captures == []
+    assert len(refreshes) >= 2
+    assert statuses[-1] == "Chip alignment image pick cancelled."
+
+
+def test_clicked_alignment_resolution_error_restores_retry_state() -> None:
+    window, stage, _manager, statuses = _window()
+    window._manual_alignment_pick_slot = 0
+    refreshes: list[str] = []
+    window._refresh_manual_alignment_ui = lambda: refreshes.append("refresh")
+    window._update_stage_coordinate_apply_state = lambda: None
+
+    Main._capture_manual_alignment_clicked(window, 0.0, 0.0)
+    request_id = stage.alignment_resolution_requests[0][0]
+    Main._on_manual_alignment_point_resolved(
+        window,
+        request_id,
+        False,
+        None,
+        None,
+        "Camera frames are unavailable for calibration.",
+    )
+
+    assert window._manual_alignment_capture_context is None
+    assert window._manual_alignment_pick_slot == 0
+    assert refreshes[-1] == "refresh"
+    assert statuses[-1] == "Camera frames are unavailable for calibration."

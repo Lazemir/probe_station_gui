@@ -1,0 +1,465 @@
+from __future__ import annotations
+
+import threading
+import time
+
+import pytest
+from PySide6.QtCore import QByteArray, QObject, QThread, Signal, Slot
+from PySide6.QtGui import QColor, QImage
+from PySide6.QtWidgets import QApplication
+
+from probe_station_gui.camera.api_control import (
+    CameraApiBroker,
+    encode_camera_frame_png,
+)
+from probe_station_gui.camera import api_control as camera_api_control
+from probe_station_gui.camera.exposure_policy import (
+    ExposurePolicy,
+    ExposurePolicyBusyError,
+    ExposurePolicyController,
+)
+
+
+class _SignalSender(QObject):
+    completed = Signal(object)
+
+
+class _CameraResultSender(QObject):
+    camera_settings_snapshot_ready = Signal(object)
+    camera_settings_batch_changed = Signal(object)
+
+
+class _BlockingWorker(QObject):
+    def __init__(self, stop: threading.Event) -> None:
+        super().__init__()
+        self._stop = stop
+
+    @Slot()
+    def run(self) -> None:
+        while not self._stop.is_set():
+            time.sleep(0.005)
+
+
+def _wait_for_count(items: list[object], count: int) -> None:
+    deadline = time.monotonic() + 1.0
+    while len(items) < count and time.monotonic() < deadline:
+        time.sleep(0.005)
+    assert len(items) == count
+
+
+def test_read_rejects_unknown_and_duplicate_nodes_before_submit() -> None:
+    submitted: list[object] = []
+    broker = CameraApiBroker(
+        snapshot_submit=lambda request_id, names: submitted.append((request_id, names)),
+        batch_submit=lambda request_id, settings: submitted.append(
+            (request_id, settings)
+        ),
+        frame_counter=lambda: 0,
+    )
+
+    unknown = broker.read_settings(["TriggerMode"])
+    duplicate = broker.read_settings(["Gain", "Gain"])
+
+    assert unknown["accepted"] is False
+    assert unknown["status_code"] == 400
+    assert duplicate["accepted"] is False
+    assert duplicate["status_code"] == 400
+    assert submitted == []
+
+
+def test_concurrent_results_are_correlated_by_request_id() -> None:
+    submitted: list[tuple[str, list[str]]] = []
+    submitted_event = threading.Event()
+
+    def submit(request_id: str, names: list[str]) -> None:
+        submitted.append((request_id, names))
+        if len(submitted) == 2:
+            submitted_event.set()
+
+    broker = CameraApiBroker(
+        snapshot_submit=submit,
+        batch_submit=lambda _request_id, _settings: None,
+        frame_counter=lambda: 17,
+    )
+    results: dict[str, dict[str, object]] = {}
+    first = threading.Thread(
+        target=lambda: results.update(first=broker.read_settings(["Gain"]))
+    )
+    second = threading.Thread(
+        target=lambda: results.update(second=broker.read_settings(["ExposureTime"]))
+    )
+    first.start()
+    second.start()
+    assert submitted_event.wait(1.0)
+
+    for request_id, names in reversed(submitted):
+        broker.complete(
+            {
+                "ok": True,
+                "request_id": request_id,
+                "maps": [{"key": "camera", "nodes": [{"name": names[0]}]}],
+                "streaming": True,
+            }
+        )
+    first.join(1.0)
+    second.join(1.0)
+
+    assert results["first"]["nodes"][0]["name"] == "Gain"
+    assert results["second"]["nodes"][0]["name"] == "ExposureTime"
+    assert results["first"]["frame_counter_at_completion"] == 17
+    assert results["second"]["accepted"] is True
+
+
+def test_camera_result_connection_completes_while_gui_thread_waits() -> None:
+    QApplication.instance() or QApplication([])
+    connect_results = getattr(
+        camera_api_control,
+        "connect_camera_api_results",
+        None,
+    )
+    assert callable(connect_results)
+
+    sender = _CameraResultSender()
+    workers: list[threading.Thread] = []
+
+    def submit_batch(
+        request_id: str,
+        settings: list[tuple[str, object]],
+    ) -> None:
+        worker = threading.Thread(
+            target=lambda: sender.camera_settings_batch_changed.emit(
+                {
+                    "ok": True,
+                    "request_id": request_id,
+                    "nodes": [
+                        {"name": name, "value": value}
+                        for name, value in settings
+                    ],
+                }
+            ),
+            daemon=True,
+        )
+        workers.append(worker)
+        worker.start()
+
+    broker = CameraApiBroker(
+        snapshot_submit=lambda _request_id, _names: None,
+        batch_submit=submit_batch,
+        frame_counter=lambda: 19,
+        timeout_s=0.1,
+    )
+    connect_results(sender, broker)
+
+    result = broker.write_settings_trusted([("Gain", 1.5)])
+
+    for worker in workers:
+        worker.join(1.0)
+    assert result["accepted"] is True
+    assert result["frame_counter_at_completion"] == 19
+
+
+def test_read_marks_native_exposure_auto_as_policy_managed() -> None:
+    submitted: list[tuple[str, list[str]]] = []
+    submitted_event = threading.Event()
+
+    def submit(request_id: str, names: list[str]) -> None:
+        submitted.append((request_id, names))
+        submitted_event.set()
+
+    broker = CameraApiBroker(
+        snapshot_submit=submit,
+        batch_submit=lambda _request_id, _settings: None,
+        frame_counter=lambda: 0,
+    )
+    result_holder: dict[str, object] = {}
+    thread = threading.Thread(
+        target=lambda: result_holder.update(
+            broker.read_settings(["ExposureAuto"])
+        )
+    )
+    thread.start()
+    assert submitted_event.wait(1.0)
+    broker.complete(
+        {
+            "ok": True,
+            "request_id": submitted[0][0],
+            "maps": [
+                {
+                    "key": "camera",
+                    "nodes": [{"name": "ExposureAuto", "value": "Off"}],
+                }
+            ],
+        }
+    )
+    thread.join(1.0)
+
+    assert result_holder["nodes"] == [
+        {
+            "name": "ExposureAuto",
+            "value": "Off",
+            "enum_entries": [],
+            "managed_by": "exposure_policy",
+        }
+    ]
+
+
+def test_timeout_removes_pending_request_and_late_completion_is_ignored() -> None:
+    submitted: list[tuple[str, list[str]]] = []
+    broker = CameraApiBroker(
+        snapshot_submit=lambda request_id, names: submitted.append((request_id, names)),
+        batch_submit=lambda _request_id, _settings: None,
+        frame_counter=lambda: 0,
+        timeout_s=0.01,
+    )
+
+    result = broker.read_settings(["Gain"])
+
+    assert result["accepted"] is False
+    assert result["status_code"] == 504
+    assert broker._pending == {}
+    broker.complete({"ok": True, "request_id": submitted[0][0], "maps": []})
+    assert broker._pending == {}
+
+
+def test_write_rejects_managed_exposure_auto_before_submit() -> None:
+    submitted: list[object] = []
+    broker = CameraApiBroker(
+        snapshot_submit=lambda _request_id, _names: None,
+        batch_submit=lambda request_id, settings: submitted.append((request_id, settings)),
+        frame_counter=lambda: 0,
+    )
+
+    result = broker.write_settings([{"name": "ExposureAuto", "value": "Off"}])
+
+    assert result["accepted"] is False
+    assert result["status_code"] == 409
+    assert submitted == []
+
+
+def test_public_mixed_exposure_batch_rejects_exposure_auto_before_policy_hook() -> None:
+    hook_calls: list[object] = []
+    broker = CameraApiBroker(
+        snapshot_submit=lambda _request_id, _names: None,
+        batch_submit=lambda _request_id, _settings: None,
+        frame_counter=lambda: 0,
+        manual_exposure_write=lambda command: (
+            hook_calls.append(command) or {"accepted": True}
+        ),
+    )
+
+    result = broker.write_settings(
+        [
+            {"name": "ExposureAuto", "value": "Off"},
+            {"name": "ExposureTime", "value": 1800.0},
+        ]
+    )
+
+    assert result["accepted"] is False
+    assert result["status_code"] == 409
+    assert hook_calls == []
+
+
+def test_trusted_write_bypasses_policy_guard_but_keeps_allowlist_validation() -> None:
+    submitted: list[tuple[str, list[tuple[str, object]]]] = []
+    submitted_event = threading.Event()
+
+    def submit(request_id: str, settings: list[tuple[str, object]]) -> None:
+        submitted.append((request_id, settings))
+        submitted_event.set()
+
+    broker = CameraApiBroker(
+        snapshot_submit=lambda _request_id, _names: None,
+        batch_submit=submit,
+        frame_counter=lambda: 4,
+    )
+    result_holder: dict[str, object] = {}
+    thread = threading.Thread(
+        target=lambda: result_holder.update(
+            broker.write_settings_trusted(
+                [("ExposureAuto", "Continuous")]
+            )
+        )
+    )
+    thread.start()
+    assert submitted_event.wait(1.0)
+    broker.complete(
+        {
+            "ok": True,
+            "request_id": submitted[0][0],
+            "nodes": [{"name": "ExposureAuto", "value": "Continuous"}],
+        }
+    )
+    thread.join(1.0)
+
+    invalid = broker.write_settings_trusted(
+        [{"name": "TriggerMode", "value": "On"}]
+    )
+
+    assert result_holder["accepted"] is True
+    assert submitted[0][1] == [("ExposureAuto", "Continuous")]
+    assert invalid["accepted"] is False
+    assert invalid["status_code"] == 400
+
+
+def test_exposure_time_write_requires_policy_guard_before_submit() -> None:
+    submitted: list[object] = []
+    broker = CameraApiBroker(
+        snapshot_submit=lambda _request_id, _names: None,
+        batch_submit=lambda request_id, settings: submitted.append((request_id, settings)),
+        frame_counter=lambda: 0,
+    )
+
+    result = broker.write_settings([{"name": "ExposureTime", "value": 1800.0}])
+
+    assert result["accepted"] is False
+    assert result["status_code"] == 503
+    assert submitted == []
+
+
+def test_public_exposure_time_write_holds_policy_lock_until_worker_completion() -> None:
+    submitted: list[tuple[str, list[tuple[str, object]]]] = []
+    submitted_event = threading.Event()
+    controller = ExposurePolicyController(
+        initial_policy=ExposurePolicy(auto_enabled=False, engine="software"),
+        software_once=lambda _config: {"accepted": True},
+        settings_read=lambda _names: {"accepted": True, "nodes": []},
+        settings_write=lambda _settings: {"accepted": True},
+        frame_read=lambda _counter, _timeout: None,
+    )
+
+    def submit(request_id: str, settings: list[tuple[str, object]]) -> None:
+        submitted.append((request_id, settings))
+        submitted_event.set()
+
+    broker = CameraApiBroker(
+        snapshot_submit=lambda _request_id, _names: None,
+        batch_submit=submit,
+        frame_counter=lambda: 12,
+    )
+    broker.set_manual_exposure_write(controller.run_manual_exposure_write)
+    result_holder: dict[str, object] = {}
+    thread = threading.Thread(
+        target=lambda: result_holder.update(
+            broker.write_settings([{"name": "ExposureTime", "value": 1800.0}])
+        )
+    )
+    thread.start()
+    assert submitted_event.wait(1.0)
+
+    with pytest.raises(ExposurePolicyBusyError):
+        controller.set_policy(auto_enabled=True, engine="software")
+
+    broker.complete(
+        {
+            "ok": True,
+            "request_id": submitted[0][0],
+            "nodes": [{"name": "ExposureTime", "value": 1800.0}],
+        }
+    )
+    thread.join(1.0)
+
+    assert result_holder["accepted"] is True
+    assert submitted[0][1] == [("ExposureTime", 1800.0)]
+
+
+def test_manual_exposure_time_write_returns_completion_watermark() -> None:
+    submitted: list[tuple[str, list[tuple[str, object]]]] = []
+    submitted_event = threading.Event()
+
+    def submit(request_id: str, settings: list[tuple[str, object]]) -> None:
+        submitted.append((request_id, settings))
+        submitted_event.set()
+
+    broker = CameraApiBroker(
+        snapshot_submit=lambda _request_id, _names: None,
+        batch_submit=submit,
+        frame_counter=lambda: 23,
+        manual_exposure_write=lambda command: command(),
+    )
+    result_holder: dict[str, object] = {}
+    thread = threading.Thread(
+        target=lambda: result_holder.update(
+            broker.write_settings(
+                [
+                    {"name": "ExposureTime", "value": 1800.0},
+                ]
+            )
+        )
+    )
+    thread.start()
+    assert submitted_event.wait(1.0)
+    request_id, settings = submitted[0]
+    broker.complete(
+        {
+            "ok": True,
+            "request_id": request_id,
+            "nodes": [{"name": name, "value": value} for name, value in settings],
+            "streaming": True,
+        }
+    )
+    thread.join(1.0)
+
+    assert settings == [("ExposureTime", 1800.0)]
+    assert result_holder["accepted"] is True
+    assert result_holder["frame_counter_at_completion"] == 23
+
+
+def test_png_encoding_returns_image_metadata_and_decodable_bytes() -> None:
+    image = QImage(12, 7, QImage.Format_RGB32)
+    image.fill(QColor("#336699"))
+
+    result = encode_camera_frame_png(image, counter=42, space="raw")
+
+    assert result["accepted"] is True
+    assert result["counter"] == 42
+    assert result["space"] == "raw"
+    assert result["width"] == 12
+    assert result["height"] == 7
+    decoded = QImage.fromData(QByteArray(result["data"]), "PNG")
+    assert not decoded.isNull()
+    assert decoded.size() == image.size()
+
+
+def test_qt_signal_completion_runs_outside_blocked_sender_thread() -> None:
+    app = QApplication.instance() or QApplication([])
+    submitted: list[tuple[str, list[str]]] = []
+    broker = CameraApiBroker(
+        snapshot_submit=lambda request_id, names: submitted.append((request_id, names)),
+        batch_submit=lambda _request_id, _settings: None,
+        frame_counter=lambda: 31,
+        timeout_s=0.3,
+    )
+    sender = _SignalSender()
+    sender.completed.connect(broker.complete)
+    stop = threading.Event()
+    blocker = _BlockingWorker(stop)
+    camera_thread = QThread()
+    sender.moveToThread(camera_thread)
+    blocker.moveToThread(camera_thread)
+    camera_thread.started.connect(blocker.run)
+    camera_thread.start()
+    result_holder: dict[str, object] = {}
+    request_thread = threading.Thread(
+        target=lambda: result_holder.update(broker.read_settings(["Gain"]))
+    )
+    request_thread.start()
+    try:
+        _wait_for_count(submitted, 1)
+        sender.completed.emit(
+            {
+                "ok": True,
+                "request_id": submitted[0][0],
+                "maps": [{"key": "camera", "nodes": [{"name": "Gain"}]}],
+            }
+        )
+        deadline = time.monotonic() + 0.25
+        while request_thread.is_alive() and time.monotonic() < deadline:
+            app.processEvents()
+            time.sleep(0.005)
+        request_thread.join(0.1)
+        assert result_holder["accepted"] is True
+        assert result_holder["frame_counter_at_completion"] == 31
+    finally:
+        stop.set()
+        camera_thread.quit()
+        camera_thread.wait(1000)

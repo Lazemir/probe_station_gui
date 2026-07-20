@@ -34,6 +34,8 @@ from PySide6.QtWidgets import (
 )
 
 from probe_station_gui.api.keys import (
+    API_PERMISSION_CAMERA_READ,
+    API_PERMISSION_CAMERA_WRITE,
     API_PERMISSION_ROUTE_MEASURE,
     API_PERMISSION_ROUTE_READ,
     API_PERMISSION_STAGE_READ,
@@ -75,6 +77,7 @@ from probe_station_gui.settings.manager import (
     TELEGRAM_ALERT_TYPES,
     TelegramSettings,
 )
+from probe_station_gui.settings.objective_config import ObjectivesSettings
 from probe_station_gui.notifications.telegram import (
     LinkedTelegramChat,
     TELEGRAM_BOT_TOKEN_ENV,
@@ -143,6 +146,8 @@ class ApiSettingsWidget(QWidget):
         4: API_PERMISSION_STAGE_WRITE,
         5: API_PERMISSION_ROUTE_READ,
         6: API_PERMISSION_ROUTE_MEASURE,
+        7: API_PERMISSION_CAMERA_READ,
+        8: API_PERMISSION_CAMERA_WRITE,
     }
     ITEM_KIND_ROLE = Qt.UserRole
     RECORD_ID_ROLE = Qt.UserRole + 1
@@ -182,7 +187,7 @@ class ApiSettingsWidget(QWidget):
         keys_group = QGroupBox("API keys", self)
         keys_layout = QVBoxLayout(keys_group)
         self._keys_tree = QTreeWidget(keys_group)
-        self._keys_tree.setColumnCount(9)
+        self._keys_tree.setColumnCount(11)
         self._keys_tree.setHeaderLabels(
             [
                 "User / key",
@@ -192,6 +197,8 @@ class ApiSettingsWidget(QWidget):
                 "Stage write",
                 "Route read",
                 "Route measure",
+                "Camera read",
+                "Camera write",
                 "Created",
                 "Last used",
             ]
@@ -305,6 +312,8 @@ class ApiSettingsWidget(QWidget):
             [
                 record.key_name or record.key_prefix,
                 masked_api_key(record.key_prefix, record.key_suffix),
+                "",
+                "",
                 "",
                 "",
                 "",
@@ -961,6 +970,7 @@ class SettingsDialog(QDialog):
         *,
         initial_tab: str | None = None,
         camera_settings_source: object | None = None,
+        exposure_policy_source: object | None = None,
         api_key_store: ApiKeyStore | None = None,
     ) -> None:
         super().__init__(parent)
@@ -970,6 +980,9 @@ class SettingsDialog(QDialog):
         self._settings = settings.clone()
         self._applied_once = False
         self._camera_tab: CameraSettingsWidget | None = None
+        self._accept_after_camera_apply = False
+        self._collecting_settings = False
+        self._deferred_camera_apply_result: bool | None = None
 
         root_layout = QVBoxLayout(self)
         self._tabs = QTabWidget(self)
@@ -1003,7 +1016,12 @@ class SettingsDialog(QDialog):
             self,
         )
         if camera_settings_source is not None:
-            self._camera_tab = CameraSettingsWidget(camera_settings_source, self)
+            self._camera_tab = CameraSettingsWidget(
+                camera_settings_source,
+                self,
+                exposure_policy_source=exposure_policy_source,
+            )
+            self._camera_tab.apply_finished.connect(self._on_camera_apply_finished)
         self._tabs.addTab(self._controls_tab, "Controls")
         self._tabs.addTab(self._api_tab, "API")
         if self._camera_tab is not None:
@@ -1024,16 +1042,16 @@ class SettingsDialog(QDialog):
         self._tabs.currentChanged.connect(self._on_tab_changed)
         self._refresh_camera_tab_if_current()
 
-        buttons = QDialogButtonBox(
+        self._buttons = QDialogButtonBox(
             QDialogButtonBox.Save | QDialogButtonBox.Apply | QDialogButtonBox.Cancel,
             self,
         )
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        apply_button = buttons.button(QDialogButtonBox.Apply)
+        self._buttons.accepted.connect(self.accept)
+        self._buttons.rejected.connect(self.reject)
+        apply_button = self._buttons.button(QDialogButtonBox.Apply)
         if apply_button is not None:
             apply_button.clicked.connect(self._apply_without_closing)
-        root_layout.addWidget(buttons)
+        root_layout.addWidget(self._buttons)
 
     def _on_tab_changed(self, _index: int) -> None:
         self._refresh_camera_tab_if_current()
@@ -1047,35 +1065,80 @@ class SettingsDialog(QDialog):
             self._camera_tab.refresh()
 
     def accept(self) -> None:  # type: ignore[override]
-        self._collect_settings()
+        self._accept_after_camera_apply = True
+        camera_started = self._collect_settings()
         self._applied_once = True
         self.settings_applied.emit(self._settings.clone())
+        if camera_started:
+            self._buttons.setEnabled(False)
+            self._finish_deferred_camera_apply_if_ready()
+            return
+        self._accept_after_camera_apply = False
         self._telegram_tab.shutdown()
         super().accept()
 
     def _apply_without_closing(self) -> None:
-        self._collect_settings()
+        self._accept_after_camera_apply = False
+        camera_started = self._collect_settings()
         self._applied_once = True
         self.settings_applied.emit(self._settings.clone())
+        if camera_started:
+            self._buttons.setEnabled(False)
+            self._finish_deferred_camera_apply_if_ready()
 
-    def _collect_settings(self) -> None:
-        self._controls_tab.to_settings(self._settings)
-        self._api_tab.to_settings(self._settings)
-        self._telegram_tab.to_settings(self._settings)
-        self._jog_tab.to_settings(self._settings)
-        self._coordinate_system_tab.to_settings(self._settings)
-        self._objectives_tab.to_settings(self._settings)
-        self._axis_calibration_tab.to_settings(self._settings)
-        self._measurement_tab.to_settings(self._settings)
-        self._needles_tab.to_settings(self._settings)
-        self._logging_tab.to_settings(self._settings.logging)
-        if self._camera_tab is not None:
-            self._camera_tab.apply_pending_settings()
+    def _collect_settings(self) -> bool:
+        self._collecting_settings = True
+        self._deferred_camera_apply_result = None
+        try:
+            self._controls_tab.to_settings(self._settings)
+            self._api_tab.to_settings(self._settings)
+            self._telegram_tab.to_settings(self._settings)
+            self._jog_tab.to_settings(self._settings)
+            self._coordinate_system_tab.to_settings(self._settings)
+            self._objectives_tab.to_settings(self._settings)
+            self._axis_calibration_tab.to_settings(self._settings)
+            self._measurement_tab.to_settings(self._settings)
+            self._needles_tab.to_settings(self._settings)
+            self._logging_tab.to_settings(self._settings.logging)
+            return bool(
+                self._camera_tab is not None
+                and self._camera_tab.apply_pending_settings()
+            )
+        finally:
+            self._collecting_settings = False
+
+    def _on_camera_apply_finished(self, success: bool) -> None:
+        if self._collecting_settings:
+            self._deferred_camera_apply_result = bool(success)
+            return
+        self._complete_camera_apply(bool(success))
+
+    def _finish_deferred_camera_apply_if_ready(self) -> None:
+        result = self._deferred_camera_apply_result
+        self._deferred_camera_apply_result = None
+        if result is not None:
+            self._complete_camera_apply(result)
+
+    def _complete_camera_apply(self, success: bool) -> None:
+        self._buttons.setEnabled(True)
+        if not self._accept_after_camera_apply:
+            return
+        self._accept_after_camera_apply = False
+        if not success:
+            return
+        self._telegram_tab.shutdown()
+        super().accept()
 
     def result_settings(self) -> Settings:
         """Return a clone of the adjusted settings."""
 
         return self._settings.clone()
+
+    def set_objectives(self, objectives: ObjectivesSettings) -> None:
+        """Reload effective objective settings after applying the dialog."""
+
+        self._objectives_tab.set_objectives(objectives)
+        self._settings.objectives = objectives.clone()
 
     def was_applied(self) -> bool:
         """Return True when settings were applied at least once."""

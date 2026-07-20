@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import logging
+import threading
 import time
 from typing import TYPE_CHECKING, Any, cast
 
@@ -113,19 +114,132 @@ class StageControllerClickMoveMixin:
                 raise StageControllerError(
                     "Stage is busy. Wait for the current operation to finish."
                 )
-            with self._serial_session():
-                status = self._query_current_status_with_required_coordinates(
-                    axes=("X", "Y"),
+            self._cancel_event.clear()
+            current_thread = threading.current_thread()
+            token = self._new_stage_task_token_locked("click_calibration")
+            setattr(current_thread, "_probe_station_stage_task_token", token)
+            self._active_thread = current_thread
+        try:
+            return self._resolve_clicked_point_xy_work(dx_pixels, dy_pixels)
+        finally:
+            with self._task_lock:
+                if self._active_thread is current_thread:
+                    self._active_thread = None
+
+    def request_clicked_point_resolution(
+        self,
+        request_id: object,
+        dx_pixels: float,
+        dy_pixels: float,
+    ) -> bool:
+        """Resolve an image point in a stage-owned background task."""
+
+        try:
+            return self._start_background_task(
+                target=self._run_clicked_point_resolution,
+                args=(request_id, float(dx_pixels), float(dy_pixels)),
+                busy_message="Stage is busy. Alignment point capture not started.",
+                before_create=lambda: setattr(
+                    self,
+                    "_clicked_point_resolution_request_id",
+                    request_id,
+                ),
+            )
+        except Exception:
+            with self._task_lock:
+                if self._clicked_point_resolution_request_id == request_id:
+                    self._clicked_point_resolution_request_id = None
+            raise
+
+    def _run_clicked_point_resolution(
+        self,
+        request_id: object,
+        dx_pixels: float,
+        dy_pixels: float,
+    ) -> None:
+        try:
+            center_xy, clicked_xy = self._resolve_clicked_point_xy_for_active_task(
+                dx_pixels,
+                dy_pixels,
+            )
+            self._check_cancelled()
+        except Exception as exc:
+            self._release_clicked_point_task(request_id)
+            self.clicked_point_resolved.emit(
+                request_id,
+                False,
+                None,
+                None,
+                str(exc) or type(exc).__name__,
+            )
+            return
+        self._release_clicked_point_task(request_id)
+        self.clicked_point_resolved.emit(
+            request_id,
+            True,
+            center_xy,
+            clicked_xy,
+            "",
+        )
+
+    def _release_clicked_point_task(self, request_id: object) -> None:
+        current_thread = threading.current_thread()
+        with self._task_lock:
+            if self._active_thread is current_thread:
+                self._active_thread = None
+            if self._clicked_point_resolution_request_id == request_id:
+                self._clicked_point_resolution_request_id = None
+
+    def _resolve_clicked_point_xy_for_active_task(
+        self,
+        dx_pixels: float,
+        dy_pixels: float,
+    ) -> tuple[tuple[float, float], tuple[float, float]]:
+        current_thread = threading.current_thread()
+        with self._task_lock:
+            if self._active_thread is not current_thread:
+                raise StageControllerError(
+                    "Current thread does not own the alignment stage task."
                 )
-                if status is None or status.display_position is None:
-                    raise StageControllerError("Unable to read stage position.")
-                self._ensure_calibration()
+        return self._resolve_clicked_point_xy_work(dx_pixels, dy_pixels)
+
+    def _resolve_clicked_point_xy_work(
+        self,
+        dx_pixels: float,
+        dy_pixels: float,
+    ) -> tuple[tuple[float, float], tuple[float, float]]:
+        self._check_cancelled()
+        if self._click_calibration_required():
+            with self._open_optical_session("click-to-move calibration"):
+                self._check_cancelled()
+                status = self._resolve_clicked_point_status_locked()
+        else:
+            status = self._resolve_clicked_point_status_locked()
+        self._check_cancelled()
         if self._pixels_to_mm is None:
             raise StageControllerError("Calibration failed. Cannot resolve clicked position.")
         return self._resolve_xy_from_center(
             tuple(float(value) for value in status.display_position),
             dx_pixels,
             dy_pixels,
+        )
+
+    def _resolve_clicked_point_status_locked(self) -> object:
+        """Read stage position and ensure click calibration for the task owner."""
+
+        with self._serial_session():
+            status = self._query_current_status_with_required_coordinates(
+                axes=("X", "Y"),
+            )
+            if status is None or status.display_position is None:
+                raise StageControllerError("Unable to read stage position.")
+            self._ensure_calibration()
+        return status
+
+    def _click_calibration_required(self) -> bool:
+        return self._pixels_to_mm is None or not self._objective_calibration_verified.get(
+            self._active_objective_name,
+            False,
         )
 
     def preview_clicked_point_xy(
@@ -150,39 +264,63 @@ class StageControllerClickMoveMixin:
                 raise StageControllerError(
                     "Stage is busy. Wait for the current operation to finish."
                 )
+            self._cancel_event.clear()
             self._pixels_to_mm = None
             self._objective_matrices.pop(self._active_objective_name, None)
             self._objective_calibration_verified[self._active_objective_name] = False
-        self.objective_calibration_updated.emit(self._active_objective_name, [])
+            task_token = self._new_stage_task_token_locked(
+                "click_calibration_reset"
+            )
+        self.objective_calibration_updated.emit(
+            self._active_objective_name,
+            [],
+            task_token,
+        )
         self.status_message.emit(reason)
 
     def _run_move(self, dx_pixels: float, dy_pixels: float) -> None:
-        self.movement_started.emit()
         try:
-            self._check_cancelled()
-            with self._serial_session():
-                self._move_safety_check()
-                before_counter = self._prepare_click_move_without_status_locked(
+            if self._click_calibration_required():
+                with self._open_optical_session("click-to-move calibration"):
+                    self.movement_started.emit()
+                    success, message = self._execute_click_move(
+                        dx_pixels,
+                        dy_pixels,
+                    )
+            else:
+                self.movement_started.emit()
+                success, message = self._execute_click_move(
                     dx_pixels,
                     dy_pixels,
                 )
-            if before_counter is None:
-                self.movement_finished.emit(True, "Target already centered.")
-                return
-            after_frame, _ = self._wait_for_new_frame(before_counter, timeout=4.0)
-            if after_frame is None:
-                self.movement_finished.emit(
-                    False,
-                    "Movement command sent but camera did not provide an updated frame.",
-                )
-                return
-
-            self.movement_finished.emit(True, "Move complete.")
+            self.movement_finished.emit(success, message)
         except StageControllerError as exc:
             self.movement_finished.emit(False, str(exc))
         finally:
             with self._task_lock:
                 setattr(self, "_active_thread", None)
+
+    def _execute_click_move(
+        self,
+        dx_pixels: float,
+        dy_pixels: float,
+    ) -> tuple[bool, str]:
+        self._check_cancelled()
+        with self._serial_session():
+            self._move_safety_check()
+            before_counter = self._prepare_click_move_without_status_locked(
+                dx_pixels,
+                dy_pixels,
+            )
+        if before_counter is None:
+            return (True, "Target already centered.")
+        after_frame, _ = self._wait_for_new_frame(before_counter, timeout=4.0)
+        if after_frame is None:
+            return (
+                False,
+                "Movement command sent but camera did not provide an updated frame.",
+            )
+        return (True, "Move complete.")
 
     def _run_move_to_xy(self, target_x_mm: float, target_y_mm: float) -> None:
         self.movement_started.emit()
@@ -451,20 +589,46 @@ class StageControllerClickMoveMixin:
             if abs(determinant) < 1e-9:
                 raise StageControllerError("Calibration matrix is singular.")
             pixels_to_mm = np.linalg.inv(calibration_matrix)
-            self._pixels_to_mm = pixels_to_mm
-            mm_per_pixel_x, mm_per_pixel_y = self._calibration_magnitudes()
-            self.calibration_changed.emit(mm_per_pixel_x, mm_per_pixel_y)
+            task_token = self._calibration_signal_token("click_calibration")
+            self._check_cancelled()
+            if not self.offer_objective_calibration_candidate(
+                task_token,
+                self._active_objective_name,
+                pixels_to_mm,
+            ):
+                raise StageControllerError(
+                    "Click calibration result is no longer owned by this task."
+                )
+            self._check_cancelled()
+            if not self.is_calibration_task_token_current(task_token):
+                self.reject_objective_calibration_candidate(task_token)
+                raise StageControllerError(
+                    "Click calibration result is no longer owned by this task."
+                )
             self.objective_calibration_updated.emit(
                 self._active_objective_name,
                 pixels_to_mm.tolist(),
+                task_token,
             )
-            self._objective_matrices[self._active_objective_name] = pixels_to_mm
-            self._objective_calibration_verified[self._active_objective_name] = True
+            if not self.wait_for_objective_calibration_candidate(
+                task_token,
+                timeout_s=10.0,
+            ):
+                raise StageControllerError(
+                    "Click calibration result was cancelled or not accepted."
+                )
+            self._check_cancelled()
+            if self._pixels_to_mm is None:
+                raise StageControllerError("Calibration result was not applied.")
+            mm_per_pixel_x, mm_per_pixel_y = self._calibration_magnitudes()
             target_handled, before_counter = self._move_from_calibration_to_target(
                 origin,
                 target_pixels,
             )
         except Exception:
+            task_token = locals().get("task_token")
+            if task_token is not None:
+                self.reject_objective_calibration_candidate(task_token)
             self._return_to_origin(origin)
             raise
 
@@ -538,7 +702,19 @@ class StageControllerClickMoveMixin:
                     f"Selected objective appears to be {suggestion}, not "
                     f"{self._active_objective_name}. Objective switched; click again."
                 )
-                self.objective_mismatch_detected.emit(suggestion, message)
+                task_token = self._calibration_signal_token(
+                    "click_calibration_check"
+                )
+                self._check_cancelled()
+                if not self.is_calibration_task_token_current(task_token):
+                    raise StageControllerError(
+                        "Calibration check result is no longer owned by this task."
+                    )
+                self.objective_mismatch_detected.emit(
+                    suggestion,
+                    message,
+                    task_token,
+                )
                 raise StageControllerError(message)
             raise StageControllerError(
                 "Click calibration does not match the selected objective. "

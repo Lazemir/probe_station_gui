@@ -990,6 +990,50 @@ class MicroscopeImagingTest(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertIn("frame size", completed.stdout)
 
+    def test_compiled_flat_field_matches_profile_application(self) -> None:
+        script = textwrap.dedent(
+            """
+            import json
+            from PySide6.QtGui import QColor, QImage
+            from probe_station_gui.camera.imaging import (
+                apply_compiled_flat_field_correction,
+                apply_flat_field_correction,
+                build_flat_field_profile,
+                compile_flat_field_correction,
+            )
+
+            reference = QImage(31, 17, QImage.Format_RGB32)
+            frame = QImage(31, 17, QImage.Format_RGB32)
+            for y in range(reference.height()):
+                for x in range(reference.width()):
+                    shade = 45 + 4 * x
+                    reference.setPixelColor(x, y, QColor(shade, shade + 3, shade // 2))
+                    frame.setPixelColor(x, y, QColor(100, 110, 70))
+
+            profile = build_flat_field_profile(reference, blur_radius_px=9, max_gain=5.0)
+            expected = apply_flat_field_correction(frame, profile)
+            compiled = compile_flat_field_correction(profile)
+            actual = apply_compiled_flat_field_correction(frame, compiled)
+            same = all(
+                expected.pixelColor(x, y) == actual.pixelColor(x, y)
+                for y in range(frame.height())
+                for x in range(frame.width())
+            )
+            print(json.dumps({"same": same, "size": list(compiled.image_size_px)}))
+            """
+        )
+        completed = subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=".",
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        result = json.loads(completed.stdout.strip().splitlines()[-1])
+        self.assertTrue(result["same"])
+        self.assertEqual(result["size"], [31, 17])
+
     def test_median_flat_field_profile_ignores_moving_dark_features(self) -> None:
         script = textwrap.dedent(
             """

@@ -86,6 +86,7 @@ class MicroscopeScanDialog(QDialog):
         self._approach_spin.setSuffix(" mm")
         self._approach_spin.setValue(0.010)
         form.addRow(QLabel("Approach", self), self._approach_spin)
+
         layout.addLayout(form)
 
         self._status_label = QLabel("Idle.", self)

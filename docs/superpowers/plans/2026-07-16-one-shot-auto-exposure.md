@@ -1,0 +1,268 @@
+# One-Shot Camera Auto-Exposure Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** Run application-controlled one-shot exposure before every microscope scan, apply calibrated flat-field correction to live GUI frames, expose exposure through the operator camera API, and suppress isolated recoverable Spinnaker `NEW_BUFFER_DATA` timeouts.
+
+**Architecture:** A transport-independent controller owns camera state transitions, convergence, rollback, and serialization. `Main` adapts the existing camera broker and raw-frame condition to that controller for both scan workers and the external API. Acquisition timeout classification remains inside `Grabber`, where the actual Spinnaker exception and frame recovery are visible.
+
+**Tech Stack:** Python 3.11, PySide6, NumPy, OpenCV, FastAPI, rotpy/Spinnaker, pytest.
+
+## Global Constraints
+
+- GUI code calls the controller directly and never calls the app's localhost API.
+- Camera acquisition remains running while settings are read or written.
+- One-shot exposure runs before stage task acquisition, needle movement, or tile movement.
+- Success leaves manual exposure active; failure restores the original camera state.
+- Gain is fixed at `0 dB`; existing white-balance ratios are preserved with automatic white balance disabled.
+- `auto_exposure=false` disables the pre-scan adjustment for API scans.
+- Only Spinnaker code `-1011` containing `NEW_BUFFER_DATA` receives transient treatment; every other acquisition exception keeps current error behavior.
+- All Python commands use `C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe`.
+
+---
+
+### Task 1: Shared One-Shot Exposure Controller
+
+**Files:**
+- Create: `probe_station_gui/camera/auto_exposure.py`
+- Modify: `probe_station_gui/camera/exposure_diagnostic.py`
+- Create: `tests/camera/test_auto_exposure.py`
+- Modify: `tests/camera/test_exposure_diagnostic.py`
+
+**Interfaces:**
+- Produces: `AutoExposureConfig`, `AutoExposureFrame`, `AutoExposureBusyError`, `CameraAutoExposureController.run(config=None) -> dict[str, Any]`.
+- Consumes callbacks: `settings_read(names)`, `settings_write(ordered_settings)`, and `frame_read(after_counter, timeout_s)`.
+- Produces shared `next_exposure_us(...)` and `highlight_level(...)` used by the diagnostic.
+
+- [x] **Step 1: Write failing controller tests**
+
+Cover bounded convergence, fresh-frame watermarks, ordered manual-mode transition, success leaving the result active, failure rollback, and non-blocking busy rejection. The success assertion must include:
+
+```python
+result = controller.run(AutoExposureConfig(settling_frames=0, convergence_window=2))
+assert result["accepted"] is True
+assert result["converged"] is True
+assert camera.state["ExposureAuto"] == "Off"
+assert camera.state["GainAuto"] == "Off"
+assert camera.state["Gain"] == "0.0"
+assert result["brightness_trace"][-2:] == pytest.approx([235.0, 235.0])
+```
+
+- [x] **Step 2: Run tests and verify RED**
+
+Run: `C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m pytest tests/camera/test_auto_exposure.py -q`
+
+Expected: import failure because `probe_station_gui.camera.auto_exposure` does not exist.
+
+- [x] **Step 3: Implement the minimal controller**
+
+Add immutable config/frame dataclasses, validate all numeric config fields, acquire a non-blocking operation lock, snapshot the five operator nodes, disable automatic modes in one batch, write gain/exposure in a second batch, consume only fresh raw frames, and restore the snapshot on every unsuccessful exit. Return a JSON-safe result containing configuration, final settings, frame counter, iteration count, and brightness trace.
+
+- [x] **Step 4: Share controller math with the diagnostic**
+
+Import `AutoExposureConfig`, `next_exposure_us`, and `highlight_level` into `exposure_diagnostic.py`. Keep `ExposureDiagnosticConfig` as a compatible extension for diagnostic-only SNR fields so existing CLI/report behavior remains stable.
+
+- [x] **Step 5: Run focused tests and commit**
+
+Run: `C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m pytest tests/camera/test_auto_exposure.py tests/camera/test_exposure_diagnostic.py -q`
+
+Expected: PASS.
+
+Commit: `feat: add reusable camera auto exposure`
+
+### Task 2: Live Flat-Field Camera Pipeline
+
+**Files:**
+- Modify: `probe_station_gui/camera/imaging.py`
+- Create: `probe_station_gui/camera/live_correction.py`
+- Modify: `main.py`
+- Modify: `probe_station_gui/views/main_window_shutdown.py`
+- Modify: `tests/camera/test_imaging.py`
+- Create: `tests/camera/test_live_correction.py`
+- Modify: `tests/app/test_main_camera_distortion.py`
+- Modify: `tests/ui/test_main_window_shutdown.py`
+
+**Interfaces:**
+- Produces a compiled flat-field gain map which does not recompute illumination ratios per frame.
+- Produces a cached active-objective correction pipeline with raw, flat-field, lens-distortion ordering.
+- Produces a latest-frame background processor which replaces stale pending work and supports bounded shutdown.
+
+- [x] **Step 1: Write failing compiled-profile and pipeline tests**
+
+Assert a profile compiles to the same corrected pixels as the existing path, `current.json` is loaded for the active objective, repeated frames reuse the cache, missing profile passes through, and flat-field runs before distortion.
+
+- [x] **Step 2: Write failing background and Main integration tests**
+
+Assert submission never blocks, a busy processor replaces its pending frame with the newest one, raw counters notify before processing completes, corrected frames reach GUI/stage/API state, and shutdown stops the worker.
+
+- [x] **Step 3: Run tests and verify RED**
+
+Run: `C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m pytest tests/camera/test_imaging.py tests/camera/test_live_correction.py tests/app/test_main_camera_distortion.py tests/ui/test_main_window_shutdown.py -q`
+
+Expected: failures for missing compiled correction and live processor integration.
+
+- [x] **Step 4: Implement the live correction path**
+
+Load `<config_dir>/calibrations/flat-field/<objective>/current.json`, compile and cache the gain map, and process raw frames in a dedicated latest-frame worker. Deliver only processed frames to corrected API state, stage, notifications, and GUI. Missing profiles pass through; invalid profiles log once per signature.
+
+- [x] **Step 5: Run focused tests and commit**
+
+Run the Task 2 test command again and expect PASS.
+
+Commit: `feat: apply flat field to live microscope view`
+
+### Task 3: Scan Configuration And Direct Integration
+
+**Files:**
+- Modify: `probe_station_gui/camera/microscope_scan.py`
+- Modify: `probe_station_gui/dialogs/microscope_scan_dialog.py`
+- Modify: `main.py`
+- Modify: `tests/camera/test_microscope_scan.py`
+- Modify: `tests/app/test_main_microscope_scan.py`
+- Modify: `tests/dialogs/test_microscope_scan_dialog.py` if present, otherwise create it under `tests/ui/`.
+
+**Interfaces:**
+- Produces: `AutoExposureScanOptions(enabled: bool = True)` and `auto_exposure_options_from_payload(payload, default_enabled=True)`.
+- `MicroscopeScanConfiguration.auto_exposure: bool` defaults to `True`.
+- `Main._run_camera_auto_exposure() -> dict[str, Any]` adapts broker settings and raw `QImage` frames to the shared controller.
+
+- [x] **Step 1: Write failing scan-option tests**
+
+Assert missing API payload defaults to enabled, `auto_exposure=false` disables it, object form accepts `enabled`, and scan metadata serializes the applied result.
+
+- [x] **Step 2: Write failing scan-order tests**
+
+Use a minimal `Main` and ordered event list. Assert `auto_exposure` occurs before `begin_external_task`, `raise`, and all moves. Assert rejected auto-exposure produces no stage events and emits a failed scan result. Assert disabled auto-exposure starts with the existing camera lock.
+
+- [x] **Step 3: Run tests and verify RED**
+
+Run: `C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m pytest tests/camera/test_microscope_scan.py tests/app/test_main_microscope_scan.py -q`
+
+Expected: failures for missing options and pre-scan call.
+
+- [x] **Step 4: Implement GUI and API scan configuration**
+
+Add an `Auto exposure` checkbox to the scan dialog, checked by default, and include the boolean in `MicroscopeScanConfiguration`. Parse the same option in `_api_microscope_area_scan` and attach it to the worker configuration.
+
+- [x] **Step 5: Run the controller before motion**
+
+In `_run_microscope_scan`, invoke the direct controller before `stage_controller.begin_external_task`. On rejection raise a scan failure before stage ownership or movement. On success add `auto_exposure` result metadata to `corrections`; then apply the existing camera lock and continue unchanged.
+
+- [x] **Step 6: Run focused tests and commit**
+
+Run: `C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m pytest tests/camera/test_microscope_scan.py tests/app/test_main_microscope_scan.py tests/ui -q`
+
+Expected: PASS.
+
+Commit: `feat: run auto exposure before microscope scans`
+
+### Task 4: Operator Camera API And Client
+
+**Files:**
+- Modify: `probe_station_gui/api/server.py`
+- Modify: `probe_station_client/client.py`
+- Modify: `main.py`
+- Modify: `tests/api/test_server.py`
+- Modify: `tests/api/test_client.py`
+- Modify: `tests/app/test_main_camera_api.py`
+
+**Interfaces:**
+- `ProbeStationApiServer(..., camera_auto_exposure_callback=None)`.
+- `POST /api/v1/camera/auto-exposure` requires `camera_write` and accepts `{}` or `{"config": {...}}`.
+- `ProbeStationCameraClient.auto_exposure(config=None, timeout_s=30.0) -> dict[str, Any]`.
+
+- [x] **Step 1: Write failing server and client tests**
+
+Assert missing permission returns 403, missing callback returns 501, ordered callback result passes through, invalid non-object config returns 400, rejected results preserve 409, and the Python client sends POST with an extended request timeout.
+
+- [x] **Step 2: Run tests and verify RED**
+
+Run: `C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m pytest tests/api/test_server.py tests/api/test_client.py tests/app/test_main_camera_api.py -q`
+
+Expected: constructor/route/client method failures.
+
+- [x] **Step 3: Implement endpoint and client**
+
+Add the dedicated callback and route beside camera settings routes. Authorize with `API_PERMISSION_CAMERA_WRITE`, validate config shape, call the callback synchronously in the FastAPI worker, and map rejected status through `_raise_for_rejected`. Add the client method without changing default timeout behavior for other requests.
+
+- [x] **Step 4: Wire Main busy guards**
+
+Pass `self._api_camera_auto_exposure` into the server. Reject when a microscope scan is active; otherwise parse configuration and run the shared controller. A concurrent controller operation returns 409 without waiting.
+
+- [x] **Step 5: Run focused tests and commit**
+
+Run: `C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m pytest tests/api/test_server.py tests/api/test_client.py tests/app/test_main_camera_api.py -q`
+
+Expected: PASS.
+
+Commit: `feat: expose camera auto exposure API`
+
+### Task 5: Recoverable Spinnaker Timeout Classification
+
+**Files:**
+- Modify: `probe_station_gui/camera/worker.py`
+- Modify: `tests/camera/test_camera_worker.py`
+
+**Interfaces:**
+- Produces: `Grabber.NEW_BUFFER_TIMEOUT_CODE = -1011` and `Grabber.NEW_BUFFER_TIMEOUT_ALERT_COUNT = 5`.
+- Produces private `_handle_acquisition_exception(exc) -> bool` and recovery state consumed by `_emit_frame`.
+
+- [x] **Step 1: Write failing timeout tests**
+
+Use a fake exception with `spin_error_code=-1011`. Assert one matching timeout emits no `error`, five consecutive matches emit exactly one error, a valid-frame recovery resets escalation, the recovered frame suppresses the expected gap warning, and mismatched code/message emits immediately.
+
+- [x] **Step 2: Run tests and verify RED**
+
+Run: `C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m pytest tests/camera/test_camera_worker.py -q`
+
+Expected: missing classifier/state failures.
+
+- [x] **Step 3: Implement classification and escalation**
+
+Route acquisition exceptions through the classifier. Ignore isolated matching timeouts, escalate once at the named threshold, and reset on a valid image. Suppress only the first frame-gap warning caused by a non-escalated timeout. Preserve current handling for all unrelated exceptions.
+
+- [x] **Step 4: Run focused tests and commit**
+
+Run: `C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m pytest tests/camera/test_camera_worker.py -q`
+
+Expected: PASS.
+
+Commit: `fix: suppress transient camera buffer timeouts`
+
+### Task 6: Regression And Hardware Verification
+
+**Files:**
+- Modify only files owned by Tasks 1-5 if verification finds a defect.
+- Generate ignored reports under `.scratch/`.
+
+- [x] **Step 1: Run static sanity checks**
+
+Run: `git diff --check`
+
+Expected: no whitespace errors.
+
+- [x] **Step 2: Run the complete automated suite**
+
+Run: `$env:QT_QPA_PLATFORM='offscreen'; C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m pytest tests -q`
+
+Expected: all tests pass without a native Qt application lifecycle failure.
+
+- [x] **Step 3: Restart the GUI normally**
+
+Restart from `C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe main.py`; verify camera streaming and API health before calling the new endpoint.
+
+- [x] **Step 4: Invoke real one-shot exposure through the API**
+
+Call `ProbeStationClient.camera.auto_exposure()` using the existing Codex operator key. Verify the response converges, leaves `ExposureAuto=Off`, `GainAuto=Off`, `Gain=0`, and returns a fresh-frame watermark.
+
+- [x] **Step 5: Verify scan integration without unnecessary motion**
+
+Use a one-tile area scan centered at the current point. Confirm auto-exposure status precedes camera lock and stage task status, the manifest contains the auto-exposure result, and the camera retains the final exposure after scan completion.
+
+- [x] **Step 6: Verify timeout logging behavior**
+
+Inspect both runtime logs. Confirm isolated `-1011` no longer produces `ERROR` or Telegram-alert dispatch while unrelated camera errors remain eligible for the existing path.
+
+- [x] **Step 7: Commit verification fixes**
+
+If hardware verification requires changes, repeat the relevant RED/GREEN test and commit as `fix: harden automatic camera exposure`.

@@ -7,10 +7,11 @@ import logging
 import os
 import platform
 import re
+import threading
 from dataclasses import dataclass, field
 from importlib import resources
 from pathlib import Path
-from typing import Dict, Iterable, List
+from typing import Callable, Dict, Iterable, List
 
 from probe_station_gui.settings.axis_calibration_config import (
     AxisACalibrationConfig,
@@ -71,6 +72,7 @@ from probe_station_gui.settings.oscillation_config import (
 from probe_station_gui.settings.value_parsing import (
     coerce_bool,
     finite_float,
+    normalise_choice,
 )
 from probe_station_gui.settings.section_parsing import (
     parse_api_settings,
@@ -81,6 +83,7 @@ from probe_station_gui.settings.sections import (
     ApiSettings,
     ClickToMoveSettings,
     CoordinateSystemSettings,
+    ExposurePolicySettings,
     LoggingSettings,
     WORK_COORDINATE_SYSTEMS,
 )
@@ -124,6 +127,9 @@ class Settings:
     )
     objectives: ObjectivesSettings = field(default_factory=ObjectivesSettings)
     design_last_directory: str = ""
+    exposure_policy: ExposurePolicySettings = field(
+        default_factory=ExposurePolicySettings
+    )
 
     def clone(self) -> "Settings":
         """Create a deep copy of the settings container."""
@@ -132,6 +138,7 @@ class Settings:
             controls={key: list(value) for key, value in self.controls.items()},
             logging=self.logging.clone(),
             api=self.api.clone(),
+            exposure_policy=self.exposure_policy.clone(),
             telegram=self.telegram.clone(),
             feedrates=self.feedrates.clone(),
             oscillation=self.oscillation.clone(),
@@ -155,6 +162,7 @@ class Settings:
             },
             "logging": self.logging.to_dict(),
             "api": self.api.to_dict(),
+            "camera": {"exposure": self.exposure_policy.to_dict()},
             "telegram": self.telegram.to_dict(),
             "feedrates": {
                 "linear": {
@@ -189,6 +197,7 @@ class SettingsManager:
     DEFAULT_API_ENABLED: bool = True
     DEFAULT_API_HOST: str = "127.0.0.1"
     DEFAULT_API_PORT: int = 8765
+    EXPOSURE_POLICY_ENGINES: tuple[str, ...] = ("software", "camera")
     MIN_FEEDRATE_MM_MIN: float = 1.0
     DEFAULT_LINEAR_FEEDRATE_PRESETS: tuple[float, ...] = (
         1.0,
@@ -275,6 +284,7 @@ class SettingsManager:
     CYRILLIC_PATTERN = re.compile(r"[\u0400-\u04FF]")
 
     def __init__(self) -> None:
+        self._settings_lock = threading.RLock()
         self._config_dir = self._determine_config_dir()
         self._config_path = self._config_dir / self.CONFIG_FILENAME
         self._logger = logging.getLogger(__name__)
@@ -297,17 +307,71 @@ class SettingsManager:
     def replace(self, settings: Settings) -> None:
         """Replace the stored settings with the provided instance."""
 
-        self._settings = self._normalise_settings(settings)
-        self.apply()
+        with self._settings_lock:
+            self._replace_locked(settings, apply_runtime=True)
 
     def save(self) -> None:
         """Persist the current settings to disk."""
 
+        with self._settings_lock:
+            self._save_locked()
+
+    def replace_and_save(
+        self,
+        settings: Settings,
+        *,
+        preserve_exposure_policy: bool = False,
+        apply_runtime: bool = True,
+    ) -> None:
+        """Replace and atomically persist settings as one serialized transaction."""
+
+        with self._settings_lock:
+            updated = settings.clone()
+            if preserve_exposure_policy:
+                updated.exposure_policy = self._settings.exposure_policy.clone()
+            self._replace_locked(updated, apply_runtime=apply_runtime)
+            self._save_locked()
+
+    def update_and_save(
+        self,
+        mutation: Callable[[Settings], None],
+        *,
+        apply_runtime: bool = False,
+    ) -> None:
+        """Mutate a fresh settings clone and persist it under one lock."""
+
+        with self._settings_lock:
+            updated = self._settings.clone()
+            mutation(updated)
+            self._replace_locked(updated, apply_runtime=apply_runtime)
+            self._save_locked()
+
+    def _replace_locked(self, settings: Settings, *, apply_runtime: bool) -> None:
+        self._settings = self._normalise_settings(settings)
+        if apply_runtime:
+            self.apply()
+
+    def _save_locked(self) -> None:
         data = self._settings.to_dict()
-        self._config_dir.mkdir(parents=True, exist_ok=True)
-        with self._config_path.open("w", encoding="utf-8") as handle:
-            json.dump(data, handle, indent=2, ensure_ascii=False)
+        self._write_settings_file_atomic(data)
         self._logger.info("Settings saved to %s", self._config_path)
+
+    def _write_settings_file_atomic(self, data: dict) -> None:
+        self._config_dir.mkdir(parents=True, exist_ok=True)
+        temporary_path = self._config_path.with_name(
+            f".{self._config_path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+        )
+        try:
+            with temporary_path.open("w", encoding="utf-8") as handle:
+                json.dump(data, handle, indent=2, ensure_ascii=False)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary_path, self._config_path)
+        finally:
+            try:
+                temporary_path.unlink()
+            except FileNotFoundError:
+                pass
 
     def apply(self) -> None:
         """Apply runtime-affecting settings such as logging configuration."""
@@ -597,6 +661,9 @@ class SettingsManager:
             controls=controls,
             logging=logging_settings,
             api=self._parse_api(self._raw_section(raw, "api")),
+            exposure_policy=self._parse_exposure_policy(
+                self._raw_section(raw, "camera")
+            ),
             telegram=self._parse_telegram(self._raw_section(raw, "telegram")),
             feedrates=feedrates,
             oscillation=self._parse_oscillation(self._raw_section(raw, "oscillation")),
@@ -674,6 +741,28 @@ class SettingsManager:
                 default_port=defaults.port,
             )
         )
+
+    def _parse_exposure_policy(self, raw_camera) -> ExposurePolicySettings:
+        """Normalise persisted camera exposure policy settings."""
+
+        settings = ExposurePolicySettings()
+        raw_exposure = (
+            raw_camera.get("exposure")
+            if isinstance(raw_camera, dict)
+            else None
+        )
+        if not isinstance(raw_exposure, dict):
+            return settings
+        settings.auto_enabled = coerce_bool(
+            raw_exposure.get("auto_enabled", settings.auto_enabled),
+            default=settings.auto_enabled,
+        )
+        settings.engine = normalise_choice(
+            raw_exposure.get("engine"),
+            choices=self.EXPOSURE_POLICY_ENGINES,
+            default=settings.engine,
+        )
+        return settings
 
     def _parse_telegram(self, raw_telegram) -> TelegramSettings:
         """Normalise Telegram notification settings."""
@@ -884,6 +973,9 @@ class SettingsManager:
 
         clone = settings.clone()
         clone.api = self._parse_api(clone.api.to_dict())
+        clone.exposure_policy = self._parse_exposure_policy(
+            {"exposure": clone.exposure_policy.to_dict()}
+        )
         clone.telegram = self._parse_telegram(clone.telegram.to_dict())
         clone.feedrates = normalise_feedrate_settings(
             clone.feedrates,
@@ -928,6 +1020,11 @@ class SettingsManager:
         """Return the current local API configuration clone."""
 
         return self._settings.api.clone()
+
+    def exposure_policy_configuration(self) -> ExposurePolicySettings:
+        """Return the current camera exposure policy clone."""
+
+        return self._settings.exposure_policy.clone()
 
     def telegram_configuration(self) -> TelegramSettings:
         """Return the current Telegram notification configuration clone."""
@@ -998,10 +1095,21 @@ class SettingsManager:
             except OSError:
                 pass
             new_value = str(path)
-        if self._settings.design_last_directory == new_value:
-            return
-        updated = self._settings.clone()
-        updated.design_last_directory = new_value
-        self.replace(updated)
-        self.save()
+        with self._settings_lock:
+            if self._settings.design_last_directory == new_value:
+                return
+            updated = self._settings.clone()
+            updated.design_last_directory = new_value
+            self._replace_locked(updated, apply_runtime=False)
+            self._save_locked()
+
+    def set_exposure_policy_configuration(
+        self, settings: ExposurePolicySettings
+    ) -> None:
+        """Persist the camera exposure policy settings."""
+
+        def update_exposure_policy(updated: Settings) -> None:
+            updated.exposure_policy = settings.clone()
+
+        self.update_and_save(update_exposure_policy)
 

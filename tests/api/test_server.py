@@ -1,6 +1,10 @@
+import sys
 import unittest
+from types import ModuleType
 
 from probe_station_gui.api.keys import (
+    API_PERMISSION_CAMERA_READ,
+    API_PERMISSION_CAMERA_WRITE,
     API_PERMISSION_ROUTE_MEASURE,
     API_PERMISSION_STAGE_READ,
     API_PERMISSION_STAGE_WRITE,
@@ -59,6 +63,12 @@ class ApiServerHttpTest(unittest.TestCase):
         status_callback=None,
         command_callback=None,
         auth_callback=None,
+        camera_settings_read_callback=None,
+        camera_settings_write_callback=None,
+        camera_frame_callback=None,
+        camera_exposure_policy_snapshot_callback=None,
+        camera_exposure_policy_set_callback=None,
+        camera_exposure_once_callback=None,
         raise_server_exceptions=True,
     ):
         from fastapi.testclient import TestClient
@@ -68,6 +78,14 @@ class ApiServerHttpTest(unittest.TestCase):
             status_callback=status_callback or (lambda: {"accepted": True, "state": "Idle"}),
             command_callback=command_callback,
             auth_callback=auth_callback,
+            camera_settings_read_callback=camera_settings_read_callback,
+            camera_settings_write_callback=camera_settings_write_callback,
+            camera_frame_callback=camera_frame_callback,
+            camera_exposure_policy_snapshot_callback=(
+                camera_exposure_policy_snapshot_callback
+            ),
+            camera_exposure_policy_set_callback=camera_exposure_policy_set_callback,
+            camera_exposure_once_callback=camera_exposure_once_callback,
         )
         app, _uvicorn = server._create_app()
         return TestClient(
@@ -174,7 +192,7 @@ class ApiServerHttpTest(unittest.TestCase):
             json={"rows": 3, "columns": 3, "overlap_fraction": 0.0},
         )
 
-        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.status_code, 202)
         self.assertEqual(
             calls,
             [
@@ -189,6 +207,460 @@ class ApiServerHttpTest(unittest.TestCase):
             ],
         )
         self.assertEqual(response.json()["output_dir"], "C:/scan")
+
+    def test_area_scan_rejects_removed_auto_exposure_payload(self) -> None:
+        calls = []
+        client = self._client(
+            command_callback=lambda request: calls.append(request)
+            or {"accepted": True, "status_code": 202}
+        )
+
+        response = client.post(
+            "/api/v1/camera/area-scan",
+            json={"rows": 3, "columns": 3, "auto_exposure": False},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(calls, [])
+        self.assertIn("auto_exposure", response.json()["detail"]["message"])
+
+    def test_area_scan_default_camera_lock_requires_only_stage_write(self) -> None:
+        auth_calls = []
+
+        def authorize(_api_key, permission):
+            auth_calls.append(permission)
+            return {
+                "accepted": permission == API_PERMISSION_STAGE_WRITE,
+                "status_code": 403,
+                "message": "camera write denied",
+            }
+
+        client = self._client(
+            auth_callback=authorize,
+            command_callback=lambda _request: {
+                "accepted": True,
+                "status_code": 202,
+            },
+        )
+
+        response = client.post(
+            "/api/v1/camera/area-scan",
+            json={"rows": 2, "columns": 2},
+        )
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(auth_calls, [API_PERMISSION_STAGE_WRITE])
+
+    def test_area_scan_custom_camera_lock_requires_camera_write(self) -> None:
+        auth_calls = []
+        dispatch_calls = []
+
+        def authorize(_api_key, permission):
+            auth_calls.append(permission)
+            return {
+                "accepted": permission == API_PERMISSION_STAGE_WRITE,
+                "status_code": 403,
+                "message": "camera write denied",
+            }
+
+        client = self._client(
+            auth_callback=authorize,
+            command_callback=lambda request: dispatch_calls.append(request)
+            or {"accepted": True, "status_code": 202},
+        )
+
+        response = client.post(
+            "/api/v1/camera/area-scan",
+            json={
+                "camera_lock": {
+                    "enabled": True,
+                    "settings": [
+                        {"node_name": "GainAuto", "value": "Off"},
+                    ],
+                }
+            },
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(
+            auth_calls,
+            [API_PERMISSION_STAGE_WRITE, API_PERMISSION_CAMERA_WRITE],
+        )
+        self.assertEqual(dispatch_calls, [])
+
+    def test_area_scan_custom_allowed_lock_accepts_both_write_permissions(
+        self,
+    ) -> None:
+        auth_calls = []
+        dispatch_calls = []
+        client = self._client(
+            auth_callback=lambda _key, permission: auth_calls.append(permission)
+            or {"accepted": True},
+            command_callback=lambda request: dispatch_calls.append(request)
+            or {"accepted": True, "status_code": 202},
+        )
+        payload = {
+            "camera_lock": {
+                "enabled": True,
+                "settings": [
+                    {"node_name": "Gain", "value": 4.0},
+                ],
+            }
+        }
+
+        response = client.post("/api/v1/camera/area-scan", json=payload)
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(
+            auth_calls,
+            [API_PERMISSION_STAGE_WRITE, API_PERMISSION_CAMERA_WRITE],
+        )
+        self.assertEqual(
+            dispatch_calls,
+            [{"action": "microscope_area_scan", "payload": payload}],
+        )
+
+    def test_area_scan_preserves_rejected_command_status(self) -> None:
+        client = self._client(
+            command_callback=lambda _request: {
+                "accepted": False,
+                "status_code": 409,
+                "message": "stage became busy",
+            }
+        )
+
+        response = client.post("/api/v1/camera/area-scan", json={})
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["detail"]["message"], "stage became busy")
+
+    def test_lens_reset_preserves_rejected_command_status(self) -> None:
+        client = self._client(
+            command_callback=lambda _request: {
+                "accepted": False,
+                "status_code": 409,
+                "message": "lens correction is busy",
+            }
+        )
+
+        response = client.post(
+            "/api/v1/calibration/lens-distortion",
+            json={"reset": True},
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(
+            response.json()["detail"]["message"],
+            "lens correction is busy",
+        )
+
+    def test_click_force_reset_preserves_rejected_command_status(self) -> None:
+        client = self._client(
+            command_callback=lambda _request: {
+                "accepted": False,
+                "status_code": 409,
+                "message": "objective calibration is busy",
+            }
+        )
+
+        response = client.post(
+            "/api/v1/calibration/click-to-move",
+            json={"force": True},
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(
+            response.json()["detail"]["message"],
+            "objective calibration is busy",
+        )
+
+    def test_camera_settings_endpoints_preserve_names_and_ordered_writes(self) -> None:
+        reads = []
+        writes = []
+        client = self._client(
+            camera_settings_read_callback=lambda names: (
+                reads.append(names)
+                or {"accepted": True, "camera_ready": True, "nodes": []}
+            ),
+            camera_settings_write_callback=lambda settings: (
+                writes.append(settings)
+                or {
+                    "accepted": True,
+                    "nodes": settings,
+                    "frame_counter_at_completion": 9,
+                }
+            ),
+        )
+
+        read_response = client.get(
+            "/api/v1/camera/settings",
+            params=[("name", "ExposureTime"), ("name", "Gain")],
+        )
+        write_response = client.patch(
+            "/api/v1/camera/settings",
+            json={
+                "settings": [
+                    {"name": "Gain", "value": 0.0},
+                    {"name": "ExposureTime", "value": 1800.0},
+                ]
+            },
+        )
+
+        self.assertEqual(read_response.status_code, 200)
+        self.assertEqual(reads, [["ExposureTime", "Gain"]])
+        self.assertEqual(write_response.status_code, 200)
+        self.assertEqual(
+            writes,
+            [
+                [
+                    {"name": "Gain", "value": 0.0},
+                    {"name": "ExposureTime", "value": 1800.0},
+                ]
+            ],
+        )
+        self.assertEqual(write_response.json()["frame_counter_at_completion"], 9)
+
+    def test_camera_frame_endpoint_returns_png_metadata_headers(self) -> None:
+        calls = []
+        client = self._client(
+            camera_frame_callback=lambda space, after_counter, timeout_s: (
+                calls.append((space, after_counter, timeout_s))
+                or {
+                    "accepted": True,
+                    "data": b"png-data",
+                    "content_type": "image/png",
+                    "counter": 21,
+                    "space": space,
+                    "width": 640,
+                    "height": 480,
+                }
+            )
+        )
+
+        response = client.get(
+            "/api/v1/camera/frame",
+            params={"space": "raw", "after_counter": 20, "timeout_ms": 1500},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content, b"png-data")
+        self.assertEqual(calls, [("raw", 20, 1.5)])
+        self.assertEqual(response.headers["X-Camera-Frame-Counter"], "21")
+        self.assertEqual(response.headers["X-Camera-Frame-Space"], "raw")
+        self.assertEqual(response.headers["X-Camera-Frame-Width"], "640")
+        self.assertEqual(response.headers["X-Camera-Frame-Height"], "480")
+
+    def test_exposure_policy_endpoints_return_and_update_controller_state(self) -> None:
+        policy_updates = []
+        client = self._client(
+            camera_exposure_policy_snapshot_callback=lambda: {
+                "auto_enabled": True,
+                "engine": "software",
+                "busy": False,
+            },
+            camera_exposure_policy_set_callback=lambda *, auto_enabled, engine: (
+                policy_updates.append((auto_enabled, engine))
+                or {
+                    "auto_enabled": auto_enabled,
+                    "engine": engine,
+                    "busy": False,
+                }
+            ),
+        )
+
+        read_response = client.get("/api/v1/camera/exposure-policy")
+        write_response = client.put(
+            "/api/v1/camera/exposure-policy",
+            json={"auto_enabled": False, "engine": "camera"},
+        )
+
+        self.assertEqual(read_response.status_code, 200)
+        self.assertEqual(read_response.json()["engine"], "software")
+        self.assertEqual(write_response.status_code, 200)
+        self.assertEqual(write_response.json()["engine"], "camera")
+        self.assertEqual(policy_updates, [(False, "camera")])
+
+    def test_exposure_policy_rejects_invalid_engine_before_controller_call(self) -> None:
+        calls = []
+        client = self._client(
+            camera_exposure_policy_set_callback=lambda **policy: calls.append(policy)
+        )
+
+        response = client.put(
+            "/api/v1/camera/exposure-policy",
+            json={"auto_enabled": True, "engine": "invalid"},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(calls, [])
+
+    def test_exposure_policy_commands_report_controller_busy_as_conflict(self) -> None:
+        def busy(*_args, **_kwargs):
+            from probe_station_gui.camera.exposure_policy import (
+                ExposurePolicyBusyError,
+            )
+
+            raise ExposurePolicyBusyError("Camera exposure policy is busy.")
+
+        client = self._client(
+            camera_exposure_policy_set_callback=busy,
+            camera_exposure_once_callback=busy,
+        )
+
+        update = client.put(
+            "/api/v1/camera/exposure-policy",
+            json={"auto_enabled": False, "engine": "software"},
+        )
+        once = client.post("/api/v1/camera/exposure-once", json={})
+
+        self.assertEqual(update.status_code, 409)
+        self.assertEqual(once.status_code, 409)
+
+    def test_exposure_policy_errors_return_structured_service_unavailable(self) -> None:
+        def unavailable(*_args, **_kwargs):
+            from probe_station_gui.camera.exposure_policy import ExposurePolicyError
+
+            raise ExposurePolicyError("Camera settings write failed.")
+
+        client = self._client(
+            camera_exposure_policy_set_callback=unavailable,
+            camera_exposure_once_callback=unavailable,
+            raise_server_exceptions=False,
+        )
+
+        update = client.put(
+            "/api/v1/camera/exposure-policy",
+            json={"auto_enabled": False, "engine": "software"},
+        )
+        once = client.post("/api/v1/camera/exposure-once", json={})
+
+        self.assertEqual(update.status_code, 503)
+        self.assertEqual(once.status_code, 503)
+        self.assertEqual(update.json()["detail"]["message"], "Camera settings write failed.")
+
+    def test_exposure_policy_classifies_exception_from_reloaded_module(self) -> None:
+        from importlib import import_module
+
+        module_name = "probe_station_gui.camera.exposure_policy"
+        original_module = import_module(module_name)
+        stale_module = ModuleType(module_name)
+        stale_module.ExposurePolicyError = type(
+            "ExposurePolicyError",
+            (RuntimeError,),
+            {},
+        )
+        stale_module.ExposurePolicyBusyError = type(
+            "ExposurePolicyBusyError",
+            (stale_module.ExposurePolicyError,),
+            {},
+        )
+        current_module = ModuleType(module_name)
+        current_module.ExposurePolicyError = type(
+            "ExposurePolicyError",
+            (RuntimeError,),
+            {},
+        )
+        current_module.ExposurePolicyBusyError = type(
+            "ExposurePolicyBusyError",
+            (current_module.ExposurePolicyError,),
+            {},
+        )
+
+        def busy_after_reload(*_args, **_kwargs):
+            sys.modules[module_name] = current_module
+            raise current_module.ExposurePolicyBusyError(
+                "Camera exposure policy is busy."
+            )
+
+        client = self._client(
+            camera_exposure_once_callback=busy_after_reload,
+            raise_server_exceptions=False,
+        )
+        sys.modules[module_name] = stale_module
+        try:
+            response = client.post("/api/v1/camera/exposure-once", json={})
+        finally:
+            sys.modules[module_name] = original_module
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(
+            response.json()["detail"]["message"],
+            "Camera exposure policy is busy.",
+        )
+
+    def test_exposure_policy_endpoints_preserve_camera_permissions(self) -> None:
+        client = self._client(
+            auth_callback=lambda _key, permission: {
+                "accepted": permission != API_PERMISSION_CAMERA_WRITE,
+                "status_code": 403,
+                "message": "camera write denied",
+            },
+            camera_exposure_policy_snapshot_callback=lambda: {"busy": False},
+            camera_exposure_policy_set_callback=lambda **_policy: {"busy": False},
+            camera_exposure_once_callback=lambda: {"busy": False},
+        )
+
+        read = client.get("/api/v1/camera/exposure-policy")
+        update = client.put(
+            "/api/v1/camera/exposure-policy",
+            json={"auto_enabled": False, "engine": "software"},
+        )
+        once = client.post("/api/v1/camera/exposure-once", json={})
+
+        self.assertEqual(read.status_code, 200)
+        self.assertEqual(update.status_code, 403)
+        self.assertEqual(once.status_code, 403)
+
+    def test_old_auto_exposure_route_is_removed(self) -> None:
+        response = self._client().post("/api/v1/camera/auto-exposure", json={})
+
+        self.assertEqual(response.status_code, 404)
+
+    def test_camera_endpoints_require_separate_camera_permissions(self) -> None:
+        auth_calls = []
+
+        def auth_callback(api_key, permission):
+            auth_calls.append((api_key, permission))
+            if permission == API_PERMISSION_CAMERA_WRITE:
+                return {
+                    "accepted": False,
+                    "status_code": 403,
+                    "message": "camera write denied",
+                }
+            return {"accepted": True}
+
+        client = self._client(
+            auth_callback=auth_callback,
+            camera_settings_read_callback=lambda names: {
+                "accepted": True,
+                "nodes": [],
+            },
+            camera_settings_write_callback=lambda settings: {
+                "accepted": True,
+                "nodes": [],
+            },
+            camera_frame_callback=lambda space, after_counter, timeout_s: {
+                "accepted": True,
+                "data": b"png",
+                "counter": 1,
+                "space": space,
+                "width": 1,
+                "height": 1,
+            },
+        )
+
+        read = client.get("/api/v1/camera/settings")
+        frame = client.get("/api/v1/camera/frame")
+        write = client.patch(
+            "/api/v1/camera/settings",
+            json={"settings": [{"name": "Gain", "value": 0.0}]},
+        )
+
+        self.assertEqual(read.status_code, 200)
+        self.assertEqual(frame.status_code, 200)
+        self.assertEqual(write.status_code, 403)
+        self.assertIn((None, API_PERMISSION_CAMERA_READ), auth_calls)
+        self.assertIn((None, API_PERMISSION_CAMERA_WRITE), auth_calls)
 
     def test_click_to_move_calibration_endpoint_delegates_to_command_callback(self) -> None:
         calls = []

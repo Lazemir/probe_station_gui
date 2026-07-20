@@ -354,7 +354,7 @@ def test_flat_field_reference_mode_requires_reference_images() -> None:
         )
 
 
-def test_camera_lock_settings_default_to_fixed_auto_modes() -> None:
+def test_camera_lock_settings_reject_session_owned_exposure_nodes() -> None:
     disabled = microscope_scan.camera_lock_settings_from_payload(
         {"camera_lock": False},
         default_enabled=True,
@@ -368,10 +368,37 @@ def test_camera_lock_settings_default_to_fixed_auto_modes() -> None:
     )
     assert enabled.enabled is True
     assert enabled.settings == (
-        ("ExposureAuto", "Off"),
         ("GainAuto", "Off"),
         ("BalanceWhiteAuto", "Off"),
     )
+    assert not {"ExposureAuto", "ExposureTime"}.intersection(
+        name for name, _value in enabled.settings
+    )
+
+    with pytest.raises(ValueError, match="ExposureAuto"):
+        microscope_scan.CameraLockSettings(
+            enabled=True,
+            settings=(
+                ("ExposureAuto", "Off"),
+                ("GainAuto", "Off"),
+            ),
+        )
+    with pytest.raises(ValueError, match="ExposureTime"):
+        microscope_scan.camera_lock_settings_from_payload(
+            {
+                "camera_lock": {
+                    "enabled": True,
+                    "settings": [
+                        {"node_name": "ExposureTime", "value": 2000.0},
+                    ],
+                }
+            }
+        )
+
+
+def test_scan_module_has_no_scan_specific_exposure_option() -> None:
+    assert not hasattr(microscope_scan, "AutoExposureScanOptions")
+    assert not hasattr(microscope_scan, "auto_exposure_options_from_payload")
 
 
 def test_tile_and_mosaic_save_plans_preserve_metadata_payloads() -> None:

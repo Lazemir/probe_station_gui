@@ -224,21 +224,33 @@ def sync_contact_calibration_window_action(
 def open_settings_dialog(
     owner: MainWindowAuxiliaryOwner,
     initial_tab: object = None,
+    *,
+    dialog_class: object | None = None,
 ) -> None:
     """Open the settings dialog and apply the existing owner lifecycle hooks."""
 
-    from probe_station_gui.dialogs.settings_dialog import SettingsDialog
+    if dialog_class is None:
+        from probe_station_gui.dialogs.settings_dialog import SettingsDialog
+
+        dialog_class = SettingsDialog
 
     tab_name = initial_tab if isinstance(initial_tab, str) else None
     owner._stop_telegram_bot_service()
-    dialog = SettingsDialog(
+    dialog = dialog_class(
         owner.settings_manager.settings,
         owner,
         initial_tab=tab_name,
         camera_settings_source=owner.grabber,
+        exposure_policy_source=getattr(owner, "_exposure_policy_adapter", None),
         api_key_store=owner._api_key_store,
     )
-    dialog.settings_applied.connect(owner._apply_settings_from_dialog)
+
+    def apply_settings(new_settings: object) -> None:
+        owner._apply_settings_from_dialog(new_settings)
+        objectives = owner.settings_manager.objectives_configuration()
+        dialog.set_objectives(objectives)
+
+    dialog.settings_applied.connect(apply_settings)
     try:
         if dialog.exec() != QDialog.Accepted and not dialog.was_applied():
             logger.debug("Settings dialog cancelled")

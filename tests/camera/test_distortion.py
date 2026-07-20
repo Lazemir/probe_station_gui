@@ -353,6 +353,22 @@ def test_stage_geometry_payload_applies_to_qimage() -> None:
     assert fit.to_payload()["model_type"] == "stage_geometry"
 
 
+def test_stage_geometry_fit_rejects_sparse_underdetermined_tracks() -> None:
+    observations = [
+        StageFeatureObservation(0, "a", (0.0, 0.0), (20.0, 20.0)),
+        StageFeatureObservation(1, "a", (0.010, 0.0), (10.0, 20.0)),
+        StageFeatureObservation(0, "b", (0.0, 0.0), (60.0, 40.0)),
+        StageFeatureObservation(1, "b", (0.010, 0.0), (50.0, 40.0)),
+    ]
+
+    with pytest.raises(ValueError, match="insufficient geometry coverage"):
+        fit_stage_geometry_from_observations(
+            observations,
+            frame_size=(80, 60),
+            initial_pixels_to_mm=((-0.001, 0.0), (0.0, -0.001)),
+        )
+
+
 def test_stage_geometry_payload_rejects_invalid_pixels_matrix() -> None:
     payload = {
         "model_version": 1,
@@ -366,7 +382,8 @@ def test_stage_geometry_payload_rejects_invalid_pixels_matrix() -> None:
         correction_from_payload(payload)
 
 
-def test_stage_geometry_fit_from_grid_frames_does_not_need_grid_spacing() -> None:
+def test_affine_stage_geometry_fit_from_grid_frames_does_not_need_grid_spacing(
+) -> None:
     frames = [
         GridCalibrationFrame(
             frame=_synthetic_grid_image(
@@ -398,6 +415,7 @@ def test_stage_geometry_fit_from_grid_frames_does_not_need_grid_spacing() -> Non
         frames,
         frame_size=(360, 260),
         pixels_to_mm=((-0.0010, 0.0), (0.0, -0.0010)),
+        optimize_distortion=False,
         max_nfev=200,
     )
 
@@ -571,6 +589,37 @@ def test_detect_bright_feature_bounds_prefers_center_structure() -> None:
     assert bounds.right == pytest.approx(413.0, abs=18.0)
     assert bounds.top == pytest.approx(143.0, abs=18.0)
     assert bounds.bottom == pytest.approx(278.0, abs=18.0)
+
+
+def test_detect_bright_feature_bounds_does_not_link_nearby_comb_structures() -> None:
+    image = QImage(1920, 1200, QImage.Format_RGB32)
+    image.fill(QColor("#202018"))
+    painter = QPainter(image)
+    try:
+        painter.setRenderHint(QPainter.Antialiasing, False)
+        painter.setPen(QPen(QColor("#fff080"), 12, Qt.SolidLine, Qt.RoundCap))
+        for x_pos in (600, 780, 960, 1140, 1320):
+            painter.drawLine(QPointF(x_pos, 250.0), QPointF(x_pos, 950.0))
+        for y_pos in (250, 425, 600, 775, 950):
+            painter.drawLine(QPointF(600.0, y_pos), QPointF(1320.0, y_pos))
+        for x_pos in range(20, 581, 35):
+            painter.drawLine(QPointF(float(x_pos), 430.0), QPointF(float(x_pos), 770.0))
+        for x_pos in range(1340, 1901, 35):
+            painter.drawLine(QPointF(float(x_pos), 430.0), QPointF(float(x_pos), 770.0))
+        for y_pos in range(20, 231, 35):
+            painter.drawLine(QPointF(790.0, float(y_pos)), QPointF(1130.0, float(y_pos)))
+        for y_pos in range(970, 1181, 35):
+            painter.drawLine(QPointF(790.0, float(y_pos)), QPointF(1130.0, float(y_pos)))
+    finally:
+        painter.end()
+
+    bounds = detect_bright_feature_bounds(image)
+
+    assert bounds is not None
+    assert 500.0 < bounds.left < 620.0
+    assert 1300.0 < bounds.right < 1420.0
+    assert 180.0 < bounds.top < 280.0
+    assert 920.0 < bounds.bottom < 1020.0
 
 
 def test_grid_fit_reports_grid_pixel_matrix_estimate_from_known_grid_pitch() -> None:

@@ -1,3 +1,6 @@
+import json
+from importlib import resources
+
 from probe_station_gui.notifications.telegram_settings import default_telegram_alerts
 from probe_station_gui.settings.default_file import normalize_default_settings_data
 
@@ -7,6 +10,10 @@ def test_normalize_default_settings_data_builds_current_shape_from_invalid_input
 
     assert data["logging"] == {"level": "INFO", "file": "runtime.log"}
     assert data["api"] == {"enabled": True, "host": "127.0.0.1", "port": 8765}
+    assert data["camera"]["exposure"] == {
+        "auto_enabled": True,
+        "engine": "software",
+    }
     assert data["telegram"]["alerts"] == default_telegram_alerts()
     assert data["feedrates"]["linear"]["presets"] == [1.0, 3.0, 10.0, 30.0, 100.0, 300.0]
     assert data["feedrates"]["rotary"]["presets"] == [1.0, 3.0, 10.0, 30.0, 90.0, 360.0]
@@ -17,6 +24,18 @@ def test_normalize_default_settings_data_builds_current_shape_from_invalid_input
         "configured": False,
     }
     assert data["design_last_directory"] == ""
+
+
+def test_normalize_default_settings_data_replaces_invalid_camera_exposure() -> None:
+    data = normalize_default_settings_data(
+        {"camera": {"exposure": "invalid"}},
+        log_path="runtime.log",
+    )
+
+    assert data["camera"]["exposure"] == {
+        "auto_enabled": True,
+        "engine": "software",
+    }
 
 
 def test_normalize_default_settings_data_preserves_legacy_defaults_and_adds_gaps() -> None:
@@ -63,3 +82,13 @@ def test_normalize_default_settings_data_preserves_legacy_defaults_and_adds_gaps
     assert profile["magnification"] == 100.0
     assert profile["xy_offset_configured"] is False
     assert profile["autofocus_range_mm"] == 1.0
+
+
+def test_bundled_defaults_include_camera_exposure_policy() -> None:
+    path = resources.files("probe_station_gui").joinpath("default_settings.json")
+    data = json.loads(path.read_text(encoding="utf-8-sig"))
+
+    assert data["camera"]["exposure"] == {
+        "auto_enabled": True,
+        "engine": "software",
+    }

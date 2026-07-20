@@ -7,6 +7,8 @@ import math
 from typing import Any, Callable
 
 from probe_station_gui.api.keys import (
+    API_PERMISSION_CAMERA_READ,
+    API_PERMISSION_CAMERA_WRITE,
     API_PERMISSION_ROUTE_MEASURE,
     API_PERMISSION_ROUTE_READ,
     API_PERMISSION_STAGE_READ,
@@ -18,6 +20,7 @@ logger = logging.getLogger(__name__)
 
 _AXIS_NAMES = ("X", "Y", "Z", "A", "B", "C")
 _MAX_SWEEP_POINTS = 1000
+_MAX_CAMERA_FRAME_TIMEOUT_MS = 30_000
 _NO_PAYLOAD = object()
 
 
@@ -133,6 +136,21 @@ class ProbeStationApiServer:
         status_callback: Callable[[], dict[str, Any]],
         command_callback: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
         auth_callback: Callable[[str | None, str], dict[str, Any]] | None = None,
+        camera_settings_read_callback: Callable[
+            [list[str] | None], dict[str, Any]
+        ]
+        | None = None,
+        camera_settings_write_callback: Callable[
+            [list[dict[str, Any]]], dict[str, Any]
+        ]
+        | None = None,
+        camera_frame_callback: Callable[
+            [str, int | None, float], dict[str, Any]
+        ]
+        | None = None,
+        camera_exposure_policy_snapshot_callback: Callable[[], dict[str, Any]] | None = None,
+        camera_exposure_policy_set_callback: Callable[..., dict[str, Any]] | None = None,
+        camera_exposure_once_callback: Callable[[], dict[str, Any]] | None = None,
         host: str | None = None,
         port: int | None = None,
     ) -> None:
@@ -142,6 +160,14 @@ class ProbeStationApiServer:
         self._status_callback = status_callback
         self._command_callback = command_callback
         self._auth_callback = auth_callback
+        self._camera_settings_read_callback = camera_settings_read_callback
+        self._camera_settings_write_callback = camera_settings_write_callback
+        self._camera_frame_callback = camera_frame_callback
+        self._camera_exposure_policy_snapshot_callback = (
+            camera_exposure_policy_snapshot_callback
+        )
+        self._camera_exposure_policy_set_callback = camera_exposure_policy_set_callback
+        self._camera_exposure_once_callback = camera_exposure_once_callback
         self._server: object | None = None
         self._thread: threading.Thread | None = None
 
@@ -211,8 +237,8 @@ class ProbeStationApiServer:
             logger.exception("FastAPI control API stopped unexpectedly.")
 
     def _create_app(self):
-        from fastapi import Body, Depends, FastAPI, Header, HTTPException
-        from fastapi.responses import HTMLResponse, Response
+        from fastapi import Body, Depends, FastAPI, Header, HTTPException, Query
+        from fastapi.responses import HTMLResponse, JSONResponse, Response
         import uvicorn
 
         app = FastAPI(
@@ -280,6 +306,39 @@ class ProbeStationApiServer:
         ) -> dict[str, Any]:
             authorize_request(permission, auth_headers)
             return dispatch_command_result(action, payload)
+
+        def exposure_policy_result(
+            callback: Callable[..., dict[str, Any]],
+            *args: Any,
+            **kwargs: Any,
+        ) -> dict[str, Any]:
+            try:
+                result = callback(*args, **kwargs)
+            except Exception as exc:
+                from probe_station_gui.camera.exposure_policy import (
+                    ExposurePolicyBusyError,
+                    ExposurePolicyError,
+                )
+
+                if isinstance(exc, ExposurePolicyBusyError):
+                    raise HTTPException(
+                        status_code=409,
+                        detail={"message": str(exc)},
+                    ) from exc
+                if isinstance(exc, ExposurePolicyError):
+                    raise HTTPException(
+                        status_code=503,
+                        detail={"message": str(exc)},
+                    ) from exc
+                raise
+            if not isinstance(result, dict):
+                raise HTTPException(
+                    status_code=500,
+                    detail={"message": "Exposure policy returned an invalid result."},
+                )
+            if "accepted" in result:
+                _raise_for_rejected(result)
+            return result
 
         def contact_payload(
             contact_number: int,
@@ -510,6 +569,180 @@ class ProbeStationApiServer:
                 _raise_for_rejected(result)
             return result
 
+        @app.get("/api/v1/camera/settings")
+        def camera_settings(
+            name: list[str] | None = Query(default=None),
+            auth_headers: tuple[str | None, str | None] = Depends(api_auth_headers),
+        ) -> dict[str, Any]:
+            authorize_request(API_PERMISSION_CAMERA_READ, auth_headers)
+            callback = self._camera_settings_read_callback
+            if callback is None:
+                raise HTTPException(
+                    status_code=501,
+                    detail={"message": "Camera settings API is unavailable."},
+                )
+            result = callback(list(name) if name is not None else None)
+            _raise_for_rejected(result)
+            return result
+
+        @app.patch("/api/v1/camera/settings")
+        def update_camera_settings(
+            payload: dict[str, Any] = Body(...),
+            auth_headers: tuple[str | None, str | None] = Depends(api_auth_headers),
+        ) -> dict[str, Any]:
+            authorize_request(API_PERMISSION_CAMERA_WRITE, auth_headers)
+            raw_settings = payload.get("settings")
+            if not isinstance(raw_settings, list) or not raw_settings:
+                raise HTTPException(
+                    status_code=400,
+                    detail={"message": "Provide a non-empty settings array."},
+                )
+            settings: list[dict[str, Any]] = []
+            for item in raw_settings:
+                if not isinstance(item, dict):
+                    raise HTTPException(
+                        status_code=400,
+                        detail={"message": "Each camera setting must be an object."},
+                    )
+                settings.append(dict(item))
+            callback = self._camera_settings_write_callback
+            if callback is None:
+                raise HTTPException(
+                    status_code=501,
+                    detail={"message": "Camera settings API is unavailable."},
+                )
+            result = callback(settings)
+            _raise_for_rejected(result)
+            return result
+
+        @app.get("/api/v1/camera/frame")
+        def camera_frame(
+            space: str = "raw",
+            after_counter: int | None = None,
+            timeout_ms: int = 2000,
+            auth_headers: tuple[str | None, str | None] = Depends(api_auth_headers),
+        ) -> Response:
+            authorize_request(API_PERMISSION_CAMERA_READ, auth_headers)
+            normalized_space = str(space or "").strip().lower()
+            if normalized_space not in {"raw", "corrected"}:
+                raise HTTPException(
+                    status_code=400,
+                    detail={"message": f"Unsupported camera frame space: {space!r}."},
+                )
+            if after_counter is not None and after_counter < 0:
+                raise HTTPException(
+                    status_code=400,
+                    detail={"message": "after_counter must be non-negative."},
+                )
+            if timeout_ms < 0 or timeout_ms > _MAX_CAMERA_FRAME_TIMEOUT_MS:
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "message": (
+                            "timeout_ms must be between 0 and "
+                            f"{_MAX_CAMERA_FRAME_TIMEOUT_MS}."
+                        )
+                    },
+                )
+            callback = self._camera_frame_callback
+            if callback is None:
+                raise HTTPException(
+                    status_code=501,
+                    detail={"message": "Camera frame API is unavailable."},
+                )
+            result = callback(
+                normalized_space,
+                after_counter,
+                float(timeout_ms) / 1000.0,
+            )
+            _raise_for_rejected(result)
+            data = result.get("data")
+            if not isinstance(data, (bytes, bytearray)):
+                raise HTTPException(
+                    status_code=500,
+                    detail={"message": "Camera frame data is invalid."},
+                )
+            return Response(
+                content=bytes(data),
+                media_type=str(result.get("content_type") or "image/png"),
+                headers={
+                    "X-Camera-Frame-Counter": str(result.get("counter", 0)),
+                    "X-Camera-Frame-Space": str(
+                        result.get("space") or normalized_space
+                    ),
+                    "X-Camera-Frame-Width": str(result.get("width", 0)),
+                    "X-Camera-Frame-Height": str(result.get("height", 0)),
+                },
+            )
+
+        @app.get("/api/v1/camera/exposure-policy")
+        def camera_exposure_policy(
+            auth_headers: tuple[str | None, str | None] = Depends(api_auth_headers),
+        ) -> dict[str, Any]:
+            authorize_request(API_PERMISSION_CAMERA_READ, auth_headers)
+            callback = self._camera_exposure_policy_snapshot_callback
+            if callback is None:
+                raise HTTPException(
+                    status_code=501,
+                    detail={"message": "Camera exposure policy API is unavailable."},
+                )
+            return exposure_policy_result(callback)
+
+        @app.put("/api/v1/camera/exposure-policy")
+        def update_camera_exposure_policy(
+            payload: dict[str, Any] = Body(...),
+            auth_headers: tuple[str | None, str | None] = Depends(api_auth_headers),
+        ) -> dict[str, Any]:
+            authorize_request(API_PERMISSION_CAMERA_WRITE, auth_headers)
+            unknown = sorted(set(payload) - {"auto_enabled", "engine"})
+            if unknown:
+                raise HTTPException(
+                    status_code=400,
+                    detail={"message": f"Unknown request setting: {unknown[0]}."},
+                )
+            auto_enabled = payload.get("auto_enabled")
+            if not isinstance(auto_enabled, bool):
+                raise HTTPException(
+                    status_code=400,
+                    detail={"message": "auto_enabled must be a boolean."},
+                )
+            engine = payload.get("engine")
+            if not isinstance(engine, str) or engine not in {"software", "camera"}:
+                raise HTTPException(
+                    status_code=400,
+                    detail={"message": "engine must be software or camera."},
+                )
+            callback = self._camera_exposure_policy_set_callback
+            if callback is None:
+                raise HTTPException(
+                    status_code=501,
+                    detail={"message": "Camera exposure policy API is unavailable."},
+                )
+            return exposure_policy_result(
+                callback,
+                auto_enabled=auto_enabled,
+                engine=engine,
+            )
+
+        @app.post("/api/v1/camera/exposure-once")
+        def camera_exposure_once(
+            payload: dict[str, Any] | None = Body(default=None),
+            auth_headers: tuple[str | None, str | None] = Depends(api_auth_headers),
+        ) -> dict[str, Any]:
+            authorize_request(API_PERMISSION_CAMERA_WRITE, auth_headers)
+            if payload not in (None, {}):
+                raise HTTPException(
+                    status_code=400,
+                    detail={"message": "exposure-once does not accept settings."},
+                )
+            callback = self._camera_exposure_once_callback
+            if callback is None:
+                raise HTTPException(
+                    status_code=501,
+                    detail={"message": "Camera exposure policy API is unavailable."},
+                )
+            return exposure_policy_result(callback)
+
         add_body_command_route(
             "/api/v1/stage/focus/local",
             name="local_stage_focus",
@@ -528,12 +761,34 @@ class ProbeStationApiServer:
             permission=API_PERMISSION_STAGE_WRITE,
             action="click_to_move_calibration",
         )
-        add_body_command_route(
+        @app.post(
             "/api/v1/camera/area-scan",
             name="microscope_area_scan",
-            permission=API_PERMISSION_STAGE_WRITE,
-            action="microscope_area_scan",
+            response_model=None,
         )
+        def microscope_area_scan(
+            payload: dict[str, Any] | None = Body(default=None),
+            auth_headers: tuple[str | None, str | None] = Depends(api_auth_headers),
+        ) -> JSONResponse:
+            authorize_request(API_PERMISSION_STAGE_WRITE, auth_headers)
+            body = dict(payload or {})
+            camera_lock = body.get("camera_lock")
+            if isinstance(camera_lock, dict) and "settings" in camera_lock:
+                authorize_request(API_PERMISSION_CAMERA_WRITE, auth_headers)
+            if "auto_exposure" in body:
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "message": (
+                            "auto_exposure is no longer supported for area scans."
+                        )
+                    },
+                )
+            result = dispatch_command_result(
+                "microscope_area_scan",
+                body,
+            )
+            return JSONResponse(status_code=202, content=result)
         add_command_route(
             "/api/v1/route/contacts",
             method="GET",

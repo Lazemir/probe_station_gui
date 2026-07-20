@@ -119,6 +119,32 @@ def test_objectives_widget_saves_profile_before_switching() -> None:
     widget.deleteLater()
 
 
+def test_objectives_widget_restores_active_selection_and_keeps_inactive_edits() -> None:
+    _qt_app()
+    settings = Settings()
+    settings.objectives = ObjectivesSettings(
+        active_name="X5",
+        objectives={
+            "X5": ObjectiveCalibrationSettings(name="X5", magnification=5.0),
+            "X20": ObjectiveCalibrationSettings(name="X20", magnification=20.0),
+        },
+    )
+    widget = ObjectivesSettingsWidget(settings.objectives)
+
+    _set_combo_data(widget._active_combo, "X20")
+    widget._magnification_spin.setValue(99.0)
+    effective_objectives = settings.objectives.clone()
+    effective_objectives.objectives["X20"].magnification = 25.0
+    widget.set_objectives(effective_objectives)
+    widget.to_settings(settings)
+
+    assert settings.objectives.active_name == "X5"
+    assert settings.objectives.objectives["X5"].magnification == pytest.approx(5.0)
+    assert settings.objectives.objectives["X20"].magnification == pytest.approx(25.0)
+
+    widget.deleteLater()
+
+
 def test_coordinate_system_widget_updates_hint_state_and_settings() -> None:
     _qt_app()
     settings = Settings()

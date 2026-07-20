@@ -3,7 +3,26 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import threading
 from typing import Optional
+
+
+@dataclass(frozen=True)
+class StageTaskToken:
+    """Identity of one stage operation that may emit calibration callbacks."""
+
+    generation: int
+    source: str
+
+
+@dataclass
+class _ObjectiveCalibrationCandidate:
+    token: StageTaskToken
+    objective_name: str
+    pixels_to_mm: object
+    decision: threading.Event = field(default_factory=threading.Event)
+    accepted: bool = False
+    published: bool = False
 
 
 @dataclass
