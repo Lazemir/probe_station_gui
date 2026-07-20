@@ -145,7 +145,8 @@ def test_disabled_snapshot_keeps_curve_but_hides_current_marker(qtbot) -> None:
     preview = widget._calibration_previews["Z"]
     assert preview.curve_item.isVisible()
     assert not preview.marker_item.isVisible()
-    assert not preview.position_line.isVisible()
+    assert preview.controller_position_value.text() == "1 mm"
+    assert preview.physical_position_value.text() == "—"
 
 
 def test_live_status_updates_marker_from_cached_machine_coordinate(qtbot) -> None:
@@ -175,6 +176,8 @@ def test_current_position_outside_curve_hides_marker_and_reports_range(qtbot) ->
 
     preview = widget._calibration_previews["X"]
     assert not preview.marker_item.isVisible()
+    assert preview.controller_position_value.text() == "3 mm"
+    assert preview.physical_position_value.text() == "—"
     assert preview.range_status.text() == "Current position is outside the calibration range"
 
 

@@ -111,7 +111,7 @@ def test_marker_update_does_not_replace_curve_or_reset_view(qtbot) -> None:
     assert preview.current_position == pytest.approx((0.3, 0.6))
     assert preview.plot_widget.viewRange() == before
     assert preview.marker_item.isVisible()
-    assert preview.position_line.isVisible()
+    assert not hasattr(preview, "position_line")
 
 
 def test_hiding_current_position_keeps_curve_visible(qtbot) -> None:
@@ -124,7 +124,73 @@ def test_hiding_current_position_keeps_curve_visible(qtbot) -> None:
 
     assert preview.curve_item.isVisible()
     assert not preview.marker_item.isVisible()
-    assert not preview.position_line.isVisible()
+
+
+def test_position_card_shows_z_coordinates_with_units(qtbot) -> None:
+    preview = AxisCalibrationPreview("Z")
+    qtbot.addWidget(preview)
+
+    preview.set_current_position(5.441, 5.439, visible=True)
+
+    assert preview.controller_position_header.text() == "Controller Z"
+    assert preview.physical_position_header.text() == "Physical Z"
+    assert preview.controller_position_value.text() == "5.441 mm"
+    assert preview.physical_position_value.text() == "5.439 mm"
+
+
+def test_position_card_retains_raw_value_when_physical_is_missing(qtbot) -> None:
+    preview = AxisCalibrationPreview("Z")
+    qtbot.addWidget(preview)
+
+    preview.set_current_position(5.441, None, visible=True)
+
+    assert preview.controller_position_value.text() == "5.441 mm"
+    assert preview.physical_position_value.text() == "—"
+    assert not preview.marker_item.isVisible()
+
+
+def test_marker_is_a_small_filled_red_circle_without_position_line(qtbot) -> None:
+    preview = AxisCalibrationPreview("X")
+    qtbot.addWidget(preview)
+
+    assert preview.marker_item.opts["symbol"] == "o"
+    assert preview.marker_item.opts["size"] == 8
+    assert preview.marker_item.opts["pen"].color().name() == "#b71c1c"
+    assert preview.marker_item.opts["pen"].width() == 1
+    assert preview.marker_item.opts["brush"].color().name() == "#e53935"
+    assert not hasattr(preview, "position_line")
+
+
+def test_clearing_position_hides_marker_without_disturbing_hover_or_view(qtbot) -> None:
+    preview = AxisCalibrationPreview("X")
+    qtbot.addWidget(preview)
+    preview.set_curve((0.0, 2.0), (1.0, 5.0))
+    preview.plot_widget.setXRange(0.2, 0.8, padding=0)
+    preview.plot_widget.setYRange(1.5, 2.5, padding=0)
+    preview.set_hover_controller_value(0.5)
+    preview.set_current_position(0.5, 2.0, visible=True)
+    before = preview.plot_widget.viewRange()
+
+    preview.set_current_position(None, None, visible=False)
+
+    assert preview.controller_position_value.text() == "—"
+    assert preview.physical_position_value.text() == "—"
+    assert not preview.marker_item.isVisible()
+    assert preview.hover_vertical_line.isVisible()
+    assert preview.hover_horizontal_line.isVisible()
+    assert preview.plot_widget.viewRange() == before
+
+
+def test_outside_range_retains_raw_card_value_and_hides_marker(qtbot) -> None:
+    preview = AxisCalibrationPreview("X")
+    qtbot.addWidget(preview)
+
+    preview.set_outside_range(True, controller=3.0)
+
+    assert preview.controller_position_value.text() == "3 mm"
+    assert preview.physical_position_value.text() == "—"
+    assert not preview.marker_item.isVisible()
+    assert preview.range_status.text() == "Current position is outside the calibration range"
 
 
 def test_clear_curve_removes_curve_and_live_items(qtbot) -> None:
@@ -281,7 +347,6 @@ def test_leaving_plot_viewport_hides_hover_without_clearing_curve_or_marker(qtbo
 
     assert preview.curve_item.isVisible()
     assert preview.marker_item.isVisible()
-    assert preview.position_line.isVisible()
     assert not preview.hover_vertical_line.isVisible()
     assert not preview.hover_horizontal_line.isVisible()
     assert not preview.hover_label.isVisible()

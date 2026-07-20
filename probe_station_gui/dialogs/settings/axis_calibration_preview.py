@@ -7,12 +7,24 @@ from collections.abc import Sequence
 import numpy as np
 import pyqtgraph as pg
 from PySide6.QtCore import QEvent, Qt
-from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QFrame, QGridLayout, QLabel, QVBoxLayout, QWidget
 
 from probe_station_gui.settings.axis_calibration_config import axis_unit
 
 
 CURVE_VIEW_PADDING_FRACTION = 0.05
+
+
+def _format_position(value: float | None, unit: str) -> str:
+    """Format a finite coordinate for the position card."""
+
+    try:
+        numeric_value = float(value)
+    except (TypeError, ValueError):
+        return "—"
+    if not np.isfinite(numeric_value):
+        return "—"
+    return f"{numeric_value:.6g} {unit}"
 
 
 def _curve_arrays(
@@ -79,6 +91,36 @@ class AxisCalibrationPreview(QWidget):
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 4, 0, 0)
+        self.position_card = QFrame(self)
+        self.position_card.setFixedHeight(54)
+        self.position_card.setStyleSheet(
+            "QFrame { border: 1px solid #e0e0e0; border-radius: 3px; "
+            "background: #fafafa; }"
+            "QLabel#positionHeader { color: #757575; font-size: 11px; }"
+            "QLabel#positionValue { color: #212121; font-size: 15px; "
+            "font-weight: 600; }"
+        )
+        position_layout = QGridLayout(self.position_card)
+        position_layout.setContentsMargins(10, 5, 10, 5)
+        position_layout.setHorizontalSpacing(20)
+        position_layout.setVerticalSpacing(0)
+        self.controller_position_header = QLabel(
+            f"Controller {self.axis}", self.position_card
+        )
+        self.controller_position_header.setObjectName("positionHeader")
+        self.physical_position_header = QLabel(
+            f"Physical {self.axis}", self.position_card
+        )
+        self.physical_position_header.setObjectName("positionHeader")
+        self.controller_position_value = QLabel("—", self.position_card)
+        self.controller_position_value.setObjectName("positionValue")
+        self.physical_position_value = QLabel("—", self.position_card)
+        self.physical_position_value.setObjectName("positionValue")
+        position_layout.addWidget(self.controller_position_header, 0, 0)
+        position_layout.addWidget(self.physical_position_header, 0, 1)
+        position_layout.addWidget(self.controller_position_value, 1, 0)
+        position_layout.addWidget(self.physical_position_value, 1, 1)
+        layout.addWidget(self.position_card)
         self.plot_widget = pg.PlotWidget(self)
         self.plot_widget.setMinimumHeight(240)
         self.plot_widget.setBackground("#ffffff")
@@ -122,18 +164,12 @@ class AxisCalibrationPreview(QWidget):
         self.marker_item = pg.ScatterPlotItem(
             [],
             [],
-            symbol="d",
-            size=15,
-            pen=pg.mkPen("#212121", width=2),
-            brush=pg.mkBrush("#ffca28"),
+            symbol="o",
+            size=8,
+            pen=pg.mkPen("#b71c1c", width=1),
+            brush=pg.mkBrush("#e53935"),
         )
         self.plot_widget.addItem(self.marker_item)
-        self.position_line = pg.InfiniteLine(
-            angle=90,
-            movable=False,
-            pen=pg.mkPen("#ef6c00", width=1, style=Qt.DashLine),
-        )
-        self.plot_widget.addItem(self.position_line)
         hover_pen = pg.mkPen("#455a64", width=1, style=Qt.DashLine)
         self.hover_vertical_line = pg.InfiniteLine(
             angle=90,
@@ -158,7 +194,6 @@ class AxisCalibrationPreview(QWidget):
         self.plot_widget.addItem(self.hover_horizontal_line)
         self.plot_widget.addItem(self.hover_label)
         self.marker_item.hide()
-        self.position_line.hide()
         self._hide_hover()
 
         self.range_status = QLabel("", self)
@@ -251,22 +286,32 @@ class AxisCalibrationPreview(QWidget):
         *,
         visible: bool,
     ) -> None:
-        shown = bool(visible and controller is not None and physical is not None)
-        self.marker_item.setVisible(shown)
-        self.position_line.setVisible(shown)
-        if not shown:
-            self.current_position = None
-            return
-        controller_value = float(controller)
-        physical_value = float(physical)
-        self.current_position = (controller_value, physical_value)
-        self.marker_item.setData([controller_value], [physical_value])
-        self.position_line.setValue(controller_value)
+        self.controller_position_value.setText(_format_position(controller, self.unit))
+        self.physical_position_value.setText(_format_position(physical, self.unit))
         self.range_status.clear()
         self.range_status.hide()
+        try:
+            controller_value = float(controller)
+            physical_value = float(physical)
+        except (TypeError, ValueError):
+            self.current_position = None
+            self.marker_item.hide()
+            return
+        if not (np.isfinite(controller_value) and np.isfinite(physical_value)):
+            self.current_position = None
+            self.marker_item.hide()
+            return
+        self.current_position = (controller_value, physical_value)
+        self.marker_item.setData([controller_value], [physical_value])
+        self.marker_item.setVisible(bool(visible))
 
-    def set_outside_range(self, outside: bool) -> None:
-        self.set_current_position(None, None, visible=False)
+    def set_outside_range(
+        self,
+        outside: bool,
+        *,
+        controller: float | None = None,
+    ) -> None:
+        self.set_current_position(controller, None, visible=False)
         if outside:
             self.range_status.setText(
                 "Current position is outside the calibration range"

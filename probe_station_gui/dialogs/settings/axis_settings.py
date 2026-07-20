@@ -364,16 +364,21 @@ class AxisSettingsWidget(QWidget):
         if preview is None:
             return
         calibration = self._calibrations[axis]
-        if not self._calibration_checkboxes[axis].isChecked():
-            preview.set_outside_range(False)
-            return
         getter = getattr(self._position_source, "latest_machine_position", None)
         machine_position = getter() if callable(getter) else None
         index = CALIBRATION_AXES.index(axis)
-        if not isinstance(machine_position, (tuple, list)) or index >= len(machine_position):
+        controller_value: float | None = None
+        if isinstance(machine_position, (tuple, list)) and index < len(machine_position):
+            try:
+                controller_value = float(machine_position[index])
+            except (TypeError, ValueError):
+                pass
+        if not self._calibration_checkboxes[axis].isChecked():
+            preview.set_current_position(controller_value, None, visible=False)
+            return
+        if controller_value is None:
             preview.set_outside_range(False)
             return
-        controller_value = float(machine_position[index])
         curve = AxisCalibrationCurve(
             tuple(calibration.controller_points),
             tuple(calibration.physical_points),
@@ -381,7 +386,7 @@ class AxisSettingsWidget(QWidget):
         try:
             physical_value = controller_to_physical(curve, controller_value)
         except CalibrationOutOfDomain:
-            preview.set_outside_range(True)
+            preview.set_outside_range(True, controller=controller_value)
             return
         preview.set_current_position(controller_value, physical_value, visible=True)
 
