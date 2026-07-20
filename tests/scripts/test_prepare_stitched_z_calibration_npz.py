@@ -154,10 +154,26 @@ def test_cli_prints_sample_count_and_exits_nonzero_on_validation_failure(
 
     assert completed.returncode == 0
     assert completed.stdout.strip() == "5"
+    invalid_section1 = tmp_path / "invalid-section1.npz"
+    invalid_output = tmp_path / "invalid-stitched.npz"
+    np.savez(
+        invalid_section1,
+        gcode=[11.8, np.nan],
+        indicator=[11.6, 11.7],
+    )
     failed = subprocess.run(
-        [sys.executable, str(script), str(section1), str(section2), str(section3), str(output)],
+        [
+            sys.executable,
+            str(script),
+            str(invalid_section1),
+            str(section2),
+            str(section3),
+            str(invalid_output),
+        ],
         capture_output=True,
         check=False,
         text=True,
     )
     assert failed.returncode != 0
+    assert "finite" in failed.stderr
+    assert not invalid_output.exists()
