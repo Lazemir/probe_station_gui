@@ -7,8 +7,7 @@ from probe_station_gui.notifications.telegram_settings import (
     default_telegram_alerts,
 )
 from probe_station_gui.settings.axis_calibration_config import (
-    AxisACalibrationSettings,
-    AxisZCalibrationSettings,
+    default_axis_calibrations,
 )
 from probe_station_gui.settings.feedrate_config import parse_feedrate_list
 from probe_station_gui.settings.jog_config import JogSettings
@@ -65,14 +64,30 @@ def normalize_default_settings_data(
     _ensure_dict_section(data, "click_to_move", ClickToMoveSettings().to_dict())
     _ensure_dict_section(data, "oscillation", OscillationSettings().to_dict())
     _ensure_needle_section(data)
-    _ensure_dict_section(data, "axis_a_calibration", AxisACalibrationSettings().to_dict())
-    _ensure_dict_section(data, "axis_z_calibration", AxisZCalibrationSettings().to_dict())
+    _ensure_axis_calibrations_section(data)
     _ensure_dict_section(data, "coordinate_system", CoordinateSystemSettings().to_dict())
     _ensure_precision_approach_section(data)
     _ensure_objectives_section(data)
     if not isinstance(data.get("design_last_directory"), str):
         data["design_last_directory"] = ""
     return data
+
+
+def _ensure_axis_calibrations_section(data: dict) -> None:
+    defaults = {
+        axis: calibration.to_dict()
+        for axis, calibration in default_axis_calibrations().items()
+    }
+    section = _ensure_dict_section(data, "axis_calibrations", defaults)
+    for axis, axis_defaults in defaults.items():
+        stored = section.get(axis)
+        if not isinstance(stored, dict):
+            section[axis] = dict(axis_defaults)
+            continue
+        for key, value in axis_defaults.items():
+            stored.setdefault(key, list(value) if isinstance(value, list) else value)
+    data.pop("axis_a_calibration", None)
+    data.pop("axis_z_calibration", None)
 
 
 def _ensure_logging_section(data: dict, *, log_path: str) -> None:

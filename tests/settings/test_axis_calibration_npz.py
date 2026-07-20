@@ -7,148 +7,87 @@ from probe_station_gui.settings.axis_calibration_npz import (
 )
 
 
-def test_import_z_selects_requested_direction_and_sorts_points(tmp_path) -> None:
-    path = tmp_path / "z.npz"
+@pytest.mark.parametrize("axis", ["X", "Y", "Z", "A", "B", "C"])
+def test_imports_one_strict_curve_for_each_axis(tmp_path, axis: str) -> None:
+    path = tmp_path / f"{axis}.npz"
     np.savez(
         path,
-        gcode=np.array([2.0, 0.0, 1.0, 2.0, 0.0, 1.0]),
-        indicator=np.array([2.1, 0.1, 1.1, 2.0, 0.0, 1.0]),
-        direction=np.array([-1, -1, -1, 1, 1, 1]),
+        axis=np.array(axis),
+        controller=np.array([0.0, 1.0, 2.0]),
+        physical=np.array([10.0, 11.5, 14.0]),
     )
 
-    imported = load_axis_calibration_npz(path, axis="Z", final_direction=1)
+    imported = load_axis_calibration_npz(path, expected_axis=axis)
 
+    assert imported.axis == axis
     assert imported.calibration_file == str(path.resolve())
-    assert imported.gcode_points_mm == (0.0, 1.0, 2.0)
-    assert imported.display_points_mm == (0.0, 1.0, 2.0)
-    assert imported.branch_direction == 1
+    assert imported.controller_points == (0.0, 1.0, 2.0)
+    assert imported.physical_points == (10.0, 11.5, 14.0)
 
 
-def test_import_a_uses_negative_indicator_display_convention(tmp_path) -> None:
-    path = tmp_path / "a.npz"
-    np.savez(path, gcode=[-2.0, -1.0, 0.0], indicator=[2.0, 1.0, 0.0])
+def test_import_rejects_axis_mismatch(tmp_path) -> None:
+    path = tmp_path / "wrong-axis.npz"
+    np.savez(path, axis=np.array("Y"), controller=[0.0, 1.0], physical=[0.0, 1.0])
 
-    imported = load_axis_calibration_npz(path, axis="A", final_direction=-1)
-
-    assert imported.gcode_points_mm == (-2.0, -1.0, 0.0)
-    assert imported.display_points_mm == (-2.0, -1.0, -0.0)
-    assert imported.branch_direction is None
+    with pytest.raises(AxisCalibrationImportError, match="axis Y.*selected X"):
+        load_axis_calibration_npz(path, expected_axis="X")
 
 
-@pytest.mark.parametrize("missing_name", ["gcode", "indicator"])
-def test_import_rejects_missing_required_arrays(tmp_path, missing_name) -> None:
+@pytest.mark.parametrize("missing", ["axis", "controller", "physical"])
+def test_import_rejects_missing_required_entry(tmp_path, missing: str) -> None:
     path = tmp_path / "missing.npz"
-    arrays = {"gcode": [0.0, 1.0], "indicator": [0.0, 1.0]}
-    arrays.pop(missing_name)
-    np.savez(path, **arrays)
+    values = {"axis": np.array("X"), "controller": [0.0, 1.0], "physical": [0.0, 1.0]}
+    values.pop(missing)
+    np.savez(path, **values)
 
-    with pytest.raises(AxisCalibrationImportError, match=missing_name):
-        load_axis_calibration_npz(path, axis="Z", final_direction=1)
-
-
-def test_import_rejects_mismatched_array_shapes(tmp_path) -> None:
-    path = tmp_path / "mismatched.npz"
-    np.savez(path, gcode=[0.0, 1.0], indicator=[0.0, 1.0, 2.0])
-
-    with pytest.raises(AxisCalibrationImportError, match="same one-dimensional shape"):
-        load_axis_calibration_npz(path, axis="Z", final_direction=1)
+    with pytest.raises(AxisCalibrationImportError, match=missing):
+        load_axis_calibration_npz(path, expected_axis="X")
 
 
-@pytest.mark.parametrize("array_name", ["gcode", "indicator"])
-def test_import_rejects_non_finite_values(tmp_path, array_name) -> None:
-    path = tmp_path / "non-finite.npz"
-    arrays = {"gcode": [0.0, 1.0], "indicator": [0.0, 1.0]}
-    arrays[array_name][1] = np.nan
-    np.savez(path, **arrays)
+@pytest.mark.parametrize("axis_value", [np.array(["X"]), np.array(1), np.array("x"), np.array("Q")])
+def test_import_rejects_invalid_axis_value(tmp_path, axis_value) -> None:
+    path = tmp_path / "axis.npz"
+    np.savez(path, axis=axis_value, controller=[0.0, 1.0], physical=[0.0, 1.0])
 
-    with pytest.raises(AxisCalibrationImportError, match="finite"):
-        load_axis_calibration_npz(path, axis="Z", final_direction=1)
+    with pytest.raises(AxisCalibrationImportError, match="axis"):
+        load_axis_calibration_npz(path, expected_axis="X")
 
 
-def test_import_rejects_missing_requested_branch(tmp_path) -> None:
-    path = tmp_path / "branch.npz"
-    np.savez(
-        path,
-        gcode=[0.0, 1.0],
-        indicator=[0.0, 1.0],
-        direction=[-1, -1],
-    )
+@pytest.mark.parametrize(
+    ("controller", "physical", "message"),
+    [
+        ([[0.0, 1.0]], [0.0, 1.0], "one-dimensional"),
+        ([0.0, 1.0], [[0.0, 1.0]], "one-dimensional"),
+        ([0.0, 1.0], [0.0, 1.0, 2.0], "same length"),
+        ([0.0], [0.0], "at least two"),
+        ([0.0, float("nan")], [0.0, 1.0], "finite"),
+        ([0.0, 1.0], [0.0, float("inf")], "finite"),
+        ([0.0, 0.0], [0.0, 1.0], "controller.*strictly increasing"),
+        ([1.0, 0.0], [0.0, 1.0], "controller.*strictly increasing"),
+        ([0.0, 1.0], [0.0, 0.0], "physical.*strictly increasing"),
+        ([0.0, 1.0], [1.0, 0.0], "physical.*strictly increasing"),
+    ],
+)
+def test_import_rejects_invalid_curve(tmp_path, controller, physical, message: str) -> None:
+    path = tmp_path / "invalid.npz"
+    np.savez(path, axis=np.array("X"), controller=controller, physical=physical)
 
-    with pytest.raises(AxisCalibrationImportError, match="direction 1"):
-        load_axis_calibration_npz(path, axis="Z", final_direction=1)
-
-
-def test_import_rejects_fewer_than_two_unique_gcode_points(tmp_path) -> None:
-    path = tmp_path / "one-point.npz"
-    np.savez(path, gcode=[1.0, 1.0], indicator=[2.0, 2.1])
-
-    with pytest.raises(AxisCalibrationImportError, match="two unique G-code"):
-        load_axis_calibration_npz(path, axis="Z", final_direction=1)
-
-
-def test_import_aggregates_duplicate_gcode_with_median_indicator(tmp_path) -> None:
-    path = tmp_path / "duplicates.npz"
-    np.savez(
-        path,
-        gcode=[0.0, 0.0, 0.0, 1.0, 1.0, 2.0],
-        indicator=[0.0, 10.0, 2.0, 4.0, 6.0, 8.0],
-    )
-
-    imported = load_axis_calibration_npz(path, axis="Z", final_direction=1)
-
-    assert imported.gcode_points_mm == (0.0, 1.0, 2.0)
-    assert imported.display_points_mm == (2.0, 5.0, 8.0)
+    with pytest.raises(AxisCalibrationImportError, match=message):
+        load_axis_calibration_npz(path, expected_axis="X")
 
 
-def test_import_rejects_non_monotonic_display_curve(tmp_path) -> None:
-    path = tmp_path / "non-monotonic.npz"
-    np.savez(path, gcode=[0.0, 1.0, 2.0], indicator=[0.0, 2.0, 1.0])
-
-    with pytest.raises(AxisCalibrationImportError, match="strictly increasing"):
-        load_axis_calibration_npz(path, axis="Z", final_direction=1)
-
-
-def test_import_collapses_adjacent_equal_display_plateaus(tmp_path) -> None:
-    path = tmp_path / "plateau.npz"
-    np.savez(
-        path,
-        gcode=[0.0, 1.0, 2.0, 3.0],
-        indicator=[0.0, 1.0, 1.0, 2.0],
-    )
-
-    imported = load_axis_calibration_npz(path, axis="Z", final_direction=1)
-
-    assert imported.gcode_points_mm == (0.0, 1.5, 3.0)
-    assert imported.display_points_mm == (0.0, 1.0, 2.0)
-
-
-def test_import_wraps_malformed_numeric_arrays(tmp_path) -> None:
+def test_import_rejects_malformed_numeric_arrays(tmp_path) -> None:
     path = tmp_path / "malformed.npz"
-    np.savez(path, gcode=["left", "right"], indicator=[0.0, 1.0])
+    np.savez(path, axis=np.array("X"), controller=["left", "right"], physical=[0.0, 1.0])
 
     with pytest.raises(AxisCalibrationImportError, match="could not be read"):
-        load_axis_calibration_npz(path, axis="Z", final_direction=1)
+        load_axis_calibration_npz(path, expected_axis="X")
 
 
-def test_import_wraps_corrupted_zip_archive(tmp_path) -> None:
+def test_import_rejects_corrupted_archive(tmp_path) -> None:
     path = tmp_path / "corrupted.npz"
     path.write_bytes(b"PK\x03\x04" + bytes(26))
 
     with pytest.raises(AxisCalibrationImportError, match="could not be read"):
-        load_axis_calibration_npz(path, axis="Z", final_direction=1)
+        load_axis_calibration_npz(path, expected_axis="X")
 
-
-def test_import_rejects_curve_reduced_to_one_display_point(tmp_path) -> None:
-    path = tmp_path / "flat.npz"
-    np.savez(path, gcode=[0.0, 1.0, 2.0], indicator=[1.0, 1.0, 1.0])
-
-    with pytest.raises(AxisCalibrationImportError, match="two usable points"):
-        load_axis_calibration_npz(path, axis="Z", final_direction=1)
-
-
-def test_import_rejects_unsupported_axis(tmp_path) -> None:
-    path = tmp_path / "axis.npz"
-    np.savez(path, gcode=[0.0, 1.0], indicator=[0.0, 1.0])
-
-    with pytest.raises(AxisCalibrationImportError, match="A or Z"):
-        load_axis_calibration_npz(path, axis="X", final_direction=1)
