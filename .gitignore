@@ -19,6 +19,7 @@ dist/
 .claude/
 .codex/
 .scratch/
+.worktrees/
 
 # Generated calibration/raw measurement artifacts. Existing tracked files stay tracked.
 calibrations/*
