@@ -47,12 +47,21 @@ def _load_directed_section(
             direction = np.asarray(archive["direction"], dtype=float)
     except KeyError as exc:
         raise ValueError(f"Raw archive is missing {exc.args[0]!r}.") from exc
-    _validate_measurement_arrays(gcode, indicator, direction)
+    _validate_measurement_arrays(
+        gcode,
+        indicator,
+        direction,
+        require_strictly_increasing=False,
+    )
     return gcode, indicator, direction
 
 
 def _validate_measurement_arrays(
-    gcode: np.ndarray, indicator: np.ndarray, direction: np.ndarray | None = None
+    gcode: np.ndarray,
+    indicator: np.ndarray,
+    direction: np.ndarray | None = None,
+    *,
+    require_strictly_increasing: bool = True,
 ) -> None:
     arrays = (gcode, indicator) if direction is None else (gcode, indicator, direction)
     if any(array.ndim != 1 for array in arrays):
@@ -63,7 +72,7 @@ def _validate_measurement_arrays(
         raise ValueError("Raw calibration samples must be finite.")
     if direction is not None and not np.all(np.isfinite(direction)):
         raise ValueError("Raw calibration samples must be finite.")
-    if not np.all(np.diff(gcode) > 0.0):
+    if require_strictly_increasing and not np.all(np.diff(gcode) > 0.0):
         raise ValueError("Raw gcode samples must be strictly increasing.")
 
 
@@ -109,6 +118,8 @@ def prepare_stitched_z_calibration(
             s3_indicator[s3_mask] + SECTION_3_OFFSET_MM,
         )
     )
+    if not np.all(np.diff(controller) > 0.0):
+        raise ValueError("Selected controller samples must be strictly increasing.")
     selected = longest_strictly_increasing_indices(physical)
     controller = controller[selected]
     physical = physical[selected]

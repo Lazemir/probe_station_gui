@@ -117,6 +117,26 @@ def test_stitcher_rejects_non_increasing_raw_controller_data(tmp_path: Path) -> 
         prepare_stitched_z_calibration(section1, section2, section3, tmp_path / "out.npz")
 
 
+def test_stitcher_accepts_mixed_direction_section_with_increasing_forward_pass(
+    tmp_path: Path,
+) -> None:
+    section1, section2, section3 = _write_valid_sections(tmp_path)
+    np.savez(
+        section3,
+        gcode=[20.214, 20.3, 20.25, 20.4],
+        indicator=[6.6, 6.7, 6.65, 6.9],
+        direction=[-1, 1, -1, 1],
+    )
+    output = tmp_path / "stitched.npz"
+
+    count = prepare_stitched_z_calibration(section1, section2, section3, output)
+
+    assert count >= 2
+    with np.load(output, allow_pickle=False) as data:
+        assert np.all(np.diff(data["controller"]) > 0.0)
+        assert np.all(np.diff(data["physical"]) > 0.0)
+
+
 def test_stitcher_rejects_fewer_than_two_usable_output_points(tmp_path: Path) -> None:
     section1, section2, section3 = _write_valid_sections(tmp_path)
     np.savez(section1, gcode=[12.0], indicator=[11.8])
