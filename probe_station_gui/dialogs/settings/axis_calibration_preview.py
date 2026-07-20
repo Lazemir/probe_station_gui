@@ -12,6 +12,9 @@ from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
 from probe_station_gui.settings.axis_calibration_config import axis_unit
 
 
+CURVE_VIEW_PADDING_FRACTION = 0.05
+
+
 def _curve_arrays(
     controller: Sequence[float] | np.ndarray,
     physical: Sequence[float] | np.ndarray,
@@ -70,6 +73,7 @@ class AxisCalibrationPreview(QWidget):
         self.unit = axis_unit(self.axis)
         self.current_position: tuple[float, float] | None = None
         self.hover_position: tuple[float, float] | None = None
+        self.preview_frame: tuple[float, float, float, float] | None = None
         self._controller_values = np.array([], dtype=float)
         self._physical_values = np.array([], dtype=float)
 
@@ -185,10 +189,49 @@ class AxisCalibrationPreview(QWidget):
         self.curve_item.setData(self._controller_values, self._physical_values)
         self.samples_item.setData(self._controller_values, self._physical_values)
         self._hide_hover()
+        self._apply_curve_navigation_limits()
         self.plot_widget.enableAutoRange()
         self.plot_widget.autoRange()
         self.range_status.clear()
         self.range_status.hide()
+
+    def _apply_curve_navigation_limits(self) -> None:
+        if self._controller_values.size == 0:
+            self._clear_curve_navigation_limits()
+            return
+        x_min = float(self._controller_values[0])
+        x_max = float(self._controller_values[-1])
+        y_min = float(self._physical_values[0])
+        y_max = float(self._physical_values[-1])
+        x_padding = (x_max - x_min) * CURVE_VIEW_PADDING_FRACTION
+        y_padding = (y_max - y_min) * CURVE_VIEW_PADDING_FRACTION
+        self.preview_frame = (
+            x_min - x_padding,
+            y_min - y_padding,
+            x_max + x_padding,
+            y_max + y_padding,
+        )
+        left, bottom, right, top = self.preview_frame
+        # TODO(coordinate-system-rework): share a canonical bounded-view policy with Design Window after the coordinate/settings UI rewrite.
+        self.plot_widget.getViewBox().setLimits(
+            xMin=left,
+            xMax=right,
+            yMin=bottom,
+            yMax=top,
+            maxXRange=right - left,
+            maxYRange=top - bottom,
+        )
+
+    def _clear_curve_navigation_limits(self) -> None:
+        self.preview_frame = None
+        self.plot_widget.getViewBox().setLimits(
+            xMin=None,
+            xMax=None,
+            yMin=None,
+            yMax=None,
+            maxXRange=None,
+            maxYRange=None,
+        )
 
     def clear_curve(self) -> None:
         self.curve_item.setData([], [])
@@ -196,6 +239,7 @@ class AxisCalibrationPreview(QWidget):
         self._controller_values = np.array([], dtype=float)
         self._physical_values = np.array([], dtype=float)
         self._hide_hover()
+        self._clear_curve_navigation_limits()
         self.set_current_position(None, None, visible=False)
         self.range_status.clear()
         self.range_status.hide()

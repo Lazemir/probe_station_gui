@@ -10,7 +10,8 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 pytest.importorskip("PySide6")
 pytest.importorskip("pyqtgraph")
 
-from PySide6.QtCore import QEvent
+from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
+from PySide6.QtGui import QWheelEvent
 from PySide6.QtWidgets import QApplication
 
 from probe_station_gui.dialogs.settings import axis_calibration_preview
@@ -36,6 +37,28 @@ def qtbot():
     for widget in bot.widgets:
         widget.deleteLater()
     app.processEvents()
+
+
+def _show_preview(preview: AxisCalibrationPreview) -> None:
+    preview.resize(640, 360)
+    preview.show()
+    QApplication.processEvents()
+
+
+def _view_bounds(preview: AxisCalibrationPreview) -> tuple[float, float, float, float]:
+    x_range, y_range = preview.plot_widget.getViewBox().viewRange()
+    return (x_range[0], y_range[0], x_range[1], y_range[1])
+
+
+def _assert_view_inside_frame(
+    preview: AxisCalibrationPreview,
+    frame: tuple[float, float, float, float],
+) -> None:
+    visible = _view_bounds(preview)
+    assert visible[0] >= frame[0] - 1e-6
+    assert visible[1] >= frame[1] - 1e-6
+    assert visible[2] <= frame[2] + 1e-6
+    assert visible[3] <= frame[3] + 1e-6
 
 
 def test_curve_and_samples_are_populated_and_auto_ranged(qtbot) -> None:
@@ -280,3 +303,101 @@ def test_hover_label_anchor_flips_at_visible_range_boundaries(qtbot) -> None:
 
     assert tuple(preview.hover_label.anchor) == pytest.approx((1.0, 0.0))
     assert preview.plot_widget.viewRange() == before
+
+
+def test_wheel_zoom_out_stops_at_padded_curve_frame(qtbot) -> None:
+    preview = AxisCalibrationPreview("X")
+    qtbot.addWidget(preview)
+    _show_preview(preview)
+    preview.set_curve((0.0, 1.0, 2.0), (10.0, 11.5, 14.0))
+    QApplication.processEvents()
+    frame = (-0.1, 9.8, 2.1, 14.2)
+    before = _view_bounds(preview)
+    viewport = preview.plot_widget.viewport()
+    center = viewport.rect().center()
+    wheel = QWheelEvent(
+        QPointF(center),
+        QPointF(viewport.mapToGlobal(center)),
+        QPoint(),
+        QPoint(0, -12_000),
+        Qt.NoButton,
+        Qt.NoModifier,
+        Qt.ScrollUpdate,
+        False,
+    )
+
+    QApplication.sendEvent(viewport, wheel)
+    QApplication.processEvents()
+
+    assert _view_bounds(preview)[2] - _view_bounds(preview)[0] > before[2] - before[0]
+    _assert_view_inside_frame(preview, frame)
+    assert preview.preview_frame == pytest.approx(frame)
+
+
+@pytest.mark.parametrize(
+    ("dx", "dy"),
+    [
+        (-1_000_000.0, 0.0),
+        (1_000_000.0, 0.0),
+        (0.0, -1_000_000.0),
+        (0.0, 1_000_000.0),
+    ],
+)
+def test_viewbox_cannot_pan_past_any_curve_frame_edge(qtbot, dx, dy) -> None:
+    preview = AxisCalibrationPreview("X")
+    qtbot.addWidget(preview)
+    _show_preview(preview)
+    preview.set_curve((0.0, 1.0, 2.0), (10.0, 11.5, 14.0))
+    QApplication.processEvents()
+    frame = (-0.1, 9.8, 2.1, 14.2)
+    view_box = preview.plot_widget.getViewBox()
+    view_box.setRange(
+        xRange=(0.5, 1.5),
+        yRange=(11.0, 13.0),
+        padding=0.0,
+    )
+
+    view_box.translateBy(x=dx, y=dy)
+    QApplication.processEvents()
+
+    _assert_view_inside_frame(preview, frame)
+    assert preview.preview_frame == pytest.approx(frame)
+
+
+def test_replacing_curve_updates_preview_frame_and_visible_domain(qtbot) -> None:
+    preview = AxisCalibrationPreview("Z")
+    qtbot.addWidget(preview)
+    _show_preview(preview)
+    preview.set_curve((0.0, 1.0, 2.0), (10.0, 11.5, 14.0))
+
+    preview.set_curve((100.0, 150.0, 200.0), (1_000.0, 1_500.0, 2_000.0))
+    QApplication.processEvents()
+
+    frame = (95.0, 950.0, 205.0, 2_050.0)
+    visible = _view_bounds(preview)
+    assert visible[0] <= 100.0
+    assert visible[1] <= 1_000.0
+    assert visible[2] >= 200.0
+    assert visible[3] >= 2_000.0
+    preview.plot_widget.getViewBox().translateBy(x=1_000_000.0, y=1_000_000.0)
+    QApplication.processEvents()
+    _assert_view_inside_frame(preview, frame)
+    assert preview.preview_frame == pytest.approx(frame)
+
+
+def test_clear_curve_removes_stale_navigation_limits(qtbot) -> None:
+    preview = AxisCalibrationPreview("X")
+    qtbot.addWidget(preview)
+    _show_preview(preview)
+    preview.set_curve((0.0, 1.0, 2.0), (10.0, 11.5, 14.0))
+
+    preview.clear_curve()
+    preview.plot_widget.getViewBox().setRange(
+        xRange=(100.0, 200.0),
+        yRange=(1_000.0, 2_000.0),
+        padding=0.0,
+    )
+    QApplication.processEvents()
+
+    assert _view_bounds(preview) == pytest.approx((100.0, 1_000.0, 200.0, 2_000.0))
+    assert preview.preview_frame is None
