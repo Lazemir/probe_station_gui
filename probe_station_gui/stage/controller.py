@@ -928,6 +928,23 @@ class StageController(
     def latest_machine_position(self) -> tuple[float, ...] | None:
         """Return the latest cached raw machine coordinates without controller I/O."""
 
+        if self._position_reporting_mode == "work":
+            work_position = self._last_stage_position
+            coordinate_system = self._active_work_coordinate_system
+            if work_position is None or coordinate_system is None:
+                return None
+            work_offset = self._controller_coordinate_offsets.get(coordinate_system)
+            if (
+                work_offset is None
+                or len(work_position) < 3
+                or len(work_offset) < len(work_position)
+            ):
+                return None
+            # TODO(coordinate-system-rework): publish one canonical machine-coordinate snapshot instead of reconstructing MPos from WPos/WCO.
+            return tuple(
+                float(position + offset)
+                for position, offset in zip(work_position, work_offset)
+            )
         if self._last_machine_position is None:
             return None
         return tuple(self._last_machine_position)

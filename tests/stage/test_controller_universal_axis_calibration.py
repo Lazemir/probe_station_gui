@@ -82,12 +82,74 @@ def test_work_coordinate_mapping_uses_cached_offset() -> None:
 def test_cached_machine_position_drives_preview_without_hardware_read() -> None:
     controller = StageController()
     try:
+        controller._position_reporting_mode = "machine"
         controller.apply_axis_calibrations(_curve("Z"))
         controller._last_machine_position = (0.0, 0.0, 2.0, 0.0, 0.0, 0.0)
         controller._query_status = lambda *_args, **_kwargs: pytest.fail("hardware read")
 
         assert controller.latest_machine_position() == (0.0, 0.0, 2.0, 0.0, 0.0, 0.0)
         assert controller.axis_calibration_preview_position("Z") == pytest.approx((2.0, 3.5))
+    finally:
+        controller.shutdown()
+
+
+def test_work_mode_derives_machine_position_from_cached_work_position_and_wco() -> None:
+    controller = StageController()
+    try:
+        controller._position_reporting_mode = "work"
+        controller._last_stage_position = (-9.047, -5.369, 5.441, 2.01, -3.505)
+        controller._active_work_coordinate_system = "G54"
+        controller._controller_coordinate_offsets["G54"] = (
+            32.0,
+            32.0,
+            0.0,
+            0.0,
+            0.0,
+        )
+
+        assert controller.latest_machine_position() == pytest.approx(
+            (22.953, 26.631, 5.441, 2.01, -3.505)
+        )
+    finally:
+        controller.shutdown()
+
+
+def test_work_mode_ignores_stale_machine_cache_for_latest_machine_position() -> None:
+    controller = StageController()
+    try:
+        controller._position_reporting_mode = "work"
+        controller._last_machine_position = (999.0, 999.0, 999.0)
+        controller._last_stage_position = (1.0, 2.0, 5.441)
+        controller._active_work_coordinate_system = "G54"
+        controller._controller_coordinate_offsets["G54"] = (10.0, 20.0, 0.0)
+
+        assert controller.latest_machine_position() == pytest.approx((11.0, 22.0, 5.441))
+    finally:
+        controller.shutdown()
+
+
+def test_work_mode_without_active_wco_has_no_latest_machine_position() -> None:
+    controller = StageController()
+    try:
+        controller._position_reporting_mode = "work"
+        controller._last_machine_position = (999.0, 999.0, 999.0)
+        controller._last_stage_position = (1.0, 2.0, 5.441)
+        controller._active_work_coordinate_system = "G54"
+
+        assert controller.latest_machine_position() is None
+    finally:
+        controller.shutdown()
+
+
+def test_work_mode_with_incomplete_coordinate_components_has_no_latest_machine_position() -> None:
+    controller = StageController()
+    try:
+        controller._position_reporting_mode = "work"
+        controller._last_stage_position = (1.0, 2.0)
+        controller._active_work_coordinate_system = "G54"
+        controller._controller_coordinate_offsets["G54"] = (10.0, 20.0, 0.0)
+
+        assert controller.latest_machine_position() is None
     finally:
         controller.shutdown()
 
