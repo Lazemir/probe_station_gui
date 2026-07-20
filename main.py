@@ -351,13 +351,15 @@ from probe_station_gui.camera.distortion import (
 )
 from probe_station_gui.camera import microscope_scan
 from probe_station_gui.camera.microscope_scan_runtime import (
-    MicroscopeScanArtifactAdapter,
+    MicroscopeScanRunRequest,
+    MicroscopeScanRuntime,
+)
+from probe_station_gui.camera.microscope_scan_runtime_adapters import (
     MicroscopeAreaScanRequest,
+    MicroscopeScanArtifactAdapter,
     MicroscopeScanCameraAdapter,
     MicroscopeDesignScanRequest,
     MicroscopeScanEventAdapter,
-    MicroscopeScanRunRequest,
-    MicroscopeScanRuntime,
     MicroscopeScanSessionAdapter,
     MicroscopeScanStageAdapter,
     build_microscope_scan_plan,

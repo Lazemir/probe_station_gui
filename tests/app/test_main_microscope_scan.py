@@ -8,7 +8,9 @@ from PySide6.QtGui import QColor, QImage
 from main import Main
 from probe_station_gui.camera import microscope_scan
 from probe_station_gui.camera.imaging import MicroscopeScaleCalibration
-from probe_station_gui.camera.microscope_scan_runtime import build_microscope_scan_plan
+from probe_station_gui.camera.microscope_scan_runtime_adapters import (
+    build_microscope_scan_plan,
+)
 from probe_station_gui.design.model import DesignRegistration
 
 

@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from pathlib import Path
 import types
+from typing import get_type_hints
 
 from probe_station_gui.camera import microscope_scan, microscope_scan_runtime
 from probe_station_gui.camera.imaging import MicroscopeScanPlan, MicroscopeScanTile
+from probe_station_gui.camera import microscope_scan_runtime_adapters
 
 
 class _StageAdapter:
@@ -130,6 +132,18 @@ def test_capture_failure_returns_stage_before_camera_restore_and_session_release
     assert events.index("stage:return") < events.index("camera:restore")
     assert events.index("camera:restore") < events.index("session:release")
     assert events[-1].startswith("finished:false:")
+
+
+def test_runtime_ports_use_explicit_artifact_result_and_adapters_are_separate() -> None:
+    hints = get_type_hints(microscope_scan_runtime.ArtifactPort.save_tile)
+
+    assert hints["return"] is microscope_scan_runtime.MicroscopeCaptureResult
+    assert not hasattr(microscope_scan_runtime, "MicroscopeScanCameraAdapter")
+    assert hasattr(microscope_scan_runtime_adapters, "MicroscopeScanCameraAdapter")
+    assert hasattr(
+        microscope_scan_runtime_adapters.ScanLaunchPort,
+        "design_to_raw_stage",
+    )
 
 
 class _RecordingStage(_StageAdapter):
@@ -390,7 +404,7 @@ def test_session_adapter_closes_lease_when_snapshot_fails() -> None:
             assert parent_token is None
             return _Lease()
 
-    adapter = microscope_scan_runtime.MicroscopeScanSessionAdapter(_Manager())
+    adapter = microscope_scan_runtime_adapters.MicroscopeScanSessionAdapter(_Manager())
 
     try:
         adapter.acquire()
