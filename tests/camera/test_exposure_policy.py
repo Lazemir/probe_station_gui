@@ -70,10 +70,13 @@ def test_policy_transitions_cover_manual_and_automatic_modes() -> None:
     assert rig.camera_once_calls == 1
     assert rig.camera.state["ExposureAuto"] == "Continuous"
 
+    writes_before_software = len(rig.camera.write_calls)
     auto_software = rig.controller.set_policy(auto_enabled=True, engine="software")
     assert auto_software["engine"] == "software"
     assert rig.software_once_calls == 1
+    assert rig.software_exposure_auto_states == ["Continuous"]
     assert rig.camera.state["ExposureAuto"] == "Off"
+    assert rig.camera.write_calls[writes_before_software:] == []
 
     manual_software = rig.controller.set_policy(
         auto_enabled=False,
@@ -153,6 +156,65 @@ def test_software_monitor_adjusts_only_beyond_five_percent_drift(
     rig.controller.shutdown()
 
 
+def test_software_monitor_retries_failed_fit_only_after_scene_changes() -> None:
+    rig = PolicyRig(auto_enabled=True, engine="software", brightness=248)
+    rig.controller.start()
+    rig.clear_activity()
+    rig.software_results.append(
+        {
+            "accepted": False,
+            "converged": False,
+            "message": "no convergence",
+            "restored": True,
+            "failure_reason": "not_converged",
+        }
+    )
+
+    rig.advance_monitor_interval()
+
+    assert rig.software_once_calls == 1
+    rig.clear_activity()
+
+    rig.advance_monitor_interval()
+
+    assert rig.camera.frame_reads == 1
+    assert rig.software_once_calls == 0
+    assert rig.controller.snapshot()["warning"] == "no convergence"
+    rig.clear_activity()
+    rig.camera.brightness = 180
+
+    rig.advance_monitor_interval()
+
+    assert rig.software_once_calls == 1
+    rig.controller.shutdown()
+
+
+def test_failed_manual_once_does_not_trigger_an_unchanged_monitor_retry() -> None:
+    rig = PolicyRig(auto_enabled=True, engine="software", brightness=248)
+    rig.controller.start()
+    rig.clear_activity()
+    rig.software_results.append(
+        {
+            "accepted": False,
+            "converged": False,
+            "message": "no convergence",
+            "restored": True,
+            "failure_reason": "not_converged",
+        }
+    )
+
+    with pytest.raises(ExposurePolicyError, match="no convergence"):
+        rig.controller.run_once()
+    rig.clear_activity()
+
+    rig.advance_monitor_interval()
+
+    assert rig.camera.frame_reads == 1
+    assert rig.software_once_calls == 0
+    assert rig.controller.snapshot()["warning"] == "no convergence"
+    rig.controller.shutdown()
+
+
 def test_hardware_once_waits_for_off_and_a_newer_raw_frame() -> None:
     rig = PolicyRig(auto_enabled=False, engine="camera")
     rig.camera.hardware_once_reads_before_off = 2
@@ -183,6 +245,41 @@ def test_failed_transition_rolls_back_camera_and_persisted_policy() -> None:
     assert rig.controller.snapshot()["auto_enabled"] is True
     assert rig.camera.state["ExposureAuto"] == "Continuous"
     assert rig.persisted == []
+    rig.controller.shutdown()
+
+
+def test_nonconverged_software_auto_transition_keeps_selected_policy() -> None:
+    rig = PolicyRig(auto_enabled=True, engine="camera", brightness=248)
+    rig.controller.start()
+    rig.clear_activity()
+    rig.software_results.append(
+        {
+            "accepted": False,
+            "converged": False,
+            "message": "no convergence",
+            "restored": True,
+            "failure_reason": "not_converged",
+        }
+    )
+
+    result = rig.controller.set_policy(auto_enabled=True, engine="software")
+
+    assert result["engine"] == "software"
+    assert result["auto_enabled"] is True
+    assert rig.controller.snapshot()["monitoring"] is True
+    assert rig.controller.snapshot()["warning"] == "no convergence"
+    assert rig.camera.state["ExposureAuto"] == "Off"
+    assert rig.camera.write_calls == [[("ExposureAuto", "Off")]]
+    assert [policy.to_dict() for policy in rig.persisted] == [
+        {"auto_enabled": True, "engine": "software"}
+    ]
+    rig.clear_activity()
+
+    rig.advance_monitor_interval()
+
+    assert rig.camera.frame_reads == 1
+    assert rig.software_once_calls == 0
+    assert rig.controller.snapshot()["warning"] == "no convergence"
     rig.controller.shutdown()
 
 
@@ -544,6 +641,7 @@ class PolicyRig:
         self.camera = FakePolicyCamera(brightness=brightness)
         self.software_once_calls = 0
         self.software_configs = []
+        self.software_exposure_auto_states: list[object] = []
         self.software_results: list[dict[str, object]] = []
         self.persisted: list[ExposurePolicy] = []
         self.controller = ExposurePolicyController(
@@ -565,18 +663,24 @@ class PolicyRig:
     def software_once(self, config=None) -> dict[str, object]:
         self.software_once_calls += 1
         self.software_configs.append(config)
+        self.software_exposure_auto_states.append(self.camera.state["ExposureAuto"])
         if self.software_results:
-            return self.software_results.pop(0)
-        return {
-            "accepted": True,
-            "converged": True,
-            "final_exposure_us": float(self.camera.state["ExposureTime"]),
-            "final_frame_counter": self.camera.counter,
-        }
+            result = self.software_results.pop(0)
+        else:
+            result = {
+                "accepted": True,
+                "converged": True,
+                "final_exposure_us": float(self.camera.state["ExposureTime"]),
+                "final_frame_counter": self.camera.counter,
+            }
+        if bool(result.get("accepted")) and bool(result.get("converged", True)):
+            self.camera.state["ExposureAuto"] = "Off"
+        return result
 
     def clear_activity(self) -> None:
         self.software_once_calls = 0
         self.software_configs.clear()
+        self.software_exposure_auto_states.clear()
         self.camera.write_calls.clear()
         self.camera.frame_reads = 0
         self.camera.frame_watermarks.clear()

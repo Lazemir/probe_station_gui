@@ -41,6 +41,23 @@ def test_controller_converges_with_fresh_frames_and_leaves_manual_result() -> No
     )
 
 
+def test_controller_drains_native_auto_frames_before_software_adjustment() -> None:
+    camera = _SyntheticAutoExposureCamera()
+    controller = _controller(camera)
+
+    result = controller.run(
+        AutoExposureConfig(
+            native_auto_release_frames=4,
+            settling_frames=0,
+            convergence_window=2,
+        )
+    )
+
+    assert result["accepted"] is True
+    first_manual_write = camera.events.index("manual-write")
+    assert camera.events[1:first_manual_write] == ["frame"] * 4
+
+
 def test_controller_restores_original_state_when_frame_capture_fails() -> None:
     camera = _SyntheticAutoExposureCamera(fail_frames=True)
     original = dict(camera.state)
@@ -53,6 +70,24 @@ def test_controller_restores_original_state_when_frame_capture_fails() -> None:
     assert "frame unavailable" in result["message"]
     assert camera.state == original
     assert result["restored"] is True
+    assert result["failure_reason"] == "error"
+
+
+def test_controller_labels_exhausted_adjustment_as_nonconvergence() -> None:
+    camera = _SyntheticAutoExposureCamera()
+    controller = _controller(camera)
+
+    result = controller.run(
+        AutoExposureConfig(
+            settling_frames=0,
+            convergence_window=3,
+            max_iterations=3,
+        )
+    )
+
+    assert result["accepted"] is False
+    assert result["converged"] is False
+    assert result["failure_reason"] == "not_converged"
 
 
 def test_controller_rejects_concurrent_operation_without_waiting() -> None:
@@ -94,6 +129,7 @@ class _SyntheticAutoExposureCamera:
         self.counter = 10
         self.calls: list[list[tuple[str, object]]] = []
         self.frame_watermarks: list[tuple[int, int]] = []
+        self.events: list[str] = []
         self.fail_frames = fail_frames
         self._last_write_counter = self.counter
         self._lock = threading.Lock()
@@ -129,6 +165,11 @@ class _SyntheticAutoExposureCamera:
         if self.state["ExposureAuto"] != "Off" and "ExposureTime" in names:
             raise RuntimeError("ExposureTime is read-only while ExposureAuto is enabled")
         self.calls.append(ordered)
+        self.events.append(
+            "manual-write"
+            if any(name in {"Gain", "ExposureTime"} for name, _value in ordered)
+            else "mode-write"
+        )
         for name, value in ordered:
             self.state[name] = str(value)
         self.counter += 1
@@ -147,6 +188,7 @@ class _SyntheticAutoExposureCamera:
         if self.fail_frames:
             raise RuntimeError("frame unavailable")
         with self._lock:
+            self.events.append("frame")
             self.frame_watermarks.append((int(after_counter), self._last_write_counter))
             self.counter = max(self.counter + 1, int(after_counter) + 1)
             exposure = float(self.state["ExposureTime"])

@@ -140,6 +140,7 @@ from probe_station_gui.api.server import ProbeStationApiServer
 from probe_station_gui.api.keys import API_KEY_FILENAME, ApiKeyStore
 from probe_station_gui.camera.api_control import (
     CameraApiBroker,
+    connect_camera_api_results,
     encode_camera_frame_png,
 )
 from probe_station_gui.camera.auto_exposure import (
@@ -977,12 +978,7 @@ class Main(QMainWindow):
             frame_read=self._read_camera_auto_exposure_frame,
         )
         self._compose_camera_exposure_policy()
-        self.grabber.camera_settings_snapshot_ready.connect(
-            self._camera_api_broker.complete
-        )
-        self.grabber.camera_settings_batch_changed.connect(
-            self._camera_api_broker.complete
-        )
+        connect_camera_api_results(self.grabber, self._camera_api_broker)
         self.thread = QThread()
         self.grabber.moveToThread(self.thread)
         self.thread.started.connect(self.grabber.start)
@@ -4006,6 +4002,13 @@ class Main(QMainWindow):
             return int(self._latest_camera_frame_counter)
 
     def _latest_raw_camera_counter(self) -> int:
+        direct_counter = getattr(
+            getattr(self, "grabber", None),
+            "latest_frame_counter",
+            None,
+        )
+        if callable(direct_counter):
+            return int(direct_counter())
         with self._latest_camera_frame_condition:
             return int(getattr(self, "_latest_raw_camera_frame_counter", 0))
 
@@ -4036,6 +4039,16 @@ class Main(QMainWindow):
         after_counter: int | None = None,
         timeout_s: float = 2.0,
     ) -> tuple[QImage | None, int]:
+        direct_wait = getattr(
+            getattr(self, "grabber", None),
+            "wait_for_frame",
+            None,
+        )
+        if callable(direct_wait):
+            return direct_wait(
+                after_counter=after_counter,
+                timeout_s=timeout_s,
+            )
         deadline = time.monotonic() + max(0.0, float(timeout_s))
         with self._latest_camera_frame_condition:
             while True:

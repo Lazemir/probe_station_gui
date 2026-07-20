@@ -237,6 +237,38 @@ def test_camera_api_frame_selects_raw_and_corrected_storage() -> None:
     assert corrected_image.pixelColor(0, 0) == QColor("blue")
 
 
+def test_raw_camera_reads_use_acquisition_worker_cache_when_available() -> None:
+    raw_frame = _solid_image("green")
+
+    class DirectFrameGrabber:
+        @staticmethod
+        def latest_frame_counter() -> int:
+            return 23
+
+        @staticmethod
+        def wait_for_frame(*, after_counter, timeout_s):
+            assert after_counter == 22
+            assert timeout_s == 1.25
+            return raw_frame.copy(), 23
+
+    window = Main.__new__(Main)
+    window.grabber = DirectFrameGrabber()
+    window._latest_camera_frame_condition = threading.Condition()
+    window._latest_raw_camera_frame = _solid_image("red")
+    window._latest_raw_camera_frame_counter = 11
+
+    frame, counter = Main._wait_for_raw_camera_frame(
+        window,
+        after_counter=22,
+        timeout_s=1.25,
+    )
+
+    assert Main._latest_raw_camera_counter(window) == 23
+    assert counter == 23
+    assert frame is not None
+    assert frame.pixelColor(0, 0) == QColor("green")
+
+
 def test_exposure_policy_successful_start_latches_after_first_real_raw_frame() -> None:
     class StartAdapter:
         def __init__(self) -> None:

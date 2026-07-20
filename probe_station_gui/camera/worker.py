@@ -6,6 +6,7 @@ import logging
 import concurrent.futures
 import importlib
 import queue
+import threading
 import time
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
@@ -70,6 +71,9 @@ class Grabber(QObject):
         self._camera: Any | None = None
         self._acquiring = False
         self._frame_index = 0
+        self._latest_frame_condition = threading.Condition()
+        self._latest_frame: QImage | None = None
+        self._latest_frame_counter = 0
         self._last_frame_timestamp: float | None = None
         self._last_frame_log_timestamp = 0.0
         self._new_buffer_timeout_count = 0
@@ -310,6 +314,7 @@ class Grabber(QObject):
             cam = cams.create_camera_by_index(0)
             self._camera = cam
             cam.init_cam()
+            self._set_stream_buffer_handling_mode(cam)
             self._set_rgb8_pixel_format(cam)
             cam.begin_acquisition()
             self._acquiring = True
@@ -344,6 +349,41 @@ class Grabber(QObject):
     def stop(self) -> None:
         self._running = False
 
+    def latest_frame_counter(self) -> int:
+        """Return the acquisition counter without crossing the GUI event queue."""
+
+        with self._latest_frame_condition:
+            return int(self._latest_frame_counter)
+
+    def wait_for_frame(
+        self,
+        *,
+        after_counter: int | None = None,
+        timeout_s: float = 2.0,
+    ) -> tuple[QImage | None, int]:
+        """Read the latest acquired frame directly from the camera worker cache."""
+
+        deadline = time.monotonic() + max(0.0, float(timeout_s))
+        with self._latest_frame_condition:
+            while True:
+                frame = self._latest_frame
+                counter = int(self._latest_frame_counter)
+                fresh_enough = after_counter is None or counter > int(after_counter)
+                if frame is not None and fresh_enough:
+                    return frame.copy(), counter
+                remaining = deadline - time.monotonic()
+                if remaining <= 0.0:
+                    if frame is not None and after_counter is None:
+                        return frame.copy(), counter
+                    return None, counter
+                self._latest_frame_condition.wait(min(remaining, 0.1))
+
+    def _cache_latest_frame(self, frame: QImage) -> None:
+        with self._latest_frame_condition:
+            self._latest_frame = frame.copy()
+            self._latest_frame_counter = int(self._frame_index)
+            self._latest_frame_condition.notify_all()
+
     def _emit_frame(self, img: object) -> None:
         try:
             pix_fmt = str(img.get_pix_fmt())
@@ -365,6 +405,7 @@ class Grabber(QObject):
         suppress_frame_gap = bool(self._suppress_next_frame_gap)
         self._reset_acquisition_timeout_state()
         self._frame_index += 1
+        self._cache_latest_frame(qimg)
         now = time.monotonic()
         frame_interval = (
             now - self._last_frame_timestamp
@@ -441,6 +482,27 @@ class Grabber(QObject):
                 pixel_format.set_node_value_from_str("RGB8")
         except Exception as exc:  # pragma: no cover - hardware dependent
             logger.warning("Unable to set camera PixelFormat to RGB8: %s", exc)
+
+    def _set_stream_buffer_handling_mode(self, cam: object) -> None:
+        try:
+            node_map = cam.get_tl_stream_node_map()
+            node = node_map.get_node_by_name("StreamBufferHandlingMode")
+            if node is None:
+                logger.warning("StreamBufferHandlingMode is unavailable.")
+                return
+            if not node.is_available() or not node.is_writable():
+                logger.warning("StreamBufferHandlingMode is not writable.")
+                return
+            node.set_node_value_from_str("NewestOnly")
+            logger.info(
+                "Camera stream buffer handling mode: %s",
+                node.get_node_value_as_str(),
+            )
+        except Exception as exc:  # pragma: no cover - hardware dependent
+            logger.warning(
+                "Unable to set StreamBufferHandlingMode to NewestOnly: %s",
+                exc,
+            )
 
     def _shutdown_camera(self, cam: object | None) -> None:
         if cam is None:

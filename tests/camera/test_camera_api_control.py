@@ -12,6 +12,7 @@ from probe_station_gui.camera.api_control import (
     CameraApiBroker,
     encode_camera_frame_png,
 )
+from probe_station_gui.camera import api_control as camera_api_control
 from probe_station_gui.camera.exposure_policy import (
     ExposurePolicy,
     ExposurePolicyBusyError,
@@ -21,6 +22,11 @@ from probe_station_gui.camera.exposure_policy import (
 
 class _SignalSender(QObject):
     completed = Signal(object)
+
+
+class _CameraResultSender(QObject):
+    camera_settings_snapshot_ready = Signal(object)
+    camera_settings_batch_changed = Signal(object)
 
 
 class _BlockingWorker(QObject):
@@ -102,6 +108,54 @@ def test_concurrent_results_are_correlated_by_request_id() -> None:
     assert results["second"]["nodes"][0]["name"] == "ExposureTime"
     assert results["first"]["frame_counter_at_completion"] == 17
     assert results["second"]["accepted"] is True
+
+
+def test_camera_result_connection_completes_while_gui_thread_waits() -> None:
+    QApplication.instance() or QApplication([])
+    connect_results = getattr(
+        camera_api_control,
+        "connect_camera_api_results",
+        None,
+    )
+    assert callable(connect_results)
+
+    sender = _CameraResultSender()
+    workers: list[threading.Thread] = []
+
+    def submit_batch(
+        request_id: str,
+        settings: list[tuple[str, object]],
+    ) -> None:
+        worker = threading.Thread(
+            target=lambda: sender.camera_settings_batch_changed.emit(
+                {
+                    "ok": True,
+                    "request_id": request_id,
+                    "nodes": [
+                        {"name": name, "value": value}
+                        for name, value in settings
+                    ],
+                }
+            ),
+            daemon=True,
+        )
+        workers.append(worker)
+        worker.start()
+
+    broker = CameraApiBroker(
+        snapshot_submit=lambda _request_id, _names: None,
+        batch_submit=submit_batch,
+        frame_counter=lambda: 19,
+        timeout_s=0.1,
+    )
+    connect_results(sender, broker)
+
+    result = broker.write_settings_trusted([("Gain", 1.5)])
+
+    for worker in workers:
+        worker.join(1.0)
+    assert result["accepted"] is True
+    assert result["frame_counter_at_completion"] == 19
 
 
 def test_read_marks_native_exposure_auto_as_policy_managed() -> None:

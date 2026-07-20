@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import math
 import threading
 import time
@@ -12,6 +13,9 @@ from typing import Any
 import numpy as np
 
 
+logger = logging.getLogger(__name__)
+
+
 @dataclass(frozen=True)
 class AutoExposureConfig:
     target_percentile: float = 99.5
@@ -20,10 +24,11 @@ class AutoExposureConfig:
     min_step_ratio: float = 0.5
     max_step_ratio: float = 2.0
     clipping_reduction_ratio: float = 0.5
+    native_auto_release_frames: int = 0
     settling_frames: int = 2
     convergence_window: int = 3
     target_tolerance_fraction: float = 0.02
-    max_iterations: int = 12
+    max_iterations: int = 18
     frame_timeout_ms: int = 2500
     fixed_gain_db: float = 0.0
 
@@ -81,6 +86,7 @@ class CameraAutoExposureController:
         snapshot: dict[str, dict[str, Any]] | None = None
         trace: list[float] = []
         counter = 0
+        failure_reason = "not_converged"
         try:
             snapshot = _read_nodes(self._settings_read, self.SNAPSHOT_NODES)
             exposure_node = snapshot["ExposureTime"]
@@ -95,6 +101,9 @@ class CameraAutoExposureController:
                     _finite_float(exposure_node.get("value"), exposure_limits[0]),
                 ),
             )
+            native_auto_active = str(
+                snapshot["ExposureAuto"].get("value") or "Off"
+            ) != "Off"
             response = _write_settings(
                 self._settings_write,
                 [
@@ -104,6 +113,17 @@ class CameraAutoExposureController:
                 ],
             )
             counter = _response_counter(response, counter)
+            if native_auto_active:
+                for _discarded in range(int(config.native_auto_release_frames)):
+                    frame = self._frame_read(
+                        counter,
+                        float(config.frame_timeout_ms) / 1000.0,
+                    )
+                    counter = int(frame.counter)
+                logger.debug(
+                    "Software auto exposure released native auto after %s frames",
+                    int(config.native_auto_release_frames),
+                )
             response = _write_settings(
                 self._settings_write,
                 [
@@ -128,6 +148,14 @@ class CameraAutoExposureController:
                 counter = int(frame.counter)
                 measured = highlight_level(frame.rgb, config)
                 trace.append(measured)
+                logger.debug(
+                    "Software auto exposure iteration=%s exposure_us=%.3f "
+                    "brightness=%.3f frame_counter=%s",
+                    len(trace),
+                    exposure,
+                    measured,
+                    counter,
+                )
                 relative_error = abs(measured - config.target_level) / config.target_level
                 if relative_error <= float(config.target_tolerance_fraction):
                     converged_count += 1
@@ -135,6 +163,12 @@ class CameraAutoExposureController:
                         final_nodes = _read_nodes(
                             self._settings_read,
                             ("ExposureTime", "Gain"),
+                        )
+                        logger.debug(
+                            "Software auto exposure converged exposure_us=%.3f "
+                            "trace=%s",
+                            _node_float(final_nodes, "ExposureTime"),
+                            trace,
                         )
                         return {
                             "accepted": True,
@@ -166,8 +200,15 @@ class CameraAutoExposureController:
                 )
                 counter = _response_counter(response, counter)
             message = "Camera auto exposure did not converge."
+            logger.warning(
+                "Software auto exposure did not converge; exposure_us=%.3f "
+                "trace=%s",
+                exposure,
+                trace,
+            )
         except Exception as exc:
             message = str(exc) or type(exc).__name__
+            failure_reason = "error"
 
         restored, restore_error = _restore_snapshot(self._settings_write, snapshot)
         result: dict[str, Any] = {
@@ -175,6 +216,7 @@ class CameraAutoExposureController:
             "status_code": 409 if restored else 500,
             "message": message,
             "converged": False,
+            "failure_reason": failure_reason,
             "restored": restored,
             "final_frame_counter": counter,
             "iterations": len(trace),
@@ -212,6 +254,10 @@ def validate_auto_exposure_config(config: AutoExposureConfig) -> None:
         raise ValueError("auto exposure clipping_reduction_ratio must be in (0, 1].")
     if int(config.settling_frames) < 0:
         raise ValueError("auto exposure settling_frames must be non-negative.")
+    if int(config.native_auto_release_frames) < 0:
+        raise ValueError(
+            "auto exposure native_auto_release_frames must be non-negative."
+        )
     if int(config.convergence_window) < 1:
         raise ValueError("auto exposure convergence_window must be positive.")
     if float(config.target_tolerance_fraction) <= 0.0:

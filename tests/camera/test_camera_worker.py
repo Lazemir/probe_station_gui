@@ -4,6 +4,8 @@ import queue
 import logging
 import time
 
+from PySide6.QtGui import QColor, QImage
+
 from probe_station_gui.camera.worker import Grabber
 
 
@@ -88,11 +90,19 @@ class FakeNodeMap:
 
 
 class FakeCamera:
-    def __init__(self, node_map: FakeNodeMap) -> None:
+    def __init__(
+        self,
+        node_map: FakeNodeMap,
+        stream_node_map: FakeNodeMap | None = None,
+    ) -> None:
         self._node_map = node_map
+        self._stream_node_map = stream_node_map or FakeNodeMap([])
 
     def get_node_map(self) -> FakeNodeMap:
         return self._node_map
+
+    def get_tl_stream_node_map(self) -> FakeNodeMap:
+        return self._stream_node_map
 
 
 def make_grabber(nodes: list[FakeNode]) -> Grabber:
@@ -103,6 +113,51 @@ def make_grabber(nodes: list[FakeNode]) -> Grabber:
 
 def close_grabber(grabber: Grabber) -> None:
     grabber._camera_settings_executor.shutdown(wait=True, cancel_futures=True)
+
+
+def test_latest_frame_cache_does_not_depend_on_gui_signal_delivery() -> None:
+    grabber = Grabber()
+    frame = QImage(3, 2, QImage.Format_RGB888)
+    frame.fill(QColor("red"))
+    grabber._frame_index = 7
+    try:
+        grabber._cache_latest_frame(frame)
+
+        cached, counter = grabber.wait_for_frame(after_counter=None, timeout_s=0.0)
+        stale, stale_counter = grabber.wait_for_frame(
+            after_counter=counter,
+            timeout_s=0.0,
+        )
+
+        assert grabber.latest_frame_counter() == 7
+        assert counter == 7
+        assert cached is not None
+        assert cached.pixelColor(0, 0) == QColor("red")
+        assert stale is None
+        assert stale_counter == 7
+    finally:
+        close_grabber(grabber)
+
+
+def test_stream_buffer_uses_newest_frame_instead_of_camera_backlog() -> None:
+    handling_mode = FakeNode(
+        "StreamBufferHandlingMode",
+        "enum",
+        "OldestFirst",
+        entries=("OldestFirst", "NewestOnly"),
+    )
+    camera = FakeCamera(
+        FakeNodeMap([]),
+        FakeNodeMap([handling_mode]),
+    )
+    grabber = Grabber()
+    try:
+        grabber._set_stream_buffer_handling_mode(camera)
+
+        assert handling_mode.value == "NewestOnly"
+        assert handling_mode.set_values == ["NewestOnly"]
+    finally:
+        close_grabber(grabber)
 
 
 def test_temporary_camera_settings_restore_saved_values_in_reverse_order() -> None:

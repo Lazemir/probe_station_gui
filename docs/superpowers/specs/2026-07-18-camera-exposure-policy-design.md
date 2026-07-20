@@ -38,12 +38,13 @@ Exposure configuration consists of two independent persisted values:
 - `engine`: `software` or `camera`.
 
 The engine remains meaningful while automatic exposure is disabled. It selects
-the implementation used by the `Once` action and by mandatory adjustments around
-optical operations. The initial and migration default is `Auto + Software`.
+the implementation used by the `Adjust Exposure` action and by mandatory
+adjustments around optical operations. The initial and migration default is
+`Auto + Software`.
 
 The four combinations behave as follows:
 
-| Exposure | Engine | Steady-state behavior | `Once` behavior |
+| Exposure | Engine | Steady-state behavior | Adjustment behavior |
 | --- | --- | --- | --- |
 | Manual | Software | Fixed exposure | Application one-shot, remain manual |
 | Manual | Camera | Fixed exposure | Native camera one-shot, remain manual |
@@ -56,10 +57,12 @@ automatic exposure starts the selected engine. Software starts with a full
 one-shot; camera performs a native one-shot and then enters `Continuous`.
 
 Changing the engine while automatic exposure is disabled changes only the next
-`Once` implementation. Changing it while automatic exposure is enabled is an
+adjustment implementation. Changing it while automatic exposure is enabled is an
 atomic transition: stop the old engine, adjust once with the new engine, then
 start the new automatic mode. A failed transition restores the previous policy
-and camera state.
+and camera state. Exhausting the software adjustment iterations is recoverable:
+the Software policy remains selected, exposes a warning, and its periodic monitor
+continues retrying. Camera I/O and persistence failures still roll back.
 
 ## Software And Camera Engines
 
@@ -146,20 +149,32 @@ second exposure mechanism or bypass with different semantics.
 
 The Camera Settings dialog starts with a compact operator block:
 
-- `Exposure`: a `Manual | Auto` segmented control.
-- `Engine`: a `Software | Camera` segmented control.
-- `Once`: a push button with a busy state while adjustment is running.
+- `Control`: a `Manual | Auto` dropdown.
+- `Method`: a `Software | Camera` dropdown.
+- `Timing`: a `Timed | Trigger width` dropdown backed by `ExposureMode`.
 - `Exposure time`: editable only in manual mode and outside an optical session.
+- `Adjust Exposure`: a push button with a busy state while adjustment is running.
 
-The two segmented controls remain independent and are both persisted. They may be
-changed in any steady state. During an optical session, the complete block is
-disabled rather than accepting deferred commands.
+`Control` and `Method` remain independent and are both persisted. They may be
+changed in any steady state. `Trigger width` is available only with the `Camera`
+method because the software engine adjusts `ExposureTime`. Selecting `Software`
+while `Trigger width` is active first writes and confirms `Timed`, then changes
+the exposure policy. During an optical session, the complete block is disabled
+rather than accepting deferred commands.
+
+Camera field edits, timing, and exposure-policy selections are dialog-local until
+the operator presses `Apply` or `Save`. `Cancel` performs no camera writes. Apply
+operations are ordered and confirmed one at a time so dependent settings cannot
+overtake each other; `Save` closes only after the complete camera transaction
+finishes. `Adjust Exposure` remains an immediate command and requires pending
+settings to be applied first.
 
 Raw `ExposureAuto` is hidden from the generic operator node list because its
 `Off`, `Once`, and `Continuous` values are controller implementation state, not
-the saved operator policy. `ExposureTime` appears only in the operator block, not
-a second time in the generic list. The dialog remains lazy and all camera reads
-continue through its worker-backed settings source.
+the saved operator policy. `ExposureMode` and `ExposureTime` appear only in the
+operator block, not a second time in the generic list. `ExposureCompensationAuto`
+and `ExposureCompensation` are omitted from operator settings. The dialog remains
+lazy and all camera reads continue through its worker-backed settings source.
 
 ## API
 
@@ -247,7 +262,7 @@ operator-facing camera errors.
 
 - The operator controls automatic enablement and engine with two independent,
   persisted settings; startup defaults to `Auto + Software`.
-- `Once` is a button, works with either engine, and never changes the saved pair.
+- `Adjust Exposure` works with either engine and never changes the saved pair.
 - `Auto + Software` checks every five seconds and performs full adjustment only
   beyond the 5% drift threshold.
 - Every autofocus, optical calibration, click-to-move calibration, and multi-frame

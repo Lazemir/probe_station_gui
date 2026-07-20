@@ -980,6 +980,9 @@ class SettingsDialog(QDialog):
         self._settings = settings.clone()
         self._applied_once = False
         self._camera_tab: CameraSettingsWidget | None = None
+        self._accept_after_camera_apply = False
+        self._collecting_settings = False
+        self._deferred_camera_apply_result: bool | None = None
 
         root_layout = QVBoxLayout(self)
         self._tabs = QTabWidget(self)
@@ -1018,6 +1021,7 @@ class SettingsDialog(QDialog):
                 self,
                 exposure_policy_source=exposure_policy_source,
             )
+            self._camera_tab.apply_finished.connect(self._on_camera_apply_finished)
         self._tabs.addTab(self._controls_tab, "Controls")
         self._tabs.addTab(self._api_tab, "API")
         if self._camera_tab is not None:
@@ -1038,16 +1042,16 @@ class SettingsDialog(QDialog):
         self._tabs.currentChanged.connect(self._on_tab_changed)
         self._refresh_camera_tab_if_current()
 
-        buttons = QDialogButtonBox(
+        self._buttons = QDialogButtonBox(
             QDialogButtonBox.Save | QDialogButtonBox.Apply | QDialogButtonBox.Cancel,
             self,
         )
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        apply_button = buttons.button(QDialogButtonBox.Apply)
+        self._buttons.accepted.connect(self.accept)
+        self._buttons.rejected.connect(self.reject)
+        apply_button = self._buttons.button(QDialogButtonBox.Apply)
         if apply_button is not None:
             apply_button.clicked.connect(self._apply_without_closing)
-        root_layout.addWidget(buttons)
+        root_layout.addWidget(self._buttons)
 
     def _on_tab_changed(self, _index: int) -> None:
         self._refresh_camera_tab_if_current()
@@ -1061,30 +1065,69 @@ class SettingsDialog(QDialog):
             self._camera_tab.refresh()
 
     def accept(self) -> None:  # type: ignore[override]
-        self._collect_settings()
+        self._accept_after_camera_apply = True
+        camera_started = self._collect_settings()
         self._applied_once = True
         self.settings_applied.emit(self._settings.clone())
+        if camera_started:
+            self._buttons.setEnabled(False)
+            self._finish_deferred_camera_apply_if_ready()
+            return
+        self._accept_after_camera_apply = False
         self._telegram_tab.shutdown()
         super().accept()
 
     def _apply_without_closing(self) -> None:
-        self._collect_settings()
+        self._accept_after_camera_apply = False
+        camera_started = self._collect_settings()
         self._applied_once = True
         self.settings_applied.emit(self._settings.clone())
+        if camera_started:
+            self._buttons.setEnabled(False)
+            self._finish_deferred_camera_apply_if_ready()
 
-    def _collect_settings(self) -> None:
-        self._controls_tab.to_settings(self._settings)
-        self._api_tab.to_settings(self._settings)
-        self._telegram_tab.to_settings(self._settings)
-        self._jog_tab.to_settings(self._settings)
-        self._coordinate_system_tab.to_settings(self._settings)
-        self._objectives_tab.to_settings(self._settings)
-        self._axis_calibration_tab.to_settings(self._settings)
-        self._measurement_tab.to_settings(self._settings)
-        self._needles_tab.to_settings(self._settings)
-        self._logging_tab.to_settings(self._settings.logging)
-        if self._camera_tab is not None:
-            self._camera_tab.apply_pending_settings()
+    def _collect_settings(self) -> bool:
+        self._collecting_settings = True
+        self._deferred_camera_apply_result = None
+        try:
+            self._controls_tab.to_settings(self._settings)
+            self._api_tab.to_settings(self._settings)
+            self._telegram_tab.to_settings(self._settings)
+            self._jog_tab.to_settings(self._settings)
+            self._coordinate_system_tab.to_settings(self._settings)
+            self._objectives_tab.to_settings(self._settings)
+            self._axis_calibration_tab.to_settings(self._settings)
+            self._measurement_tab.to_settings(self._settings)
+            self._needles_tab.to_settings(self._settings)
+            self._logging_tab.to_settings(self._settings.logging)
+            return bool(
+                self._camera_tab is not None
+                and self._camera_tab.apply_pending_settings()
+            )
+        finally:
+            self._collecting_settings = False
+
+    def _on_camera_apply_finished(self, success: bool) -> None:
+        if self._collecting_settings:
+            self._deferred_camera_apply_result = bool(success)
+            return
+        self._complete_camera_apply(bool(success))
+
+    def _finish_deferred_camera_apply_if_ready(self) -> None:
+        result = self._deferred_camera_apply_result
+        self._deferred_camera_apply_result = None
+        if result is not None:
+            self._complete_camera_apply(result)
+
+    def _complete_camera_apply(self, success: bool) -> None:
+        self._buttons.setEnabled(True)
+        if not self._accept_after_camera_apply:
+            return
+        self._accept_after_camera_apply = False
+        if not success:
+            return
+        self._telegram_tab.shutdown()
+        super().accept()
 
     def result_settings(self) -> Settings:
         """Return a clone of the adjusted settings."""

@@ -111,6 +111,9 @@ class ExposurePolicyController:
         self._session_operation = ""
         self._last_error = ""
         self._warning = ""
+        self._software_retry_armed = False
+        self._software_retry_brightness: float | None = None
+        self._software_retry_warning = ""
         self._shutdown_requested = False
         self._shutdown_complete = False
 
@@ -311,15 +314,16 @@ class ExposurePolicyController:
 
     def _activate_configured_policy(self) -> dict[str, object]:
         if not self._policy.auto_enabled:
+            self._clear_software_retry()
             self._write_settings([("ExposureAuto", "Off")])
             self._set_monitoring(False)
             return self.snapshot()
         if self._policy.engine is ExposureEngine.SOFTWARE:
-            result = self._software_once_result()
-            self._write_settings([("ExposureAuto", "Off")])
+            result = self._start_software_auto()
             self._set_monitoring(True)
             return result
         result = self._hardware_once()
+        self._clear_software_retry()
         self._enable_native_continuous_if_allowed()
         self._set_monitoring(False)
         return result
@@ -342,12 +346,14 @@ class ExposurePolicyController:
         camera_snapshot = self._camera_snapshot()
         self._set_monitoring(False)
         try:
-            self._write_settings([("ExposureAuto", "Off")])
-            if next_policy.auto_enabled:
-                if next_policy.engine is ExposureEngine.SOFTWARE:
-                    self._software_once_result()
-                    self._write_settings([("ExposureAuto", "Off")])
-                else:
+            if (
+                next_policy.auto_enabled
+                and next_policy.engine is ExposureEngine.SOFTWARE
+            ):
+                self._start_software_auto()
+            else:
+                self._write_settings([("ExposureAuto", "Off")])
+                if next_policy.auto_enabled:
                     self._hardware_once()
                     self._enable_native_continuous_if_allowed()
             self._persist_policy_change(next_policy, old_policy)
@@ -360,6 +366,11 @@ class ExposurePolicyController:
 
         with self._state_lock:
             self._policy = next_policy
+        if not (
+            next_policy.auto_enabled
+            and next_policy.engine is ExposureEngine.SOFTWARE
+        ):
+            self._clear_software_retry()
         self._restore_monitoring_for(next_policy)
         return self.snapshot()
 
@@ -388,15 +399,143 @@ class ExposurePolicyController:
         return {**result, "engine": self._policy.engine.value}
 
     def _software_once_result(self) -> dict[str, object]:
-        config = AutoExposureConfig(target_tolerance_fraction=0.02)
-        raw = self._software_once(config)
-        result = dict(raw)
+        result = self._software_once_attempt()
         if not _response_accepted(result) or not bool(result.get("converged", True)):
+            if self._is_recoverable_nonconvergence(result):
+                self._recover_software_nonconvergence(
+                    result,
+                    brightness=None,
+                )
             raise ExposurePolicyError(
                 str(result.get("message") or "Software exposure did not converge.")
             )
-        result.setdefault("accepted", True)
-        result["engine"] = ExposureEngine.SOFTWARE.value
+        self._clear_software_retry()
+        return self._successful_software_result(result)
+
+    def _software_once_attempt(self) -> dict[str, object]:
+        config = AutoExposureConfig(target_tolerance_fraction=0.02)
+        return dict(self._software_once(config))
+
+    @staticmethod
+    def _successful_software_result(
+        result: Mapping[str, Any],
+    ) -> dict[str, object]:
+        normalized = dict(result)
+        normalized.setdefault("accepted", True)
+        normalized["engine"] = ExposureEngine.SOFTWARE.value
+        return normalized
+
+    @staticmethod
+    def _is_recoverable_nonconvergence(result: Mapping[str, Any]) -> bool:
+        return (
+            str(result.get("failure_reason") or "") == "not_converged"
+            and bool(result.get("restored", False))
+        )
+
+    def _remember_software_retry(
+        self,
+        *,
+        brightness: float | None,
+        warning: str,
+    ) -> None:
+        self._software_retry_armed = True
+        self._software_retry_brightness = brightness
+        self._software_retry_warning = str(warning)
+
+    def _clear_software_retry(self) -> None:
+        self._software_retry_armed = False
+        self._software_retry_brightness = None
+        self._software_retry_warning = ""
+
+    def _software_retry_suppresses(self, measured: float) -> bool:
+        if not self._software_retry_armed:
+            return False
+        baseline = self._software_retry_brightness
+        if baseline is None:
+            self._software_retry_brightness = float(measured)
+            return True
+        relative_change = abs(float(measured) - baseline) / max(abs(baseline), 1.0)
+        if relative_change <= self.DRIFT_TOLERANCE_FRACTION:
+            return True
+        self._clear_software_retry()
+        return False
+
+    def _software_retry_result(
+        self,
+        *,
+        measured: float,
+        frame_counter: int,
+    ) -> dict[str, object]:
+        warning = self._software_retry_warning
+        self._set_warning(warning)
+        return {
+            "accepted": True,
+            "engine": ExposureEngine.SOFTWARE.value,
+            "brightness": measured,
+            "adjusted": False,
+            "retry_suppressed": True,
+            "warning": warning,
+            "final_frame_counter": frame_counter,
+        }
+
+    def _recover_software_nonconvergence(
+        self,
+        result: Mapping[str, Any],
+        *,
+        brightness: float | None,
+    ) -> dict[str, object]:
+        warning = str(result.get("message") or "Software exposure did not converge.")
+        self._remember_software_retry(brightness=brightness, warning=warning)
+        self._set_warning(warning)
+        recovered = dict(result)
+        recovered["accepted"] = True
+        recovered["engine"] = ExposureEngine.SOFTWARE.value
+        recovered["warning"] = warning
+        return recovered
+
+    def _normalize_software_once_result(
+        self,
+        result: Mapping[str, Any],
+        *,
+        failure_brightness: float | None,
+    ) -> dict[str, object]:
+        if _response_accepted(result) and bool(result.get("converged", True)):
+            self._clear_software_retry()
+            return self._successful_software_result(result)
+        if self._is_recoverable_nonconvergence(result):
+            return self._recover_software_nonconvergence(
+                result,
+                brightness=failure_brightness,
+            )
+        raise ExposurePolicyError(
+            str(result.get("message") or "Software exposure did not converge.")
+        )
+
+    def _software_once_result_for_monitor(
+        self,
+        *,
+        measured: float,
+    ) -> dict[str, object]:
+        result = self._normalize_software_once_result(
+            self._software_once_attempt(),
+            failure_brightness=measured,
+        )
+        if bool(result.get("converged", False)):
+            result["adjusted"] = True
+        else:
+            result["adjusted"] = False
+            result["retry_suppressed"] = True
+        return result
+
+    def _start_software_auto(self) -> dict[str, object]:
+        result = self._normalize_software_once_result(
+            self._software_once_attempt(),
+            failure_brightness=None,
+        )
+        if not bool(result.get("converged", False)):
+            # A failed software attempt restores its camera snapshot. The newly
+            # selected software policy must not leave native auto running.
+            self._write_settings([("ExposureAuto", "Off")])
         return result
 
     def _hardware_once(self) -> dict[str, object]:
@@ -468,9 +607,13 @@ class ExposurePolicyController:
             "adjusted": False,
             "final_frame_counter": int(frame.counter),
         }
+        if self._software_retry_suppresses(measured):
+            return self._software_retry_result(
+                measured=measured,
+                frame_counter=int(frame.counter),
+            )
         if relative_error > self.DRIFT_TOLERANCE_FRACTION:
-            result = self._software_once_result()
-            result["adjusted"] = True
+            result = self._software_once_result_for_monitor(measured=measured)
         return result
 
     def _camera_snapshot(self) -> dict[str, object]:

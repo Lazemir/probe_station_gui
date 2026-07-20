@@ -8,7 +8,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from PySide6.QtCore import QBuffer, QIODevice, QObject, Slot
+from PySide6.QtCore import QBuffer, QIODevice, QObject, Qt, Slot
 from PySide6.QtGui import QImage
 
 
@@ -226,6 +226,20 @@ class CameraApiBroker(QObject):
         return _normalize_worker_result(result)
 
 
+def connect_camera_api_results(source: object, broker: CameraApiBroker) -> None:
+    """Resolve broker waits directly from camera worker result threads."""
+
+    connection_type = Qt.ConnectionType.DirectConnection
+    source.camera_settings_snapshot_ready.connect(  # type: ignore[attr-defined]
+        broker.complete,
+        connection_type,
+    )
+    source.camera_settings_batch_changed.connect(  # type: ignore[attr-defined]
+        broker.complete,
+        connection_type,
+    )
+
+
 def encode_camera_frame_png(
     frame: QImage | None,
     *,
@@ -305,5 +319,6 @@ def _rejected(message: str, status_code: int) -> dict[str, Any]:
 __all__ = [
     "CameraApiBroker",
     "OPERATOR_CAMERA_NODE_NAMES",
+    "connect_camera_api_results",
     "encode_camera_frame_png",
 ]
