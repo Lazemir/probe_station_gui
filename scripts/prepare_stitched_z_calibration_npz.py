@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 import sys
 from typing import Sequence
@@ -87,6 +88,42 @@ def _validate_prepared_arrays(controller: np.ndarray, physical: np.ndarray) -> N
         raise ValueError("Prepared physical samples are not strictly increasing.")
 
 
+def _normalized_destination(destination: str | Path) -> Path:
+    destination_path = Path(destination)
+    if not str(destination_path).endswith(".npz"):
+        destination_path = Path(f"{destination_path}.npz")
+    return destination_path
+
+
+def _save_exclusively(
+    destination: Path,
+    *,
+    axis: str,
+    controller: np.ndarray,
+    physical: np.ndarray,
+) -> None:
+    created_stat: os.stat_result | None = None
+    try:
+        with destination.open("xb") as destination_file:
+            created_stat = os.fstat(destination_file.fileno())
+            np.savez_compressed(
+                destination_file,
+                axis=np.asarray(axis),
+                controller=controller,
+                physical=physical,
+            )
+    except BaseException:
+        if created_stat is not None:
+            try:
+                current_stat = destination.stat()
+            except FileNotFoundError:
+                pass
+            else:
+                if os.path.samestat(created_stat, current_stat):
+                    destination.unlink()
+        raise
+
+
 def prepare_stitched_z_calibration(
     section1: str | Path,
     section2: str | Path,
@@ -96,12 +133,10 @@ def prepare_stitched_z_calibration(
     axis: str = "Z",
 ) -> int:
     """Build a forward-only curve from the three Z-calibration sections."""
-    destination_path = Path(destination)
+    destination_path = _normalized_destination(destination)
     axis_name = str(axis).strip().upper()
     if axis_name not in CALIBRATION_AXES:
         raise ValueError(f"Unsupported calibration axis: {axis!r}")
-    if destination_path.exists():
-        raise FileExistsError(f"Destination already exists: {destination_path}")
 
     s1_gcode, s1_indicator = _load_undirected_section(section1)
     s2_gcode, s2_indicator = _load_undirected_section(section2)
@@ -110,12 +145,26 @@ def prepare_stitched_z_calibration(
     s1_mask = s1_gcode < SECTION_1_END_MM
     s2_mask = (s2_gcode >= SECTION_1_END_MM) & (s2_gcode <= SECTION_2_END_MM)
     s3_mask = (s3_direction == 1) & (s3_gcode > SECTION_2_END_MM)
-    controller = np.concatenate((s1_gcode[s1_mask], s2_gcode[s2_mask], s3_gcode[s3_mask]))
-    physical = np.concatenate(
-        (
-            s1_indicator[s1_mask],
-            s2_indicator[s2_mask] + SECTION_2_OFFSET_MM,
-            s3_indicator[s3_mask] + SECTION_3_OFFSET_MM,
+    controller_sections = (
+        s1_gcode[s1_mask],
+        s2_gcode[s2_mask],
+        s3_gcode[s3_mask],
+    )
+    physical_sections = (
+        s1_indicator[s1_mask],
+        s2_indicator[s2_mask] + SECTION_2_OFFSET_MM,
+        s3_indicator[s3_mask] + SECTION_3_OFFSET_MM,
+    )
+    for section_number, samples in enumerate(controller_sections, start=1):
+        if samples.size == 0:
+            raise ValueError(f"Section {section_number} has no selected samples.")
+
+    controller = np.concatenate(controller_sections)
+    physical = np.concatenate(physical_sections)
+    provenance = np.concatenate(
+        tuple(
+            np.full(samples.size, section_number, dtype=np.uint8)
+            for section_number, samples in enumerate(controller_sections, start=1)
         )
     )
     if not np.all(np.diff(controller) > 0.0):
@@ -123,12 +172,18 @@ def prepare_stitched_z_calibration(
     selected = longest_strictly_increasing_indices(physical)
     controller = controller[selected]
     physical = physical[selected]
+    selected_provenance = provenance[selected]
+    for section_number in range(1, 4):
+        if not np.any(selected_provenance == section_number):
+            raise ValueError(
+                f"Section {section_number} was removed by the physical LIS."
+            )
     _validate_prepared_arrays(controller, physical)
 
     destination_path.parent.mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(
+    _save_exclusively(
         destination_path,
-        axis=np.asarray(axis_name),
+        axis=axis_name,
         controller=controller,
         physical=physical,
     )
