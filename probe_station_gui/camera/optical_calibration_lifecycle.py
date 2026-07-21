@@ -54,6 +54,14 @@ class OpticalCalibrationLifecycle:
         kind: str,
         runner: Runner,
     ) -> CalibrationStartDecision:
+        thread: threading.Thread
+
+        def run() -> None:
+            try:
+                runner(request)
+            finally:
+                self._worker_exited(thread, request)
+
         with self._lock:
             rejection = self._start_rejection(request, kind)
             if rejection is not None:
@@ -62,7 +70,7 @@ class OpticalCalibrationLifecycle:
             self._deliverable_run_id = None
             self._active_request = request
             thread = self._thread_factory(
-                target=lambda: runner(request),
+                target=run,
                 name=("FlatFieldCalibration" if kind == "flat" else "LensDistortionCalibration"),
                 daemon=True,
             )
@@ -180,23 +188,39 @@ class OpticalCalibrationLifecycle:
             publish = self.is_current(request)
             if publish:
                 self._active_request = None
-                self._worker = None
                 self._deliverable_run_id = (
                     None if self.cancel_event.is_set() else request.run_id
                 )
             close_parent = (
                 publish and self.cancel_event.is_set() and self._parent_lease is not None
+                and not _thread_alive(self._worker)
             )
         if close_parent:
             self._schedule_parent_close()
         return publish
 
-    def consume(self, run_id: str, *, blocked: bool = False) -> bool:
+    def consume(self, run_id: str) -> bool:
         with self._lock:
-            consumable = not blocked and self._deliverable_run_id == run_id
-            if blocked or consumable:
+            consumable = self._deliverable_run_id == run_id
+            if consumable:
                 self._deliverable_run_id = None
             return consumable
+
+    def _worker_exited(self, thread: threading.Thread, request: Request) -> None:
+        with self._lock:
+            if self._worker is not thread:
+                return
+            self._worker = None
+            active = self._active_request
+            abandoned = active is not None and active.run_id == request.run_id
+            if abandoned:
+                self._active_request = None
+                self._deliverable_run_id = None
+            close_parent = self._parent_lease is not None and (
+                abandoned or self.cancel_event.is_set()
+            )
+        if close_parent:
+            self._schedule_parent_close()
 
     def _start_rejection(
         self,

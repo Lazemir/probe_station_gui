@@ -5072,6 +5072,9 @@ class Main(QMainWindow):
         ):
             return
         self._optical_calibration_runtime.cancel()
+        self._stop_lens_distortion_dialog()
+
+    def _stop_lens_distortion_dialog(self) -> None:
         dialog = self._lens_distortion_dialog
         if dialog is not None:
             dialog.set_running(False)
@@ -5283,6 +5286,7 @@ class Main(QMainWindow):
         if not self._optical_calibration_runtime.consume(
             outcome,
             blocked=self._microscope_scan_running(),
+            on_discarded=self._stop_lens_distortion_dialog,
         ):
             return
         presentation = prepare_lens_completion(

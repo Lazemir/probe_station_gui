@@ -112,8 +112,14 @@ class OpticalCalibrationRuntime:
         outcome: OpticalCalibrationOutcome,
         *,
         blocked: bool = False,
+        on_discarded: Callable[[], None] | None = None,
     ) -> bool:
-        return self._lifecycle.consume(outcome.run_id, blocked=blocked)
+        matched = self._lifecycle.consume(outcome.run_id)
+        if blocked:
+            if matched and on_discarded is not None:
+                on_discarded()
+            return False
+        return matched
 
     def _run_flat(self, raw_request: Request) -> None:
         request = raw_request

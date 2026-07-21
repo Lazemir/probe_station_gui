@@ -281,16 +281,25 @@ def _queued_lens_delivery() -> tuple[
     return runtime, request, outcome, artifact
 
 
-@pytest.mark.parametrize("invalidated_by", ("new-run", "cancel", "scan"))
+@pytest.mark.parametrize(
+    "invalidated_by", ("new-run", "cancel", "scan", "new-run-during-scan")
+)
 def test_queued_lens_outcome_cannot_mutate_after_invalidation(invalidated_by) -> None:
     runtime, request, outcome, artifact = _queued_lens_delivery()
-    if invalidated_by == "new-run":
-        runtime.start_lens(replace(request, run_id="lens-b"))
+    replacement_outcome = replace(outcome, run_id="lens-b")
+    if invalidated_by in {"new-run", "new-run-during-scan"}:
+        replacement_request = replace(request, run_id="lens-b")
+        runtime.start_lens(replacement_request)
+        if invalidated_by == "new-run-during-scan":
+            runtime._finish_run(replacement_request, replacement_outcome)
     window = Main.__new__(Main)
     window._optical_calibration_runtime = runtime
-    window._microscope_scan_running = lambda: invalidated_by == "scan"
+    window._microscope_scan_running = lambda: invalidated_by in {
+        "scan",
+        "new-run-during-scan",
+    }
     dialog_updates: list[tuple[str, object]] = []
-    if invalidated_by == "cancel":
+    if invalidated_by in {"cancel", "scan"}:
         window._lens_distortion_dialog = SimpleNamespace(
             set_running=lambda value: dialog_updates.append(("running", value)),
             set_status=lambda message: dialog_updates.append(("status", message)),
@@ -317,11 +326,13 @@ def test_queued_lens_outcome_cannot_mutate_after_invalidation(invalidated_by) ->
         window, outcome, True, outcome.message, artifact
     )
 
-    if invalidated_by == "cancel":
+    if invalidated_by in {"cancel", "scan"}:
         assert dialog_updates == [
             ("running", False),
             ("status", "Lens distortion calibration stopped."),
         ]
+    if invalidated_by == "new-run-during-scan":
+        assert runtime.consume(replacement_outcome) is True
 
 
 def test_lens_start_captures_request_without_gui_thread_serial_read() -> None:

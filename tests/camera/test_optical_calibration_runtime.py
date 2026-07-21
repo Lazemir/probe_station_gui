@@ -529,6 +529,86 @@ def test_real_worker_thread_start_is_nonblocking_and_cancel_wins_initial_capture
     assert runtime.consume(emitted.finished[0]) is False
 
 
+@pytest.mark.parametrize("blocked_action", ("shutdown", "start"))
+def test_real_worker_remains_tracked_until_completion_callback_returns(
+    blocked_action,
+) -> None:
+    events: list[object] = []
+    completion_entered = threading.Event()
+    release_completion = threading.Event()
+
+    class _BlockingCompletionEvents(_Events):
+        def complete(self, outcome) -> None:
+            completion_entered.set()
+            assert release_completion.wait(2.0)
+            super().complete(outcome)
+
+    runtime = OpticalCalibrationRuntime(
+        stage=_Stage(events),
+        camera=_Camera(events, [_frame() for _ in range(10)]),
+        sessions=_Sessions(events),
+        store=_Store(events),
+        events=_BlockingCompletionEvents(),
+    )
+    assert runtime.start_flat(_flat_request()).accepted is True
+    assert completion_entered.wait(1.0)
+
+    try:
+        if blocked_action == "shutdown":
+            assert runtime.shutdown(0.0) is False
+        else:
+            decision = runtime.start_flat(_flat_request(run_id="flat-2"))
+            assert decision.accepted is False
+    finally:
+        release_completion.set()
+
+    assert runtime.shutdown(1.0) is True
+
+
+def test_cancel_after_finish_defers_parent_close_until_completion_returns() -> None:
+    events: list[object] = []
+    completion_entered = threading.Event()
+    release_completion = threading.Event()
+    parent_closed = threading.Event()
+
+    class _ParentLease(_Lease):
+        def close(self) -> dict[str, object]:
+            result = super().close()
+            if self.operation == "optical calibration":
+                parent_closed.set()
+            return result
+
+    class _ParentSessions(_Sessions):
+        def open(self, operation: str, parent_token: str | None = None) -> _Lease:
+            token = f"lease-{len(self.leases) + 1}"
+            lease = _ParentLease(self.events, operation, token)
+            self.leases.append(lease)
+            return lease
+
+    class _BlockingCompletionEvents(_Events):
+        def complete(self, outcome) -> None:
+            completion_entered.set()
+            assert release_completion.wait(2.0)
+            super().complete(outcome)
+
+    runtime = OpticalCalibrationRuntime(
+        stage=_Stage(events),
+        camera=_Camera(events, [_frame() for _ in range(10)]),
+        sessions=_ParentSessions(events),
+        store=_Store(events),
+        events=_BlockingCompletionEvents(),
+    )
+    assert runtime.start_flat(_flat_request(full_wizard=True)).accepted is True
+    assert completion_entered.wait(1.0)
+
+    runtime.cancel("flat-1")
+    assert parent_closed.wait(0.05) is False
+    release_completion.set()
+
+    assert parent_closed.wait(1.0) is True
+    assert runtime.shutdown(1.0) is True
+
+
 @pytest.mark.parametrize("failure", ("camera_restore", "stage_release"))
 def test_cleanup_exception_does_not_skip_later_cleanup_or_outcome(failure) -> None:
     events: list[object] = []
@@ -892,9 +972,7 @@ def test_lens_artifact_survives_camera_restore_warning(monkeypatch) -> None:
         events=emitted,
         thread_factory=_InlineThread,
     )
-    artifact = LensCalibrationArtifact(
-        {"model_type": "stage_geometry"}, _frame(), _frame()
-    )
+    artifact = LensCalibrationArtifact(_valid_lens_payload(), _frame(), _frame())
     monkeypatch.setattr(
         "probe_station_gui.camera.optical_calibration_runtime.fit_lens_artifact",
         lambda *_args, **_kwargs: artifact,
@@ -907,6 +985,10 @@ def test_lens_artifact_survives_camera_restore_warning(monkeypatch) -> None:
     assert outcome.lens_artifact is not None
     assert outcome.lens_artifact.payload is artifact.payload
     assert outcome.restore_warning == "gain restore failed"
+    assert outcome.message == (
+        "Lens distortion calibration complete, but restore failed: "
+        "gain restore failed"
+    )
 
 
 def test_lens_success_message_failure_cannot_publish_success(monkeypatch) -> None:
