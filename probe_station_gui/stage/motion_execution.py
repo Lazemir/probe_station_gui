@@ -315,7 +315,7 @@ class StageMotionExecution:
         if not self._safety.disabled():
             self._limits.ensure(moved_axes)
             limited_axes = self._relative_status_axes(move)
-            if limited_axes:
+            if self._relative_status_required(move):
                 status = self._status.read(limited_axes)
                 self.check_relative_limits(
                     move,
@@ -460,8 +460,6 @@ class StageMotionExecution:
             return
         if status is None:
             moved_axes = self._relative_status_axes(move)
-            if not moved_axes:
-                return
             status = self._status.read(moved_axes)
         positions = self._status.position(status)
         if status is None or not positions:
@@ -614,6 +612,9 @@ class StageMotionExecution:
             for axis, delta in move.items()
             if abs(delta) >= 1e-6 and (axis == "B" or axis in axis_limits)
         )
+
+    def _relative_status_required(self, move: MoveVector) -> bool:
+        return bool(self._limits.axis_limits()) or abs(move.b) >= 1e-6
 
     @staticmethod
     def _relative_motion_started(plan: RelativeMotionPlan, feedrate: float) -> None:

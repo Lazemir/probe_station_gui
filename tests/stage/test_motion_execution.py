@@ -36,8 +36,10 @@ class _SafetyAdapter:
 class _StatusAdapter:
     def __init__(self, events: list[str]) -> None:
         self.events = events
+        self.read_axes: list[tuple[str, ...]] = []
 
     def read(self, axes: tuple[str, ...]) -> _Status:
+        self.read_axes.append(axes)
         self.events.append("status:read")
         return _Status(
             state="Idle",
@@ -233,6 +235,39 @@ def test_relative_execution_without_configured_limits_skips_status_read() -> Non
         "serial:G21",
         "serial:G91",
         "serial:G1 X0.25 F120",
+        "serial:G90",
+    ]
+
+
+def test_unlimited_axis_move_reads_status_when_other_axis_limits_exist() -> None:
+    events: list[str] = []
+    status = _StatusAdapter(events)
+    execution = StageMotionExecution(
+        safety=_SafetyAdapter(events, allowed=True),
+        limits=_LimitAdapter(events, allowed=True),
+        status=status,
+        serial=_SerialAdapter(events),
+        cancellation=_CancellationAdapter(events),
+    )
+
+    execution.run_relative(
+        RelativeMotionPlan(
+            move=MoveVector(c=0.25),
+            feedrate=120.0,
+            wait_for_completion=False,
+        )
+    )
+
+    assert status.read_axes == [()]
+    assert events == [
+        "cancel:check",
+        "safety:check",
+        "limits:ensure",
+        "status:read",
+        "limits:check",
+        "serial:G21",
+        "serial:G91",
+        "serial:G1 C0.25 F120",
         "serial:G90",
     ]
 
