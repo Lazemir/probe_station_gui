@@ -32,6 +32,7 @@ from probe_station_gui.route.operation_modes import (
     ROUTE_OPERATION_MEASURE,
     ROUTE_OPERATION_PHOTO_THEN_MEASURE,
 )
+from probe_station_gui.route.point_execution_adapters import RouteMeasurementEvents
 
 logger = logging.getLogger("probe_station_gui.route.measurement")
 
@@ -146,15 +147,17 @@ class RouteExternalMeasurementSessionRunner:
             contact_settle_s=contact_settle_s,
             nplc_label=nplc_label,
             measurement_type=measurement_type,
-            status_callback=status_callback,
-            progress_callback=progress_callback,
-            photo_callback=photo_callback,
-            photo_focus_callback=photo_focus_callback,
-            photo_record_callback=photo_record_callback,
-            contact_photo_callback=contact_photo_callback,
-            pre_contact_photo_callback=pre_contact_photo_callback,
-            result_callback=result_callback,
-            waiting_callback=waiting_callback,
+            events=RouteMeasurementEvents(
+                status=status_callback,
+                progress=progress_callback,
+                photo=photo_callback,
+                photo_focus=photo_focus_callback,
+                photo_record=photo_record_callback,
+                contact_photo=contact_photo_callback,
+                pre_contact_photo=pre_contact_photo_callback,
+                result=result_callback,
+                waiting=waiting_callback,
+            ),
             operation_mode=ROUTE_OPERATION_PHOTO_THEN_MEASURE
             if self._photo_enabled
             else ROUTE_OPERATION_MEASURE,

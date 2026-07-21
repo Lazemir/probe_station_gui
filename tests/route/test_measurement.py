@@ -20,6 +20,7 @@ from probe_station_gui.route.measurement import (
 )
 from probe_station_gui.route.measurement_csv import RouteMeasurementCsvWriter
 from tests.stage.controller_test_support import StageController, _LineFakeSerial
+from probe_station_gui.route.point_execution_adapters import RouteMeasurementEvents
 
 try:
     from .measurement_test_support import (
@@ -54,6 +55,91 @@ class _PermissionThenAppendWriter(RouteMeasurementCsvWriter):
 
 
 class RouteMeasurementRunnerTest(unittest.TestCase):
+    def test_interrupted_lower_cleanup_failure_never_enters_correction_wait(self) -> None:
+        class _InterruptedLowerStage(_FakeStage):
+            def __init__(self) -> None:
+                super().__init__()
+                self.runner: RouteMeasurementRunner | None = None
+                self.lift_count = 0
+
+            def run_external_needles_action(
+                self,
+                action: str,
+                feedrate: float | None = None,
+            ) -> str:
+                result = super().run_external_needles_action(action, feedrate)
+                if action == "lift":
+                    self.lift_count += 1
+                    if self.lift_count in {2, 3}:
+                        raise RuntimeError(f"lift {self.lift_count} failed")
+                if action == "lower":
+                    assert self.runner is not None
+                    self.runner.request_current_point_correction()
+                    raise RuntimeError("Operation cancelled.")
+                return result
+
+        stage = _InterruptedLowerStage()
+        waiting: list[bool] = []
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runner = RouteMeasurementRunner(
+                points=[_point(1)],
+                csv_path=Path(tmpdir) / "route.csv",
+                stage_controller=stage,
+                lcr_controller=_FakeLCR([1000.0]),
+                needle_feedrate=75.0,
+                confirm_each_point=True,
+                contact_settle_s=0.0,
+                events=RouteMeasurementEvents(waiting=waiting.append),
+            )
+            stage.runner = runner
+
+            success, message = runner.run()
+
+        self.assertFalse(success)
+        self.assertEqual(message, "Route point needle cleanup failed.")
+        self.assertEqual(stage.lift_count, 4)
+        self.assertNotIn(True, waiting)
+
+    def test_read_failure_retries_final_lift_after_both_point_lifts_fail(self) -> None:
+        class _FailingLiftStage(_FakeStage):
+            def __init__(self) -> None:
+                super().__init__()
+                self.lift_count = 0
+
+            def run_external_needles_action(
+                self,
+                action: str,
+                feedrate: float | None = None,
+            ) -> str:
+                result = super().run_external_needles_action(action, feedrate)
+                if action == "lift":
+                    self.lift_count += 1
+                    if self.lift_count in {2, 3}:
+                        raise RuntimeError(f"lift {self.lift_count} failed")
+                return result
+
+        class _FailingReadLCR:
+            def read_primary_value_now(self) -> float:
+                raise RuntimeError("meter failed")
+
+        stage = _FailingLiftStage()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runner = RouteMeasurementRunner(
+                points=[_point(1)],
+                csv_path=Path(tmpdir) / "route.csv",
+                stage_controller=stage,
+                lcr_controller=_FailingReadLCR(),
+                needle_feedrate=75.0,
+                contact_settle_s=0.0,
+            )
+
+            success, message = runner.run()
+
+        self.assertFalse(success)
+        self.assertEqual(message, "meter failed")
+        self.assertEqual(stage.lift_count, 4)
+        self.assertEqual(stage.calls[-1], ("finish",))
+
     def test_latest_statuses_use_last_csv_row_per_structure(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             csv_path = Path(tmpdir) / "route.csv"
@@ -152,7 +238,9 @@ class RouteMeasurementRunnerTest(unittest.TestCase):
                 lcr_controller=lcr,
                 needle_feedrate=75.0,
                 contact_settle_s=0.0,
-                record_callback=lambda record, _position, _total: records.append(record),
+                events=RouteMeasurementEvents(
+                    record=lambda record, _position, _total: records.append(record),
+                ),
             )
 
             success, message = runner.run()
@@ -203,7 +291,9 @@ class RouteMeasurementRunnerTest(unittest.TestCase):
                 lcr_controller=lcr,
                 needle_feedrate=75.0,
                 contact_settle_s=0.0,
-                status_callback=statuses.append,
+                events=RouteMeasurementEvents(
+                    status=statuses.append,
+                ),
             )
             writer = _PermissionThenAppendWriter(csv_path)
             runner._csv_writer = writer
@@ -241,7 +331,9 @@ class RouteMeasurementRunnerTest(unittest.TestCase):
                 initial_measurement_count=1,
                 contact_settle_s=0.0,
                 wait_before_first_point=True,
-                waiting_callback=lambda value: waiting.set() if value else None,
+                events=RouteMeasurementEvents(
+                    waiting=lambda value: waiting.set() if value else None,
+                ),
             )
             finished: list[tuple[bool, str]] = []
             thread = threading.Thread(
@@ -296,7 +388,9 @@ class RouteMeasurementRunnerTest(unittest.TestCase):
                 lcr_controller=lcr,
                 needle_feedrate=75.0,
                 operation_mode=ROUTE_OPERATION_PHOTO,
-                photo_callback=capture,
+                events=RouteMeasurementEvents(
+                    photo=capture,
+                ),
                 photo_settle_s=0.0,
             )
 
@@ -333,7 +427,9 @@ class RouteMeasurementRunnerTest(unittest.TestCase):
                 lcr_controller=_FakeLCR([5.0]),
                 needle_feedrate=75.0,
                 operation_mode=ROUTE_OPERATION_PHOTO_THEN_MEASURE,
-                photo_callback=capture,
+                events=RouteMeasurementEvents(
+                    photo=capture,
+                ),
                 photo_settle_s=0.0,
                 contact_settle_s=0.0,
             )
@@ -361,7 +457,9 @@ class RouteMeasurementRunnerTest(unittest.TestCase):
                 lcr_controller=_FakeLCR([5.0, 7.0]),
                 needle_feedrate=75.0,
                 operation_mode=ROUTE_OPERATION_PHOTO_THEN_MEASURE,
-                photo_callback=capture,
+                events=RouteMeasurementEvents(
+                    photo=capture,
+                ),
                 photo_settle_s=0.0,
                 contact_settle_s=0.0,
             )
@@ -405,7 +503,9 @@ class RouteMeasurementRunnerTest(unittest.TestCase):
                 lcr_controller=_FakeLCR([5.0]),
                 needle_feedrate=75.0,
                 operation_mode=ROUTE_OPERATION_PHOTO_THEN_MEASURE,
-                photo_callback=capture,
+                events=RouteMeasurementEvents(
+                    photo=capture,
+                ),
                 photo_settle_s=0.0,
                 contact_settle_s=0.0,
             )
@@ -459,10 +559,13 @@ class RouteMeasurementRunnerTest(unittest.TestCase):
                 lcr_controller=_FakeLCR([5.0]),
                 needle_feedrate=75.0,
                 operation_mode=ROUTE_OPERATION_PHOTO_THEN_MEASURE,
-                photo_callback=capture,
+                events=RouteMeasurementEvents(
+                    photo=capture,
+                    status=statuses.append,
+                ),
                 photo_settle_s=0.0,
                 contact_settle_s=0.0,
-                status_callback=statuses.append,
+
             )
             runner_holder["runner"] = runner
             finished: list[tuple[bool, str]] = []
@@ -640,10 +743,13 @@ class RouteMeasurementRunnerTest(unittest.TestCase):
                 lcr_controller=_FakeLCR([5.0]),
                 needle_feedrate=75.0,
                 operation_mode=ROUTE_OPERATION_PHOTO_THEN_MEASURE,
-                photo_callback=capture,
+                events=RouteMeasurementEvents(
+                    photo=capture,
+                    status=statuses.append,
+                ),
                 photo_settle_s=0.0,
                 contact_settle_s=0.0,
-                status_callback=statuses.append,
+
             )
             runner_holder["runner"] = runner
             finished: list[tuple[bool, str]] = []
@@ -699,11 +805,15 @@ class RouteMeasurementRunnerTest(unittest.TestCase):
                 lcr_controller=_OpeningLCR([5.0]),
                 needle_feedrate=75.0,
                 operation_mode=ROUTE_OPERATION_PHOTO,
-                photo_callback=capture,
-                photo_focus_callback=focus,
-                photo_record_callback=lambda record, _position, _total: records.append(
+                events=RouteMeasurementEvents(
+                    photo=capture,
+                    photo_focus=focus,
+                    photo_record=lambda record, _position, _total: records.append(
                     record
                 ),
+                ),
+
+
                 photo_focus_enabled=True,
                 photo_settle_s=0.0,
             )
@@ -739,10 +849,13 @@ class RouteMeasurementRunnerTest(unittest.TestCase):
                 lcr_controller=_FakeLCR([5.0]),
                 needle_feedrate=75.0,
                 operation_mode=ROUTE_OPERATION_MEASURE,
-                photo_focus_callback=focus,
+                events=RouteMeasurementEvents(
+                    photo_focus=focus,
+                    status=statuses.append,
+                ),
                 photo_focus_enabled=True,
                 contact_settle_s=0.0,
-                status_callback=statuses.append,
+
             )
             runner_holder["runner"] = runner
             finished: list[tuple[bool, str]] = []
@@ -799,7 +912,9 @@ class RouteMeasurementRunnerTest(unittest.TestCase):
                 lcr_controller=_FakeLCR([5.0]),
                 needle_feedrate=75.0,
                 operation_mode=ROUTE_OPERATION_MEASURE,
-                photo_focus_callback=focus,
+                events=RouteMeasurementEvents(
+                    photo_focus=focus,
+                ),
                 photo_focus_enabled=True,
                 contact_settle_s=0.0,
             )
@@ -848,8 +963,10 @@ class RouteMeasurementRunnerTest(unittest.TestCase):
                 lcr_controller=_FakeLCR([5.0, 25.0]),
                 needle_feedrate=None,
                 contact_settle_s=0.0,
-                progress_callback=lambda position, total, point_number: progress.append(
+                events=RouteMeasurementEvents(
+                    progress=lambda position, total, point_number: progress.append(
                     (position, total, point_number)
+                ),
                 ),
             )
 
@@ -869,7 +986,9 @@ class RouteMeasurementRunnerTest(unittest.TestCase):
                 lcr_controller=_FakeLCR([5.0, 7.0]),
                 needle_feedrate=None,
                 contact_settle_s=0.01,
-                status_callback=statuses.append,
+                events=RouteMeasurementEvents(
+                    status=statuses.append,
+                ),
             )
 
             success, message = runner.run()
@@ -894,7 +1013,9 @@ class RouteMeasurementRunnerTest(unittest.TestCase):
                 lcr_controller=_FakeLCR([5.0]),
                 needle_feedrate=75.0,
                 contact_settle_s=0.0,
-                result_callback=on_result,
+                events=RouteMeasurementEvents(
+                    result=on_result,
+                ),
             )
 
             success, message = runner.run()
@@ -924,7 +1045,9 @@ class RouteMeasurementRunnerTest(unittest.TestCase):
                 lcr_controller=_FakeLCR([5.0]),
                 needle_feedrate=75.0,
                 contact_settle_s=0.0,
-                contact_photo_callback=on_contact_photo,
+                events=RouteMeasurementEvents(
+                    contact_photo=on_contact_photo,
+                ),
             )
 
             success, message = runner.run()
@@ -959,7 +1082,9 @@ class RouteMeasurementRunnerTest(unittest.TestCase):
                 lcr_controller=_FakeLCR([5.0]),
                 needle_feedrate=75.0,
                 contact_settle_s=0.0,
-                pre_contact_photo_callback=on_pre_contact_photo,
+                events=RouteMeasurementEvents(
+                    pre_contact_photo=on_pre_contact_photo,
+                ),
             )
 
             success, message = runner.run()
@@ -1013,7 +1138,9 @@ class RouteMeasurementRunnerTest(unittest.TestCase):
                 needle_feedrate=70.0,
                 confirm_each_point=True,
                 contact_settle_s=0.0,
-                record_callback=on_record,
+                events=RouteMeasurementEvents(
+                    record=on_record,
+                ),
             )
             result = []
             thread = threading.Thread(
@@ -1138,7 +1265,9 @@ class RouteMeasurementRunnerTest(unittest.TestCase):
                 needle_feedrate=None,
                 confirm_each_point=True,
                 contact_settle_s=0.0,
-                record_callback=on_record,
+                events=RouteMeasurementEvents(
+                    record=on_record,
+                ),
             )
             result = []
             thread = threading.Thread(
@@ -1189,8 +1318,11 @@ class RouteMeasurementRunnerTest(unittest.TestCase):
                 needle_feedrate=None,
                 confirm_each_point=True,
                 contact_settle_s=0.5,
-                record_callback=on_record,
-                waiting_callback=on_waiting,
+                events=RouteMeasurementEvents(
+                    record=on_record,
+                    waiting=on_waiting,
+                ),
+
             )
             result = []
             thread = threading.Thread(
@@ -1271,7 +1403,9 @@ class RouteMeasurementRunnerTest(unittest.TestCase):
                 needle_feedrate=None,
                 confirm_each_point=True,
                 contact_settle_s=0.0,
-                record_callback=on_record,
+                events=RouteMeasurementEvents(
+                    record=on_record,
+                ),
             )
             result = []
             thread = threading.Thread(

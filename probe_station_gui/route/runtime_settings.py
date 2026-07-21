@@ -35,6 +35,11 @@ def route_measurement_runtime_settings(configuration: object) -> dict[str, Any]:
                 configuration,
                 "photo_autofocus_enabled",
             ),
+            "photo_focus_range_mm": getattr(
+                configuration,
+                "photo_autofocus_range_mm",
+            ),
+            "photo_output_dir": getattr(configuration, "photo_output_dir"),
             "csv_path": getattr(configuration, "csv_path"),
             "nplc_label": meter.nplc_label(),
             "measurement_type": meter.measurement_type_label(),

@@ -8,6 +8,7 @@ import unittest
 from unittest import mock
 from pathlib import Path
 
+from probe_station_gui.route.point_execution import PointPhotoSettings
 from tests.app.main_coordinate_feedrate_support import (
     Main,
     ObjectiveCalibrationSettings,
@@ -258,14 +259,14 @@ assert image.height() == 4
             )
             or "focus-result"
         )
-        configuration = types.SimpleNamespace(photo_autofocus_range_mm=0.03)
+        settings = PointPhotoSettings(autofocus_range_mm=0.03)
 
         result = Main._route_photo_autofocus(
             window,
             types.SimpleNamespace(),
             2,
             5,
-            configuration=configuration,
+            settings=settings,
         )
 
         self.assertEqual(result, "focus-result")

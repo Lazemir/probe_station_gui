@@ -35,6 +35,8 @@ def _configuration(**overrides):
         "contact_settle_s": 0.2,
         "photo_settle_s": 0.4,
         "photo_autofocus_enabled": True,
+        "photo_autofocus_range_mm": 0.03,
+        "photo_output_dir": "photos",
         "csv_path": "route.csv",
         "operation_mode": ROUTE_OPERATION_MEASURE,
         "meter": FakeMeter(),

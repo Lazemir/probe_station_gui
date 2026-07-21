@@ -12,13 +12,13 @@ import re
 import threading
 import time
 import uuid
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from importlib import resources
 from pathlib import Path
 import sys
 from types import SimpleNamespace
-from typing import Any, Mapping, Sequence, TYPE_CHECKING
+from typing import Any, Mapping, TYPE_CHECKING
 
 _STARTUP_T0 = time.perf_counter()
 _STARTUP_LAST_ELAPSED_MS = 0.0
@@ -223,7 +223,6 @@ from probe_station_gui.route.model import (
 )
 from probe_station_gui.route.measurement import (
     ROUTE_OPERATION_MEASURE,
-    ROUTE_OPERATION_PHOTO,
     RouteContactHeightRecord,
     RouteExternalMeasurementSessionRunner,
     RouteMeasurementPoint,
@@ -233,6 +232,12 @@ from probe_station_gui.route.measurement import (
     route_measurement_sample_from_raw,
     summarize_route_contact_quality,
 )
+from probe_station_gui.route.gui_measurement_adapter import (
+    GuiRouteEventBindings,
+    setup_gui_route_meter,
+)
+from probe_station_gui.route.point_execution import PointPhotoSettings
+from probe_station_gui.route.point_execution_adapters import RouteMeasurementEvents
 from probe_station_gui.route.control_state import (
     ApiRouteControlState,
     api_route_control_legacy_attrs,
@@ -267,10 +272,8 @@ from probe_station_gui.route.confirmation_flow import (
     route_confirmation_submission_plan,
 )
 from probe_station_gui.route.dialog_adapter import (
-    current_route_measurement_configuration,
     open_or_update_route_measurement_dialog,
     route_dialog_handlers,
-    route_measurement_point_request_handler_for_owner,
     restart_waiting_route_measurement,
     route_dialog_restore_plan,
     route_measurement_setup_changed,
@@ -2605,7 +2608,9 @@ class Main(QMainWindow):
             auto_contact_seek_max_total_mm=settings.contact_seek_range_mm,
             contact_settle_s=settings.contact_settle_s,
             operation_mode=ROUTE_OPERATION_MEASURE,
-            status_callback=self.route_measurement_status.emit,
+            events=RouteMeasurementEvents(
+                status=self.route_measurement_status.emit,
+            ),
         )
         try:
             result = (
@@ -7546,9 +7551,12 @@ class Main(QMainWindow):
             wait_before_first_point=wait_before_first_point,
         ):
             return
-        route_lcr_controller = self._route_measurement_lcr_controller(
-            configuration,
+        route_lcr_controller = setup_gui_route_meter(
+            controller=self.lcr_controller,
+            configuration=configuration.meter,
             measure_enabled=launch_state.measure_enabled,
+            show_status=self._show_status,
+            presenter=self._route_runtime_presenter(),
         )
         if route_lcr_controller is None:
             return
@@ -7620,32 +7628,6 @@ class Main(QMainWindow):
         )
         return self._apply_gui_route_start_preflight(camera_preflight)
 
-    def _route_measurement_lcr_controller(
-        self,
-        configuration: RouteMeasurementRunConfiguration,
-        *,
-        measure_enabled: bool,
-    ) -> object | None:
-        if not measure_enabled:
-            return object()
-        try:
-            if self.lcr_controller.is_connected():
-                self.lcr_controller.apply_route_meter_configuration(
-                    configuration.meter
-                )
-            else:
-                self.lcr_controller.apply_route_meter_runtime_configuration(
-                    configuration.meter
-                )
-        except LCRMeterError as exc:
-            message = f"Route measurement instrument setup failed: {exc}"
-            self._show_status(message, 8000)
-            sink = self._route_runtime_presenter()
-            sink.set_running(False)
-            sink.set_status(message)
-            return None
-        return self.lcr_controller
-
     def _build_route_measurement_runner(
         self,
         configuration: RouteMeasurementRunConfiguration,
@@ -7654,7 +7636,19 @@ class Main(QMainWindow):
         route_lcr_controller: object,
         wait_before_first_point: bool,
     ) -> RouteMeasurementRunner:
-        callbacks = self._route_measurement_runner_callbacks(configuration)
+        callbacks = GuiRouteEventBindings(
+            status=self.route_measurement_status.emit,
+            progress=self.route_measurement_progress.emit,
+            record=self.route_measurement_recorded.emit,
+            capture_photo=self._capture_route_photo,
+            autofocus=self._route_photo_autofocus,
+            photo_record=self._record_route_photo,
+            contact_height=self._record_route_contact_height,
+            contact_photo=self._capture_route_contact_photo,
+            pre_contact_photo=self._capture_route_pre_contact_photo,
+            result=self.route_measurement_result.emit,
+            waiting=self.route_measurement_waiting_changed.emit,
+        ).events()
         return RouteMeasurementRunner(
             points=points,
             csv_path=configuration.csv_path,
@@ -7677,60 +7671,11 @@ class Main(QMainWindow):
             operation_mode=configuration.operation_mode,
             photo_settle_s=configuration.photo_settle_s,
             photo_focus_enabled=configuration.photo_autofocus_enabled,
+            photo_focus_range_mm=configuration.photo_autofocus_range_mm,
+            photo_output_dir=configuration.photo_output_dir,
             wait_before_first_point=wait_before_first_point,
-            **callbacks,
+            events=callbacks,
         )
-
-    def _route_measurement_runner_callbacks(
-        self,
-        configuration: RouteMeasurementRunConfiguration,
-    ) -> dict[str, object]:
-        def on_contact_height_record(
-            record: RouteContactHeightRecord,
-            position: int,
-            total: int,
-        ) -> None:
-            active_configuration = current_route_measurement_configuration(
-                self._route_measurement_runtime_configuration,
-                configuration
-            )
-            self._record_route_contact_height(
-                record,
-                position,
-                total,
-                csv_path=active_configuration.csv_path,
-            )
-
-        return {
-            "status_callback": self.route_measurement_status.emit,
-            "progress_callback": self.route_measurement_progress.emit,
-            "record_callback": self.route_measurement_recorded.emit,
-            "photo_callback": lambda point, position, total, focus_result: self._capture_route_photo(
-                point,
-                position,
-                total,
-                configuration=current_route_measurement_configuration(
-                    self._route_measurement_runtime_configuration,
-                    configuration
-                ),
-                focus_result=focus_result,
-            ),
-            "photo_focus_callback": lambda point, position, total: self._route_photo_autofocus(
-                point,
-                position,
-                total,
-                configuration=current_route_measurement_configuration(
-                    self._route_measurement_runtime_configuration,
-                    configuration
-                ),
-            ),
-            "photo_record_callback": self._record_route_photo,
-            "contact_height_record_callback": on_contact_height_record,
-            "contact_photo_callback": self._capture_route_contact_photo,
-            "pre_contact_photo_callback": self._capture_route_pre_contact_photo,
-            "result_callback": self.route_measurement_result.emit,
-            "waiting_callback": self.route_measurement_waiting_changed.emit,
-        }
 
     def _start_route_measurement_runner(
         self,
@@ -7814,7 +7759,7 @@ class Main(QMainWindow):
         position: int,
         total: int,
         *,
-        configuration: RouteMeasurementRunConfiguration,
+        settings: PointPhotoSettings,
         focus_result: object | None = None,
     ) -> str:
         route = self._design_session.route
@@ -7822,10 +7767,10 @@ class Main(QMainWindow):
             point,
             position,
             total,
-            photo_only_mode=configuration.operation_mode == ROUTE_OPERATION_PHOTO,
-            photo_output_dir=configuration.photo_output_dir,
-            photo_autofocus_enabled=bool(configuration.photo_autofocus_enabled),
-            photo_autofocus_range_mm=float(configuration.photo_autofocus_range_mm),
+            photo_only_mode=settings.photo_only_mode,
+            photo_output_dir=settings.output_dir,
+            photo_autofocus_enabled=settings.autofocus_enabled,
+            photo_autofocus_range_mm=settings.autofocus_range_mm,
             route_name=(route.name if route is not None else "route"),
             focus_result=focus_result,
             active_microscope_scale=self._active_microscope_scale,
@@ -7844,16 +7789,16 @@ class Main(QMainWindow):
         position: int,
         total: int,
         *,
-        configuration: RouteMeasurementRunConfiguration,
+        settings: PointPhotoSettings,
     ) -> object:
         _ = point
         self.route_measurement_status.emit(
             "Route photo autofocus: "
             f"point {position}/{total}, "
-            f"+/-{configuration.photo_autofocus_range_mm:.3f} mm."
+            f"+/-{settings.autofocus_range_mm:.3f} mm."
         )
         return self.stage_controller.run_external_local_autofocus(
-            range_mm=configuration.photo_autofocus_range_mm,
+            range_mm=settings.autofocus_range_mm,
         )
 
     def _record_route_photo(

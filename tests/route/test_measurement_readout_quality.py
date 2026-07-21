@@ -12,6 +12,7 @@ from probe_station_gui.route.measurement import (
     RouteMeasurementSample,
     summarize_route_contact_quality,
 )
+from probe_station_gui.route.point_execution_adapters import RouteMeasurementEvents
 
 
 def _events_named(events: list[object], name: str) -> list[object]:
@@ -139,7 +140,9 @@ class RouteMeasurementReadoutQualityTest(unittest.TestCase):
                 measurement_count=2,
                 initial_measurement_count=2,
                 contact_settle_s=0.0,
-                result_callback=lambda *_args: result_events.append(("result",)),
+                events=RouteMeasurementEvents(
+                    result=lambda *_args: result_events.append(("result",)),
+                ),
             )
 
             success, message = runner.run()
@@ -247,7 +250,9 @@ class RouteMeasurementReadoutQualityTest(unittest.TestCase):
                 needle_feedrate=None,
                 measurement_count=3,
                 contact_settle_s=0.0,
-                record_callback=lambda record, _position, _total: records.append(record),
+                events=RouteMeasurementEvents(
+                    record=lambda record, _position, _total: records.append(record),
+                ),
             )
 
             success, message = runner.run()
@@ -308,9 +313,11 @@ class RouteMeasurementReadoutQualityTest(unittest.TestCase):
                 lcr_controller=lcr,
                 needle_feedrate=None,
                 measurement_count=5,
-                short_threshold_ohm=1.0,
+
                 contact_settle_s=0.0,
-                record_callback=lambda record, _position, _total: records.append(record),
+                events=RouteMeasurementEvents(
+                    record=lambda record, _position, _total: records.append(record),
+                ),
             )
 
             success, message = runner.run()
@@ -341,9 +348,11 @@ class RouteMeasurementReadoutQualityTest(unittest.TestCase):
                 lcr_controller=lcr,
                 needle_feedrate=None,
                 measurement_count=2,
-                short_threshold_ohm=1.0,
+
                 contact_settle_s=0.0,
-                record_callback=lambda record, _position, _total: records.append(record),
+                events=RouteMeasurementEvents(
+                    record=lambda record, _position, _total: records.append(record),
+                ),
             )
 
             success, message = runner.run()
@@ -377,9 +386,11 @@ class RouteMeasurementReadoutQualityTest(unittest.TestCase):
                 lcr_controller=lcr,
                 needle_feedrate=None,
                 measurement_count=12,
-                short_threshold_ohm=1.0,
+
                 contact_settle_s=0.0,
-                record_callback=lambda record, _position, _total: records.append(record),
+                events=RouteMeasurementEvents(
+                    record=lambda record, _position, _total: records.append(record),
+                ),
             )
 
             success, message = runner.run()
@@ -427,9 +438,11 @@ class RouteMeasurementReadoutQualityTest(unittest.TestCase):
                 lcr_controller=lcr,
                 needle_feedrate=None,
                 measurement_count=12,
-                short_threshold_ohm=1.0,
+
                 contact_settle_s=0.0,
-                record_callback=lambda record, _position, _total: records.append(record),
+                events=RouteMeasurementEvents(
+                    record=lambda record, _position, _total: records.append(record),
+                ),
             )
 
             success, message = runner.run()
@@ -480,8 +493,11 @@ class RouteMeasurementReadoutQualityTest(unittest.TestCase):
                 measurement_count=4,
                 confirm_each_point=True,
                 contact_settle_s=0.0,
-                result_callback=on_result,
-                record_callback=lambda record, _position, _total: records.append(record),
+                events=RouteMeasurementEvents(
+                    result=on_result,
+                    record=lambda record, _position, _total: records.append(record),
+                ),
+
             )
             finished: list[tuple[bool, str]] = []
             thread = threading.Thread(
@@ -545,7 +561,7 @@ class RouteMeasurementReadoutQualityTest(unittest.TestCase):
                 needle_feedrate=None,
                 measurement_count=4,
                 initial_measurement_count=2,
-                short_threshold_ohm=10.0,
+
                 auto_contact_seek_on_bad_contact=True,
                 contact_settle_s=0.0,
             )
@@ -580,7 +596,7 @@ class RouteMeasurementReadoutQualityTest(unittest.TestCase):
                 lcr_controller=lcr,
                 needle_feedrate=None,
                 measurement_count=5,
-                short_threshold_ohm=1.0,
+
                 contact_settle_s=0.0,
             )
 
@@ -617,15 +633,19 @@ class RouteMeasurementReadoutQualityTest(unittest.TestCase):
                 ),
                 needle_feedrate=None,
                 measurement_count=1,
-                short_threshold_ohm=10.0,
+
                 confirm_each_point=True,
                 auto_next_ok_or_short=True,
                 contact_settle_s=0.0,
-                record_callback=lambda record, _position, _total: records.append(
+                events=RouteMeasurementEvents(
+                    record=lambda record, _position, _total: records.append(
                     record
                 ),
-                status_callback=statuses.append,
-                waiting_callback=lambda waiting: waiting_values.append(bool(waiting)),
+                    status=statuses.append,
+                    waiting=lambda waiting: waiting_values.append(bool(waiting)),
+                ),
+
+
             )
 
             success, message = runner.run()
@@ -673,8 +693,11 @@ class RouteMeasurementReadoutQualityTest(unittest.TestCase):
                 confirm_each_point=True,
                 auto_next_ok_or_short=True,
                 contact_settle_s=0.0,
-                status_callback=on_status,
-                waiting_callback=on_waiting,
+                events=RouteMeasurementEvents(
+                    status=on_status,
+                    waiting=on_waiting,
+                ),
+
             )
             result = []
             runner.request_pause_after_current_point()
@@ -732,12 +755,14 @@ class RouteMeasurementReadoutQualityTest(unittest.TestCase):
                 ),
                 needle_feedrate=None,
                 measurement_count=2,
-                short_threshold_ohm=10.0,
+
                 max_relative_rms=0.01,
                 confirm_each_point=True,
                 auto_next_ok_or_short=True,
                 contact_settle_s=0.0,
-                waiting_callback=lambda waiting: waiting_values.append(bool(waiting)),
+                events=RouteMeasurementEvents(
+                    waiting=lambda waiting: waiting_values.append(bool(waiting)),
+                ),
             )
 
             success, message = runner.run()
@@ -773,7 +798,9 @@ class RouteMeasurementReadoutQualityTest(unittest.TestCase):
                 confirm_each_point=True,
                 auto_next_ok_or_short=True,
                 contact_settle_s=0.0,
-                waiting_callback=on_waiting,
+                events=RouteMeasurementEvents(
+                    waiting=on_waiting,
+                ),
             )
             result = []
             thread = threading.Thread(
@@ -826,8 +853,11 @@ class RouteMeasurementReadoutQualityTest(unittest.TestCase):
                 max_relative_rms=0.01,
                 confirm_each_point=True,
                 contact_settle_s=0.0,
-                record_callback=on_record,
-                result_callback=on_result,
+                events=RouteMeasurementEvents(
+                    record=on_record,
+                    result=on_result,
+                ),
+
             )
             result = []
             thread = threading.Thread(
@@ -892,7 +922,9 @@ class RouteMeasurementReadoutQualityTest(unittest.TestCase):
                 needle_feedrate=None,
                 measurement_count=4,
                 contact_settle_s=0.0,
-                record_callback=lambda record, _position, _total: records.append(record),
+                events=RouteMeasurementEvents(
+                    record=lambda record, _position, _total: records.append(record),
+                ),
             )
 
             success, message = runner.run()
@@ -945,7 +977,9 @@ class RouteMeasurementReadoutQualityTest(unittest.TestCase):
                 measurement_count=11,
                 initial_measurement_count=11,
                 contact_settle_s=0.0,
-                record_callback=lambda record, _position, _total: records.append(record),
+                events=RouteMeasurementEvents(
+                    record=lambda record, _position, _total: records.append(record),
+                ),
             )
 
             success, message = runner.run()
@@ -1006,7 +1040,9 @@ class RouteMeasurementReadoutQualityTest(unittest.TestCase):
                 needle_feedrate=None,
                 measurement_count=4,
                 contact_settle_s=0.0,
-                record_callback=lambda record, _position, _total: records.append(record),
+                events=RouteMeasurementEvents(
+                    record=lambda record, _position, _total: records.append(record),
+                ),
             )
 
             success, message = runner.run()

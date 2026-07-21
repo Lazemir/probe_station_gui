@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from probe_station_gui.route.measurement import RouteMeasurementRunner
+from probe_station_gui.route.point_execution_adapters import RouteMeasurementEvents
 
 
 def _calls_named(calls: list[tuple[Any, ...]], name: str) -> list[tuple[Any, ...]]:
@@ -62,7 +63,7 @@ class RouteMeasurementContactSeekTest(unittest.TestCase):
                 needle_feedrate=75.0,
                 measurement_count=4,
                 initial_measurement_count=2,
-                short_threshold_ohm=10.0,
+
                 auto_contact_seek_on_bad_contact=True,
                 contact_settle_s=0.0,
             )
@@ -277,11 +278,15 @@ class RouteMeasurementContactSeekTest(unittest.TestCase):
                 needle_feedrate=75.0,
                 measurement_count=2,
                 initial_measurement_count=2,
-                photo_callback=capture,
-                photo_focus_callback=focus,
-                photo_record_callback=lambda record, _position, _total: records.append(
+                events=RouteMeasurementEvents(
+                    photo=capture,
+                    photo_focus=focus,
+                    photo_record=lambda record, _position, _total: records.append(
                     record
                 ),
+                ),
+
+
                 photo_settle_s=0.0,
                 contact_settle_s=0.0,
             )
@@ -455,7 +460,9 @@ class RouteMeasurementContactSeekTest(unittest.TestCase):
                 auto_contact_seek_step_mm=0.001,
                 auto_contact_seek_max_total_mm=0.002,
                 contact_settle_s=0.0,
-                contact_height_record_callback=on_contact_height,
+                events=RouteMeasurementEvents(
+                    contact_height=on_contact_height,
+                ),
             )
 
             success, message = runner.run()
@@ -572,7 +579,7 @@ class RouteMeasurementContactSeekTest(unittest.TestCase):
                 needle_feedrate=None,
                 measurement_count=4,
                 initial_measurement_count=2,
-                short_threshold_ohm=10.0,
+
                 auto_contact_seek_on_bad_contact=True,
                 auto_contact_seek_step_mm=0.0005,
                 auto_contact_seek_max_total_mm=0.001,
@@ -709,14 +716,17 @@ class RouteMeasurementContactSeekTest(unittest.TestCase):
                 needle_feedrate=None,
                 measurement_count=4,
                 initial_measurement_count=2,
-                short_threshold_ohm=10.0,
+
                 confirm_each_point=True,
                 auto_contact_seek_on_bad_contact=True,
                 auto_contact_seek_step_mm=0.001,
                 auto_contact_seek_max_total_mm=0.001,
                 contact_settle_s=0.0,
-                result_callback=on_result,
-                contact_height_record_callback=on_contact_height,
+                events=RouteMeasurementEvents(
+                    result=on_result,
+                    contact_height=on_contact_height,
+                ),
+
             )
             result = []
             thread = threading.Thread(
@@ -793,14 +803,17 @@ class RouteMeasurementContactSeekTest(unittest.TestCase):
                 needle_feedrate=None,
                 measurement_count=4,
                 initial_measurement_count=2,
-                short_threshold_ohm=10.0,
+
                 confirm_each_point=True,
                 auto_contact_seek_on_bad_contact=True,
                 auto_contact_seek_step_mm=0.001,
                 auto_contact_seek_max_total_mm=0.001,
                 contact_settle_s=0.0,
-                result_callback=on_result,
-                status_callback=statuses.append,
+                events=RouteMeasurementEvents(
+                    result=on_result,
+                    status=statuses.append,
+                ),
+
             )
             result = []
             thread = threading.Thread(
@@ -860,7 +873,9 @@ class RouteMeasurementContactSeekTest(unittest.TestCase):
             auto_contact_seek_step_mm=0.001,
             auto_contact_seek_max_total_mm=0.001,
             contact_settle_s=0.0,
-            status_callback=statuses.append,
+            events=RouteMeasurementEvents(
+                status=statuses.append,
+            ),
         )
 
         result = runner.seek_contact(point)
@@ -920,8 +935,11 @@ class RouteMeasurementContactSeekTest(unittest.TestCase):
                 auto_contact_seek_step_mm=0.001,
                 auto_contact_seek_max_total_mm=0.003,
                 contact_settle_s=0.0,
-                status_callback=on_status,
-                waiting_callback=on_waiting,
+                events=RouteMeasurementEvents(
+                    status=on_status,
+                    waiting=on_waiting,
+                ),
+
             )
             runner_holder["runner"] = runner
             result = []
@@ -1002,7 +1020,9 @@ class RouteMeasurementContactSeekTest(unittest.TestCase):
                 auto_contact_seek_step_mm=0.001,
                 auto_contact_seek_max_total_mm=0.001,
                 contact_settle_s=0.0,
-                result_callback=on_result,
+                events=RouteMeasurementEvents(
+                    result=on_result,
+                ),
             )
             result = []
             thread = threading.Thread(
