@@ -212,6 +212,10 @@ from probe_station_gui.views.stage_position_panel import (
     StagePositionPanel,
     format_stage_axis_value,
 )
+from probe_station_gui.views.microscope_interaction import (
+    ClickMoveBindings,
+    ClickMoveConfig,
+)
 from probe_station_gui.design import objective_alignment as alignment, objective_offsets as offsets
 from probe_station_gui.route.model import (
     MeasurementRoute,
@@ -646,8 +650,6 @@ class Main(QMainWindow):
     B_POSITION_CHANGE_TOLERANCE_DEG = 1e-3
     CAMERA_UI_FRAME_GAP_WARNING_S = 0.25
     EXPOSURE_POLICY_START_RETRY_BACKOFF_S = 1.0
-    CLICK_TO_MOVE_PENDING_RETRY_MS = 150
-    CLICK_TARGET_ANIMATION_PADDING_S = 0.03
     MICROSCOPE_AREA_SCAN_DEFAULT_ROWS = 3
     MICROSCOPE_AREA_SCAN_DEFAULT_COLUMNS = 3
     MICROSCOPE_AREA_SCAN_MAX_TILES = 121
@@ -698,9 +700,36 @@ class Main(QMainWindow):
             self.setWindowIcon(app.windowIcon())
         self.menuBar().setNativeMenuBar(False)
 
-        self.view = MicroscopeView()
-        self.view.set_target_pending_blink_interval(self.STAGE_COORDINATE_BLINK_MS)
-        self.view.set_target_motion_update_interval(self.MANUAL_JOG_UPDATE_MS)
+        self.settings_manager: SettingsManager = SettingsManager()
+        _startup_trace("SettingsManager created; logging configured")
+        _flush_startup_trace()
+        self.view = MicroscopeView(
+            click_move_bindings=ClickMoveBindings(
+                request_move=lambda dx, dy: self.stage_controller.request_move(dx, dy),
+                stage_connected=self._stage_serial_ready,
+                motion_blocked=self._objective_mutation_busy,
+                mark_motion_axes=lambda axes: (
+                    stage_position_panel_adapter.set_stage_motion_axes(self, axes)
+                ),
+                show_status=self._show_status,
+                repaint=lambda: self.view.update(),
+                preview_hover=lambda dx, dy: (
+                    self.stage_controller.preview_clicked_point_xy(dx, dy)
+                ),
+                present_coordinates=self._update_coordinate_display,
+                manual_alignment_active=lambda: (
+                    self._manual_alignment_pick_slot is not None
+                ),
+                capture_manual_alignment=self._capture_manual_alignment_clicked,
+                pending_state_changed=self._update_stage_coordinate_apply_state,
+            ),
+            click_move_config=ClickMoveConfig(
+                pending_timeout_s=lambda: (
+                    self.settings_manager.settings.click_to_move.pending_timeout_s
+                ),
+            ),
+        )
+        self._microscope_interaction = self.view.interaction
         central_container = QWidget(self)
         central_layout = QVBoxLayout(central_container)
         central_layout.setContentsMargins(0, 0, 0, 0)
@@ -710,9 +739,6 @@ class Main(QMainWindow):
         self.serial_connection = None
         self.serial_port_name: str | None = None
         self.serial_baud_rate: int | None = None
-        self.settings_manager: SettingsManager = SettingsManager()
-        _startup_trace("SettingsManager created; logging configured")
-        _flush_startup_trace()
         self._api_key_store = ApiKeyStore(
             self.settings_manager.config_dir() / API_KEY_FILENAME
         )
@@ -824,8 +850,6 @@ class Main(QMainWindow):
                 target_tolerance_mm=self.COORDINATE_MOVE_TARGET_TOLERANCE_MM,
             )
         )
-        self._pending_click_to_move: tuple[float, float, float, float] | None = None
-        self._pending_click_deadline: float | None = None
         self._pending_stage_axis_targets: dict[str, tuple[float, float]] = {}
         self._exact_step_accumulator = ExactStepAccumulator(self.STAGE_AXIS_NAMES)
         self._exact_step_pending_axes: set[str] = set()
@@ -951,9 +975,6 @@ class Main(QMainWindow):
         self.thread = QThread()
         self.grabber.moveToThread(self.thread)
         self.thread.started.connect(self.grabber.start)
-        self.view.clicked.connect(self.on_click)
-        self.view.hovered.connect(self._on_view_hover)
-        self.view.hover_left.connect(self._on_view_hover_left)
         self.view.design_minimap_clicked.connect(
             self._open_design_window_from_minimap_point
         )
@@ -1045,7 +1066,9 @@ class Main(QMainWindow):
         self.stage_controller.b_rotation_started.connect(
             self._on_alignment_b_rotation_started
         )
-        self.stage_controller.click_move_started.connect(self._on_click_move_started)
+        self.stage_controller.click_move_started.connect(
+            self._microscope_interaction.start_target_motion
+        )
         self.stage_controller.absolute_xy_move_started.connect(
             self._on_absolute_xy_move_started
         )
@@ -1109,9 +1132,6 @@ class Main(QMainWindow):
         self._stage_motion_blink_timer.timeout.connect(
             lambda: stage_position_panel_adapter.advance_stage_motion_blink(self)
         )
-        self._pending_click_timer = QTimer(self)
-        self._pending_click_timer.setInterval(self.CLICK_TO_MOVE_PENDING_RETRY_MS)
-        self._pending_click_timer.timeout.connect(self._retry_pending_click_to_move)
         self._linear_feedrate_save_timer = QTimer(self)
         self._linear_feedrate_save_timer.setSingleShot(True)
         self._linear_feedrate_save_timer.setInterval(400)
@@ -3308,7 +3328,7 @@ class Main(QMainWindow):
                     "status_code": 409,
                     "message": message,
                 }
-        if not self._start_click_to_move(dx_px, dy_px):
+        if not self._microscope_interaction.try_start_api_move(dx_px, dy_px):
             return {
                 "accepted": False,
                 "status_code": 409,
@@ -3740,118 +3760,11 @@ class Main(QMainWindow):
         if self._design_layout_window_requested:
             create_design_layout_window(self, design_layout_window_class)
 
-    def on_click(self, dx: float, dy: float, rel_x: float, rel_y: float) -> None:
-        if self._manual_alignment_pick_slot is not None:
-            self._capture_manual_alignment_clicked(dx, dy)
-            return
-        if self._start_click_to_move(dx, dy):
-            self._clear_pending_click_to_move(clear_cross=False)
-            return
-        self._queue_pending_click_to_move(dx, dy, rel_x, rel_y)
-
     def _stage_serial_ready(self) -> bool:
         return bool(
             self.serial_connection is not None
             and getattr(self.serial_connection, "is_open", False)
         )
-
-    def _click_to_move_pending_timeout_s(self) -> float:
-        default_timeout_s = (
-            self.settings_manager.DEFAULT_CLICK_TO_MOVE_PENDING_TIMEOUT_S
-        )
-        timeout_s = self.settings_manager.settings.click_to_move.pending_timeout_s
-        try:
-            timeout_s = float(timeout_s)
-        except (TypeError, ValueError):
-            timeout_s = default_timeout_s
-        if not math.isfinite(timeout_s):
-            timeout_s = default_timeout_s
-        return min(
-            self.settings_manager.MAX_CLICK_TO_MOVE_PENDING_TIMEOUT_S,
-            max(
-                self.settings_manager.MIN_CLICK_TO_MOVE_PENDING_TIMEOUT_S,
-                timeout_s,
-            ),
-        )
-
-    def _start_click_to_move(self, dx: float, dy: float) -> bool:
-        if not self._stage_serial_ready() or self._objective_mutation_busy():
-            return False
-        accepted = self.stage_controller.request_move(dx, dy)
-        if accepted:
-            stage_position_panel_adapter.set_stage_motion_axes(self, {"X", "Y"})
-        return bool(accepted)
-
-    def _queue_pending_click_to_move(
-        self,
-        dx: float,
-        dy: float,
-        rel_x: float,
-        rel_y: float,
-    ) -> None:
-        self._pending_click_to_move = (dx, dy, rel_x, rel_y)
-        self._pending_click_deadline = (
-            time.monotonic() + self._click_to_move_pending_timeout_s()
-        )
-        self.view.set_target_pending(True)
-        if not self._pending_click_timer.isActive():
-            self._pending_click_timer.start()
-        self._update_stage_coordinate_apply_state()
-        if self._stage_serial_ready():
-            self._show_status(
-                "Stage is busy; click-to-move will start when it is ready.",
-                3000,
-            )
-        else:
-            self._show_status(
-                "Stage is not connected; click-to-move will wait for it.",
-                3000,
-            )
-
-    def _retry_pending_click_to_move(self) -> None:
-        pending = self._pending_click_to_move
-        if pending is None:
-            self._clear_pending_click_to_move(clear_cross=False)
-            return
-        deadline = self._pending_click_deadline
-        if deadline is not None and time.monotonic() >= deadline:
-            self._clear_pending_click_to_move(clear_cross=True)
-            self._show_status(
-                "Click-to-move timed out waiting for the stage.",
-                5000,
-            )
-            return
-        dx, dy, _rel_x, _rel_y = pending
-        if self._start_click_to_move(dx, dy):
-            self._clear_pending_click_to_move(clear_cross=False)
-
-    def _clear_pending_click_to_move(self, *, clear_cross: bool) -> None:
-        self._pending_click_to_move = None
-        self._pending_click_deadline = None
-        if self._pending_click_timer.isActive():
-            self._pending_click_timer.stop()
-        self.view.set_target_pending(False)
-        if clear_cross:
-            self.view.clear_target_cross()
-        self._update_stage_coordinate_apply_state()
-
-    def _on_click_move_started(
-        self,
-        move_x_mm: float,
-        move_y_mm: float,
-        feedrate_mm_min: float,
-    ) -> None:
-        try:
-            distance_mm = math.hypot(float(move_x_mm), float(move_y_mm))
-            feedrate = max(self.MIN_FEEDRATE_MM_MIN, float(feedrate_mm_min))
-        except (TypeError, ValueError):
-            return
-        if distance_mm <= 1e-9:
-            self.view.finish_target_motion_to_center()
-            return
-        duration_s = (distance_mm / feedrate) * 60.0
-        duration_s += self.CLICK_TARGET_ANIMATION_PADDING_S
-        self.view.animate_target_cross_to_center(max(duration_s, 0.05))
 
     def _on_absolute_xy_move_started(
         self,
@@ -4189,19 +4102,6 @@ class Main(QMainWindow):
             return latest
         return None
 
-    def _on_view_hover(
-        self, dx: float, dy: float, _rel_x: float, _rel_y: float
-    ) -> None:
-        preview = self.stage_controller.preview_clicked_point_xy(dx, dy)
-        if preview is None:
-            self._update_coordinate_display()
-            return
-        center_xy, cursor_xy = preview
-        self._update_coordinate_display(center_xy=center_xy, cursor_xy=cursor_xy)
-
-    def _on_view_hover_left(self) -> None:
-        self._update_coordinate_display(cursor_xy=None)
-
     def _show_status(self, message: str, timeout_ms: int = 0) -> None:
         if message:
             status_text = str(message)
@@ -4374,7 +4274,7 @@ class Main(QMainWindow):
         for delay_ms in (0, 100, 300, 1000, 2500):
             QTimer.singleShot(delay_ms, self._update_stage_coordinate_apply_state)
 
-    def _update_stage_coordinate_apply_state(self) -> None:
+    def _update_stage_coordinate_apply_state(self, _pending: bool | None = None) -> None:
         panel = getattr(self, "_stage_position_panel", None)
         if panel is None:
             return
@@ -6005,8 +5905,8 @@ class Main(QMainWindow):
                 self.alignment_panel.set_fit_residuals(
                     *self._alignment_draft_fit_residuals
                 )
-        self.view.set_alignment_mode(presentation.alignment_mode)
-        self.view.set_alignment_instruction(presentation.instruction)
+        self._microscope_interaction.set_alignment_mode(presentation.alignment_mode)
+        self._microscope_interaction.set_alignment_instruction(presentation.instruction)
 
     def _update_coordinate_display(
         self,

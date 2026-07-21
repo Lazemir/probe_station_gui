@@ -61,17 +61,28 @@ class _StageController:
 class _View:
     def __init__(self) -> None:
         self.focus_reasons: list[object] = []
-        self.finished_target_motions = 0
-        self.cleared_target_crosses = 0
 
     def setFocus(self, reason: object) -> None:  # noqa: N802 - Qt naming
         self.focus_reasons.append(reason)
 
-    def finish_target_motion_to_center(self) -> None:
-        self.finished_target_motions += 1
 
-    def clear_target_cross(self) -> None:
-        self.cleared_target_crosses += 1
+
+class _MicroscopeInteraction:
+    def __init__(self) -> None:
+        self.has_pending_move = False
+        self.cancel_calls: list[bool] = []
+        self.finish_calls: list[bool] = []
+        self.clear_calls = 0
+
+    def cancel_pending(self, *, clear_target: bool) -> None:
+        self.has_pending_move = False
+        self.cancel_calls.append(clear_target)
+
+    def finish_move(self, *, success: bool) -> None:
+        self.finish_calls.append(success)
+
+    def clear_target(self) -> None:
+        self.clear_calls += 1
 
 
 class _JoystickPanel:
@@ -145,9 +156,9 @@ class _Owner:
     def __init__(self) -> None:
         self.stage_controller = _StageController()
         self.view = _View()
+        self._microscope_interaction = _MicroscopeInteraction()
         self.joystick_panel = _JoystickPanel()
         self._coordinate_targets = _coordinate_targets()
-        self._pending_click_to_move = None
         self._manual_alignment_pick_slot = None
         self._pending_alignment_preparation = None
         self._pending_quick_alignment_rotation = False
@@ -218,11 +229,6 @@ class _Owner:
 
     def _sample_handling_active(self) -> bool:
         return False
-
-    def _clear_pending_click_to_move(self, *, clear_cross: bool) -> None:
-        self._pending_click_to_move = None
-        if clear_cross:
-            self.view.clear_target_cross()
 
     def _cancel_manual_alignment_pick(self) -> None:
         self._manual_alignment_pick_slot = None
@@ -363,6 +369,17 @@ def test_pending_edits_only_cancel_clears_edits_and_reports_edit_status() -> Non
     assert owner.cancel_refreshes == 1
 
 
+def test_global_cancel_clears_pending_click_through_interaction_seam() -> None:
+    owner = _Owner()
+    owner._microscope_interaction.has_pending_move = True
+
+    move_lifecycle.cancel_stage_coordinate_action(owner, focus_reason="focus")
+
+    assert owner._microscope_interaction.cancel_calls == [True]
+    assert owner.statuses == [("Cancel requested.", 3000)]
+    assert owner.view.focus_reasons == ["focus"]
+
+
 def test_move_finish_success_completes_planned_move_prediction_wait_state() -> None:
     owner = _Owner()
     owner._pending_planned_move_target_xy = (4.0, 5.0)
@@ -407,7 +424,7 @@ def test_move_finish_alignment_preparation_returns_before_normal_finish_cleanup(
     assert owner.design_position_refreshes == 1
     assert owner.alignment_panel_collapses == 1
     assert owner.finished_alignment_drafts == 1
-    assert owner.view.cleared_target_crosses == 1
+    assert owner._microscope_interaction.clear_calls == 1
     assert owner.status_refreshes == [owner.MANUAL_JOG_SETTLE_POLL_DELAYS_MS]
     assert owner.cancel_refreshes == 0
     assert owner.statuses == [
@@ -460,7 +477,7 @@ def test_move_finish_normal_failure_clears_tracking_and_cross_then_reports_statu
 
     move_lifecycle.on_move_finished(owner, False, "Limit reached.")
 
-    assert owner.view.cleared_target_crosses == 1
+    assert owner._microscope_interaction.finish_calls == [False]
     assert owner._coordinate_targets.has_active_move() is False
     assert owner._stage_motion_axes == set()
     assert owner.statuses == [("Limit reached.", 5000)]
@@ -473,8 +490,7 @@ def test_move_finish_success_with_skipped_message_clears_coordinate_tracking() -
 
     move_lifecycle.on_move_finished(owner, True, "Move skipped.")
 
-    assert owner.view.finished_target_motions == 1
-    assert owner.view.cleared_target_crosses == 1
+    assert owner._microscope_interaction.finish_calls == [True]
     assert owner._coordinate_targets.has_active_move() is False
     assert owner.status_refreshes == [owner.MANUAL_JOG_SETTLE_POLL_DELAYS_MS]
     assert owner.statuses == [("Move skipped.", 5000)]

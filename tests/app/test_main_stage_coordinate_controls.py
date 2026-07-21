@@ -29,6 +29,11 @@ from probe_station_gui.views import main_window_needle_calibration as needle_cal
 from probe_station_gui.views import (
     main_window_stage_position_panel as stage_position_panel_adapter,
 )
+from probe_station_gui.views.microscope_interaction import (
+    ClickMoveBindings,
+    ClickMoveConfig,
+    MicroscopeInteraction,
+)
 
 
 class MainStageCoordinateControlsTest(unittest.TestCase):
@@ -951,6 +956,35 @@ class MainStageCoordinateControlsTest(unittest.TestCase):
         Main._update_stage_coordinate_apply_state(window)
 
         self.assertTrue(cancel_button.enabled)
+
+    def test_pending_click_refreshes_global_cancel_enabled_state(self) -> None:
+        window, _stage_controller, cancel_button, _statuses = _make_cancel_main()
+        interaction = MicroscopeInteraction(
+            ClickMoveBindings(
+                request_move=lambda _dx, _dy: False,
+                stage_connected=lambda: False,
+                motion_blocked=lambda: False,
+                mark_motion_axes=lambda _axes: None,
+                show_status=lambda _message, _timeout_ms=0: None,
+                repaint=lambda: None,
+                preview_hover=lambda _dx, _dy: None,
+                present_coordinates=lambda **_coordinates: None,
+                manual_alignment_active=lambda: False,
+                capture_manual_alignment=lambda _dx, _dy: None,
+                pending_state_changed=lambda _pending: (
+                    Main._update_stage_coordinate_apply_state(window)
+                ),
+            ),
+            ClickMoveConfig(pending_timeout_s=lambda: 2.0),
+        )
+        window._microscope_interaction = interaction
+
+        interaction.try_start_move(2.0, -1.0, 0.6, 0.4)
+        self.assertTrue(cancel_button.enabled)
+
+        interaction.cancel_pending(clear_target=True)
+        self.assertFalse(cancel_button.enabled)
+        interaction.shutdown()
 
     def test_cancel_button_is_enabled_for_reported_controller_motion(self) -> None:
         window, stage_controller, cancel_button, _statuses = _make_cancel_main()

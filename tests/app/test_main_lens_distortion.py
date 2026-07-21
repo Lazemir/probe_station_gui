@@ -1006,6 +1006,12 @@ def test_api_force_click_reset_returns_conflict_during_scan_startup() -> None:
     assert starts == []
 
 def test_click_to_move_start_is_rejected_during_scan_startup() -> None:
+    from probe_station_gui.views.microscope_interaction import (
+        ClickMoveBindings,
+        ClickMoveConfig,
+        MicroscopeInteraction,
+    )
+
     window = Main.__new__(Main)
     window._optical_calibration_runtime = SimpleNamespace(
         state=lambda: SimpleNamespace(active_run_id=None, parent_session_token=None)
@@ -1021,11 +1027,34 @@ def test_click_to_move_start_is_rejected_during_scan_startup() -> None:
     window._lens_distortion_context = None
     window._microscope_scan_thread = SimpleNamespace(is_alive=lambda: True)
     window._stage_serial_ready = lambda: True
+    interaction = MicroscopeInteraction(
+        ClickMoveBindings(
+            request_move=window.stage_controller.request_move,
+            stage_connected=window._stage_serial_ready,
+            motion_blocked=window._objective_mutation_busy,
+            mark_motion_axes=lambda _axes: None,
+            show_status=lambda _message, _timeout_ms=0: None,
+            repaint=lambda: None,
+            preview_hover=lambda _dx, _dy: None,
+            present_coordinates=lambda **_coordinates: None,
+            manual_alignment_active=lambda: False,
+            capture_manual_alignment=lambda _dx, _dy: None,
+            pending_state_changed=lambda _pending: None,
+        ),
+        ClickMoveConfig(pending_timeout_s=lambda: 8.0),
+    )
+    window._microscope_interaction = interaction
 
-    accepted = Main._start_click_to_move(window, 4.0, -3.0)
+    response = Main._api_click_to_move_calibration(
+        window,
+        {"dx_px": 4.0, "dy_px": -3.0},
+    )
 
-    assert accepted is False
+    assert response["accepted"] is False
+    assert response["status_code"] == 409
     assert requests == []
+    assert interaction.pending_move is None
+    assert interaction.target_rel is None
 
 def test_gui_click_reset_is_rejected_during_calibration_startup() -> None:
     window = Main.__new__(Main)
@@ -1121,8 +1150,10 @@ def test_api_click_to_move_calibration_force_resets_before_start() -> None:
         reset_calibration=lambda reason: events.append(("reset", reason)),
     )
     window._stage_serial_ready = lambda: True
-    window._start_click_to_move = (
-        lambda dx_px, dy_px: events.append(("start", dx_px, dy_px)) or True
+    window._microscope_interaction = SimpleNamespace(
+        try_start_api_move=(
+            lambda dx_px, dy_px: events.append(("start", dx_px, dy_px)) or True
+        )
     )
 
     response = Main._api_click_to_move_calibration(

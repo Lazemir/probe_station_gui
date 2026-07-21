@@ -12,10 +12,19 @@ from probe_station_gui.views import main_window_stage_position_panel as stage_po
 logger = logging.getLogger("main")
 
 
+class ClickMoveLifecycle(Protocol):
+    @property
+    def has_pending_move(self) -> bool: ...
+
+    def cancel_pending(self, *, clear_target: bool) -> None: ...
+    def finish_move(self, *, success: bool) -> None: ...
+    def clear_target(self) -> None: ...
+
+
 class StageMoveLifecycleOwner(Protocol):
     MANUAL_JOG_SETTLE_POLL_DELAYS_MS: tuple[int, ...]
     _coordinate_targets: Any
-    _pending_click_to_move: Any
+    _microscope_interaction: ClickMoveLifecycle
     _manual_alignment_pick_slot: Any
     _pending_alignment_preparation: Any
     _pending_quick_alignment_rotation: bool
@@ -44,7 +53,6 @@ class StageMoveLifecycleOwner(Protocol):
     def _surface_map_capture_running(self) -> bool: ...
     def _microscope_scan_running(self) -> bool: ...
     def _sample_handling_active(self) -> bool: ...
-    def _clear_pending_click_to_move(self, *, clear_cross: bool) -> None: ...
     def _cancel_manual_alignment_pick(self) -> None: ...
     def _clear_planned_move_prediction(self, *, clear_wait_state: bool) -> None: ...
     def _clear_pending_stage_coordinate_targets(self) -> bool: ...
@@ -107,7 +115,7 @@ def _capture_or_sample_active(owner: StageMoveLifecycleOwner) -> bool:
 def _pending_ui_intent_active(owner: StageMoveLifecycleOwner) -> bool:
     return (
         owner._manual_alignment_pick_slot is not None
-        or owner._pending_click_to_move is not None
+        or owner._microscope_interaction.has_pending_move
         or bool(owner._pending_homing_axes)
         or owner._homing_active_key is not None
         or owner._pending_alignment_preparation is not None
@@ -228,8 +236,8 @@ def _thread_is_alive(thread: object | None) -> bool:
 
 def _cancel_pending_ui_intents(owner: StageMoveLifecycleOwner) -> bool:
     cancelled_any = False
-    if owner._pending_click_to_move is not None:
-        owner._clear_pending_click_to_move(clear_cross=True)
+    if owner._microscope_interaction.has_pending_move:
+        owner._microscope_interaction.cancel_pending(clear_target=True)
         cancelled_any = True
     if owner._manual_alignment_pick_slot is not None:
         owner._cancel_manual_alignment_pick()
@@ -378,7 +386,7 @@ def _finish_pending_alignment_preparation(
         owner._refresh_design_panel()
         owner._refresh_design_position()
         owner._collapse_alignment_panel_if_ready()
-        owner.view.clear_target_cross()
+        owner._microscope_interaction.clear_target()
         owner._show_status(
             "Design calibration complete. "
             f"Rotation {preparation.rotation_deg:+.3f} deg, "
@@ -431,13 +439,9 @@ def _finish_target_cross(
     owner: StageMoveLifecycleOwner,
     success: bool,
 ) -> None:
+    owner._microscope_interaction.finish_move(success=success)
     if success:
-        if owner._pending_click_to_move is None:
-            owner.view.finish_target_motion_to_center()
-            owner.view.clear_target_cross()
         owner._schedule_status_refreshes(owner.MANUAL_JOG_SETTLE_POLL_DELAYS_MS)
-    elif owner._pending_click_to_move is None:
-        owner.view.clear_target_cross()
 
 
 def _coordinate_tracking_should_clear(success: bool, message_lower: str) -> bool:

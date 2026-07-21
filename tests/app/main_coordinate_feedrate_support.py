@@ -71,17 +71,28 @@ class _FakeTimer:
 class _FakeView:
     def __init__(self) -> None:
         self.focus_count = 0
-        self.finished_target_motions = 0
-        self.cleared_targets = 0
 
     def setFocus(self, *_args, **_kwargs) -> None:  # noqa: N802 - Qt naming
         self.focus_count += 1
 
-    def finish_target_motion_to_center(self) -> None:
-        self.finished_target_motions += 1
 
-    def clear_target_cross(self) -> None:
-        self.cleared_targets += 1
+
+class _FakeMicroscopeInteraction:
+    def __init__(self) -> None:
+        self.has_pending_move = False
+        self.cancelled: list[bool] = []
+        self.finished: list[bool] = []
+        self.cleared = 0
+
+    def cancel_pending(self, *, clear_target: bool) -> None:
+        self.has_pending_move = False
+        self.cancelled.append(clear_target)
+
+    def finish_move(self, *, success: bool) -> None:
+        self.finished.append(success)
+
+    def clear_target(self) -> None:
+        self.cleared += 1
 
 
 class _FakeSignal:
@@ -624,7 +635,7 @@ def _make_main(current_feedrate: float = 120.0) -> tuple[
     window._stage_limit_axes = set()
     window._coordinate_targets = _coordinate_target_state()
     window._pending_homing_axes = []
-    window._pending_click_to_move = None
+    window._microscope_interaction = _FakeMicroscopeInteraction()
     window._pending_planned_move_target_xy = None
     window._pending_planned_move_source_label = None
     window._planned_move_started_at = None
@@ -847,7 +858,7 @@ def _make_cancel_main() -> tuple[Main, _FakeStageController, _FakeButton, list[s
     window._route_measurement_runner = None
     window.surface_map_window = None
     window._manual_alignment_pick_slot = None
-    window._pending_click_to_move = None
+    window._microscope_interaction = _FakeMicroscopeInteraction()
     window._pending_homing_axes = []
     window._homing_active_key = None
     window._pending_alignment_preparation = None

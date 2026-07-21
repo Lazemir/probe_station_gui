@@ -67,6 +67,52 @@ def _design_document() -> DesignDocument:
 
 
 class MicroscopeViewMinimapTest(unittest.TestCase):
+    def test_real_widget_render_executes_ruler_and_rectangle_overlays(self) -> None:
+        view = _view_with_frame()
+        view.resize(220, 180)
+        baseline = QImage(220, 180, QImage.Format_ARGB32)
+        baseline.fill(QColor("black"))
+        view.render(baseline)
+
+        view.set_measure_mode("ruler")
+        view.mousePressEvent(
+            _mouse_event(
+                QEvent.Type.MouseButtonPress,
+                50,
+                60,
+                button=Qt.LeftButton,
+                buttons=Qt.LeftButton,
+            )
+        )
+        view.mouseMoveEvent(
+            _mouse_event(QEvent.Type.MouseMove, 170, 140, buttons=Qt.NoButton)
+        )
+        ruler = QImage(220, 180, QImage.Format_ARGB32)
+        ruler.fill(QColor("black"))
+        view.render(ruler)
+
+        view.set_measure_mode("rect")
+        view.mousePressEvent(
+            _mouse_event(
+                QEvent.Type.MouseButtonPress,
+                50,
+                60,
+                button=Qt.LeftButton,
+                buttons=Qt.LeftButton,
+            )
+        )
+        view.mouseMoveEvent(
+            _mouse_event(QEvent.Type.MouseMove, 170, 140, buttons=Qt.NoButton)
+        )
+        rectangle = QImage(220, 180, QImage.Format_ARGB32)
+        rectangle.fill(QColor("black"))
+        view.render(rectangle)
+
+        self.assertNotEqual(baseline, ruler)
+        self.assertNotEqual(baseline, rectangle)
+        self.assertNotEqual(ruler, rectangle)
+        view.shutdown()
+
     def test_widget_paint_renders_configured_minimap_panel(self) -> None:
         _app()
         view = MicroscopeView()
@@ -233,7 +279,7 @@ class MicroscopeViewMinimapTest(unittest.TestCase):
         )
 
         self.assertEqual(clicked, [])
-        self.assertIsNone(view._target_rel)
+        self.assertIsNone(view.interaction.target_rel)
 
     def test_click_to_move_release_outside_image_is_cancelled(self) -> None:
         view = _view_with_frame()
@@ -260,7 +306,7 @@ class MicroscopeViewMinimapTest(unittest.TestCase):
         )
 
         self.assertEqual(clicked, [])
-        self.assertIsNone(view._target_rel)
+        self.assertIsNone(view.interaction.target_rel)
 
 
 if __name__ == "__main__":
