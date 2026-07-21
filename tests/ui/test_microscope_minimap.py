@@ -94,7 +94,7 @@ def test_stale_background_result_cannot_replace_latest_generation() -> None:
     renderer = _DeferredRenderer()
     minimap = MicroscopeMinimap(renderer=renderer)
     display_rect = QRect(0, 0, 1000, 1000)
-    sample = QPoint(862, 145)
+    sample = QPoint(830, 180)
 
     minimap.configure(_document("first"), (0.0, 0.0, 100.0, 100.0))
     _draw(minimap, display_rect)
@@ -107,6 +107,33 @@ def test_stale_background_result_cannot_replace_latest_generation() -> None:
     assert _draw(minimap, display_rect).pixelColor(sample) == QColor("green")
 
 
+def test_overlay_only_configure_reuses_legacy_background() -> None:
+    renderer = _DeferredRenderer()
+    minimap = MicroscopeMinimap(renderer=renderer)
+    document = _document("same")
+    display_rect = QRect(0, 0, 1000, 1000)
+    sample = QPoint(830, 180)
+
+    minimap.configure(document, document.bounds)
+    _draw(minimap, display_rect)
+    renderer.complete(0, "green")
+    assert _draw(minimap, display_rect).pixelColor(sample) == QColor("green")
+
+    minimap.configure(
+        document,
+        document.bounds,
+        selected_design_point=(25.0, 75.0),
+        current_design_position=(50.0, 50.0),
+        fov_design_size=(10.0, 20.0),
+        source_design_marks=[(10.0, 10.0)],
+        check_design_marks=[(90.0, 90.0)],
+    )
+    rendered = _draw(minimap, display_rect)
+
+    assert len(renderer.requests) == 1
+    assert rendered.pixelColor(sample) == QColor("green")
+
+
 def test_non_document_configuration_retires_active_worker() -> None:
     workers: list[_Worker] = []
 
@@ -116,13 +143,16 @@ def test_non_document_configuration_retires_active_worker() -> None:
         return worker
 
     minimap = MicroscopeMinimap(worker_factory=worker_factory)
-    minimap.configure(_document("file", file_backed=True), (0.0, 0.0, 100.0, 100.0))
+    file_generation = minimap.configure(
+        _document("file", file_backed=True), (0.0, 0.0, 100.0, 100.0)
+    )
     _draw(minimap, QRect(0, 0, 1000, 1000))
     QApplication.processEvents()
-    first_generation = minimap.configure(object(), (0.0, 0.0, 1.0, 1.0))
+    invalid_generation = minimap.configure(object(), (0.0, 0.0, 1.0, 1.0))
 
     assert workers[0].stop_calls == [0.0]
-    assert minimap.configure(None, (0.0, 0.0, 1.0, 1.0)) > first_generation
+    assert invalid_generation > file_generation
+    assert minimap.configure(None, (0.0, 0.0, 1.0, 1.0)) == invalid_generation
 
 
 def test_delayed_click_uses_latest_painted_minimap_rect() -> None:

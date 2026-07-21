@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 import os
 from pathlib import Path
+import threading
 import time
 
 import klayout.db as db
@@ -309,6 +310,121 @@ def test_document_replacement_and_shutdown_retire_workers_bounded(
     minimap.shutdown()
     assert time.monotonic() - started < 0.1
     assert workers[1].stop_calls == [0.0]
+
+
+def test_same_path_source_replacement_retires_worker(
+    qt_app: QApplication,
+    tmp_path: Path,
+) -> None:
+    minimap, workers = _view_with_workers()
+    path = tmp_path / "same.gds"
+    first = replace(_document(path), source_load_id="load-a")
+    _set_document(minimap, first)
+    _draw_canvas(minimap)
+    _drain_events(qt_app)
+
+    replacement = replace(_document(path), source_load_id="load-b")
+    _set_document(minimap, replacement)
+
+    assert workers[0].stop_calls == [0.0]
+    _draw_canvas(minimap)
+    _drain_events(qt_app)
+    assert len(workers) == 2
+    minimap.shutdown()
+
+
+def test_stale_failure_after_document_supersession_is_ignored(
+    qt_app: QApplication,
+    tmp_path: Path,
+) -> None:
+    minimap, workers = _view_with_workers()
+    path = tmp_path / "generation.gds"
+    first_document = replace(_document(path), source_load_id="same-load")
+    _set_document(minimap, first_document)
+    _draw_canvas(minimap)
+    _drain_events(qt_app)
+    first = workers[0].requests[-1]
+
+    replacement = replace(
+        _document(path, visible_layers=frozenset({(2, 0)})),
+        source_load_id="same-load",
+    )
+    _set_document(minimap, replacement)
+    _draw_canvas(minimap)
+    _drain_events(qt_app)
+    latest = workers[0].requests[-1]
+
+    workers[0].failed.emit(
+        RenderFailure(
+            first.request_id,
+            first.config.generation,
+            first.viewport_generation,
+            "minimap",
+            "stale generation",
+        )
+    )
+    _drain_events(qt_app)
+
+    assert workers[0].requests == [first, latest]
+    workers[0].frame_ready.emit(_frame(latest))
+    assert _draw_canvas(minimap).pixelColor(862, 145) == QColor("#42a5f5")
+    minimap.shutdown()
+
+
+def test_failure_for_superseded_size_does_not_retry_old_request(
+    qt_app: QApplication,
+    tmp_path: Path,
+) -> None:
+    minimap, workers = _view_with_workers()
+    _set_document(minimap, _document(tmp_path / "size.gds"))
+    first_canvas = QImage(700, 700, QImage.Format_ARGB32)
+    first_painter = QPainter(first_canvas)
+    minimap.draw(first_painter, QRect(0, 0, 700, 700))
+    first_painter.end()
+    _drain_events(qt_app)
+    first = workers[0].requests[-1]
+
+    _draw_canvas(minimap)
+    workers[0].failed.emit(
+        RenderFailure(
+            first.request_id,
+            first.config.generation,
+            first.viewport_generation,
+            "minimap",
+            "superseded size",
+        )
+    )
+    _drain_events(qt_app)
+
+    assert len(workers[0].requests) == 2
+    assert workers[0].requests[-1].pixel_width != first.pixel_width
+    minimap.shutdown()
+
+
+def test_retired_worker_deletion_finishes_on_creator_thread(
+    qt_app: QApplication,
+    tmp_path: Path,
+) -> None:
+    creator_thread = threading.get_ident()
+    minimap, workers = _view_with_workers()
+    path = tmp_path / "creator.gds"
+    first = replace(_document(path), source_load_id="first")
+    _set_document(minimap, first)
+    _draw_canvas(minimap)
+    _drain_events(qt_app)
+    worker = workers[0]
+    delete_threads: list[int] = []
+    worker.deleteLater = lambda: delete_threads.append(threading.get_ident())
+
+    replacement = replace(_document(path), source_load_id="second")
+    _set_document(minimap, replacement)
+
+    assert worker.stop_calls == [0.0]
+    assert delete_threads == []
+    worker.finished.emit()
+    qt_app.processEvents()
+    assert delete_threads == [creator_thread]
+    minimap.shutdown()
 
 
 def test_render_failure_retries_once_via_same_worker(

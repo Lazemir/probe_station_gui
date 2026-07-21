@@ -128,6 +128,7 @@ class MinimapBackground(QObject):
         self._renderer = renderer or ThreadedLegacyRenderer()
         self._device_pixel_ratio = device_pixel_ratio
         self._design_document: DesignDocument | None = None
+        self._document_signature: tuple[object, ...] | None = None
         self._minimap_background: QPixmap | None = None
         self._minimap_cache_key: tuple[object, ...] | None = None
         self._minimap_render_key: tuple[object, ...] | None = None
@@ -157,12 +158,38 @@ class MinimapBackground(QObject):
 
     def configure(self, document: DesignDocument | object | None) -> int:
         valid_document = document if isinstance(document, DesignDocument) else None
+        signature = self._render_signature(valid_document)
+        if (
+            valid_document is self._design_document
+            and signature == self._document_signature
+        ):
+            return self._minimap_render_generation
+        if valid_document is not self._design_document:
+            self._minimap_klayout_signature = None
         self._configure_minimap_document(valid_document)
         self._design_document = valid_document
+        self._document_signature = signature
         return self._minimap_render_generation
 
     def background_for_size(self, size: QSize) -> QPixmap | None:
         return self._design_background_for_size(size)
+
+    @staticmethod
+    def _render_signature(
+        document: DesignDocument | None,
+    ) -> tuple[object, ...] | None:
+        if document is None:
+            return None
+        return (
+            Path(document.path).expanduser().resolve(),
+            document.source_load_id,
+            document.top_cell_name,
+            frozenset(document.visible_layers),
+            tuple(document.bounds),
+            tuple(document.cell_bounds.get(document.top_cell_name, document.bounds)),
+            int(document.rotation_quarter_turns) % 4,
+            bool(document.file_backed),
+        )
 
     def _configure_minimap_document(
         self,
