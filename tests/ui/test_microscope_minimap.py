@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 import os
 from pathlib import Path
+import threading
+import time
 
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -15,6 +17,9 @@ from PySide6.QtWidgets import QApplication
 
 from probe_station_gui.design.model import DesignDocument
 from probe_station_gui.views.microscope_minimap import MicroscopeMinimap
+from probe_station_gui.views.microscope_minimap_background import (
+    ThreadedLegacyRenderer,
+)
 
 
 _APP = QApplication.instance() or QApplication([])
@@ -134,6 +139,52 @@ def test_overlay_only_configure_reuses_legacy_background() -> None:
     assert rendered.pixelColor(sample) == QColor("green")
 
 
+def test_legacy_render_failure_allows_later_draw_retry(
+    monkeypatch,
+) -> None:
+    render_calls = 0
+    retry_started = threading.Event()
+
+    def render_image(_cls, _document, size: QSize) -> tuple[QImage, int]:
+        nonlocal render_calls
+        render_calls += 1
+        if render_calls == 1:
+            raise RuntimeError("first render failed")
+        retry_started.set()
+        image = QImage(size, QImage.Format_ARGB32_Premultiplied)
+        image.fill(QColor("green"))
+        return image, 4
+
+    monkeypatch.setattr(
+        ThreadedLegacyRenderer,
+        "render_image",
+        classmethod(render_image),
+    )
+    minimap = MicroscopeMinimap()
+    display_rect = QRect(0, 0, 1000, 1000)
+    sample = QPoint(830, 180)
+    minimap.configure(_document("retry"), (0.0, 0.0, 100.0, 100.0))
+
+    _draw(minimap, display_rect)
+    deadline = time.monotonic() + 1.0
+    while time.monotonic() < deadline and not retry_started.is_set():
+        QApplication.processEvents()
+        _draw(minimap, display_rect)
+        time.sleep(0.005)
+
+    assert retry_started.is_set()
+    deadline = time.monotonic() + 1.0
+    rendered = _draw(minimap, display_rect)
+    while time.monotonic() < deadline and rendered.pixelColor(sample) != QColor(
+        "green"
+    ):
+        QApplication.processEvents()
+        rendered = _draw(minimap, display_rect)
+        time.sleep(0.005)
+    assert rendered.pixelColor(sample) == QColor("green")
+    minimap.shutdown()
+
+
 def test_non_document_configuration_retires_active_worker() -> None:
     workers: list[_Worker] = []
 
@@ -153,6 +204,38 @@ def test_non_document_configuration_retires_active_worker() -> None:
     assert workers[0].stop_calls == [0.0]
     assert invalid_generation > file_generation
     assert minimap.configure(None, (0.0, 0.0, 1.0, 1.0)) == invalid_generation
+
+
+def test_draw_after_shutdown_starts_no_background_work() -> None:
+    renderer = _DeferredRenderer()
+    workers: list[_Worker] = []
+
+    def worker_factory() -> _Worker:
+        worker = _Worker()
+        workers.append(worker)
+        return worker
+
+    legacy_minimap = MicroscopeMinimap(
+        renderer=renderer,
+        worker_factory=worker_factory,
+    )
+    legacy_document = _document("legacy")
+    legacy_minimap.configure(legacy_document, legacy_document.bounds)
+    legacy_minimap.shutdown()
+    _draw(legacy_minimap, QRect(0, 0, 1000, 1000))
+
+    file_minimap = MicroscopeMinimap(
+        renderer=renderer,
+        worker_factory=worker_factory,
+    )
+    file_document = _document("file", file_backed=True)
+    file_minimap.configure(file_document, file_document.bounds)
+    file_minimap.shutdown()
+    _draw(file_minimap, QRect(0, 0, 1000, 1000))
+    QApplication.processEvents()
+
+    assert renderer.requests == []
+    assert workers == []
 
 
 def test_delayed_click_uses_latest_painted_minimap_rect() -> None:

@@ -27,7 +27,10 @@ logger = logging.getLogger(__name__)
 
 class LegacyRenderer(Protocol):
     def render(
-        self, document: DesignDocument, size: QSize, callback: Callable[[QImage], None]
+        self,
+        document: DesignDocument,
+        size: QSize,
+        callback: Callable[[QImage | None], None],
     ) -> None: ...
 
 
@@ -35,7 +38,10 @@ class ThreadedLegacyRenderer:
     """Render in-memory polygons off the GUI thread and return a QImage."""
 
     def render(
-        self, document: DesignDocument, size: QSize, callback: Callable[[QImage], None]
+        self,
+        document: DesignDocument,
+        size: QSize,
+        callback: Callable[[QImage | None], None],
     ) -> None:
         render_size = QSize(size)
 
@@ -45,6 +51,7 @@ class ThreadedLegacyRenderer:
                 image, point_count = self.render_image(document, render_size)
             except Exception:
                 logger.exception("MINIMAP RENDER failed")
+                callback(None)
                 return
             logger.debug(
                 "MINIMAP RENDER complete points=%d elapsed_ms=%.2f",
@@ -323,7 +330,7 @@ class MinimapBackground(QObject):
         self._stop_minimap_render_worker(timeout_s=0.0)
 
     def _design_background_for_size(self, size: QSize) -> QPixmap | None:
-        if self._design_document is None:
+        if self._minimap_renderer_shutdown or self._design_document is None:
             return None
         if self._design_document.file_backed:
             return self._klayout_background_for_size(size)
@@ -545,7 +552,11 @@ class MinimapBackground(QObject):
         size: QSize,
         cache_key: tuple[object, ...],
     ) -> None:
-        if self._design_document is None or self._design_document.file_backed:
+        if (
+            self._minimap_renderer_shutdown
+            or self._design_document is None
+            or self._design_document.file_backed
+        ):
             return
         if self._minimap_render_key == cache_key:
             return
@@ -560,7 +571,7 @@ class MinimapBackground(QObject):
             document.path.name,
         )
 
-        def accept_image(image: QImage) -> None:
+        def accept_image(image: QImage | None) -> None:
             self._legacy_ready.emit(generation, cache_key, render_size, image)
 
         self._renderer.render(document, render_size, accept_image)
