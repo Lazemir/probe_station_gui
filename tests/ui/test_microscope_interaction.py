@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 import os
+import subprocess
+import sys
+import textwrap
 import pytest
 from PySide6.QtWidgets import QApplication
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QPointF, QRect, QSize, Qt
+from PySide6.QtCore import QPointF, QRect, QSize, Qt, QThread
+from PySide6.QtTest import QTest
 
 from probe_station_gui.views import microscope_interaction as interaction_module
 from probe_station_gui.views.microscope_interaction import (
@@ -73,6 +78,7 @@ def _interaction(
     manual_alignment_active=lambda: False,
     capture_manual_alignment=lambda _dx, _dy: None,
     pending_state_changed=lambda _pending: None,
+    retry_scheduler=None,
 ) -> MicroscopeInteraction:
     return MicroscopeInteraction(
         ClickMoveBindings(
@@ -89,6 +95,7 @@ def _interaction(
             pending_state_changed=pending_state_changed,
         ),
         ClickMoveConfig(pending_timeout_s=timeout),
+        retry_scheduler=retry_scheduler,
     )
 
 
@@ -259,6 +266,120 @@ def test_latest_click_replaces_pending_and_retry_starts_only_latest() -> None:
     assert requests == [(1.0, 2.0), (3.0, 4.0), (3.0, 4.0)]
     assert interaction.pending_move is None
     assert interaction.target_rel == (0.3, 0.4)
+
+
+def test_scheduled_retry_captures_generation_and_stale_callback_is_noop() -> None:
+    accepted = False
+    requests: list[tuple[float, float]] = []
+    callbacks: list[Callable[[], None]] = []
+
+    def request_move(dx: float, dy: float) -> bool:
+        requests.append((dx, dy))
+        return accepted
+
+    interaction = _interaction(
+        request_move=request_move,
+        retry_scheduler=lambda _delay_ms, callback: callbacks.append(callback),
+    )
+    interaction.try_start_move(1.0, 2.0, 0.1, 0.2)
+    interaction.try_start_move(3.0, 4.0, 0.3, 0.4)
+
+    accepted = True
+    callbacks[0]()
+    assert requests == [(1.0, 2.0), (3.0, 4.0)]
+    assert interaction.pending_move is not None
+
+    callbacks[1]()
+    assert requests == [(1.0, 2.0), (3.0, 4.0), (3.0, 4.0)]
+    assert interaction.pending_move is None
+
+
+def test_default_qt_retry_waits_for_interval_and_runs_on_gui_thread() -> None:
+    accepted = False
+    requests: list[tuple[float, float]] = []
+    request_threads: list[QThread] = []
+
+    def request_move(dx: float, dy: float) -> bool:
+        requests.append((dx, dy))
+        request_threads.append(QThread.currentThread())
+        return accepted
+
+    interaction = _interaction(request_move=request_move)
+    interaction.try_start_move(1.0, 2.0, 0.1, 0.2)
+    accepted = True
+
+    QTest.qWait(100)
+    assert requests == [(1.0, 2.0)]
+    assert interaction.pending_move is not None
+
+    QTest.qWait(100)
+    assert requests == [(1.0, 2.0), (1.0, 2.0)]
+    assert interaction.pending_move is None
+    assert request_threads == [_QT_APP.thread(), _QT_APP.thread()]
+
+
+def test_public_interaction_state_is_read_only() -> None:
+    assert isinstance(MicroscopeInteraction.pending_move, property)
+    assert MicroscopeInteraction.pending_move.fset is None
+    assert isinstance(MicroscopeInteraction.target_rel, property)
+    assert MicroscopeInteraction.target_rel.fset is None
+    assert isinstance(MicroscopeInteraction.hover, property)
+    assert MicroscopeInteraction.hover.fset is None
+
+
+def test_active_retry_is_safe_when_real_qt_view_is_destroyed_in_subprocess() -> None:
+    code = textwrap.dedent(
+        """
+        import os
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PySide6.QtCore import QTimer
+        from PySide6.QtWidgets import QApplication
+        from probe_station_gui.views.microscope_interaction import ClickMoveBindings, ClickMoveConfig
+        from probe_station_gui.views.microscope_view import MicroscopeView
+
+        app = QApplication.instance() or QApplication([])
+        destroyed = []
+        view = MicroscopeView(
+            click_move_bindings=ClickMoveBindings(
+                request_move=lambda _dx, _dy: False,
+                stage_connected=lambda: True,
+                motion_blocked=lambda: False,
+                mark_motion_axes=lambda _axes: None,
+                show_status=lambda _message, _timeout_ms=0: None,
+                repaint=lambda: None,
+                preview_hover=lambda _dx, _dy: None,
+                present_coordinates=lambda **_coordinates: None,
+                manual_alignment_active=lambda: False,
+                capture_manual_alignment=lambda _dx, _dy: None,
+                pending_state_changed=lambda _pending: None,
+            ),
+            click_move_config=ClickMoveConfig(
+                pending_timeout_s=lambda: 2.0,
+                pending_retry_ms=20,
+            ),
+        )
+        view.destroyed.connect(lambda: destroyed.append(True))
+        view.interaction.try_start_move(1.0, 2.0, 0.2, 0.3)
+        view.deleteLater()
+        QTimer.singleShot(100, app.quit)
+        app.exec()
+        assert destroyed == [True]
+        print("destroyed-cleanly")
+        """
+    )
+    env = dict(os.environ)
+    env["QT_QPA_PLATFORM"] = "offscreen"
+
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        env=env,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "destroyed-cleanly"
 
 
 def test_api_start_never_queues_or_creates_target() -> None:

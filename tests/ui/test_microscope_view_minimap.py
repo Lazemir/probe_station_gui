@@ -2,6 +2,7 @@ import os
 from pathlib import Path
 import sys
 import unittest
+from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -67,6 +68,37 @@ def _design_document() -> DesignDocument:
 
 
 class MicroscopeViewMinimapTest(unittest.TestCase):
+    def test_overlay_paint_order_matches_legacy_minimap_z_order(self) -> None:
+        view = _view_with_frame()
+        order: list[str] = []
+        view.interaction.draw_before_minimap = (  # type: ignore[attr-defined]
+            lambda *_args, **_kwargs: order.append("interaction-under")
+        )
+        view.interaction.draw_after_minimap = (  # type: ignore[attr-defined]
+            lambda *_args, **_kwargs: order.append("measurement-over")
+        )
+        view.interaction.draw = (  # type: ignore[method-assign]
+            lambda *_args, **_kwargs: self.fail("combined overlay draw bypassed z-order")
+        )
+        view._minimap.draw = lambda *_args: order.append("minimap")  # type: ignore[method-assign]
+
+        canvas = QImage(220, 180, QImage.Format_ARGB32)
+        canvas.fill(QColor("black"))
+        with mock.patch.dict(
+            MicroscopeView.paintEvent.__globals__,
+            {
+                "draw_scale_bar": lambda *_args: order.append("scale"),
+                "draw_axis_triad": lambda *_args: order.append("axis"),
+            },
+        ):
+            view.render(canvas)
+
+        self.assertEqual(
+            order,
+            ["interaction-under", "minimap", "scale", "measurement-over", "axis"],
+        )
+        view.shutdown()
+
     def test_real_widget_render_executes_ruler_and_rectangle_overlays(self) -> None:
         view = _view_with_frame()
         view.resize(220, 180)

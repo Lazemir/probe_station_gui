@@ -153,14 +153,10 @@ class MicroscopeView(QWidget):
         self._draw_crosshair(painter, display_rect)
         scale_x = display_rect.width() / pixmap.width()
         scale_y = display_rect.height() / pixmap.height()
-        self.interaction.draw(
+        self.interaction.draw_before_minimap(
             painter,
             display_rect,
-            scale_x,
-            scale_y,
             canvas_width=self.width(),
-            mm_per_pixel_x=self._scale_mm_per_pixel_x,
-            mm_per_pixel_y=self._scale_mm_per_pixel_y,
         )
         self._minimap.draw(painter, display_rect)
         draw_scale_bar(
@@ -168,6 +164,14 @@ class MicroscopeView(QWidget):
             display_rect,
             scale_x,
             self._scale_mm_per_pixel_x,
+        )
+        self.interaction.draw_after_minimap(
+            painter,
+            display_rect,
+            scale_x,
+            scale_y,
+            mm_per_pixel_x=self._scale_mm_per_pixel_x,
+            mm_per_pixel_y=self._scale_mm_per_pixel_y,
         )
         draw_axis_triad(painter, display_rect)
         painter.end()

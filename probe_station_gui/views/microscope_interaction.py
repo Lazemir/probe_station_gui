@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from functools import partial
 import math
 from time import monotonic, perf_counter
+from typing import Callable
 
 from PySide6.QtCore import QObject, QPointF, QRect, Qt, QTimer
 from PySide6.QtGui import QPainter
@@ -32,20 +34,19 @@ class MicroscopeInteraction(QObject):
         self,
         bindings: ClickMoveBindings,
         config: ClickMoveConfig,
+        *,
+        retry_scheduler: Callable[[int, Callable[[], None]], None] | None = None,
     ) -> None:
         super().__init__()
         self._bindings = bindings
         self._config = config
-        self._retry_timer = QTimer(self)
-        self._retry_timer.setSingleShot(True)
-        self._retry_timer.timeout.connect(self._retry_scheduled)
+        self._retry_scheduler = retry_scheduler
         self._retry_generation = 0
-        self._scheduled_retry_generation = 0
-        self.pending_move: PendingClickMove | None = None
-        self.target_rel: tuple[float, float] | None = None
+        self._pending_move: PendingClickMove | None = None
+        self._target_rel: tuple[float, float] | None = None
         self._release_target: ClickCoordinates | None = None
         self._release_cancelled = False
-        self.hover: ClickCoordinates | None = None
+        self._hover: ClickCoordinates | None = None
         self._measure_mode: str | None = None
         self._measure_points: list[tuple[float, float]] = []
         self._measure_hover: tuple[float, float] | None = None
@@ -75,6 +76,18 @@ class MicroscopeInteraction(QObject):
         return self._measure_hover
 
     @property
+    def pending_move(self) -> PendingClickMove | None:
+        return self._pending_move
+
+    @property
+    def target_rel(self) -> tuple[float, float] | None:
+        return self._target_rel
+
+    @property
+    def hover(self) -> ClickCoordinates | None:
+        return self._hover
+
+    @property
     def target_motion_duration_s(self) -> float | None:
         if self._target_motion_started_at is None or self._target_motion_ends_at is None:
             return None
@@ -82,7 +95,7 @@ class MicroscopeInteraction(QObject):
 
     @property
     def has_pending_move(self) -> bool:
-        return self.pending_move is not None
+        return self._pending_move is not None
 
     def set_measure_mode(self, mode: str | None) -> None:
         self._measure_mode = mode
@@ -92,22 +105,18 @@ class MicroscopeInteraction(QObject):
         self._rect_segments.clear()
         self._bindings.repaint()
 
-    def draw(
+    def draw_before_minimap(
         self,
         painter: QPainter,
         display_rect: QRect,
-        scale_x: float,
-        scale_y: float,
         *,
         canvas_width: int,
-        mm_per_pixel_x: float | None,
-        mm_per_pixel_y: float | None,
     ) -> None:
         draw_target_overlay(
             painter,
             display_rect,
             TargetOverlay(
-                self.target_rel,
+                self._target_rel,
                 self._target_pending,
                 self._target_blink_dimmed,
             ),
@@ -122,6 +131,17 @@ class MicroscopeInteraction(QObject):
             ),
             canvas_width=canvas_width,
         )
+
+    def draw_after_minimap(
+        self,
+        painter: QPainter,
+        display_rect: QRect,
+        scale_x: float,
+        scale_y: float,
+        *,
+        mm_per_pixel_x: float | None,
+        mm_per_pixel_y: float | None,
+    ) -> None:
         draw_measurement_overlay(
             painter,
             display_rect,
@@ -188,7 +208,7 @@ class MicroscopeInteraction(QObject):
         self._release_target = None
         self._stop_target_motion()
         self._set_target_pending(False)
-        self.target_rel = (click[2], click[3])
+        self._target_rel = (click[2], click[3])
         self._bindings.repaint()
         return PointerDispatch(click=click, accepted=True)
 
@@ -204,7 +224,7 @@ class MicroscopeInteraction(QObject):
         if click is None:
             if left_button:
                 self._cancel_release(suppress_until_release=True)
-            self.hover = None
+            self._hover = None
             self._clear_hover_presentation()
             self._clear_measurement_hover()
             return PointerDispatch(hover_left=True)
@@ -213,16 +233,16 @@ class MicroscopeInteraction(QObject):
             return PointerDispatch()
         if left_button and self._release_target is not None:
             self._release_target = click
-            self.target_rel = (click[2], click[3])
+            self._target_rel = (click[2], click[3])
             self._bindings.repaint()
-        self.hover = click
+        self._hover = click
         self._present_hover(click)
         return PointerDispatch(hover=click)
 
     def leave(self) -> PointerDispatch:
         if self._release_target is not None:
             self._cancel_release(suppress_until_release=True)
-        self.hover = None
+        self._hover = None
         self._clear_hover_presentation()
         return PointerDispatch(hover_left=True)
 
@@ -244,7 +264,7 @@ class MicroscopeInteraction(QObject):
         rel_x: float,
         rel_y: float,
     ) -> None:
-        self.target_rel = (rel_x, rel_y)
+        self._target_rel = (rel_x, rel_y)
         self._stop_target_motion()
         self._set_target_pending(False)
         self._bindings.repaint()
@@ -252,8 +272,8 @@ class MicroscopeInteraction(QObject):
             self.cancel_pending(clear_target=False)
             return
         timeout_s = self._pending_timeout_s()
-        was_pending = self.pending_move is not None
-        self.pending_move = PendingClickMove(
+        was_pending = self._pending_move is not None
+        self._pending_move = PendingClickMove(
             dx=float(dx),
             dy=float(dy),
             rel_x=float(rel_x),
@@ -279,7 +299,7 @@ class MicroscopeInteraction(QObject):
         self.try_start_move(dx, dy, rel_x, rel_y)
 
     def retry_pending(self) -> None:
-        pending = self.pending_move
+        pending = self._pending_move
         if pending is None:
             return
         if monotonic() >= pending.deadline_s:
@@ -294,10 +314,9 @@ class MicroscopeInteraction(QObject):
         self._schedule_retry()
 
     def cancel_pending(self, *, clear_target: bool) -> None:
-        was_pending = self.pending_move is not None
-        self.pending_move = None
+        was_pending = self._pending_move is not None
+        self._pending_move = None
         self._retry_generation += 1
-        self._retry_timer.stop()
         if clear_target:
             self.clear_target()
         else:
@@ -332,37 +351,36 @@ class MicroscopeInteraction(QObject):
         )
 
     def finish_move(self, *, success: bool) -> None:
-        if self.pending_move is not None:
+        if self._pending_move is not None:
             return
         if success:
             self.finish_target_motion_to_center()
         self.clear_target()
 
     def finish_target_motion_to_center(self) -> None:
-        if self.target_rel is not None:
-            self.target_rel = (0.5, 0.5)
+        if self._target_rel is not None:
+            self._target_rel = (0.5, 0.5)
         self._stop_target_motion()
         self._bindings.repaint()
 
     def clear_target(self) -> None:
         self._release_target = None
         self._release_cancelled = False
-        self.target_rel = None
+        self._target_rel = None
         self._stop_target_motion()
         self._set_target_pending(False)
         self._bindings.repaint()
 
     def shutdown(self) -> None:
-        was_pending = self.pending_move is not None
-        self.pending_move = None
+        was_pending = self._pending_move is not None
+        self._pending_move = None
         self._retry_generation += 1
-        self._retry_timer.stop()
         self._target_blink_timer.stop()
         self._target_motion_timer.stop()
         self._notify_pending_transition(was_pending)
 
     def _notify_pending_transition(self, was_pending: bool) -> None:
-        is_pending = self.pending_move is not None
+        is_pending = self._pending_move is not None
         if is_pending != was_pending:
             self._bindings.pending_state_changed(is_pending)
 
@@ -433,7 +451,7 @@ class MicroscopeInteraction(QObject):
         self._release_cancelled = False
         self._stop_target_motion()
         self._set_target_pending(False)
-        self.target_rel = (click[2], click[3])
+        self._target_rel = (click[2], click[3])
         self._bindings.repaint()
 
     def _cancel_release(self, *, suppress_until_release: bool) -> None:
@@ -444,7 +462,7 @@ class MicroscopeInteraction(QObject):
         self._release_cancelled = bool(suppress_until_release)
 
     def _set_target_pending(self, pending: bool) -> None:
-        pending = bool(pending and self.target_rel is not None)
+        pending = bool(pending and self._target_rel is not None)
         if self._target_pending == pending:
             return
         self._target_pending = pending
@@ -457,10 +475,10 @@ class MicroscopeInteraction(QObject):
         self._bindings.repaint()
 
     def _animate_target_to_center(self, duration_s: float) -> None:
-        if self.target_rel is None:
+        if self._target_rel is None:
             return
         self._set_target_pending(False)
-        origin = self.target_rel
+        origin = self._target_rel
         if duration_s <= 0.0 or _points_close(origin, (0.5, 0.5)):
             self.finish_target_motion_to_center()
             return
@@ -480,9 +498,9 @@ class MicroscopeInteraction(QObject):
             return
         now = perf_counter()
         position = interpolate_position(origin, (0.5, 0.5), started_at, ends_at, now)
-        self.target_rel = (float(position[0]), float(position[1]))
+        self._target_rel = (float(position[0]), float(position[1]))
         if now >= ends_at:
-            self.target_rel = (0.5, 0.5)
+            self._target_rel = (0.5, 0.5)
             self._stop_target_motion()
         self._bindings.repaint()
 
@@ -493,7 +511,7 @@ class MicroscopeInteraction(QObject):
         self._target_motion_ends_at = None
 
     def _advance_target_blink(self) -> None:
-        if not self._target_pending or self.target_rel is None:
+        if not self._target_pending or self._target_rel is None:
             self._set_target_pending(False)
             return
         self._target_blink_dimmed = not self._target_blink_dimmed
@@ -522,13 +540,12 @@ class MicroscopeInteraction(QObject):
     def _schedule_retry(self) -> None:
         self._retry_generation += 1
         generation = self._retry_generation
-        self._retry_timer.stop()
-        self._retry_timer.setInterval(max(1, int(self._config.pending_retry_ms)))
-        self._scheduled_retry_generation = generation
-        self._retry_timer.start()
-
-    def _retry_scheduled(self) -> None:
-        self._retry_if_current(self._scheduled_retry_generation)
+        delay_ms = max(1, int(self._config.pending_retry_ms))
+        callback = partial(self._retry_if_current, generation)
+        if self._retry_scheduler is not None:
+            self._retry_scheduler(delay_ms, callback)
+            return
+        QTimer.singleShot(delay_ms, self, callback)
 
     def _retry_if_current(self, generation: int) -> None:
         if generation != self._retry_generation:

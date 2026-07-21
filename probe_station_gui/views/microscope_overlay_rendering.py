@@ -38,6 +38,16 @@ class MeasurementOverlay:
     mm_per_pixel_y: float | None
 
 
+@dataclass(frozen=True)
+class ScaleBarLayout:
+    length_mm: float
+    left: float
+    right: float
+    y: float
+    label: str
+    label_rect: QRectF
+
+
 def draw_target_overlay(
     painter: QPainter,
     display_rect: QRect,
@@ -134,30 +144,57 @@ def draw_scale_bar(
     scale_x: float,
     mm_per_pixel_x: float | None,
 ) -> None:
-    if mm_per_pixel_x is None or mm_per_pixel_x <= 0:
+    layout = _scale_bar_layout(display_rect, scale_x, mm_per_pixel_x)
+    if layout is None:
         return
-    lengths_mm = (5.0, 2.0, 1.0, 0.5, 0.2, 0.1, 0.05, 0.02, 0.01, 0.005, 0.002, 0.001)
-    bar_mm = next(
-        (
-            length
-            for length in lengths_mm
-            if length / mm_per_pixel_x * scale_x <= display_rect.width() * 0.3
-        ),
-        lengths_mm[-1],
-    )
-    bar_width = bar_mm / mm_per_pixel_x * scale_x
-    left = float(display_rect.left() + 20)
-    right = left + bar_width
-    y = float(display_rect.bottom() - 36)
     painter.save()
     painter.setRenderHint(QPainter.Antialiasing)
-    _draw_scale_bar_lines(painter, left, right, y)
+    _draw_scale_bar_lines(painter, layout.left, layout.right, layout.y)
     font = QFont()
     font.setPointSize(8)
     painter.setFont(font)
-    label_rect = QRectF(left, y - 21.0, bar_width, 14.0)
-    _draw_shadowed_text(painter, label_rect, _scale_label(bar_mm), QColor("white"))
+    painter.setPen(QPen(QColor(0, 0, 0, 160), 3))
+    painter.drawText(layout.label_rect, Qt.AlignCenter, layout.label)
+    painter.setPen(QPen(QColor("white"), 1))
+    painter.drawText(layout.label_rect, Qt.AlignCenter, layout.label)
     painter.restore()
+
+
+def _scale_bar_layout(
+    display_rect: QRect,
+    scale_x: float,
+    mm_per_pixel_x: float | None,
+) -> ScaleBarLayout | None:
+    if mm_per_pixel_x is None or mm_per_pixel_x <= 0 or scale_x <= 0:
+        return None
+    lengths_mm = (
+        5.0,
+        2.0,
+        1.0,
+        0.5,
+        0.2,
+        0.1,
+        0.05,
+        0.02,
+        0.01,
+        0.005,
+        0.002,
+        0.001,
+    )
+    for length_mm in lengths_mm:
+        bar_width = length_mm * scale_x / mm_per_pixel_x
+        if 60.0 <= bar_width <= 150.0:
+            left = float(display_rect.left() + 14)
+            y = float(display_rect.bottom() - 14)
+            return ScaleBarLayout(
+                length_mm=length_mm,
+                left=left,
+                right=left + bar_width,
+                y=y,
+                label=_scale_label(length_mm),
+                label_rect=QRectF(left, y - 21.0, bar_width, 14.0),
+            )
+    return None
 
 
 def _draw_scale_bar_lines(
@@ -246,8 +283,8 @@ def _scale_label(length_mm: float) -> str:
     if length_mm >= 1.0:
         return f"{length_mm:.0f} mm"
     if length_mm >= 0.01:
-        return f"{length_mm * 1000:.0f} µm"
-    return f"{length_mm * 1000:.1f} µm"
+        return f"{length_mm * 1000:.0f} \N{MICRO SIGN}m"
+    return f"{length_mm * 1000:.1f} \N{MICRO SIGN}m"
 
 
 def _draw_ruler(
