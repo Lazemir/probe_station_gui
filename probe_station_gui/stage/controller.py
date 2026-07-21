@@ -52,6 +52,15 @@ from probe_station_gui.stage.jog_commands import (
 from probe_station_gui.stage.homing_startup import StageControllerHomingStartupMixin
 from probe_station_gui.stage.jog_queue import StageControllerJogQueueMixin
 from probe_station_gui.stage.motion_commands import StageControllerMotionCommandsMixin
+from probe_station_gui.stage.motion_execution import (
+    FluidNCMotionSerialAdapter,
+    MotionTiming,
+    StageMotionCancellationAdapter,
+    StageMotionExecution,
+    StageMotionLimitAdapter,
+    StageMotionSafetyAdapter,
+    StageMotionStatusAdapter,
+)
 from probe_station_gui.stage.precision_motion import StageControllerPrecisionMotionMixin
 from probe_station_gui.stage.motion_timing import (
     absolute_move_distance_for_timeout as absolute_move_distance_for_timeout,
@@ -358,6 +367,7 @@ class StageController(
         self._active_work_coordinate_system: Optional[str] = None
         self._controller_coordinate_offsets: dict[str, tuple[float, ...]] = {}
         self._initialize_precision_motion()
+        self._motion_execution = self._build_motion_execution()
         self._async_write_queue: PriorityQueue[_QueuedSerialWrite] = PriorityQueue()
         self._async_write_clear_epoch = 0
         self._async_write_shutdown = threading.Event()
@@ -366,6 +376,82 @@ class StageController(
             daemon=True,
         )
         self._async_write_thread.start()
+
+    def _build_motion_execution(self) -> StageMotionExecution:
+        return StageMotionExecution(
+            safety=StageMotionSafetyAdapter(
+                check_callback=lambda: self._move_safety_check(),
+                disabled_callback=lambda: self._motion_safety_disabled,
+            ),
+            limits=StageMotionLimitAdapter(
+                ensure_callback=lambda axes: self._ensure_axis_limits(
+                    required_axes=axes
+                ),
+                configured_limits_callback=lambda axis, status: (
+                    self._axis_limits_for_configured_mode(axis, status)
+                ),
+                software_limit_ready_callback=lambda status, axis: (
+                    self._axis_software_limit_ready(status, axis)
+                ),
+                require_homed_callback=lambda status, axes, allow_relative: (
+                    self._require_homed_axes(
+                        status,
+                        axes,
+                        allow_relative=allow_relative,
+                    )
+                ),
+                axis_limits_callback=lambda: dict(self._axis_limits),
+                b_zero_position_callback=lambda: self._b_axis_zero_position,
+                set_b_zero_position_callback=self._store_b_axis_zero_position,
+            ),
+            status=StageMotionStatusAdapter(
+                read_callback=lambda axes: (
+                    self._query_current_status_with_required_coordinates(axes=axes)
+                ),
+                position_callback=lambda status: self._position_for_configured_mode(
+                    status
+                ),
+                axis_value_callback=lambda status, axis: (
+                    self._axis_value_for_configured_mode(status, axis)
+                ),
+            ),
+            serial=FluidNCMotionSerialAdapter(
+                prepare_callback=lambda: self._current_serial(),
+                write_callback=lambda command: self._write_current_command_and_wait(
+                    command
+                ),
+                reset_feed_override_callback=lambda: self._reset_feed_override(),
+                wait_for_idle_callback=lambda timeout: self._wait_for_idle(
+                    timeout=timeout
+                ),
+                wait_for_idle_at_targets_callback=lambda targets, timeout: (
+                    self._wait_for_idle_at_targets(targets, timeout=timeout)
+                ),
+            ),
+            cancellation=StageMotionCancellationAdapter(
+                check_callback=lambda: self._check_cancelled()
+            ),
+            timing=MotionTiming(
+                default_feedrate=self.DEFAULT_FEEDRATE,
+                min_feedrate=self.MIN_FEEDRATE,
+                idle_margin_s=self.MOVE_IDLE_TIMEOUT_MARGIN_S,
+                idle_min_s=self.MOVE_IDLE_TIMEOUT_MIN_S,
+                idle_max_s=self.MOVE_IDLE_TIMEOUT_MAX_S,
+                b_axis_soft_limit_deg=self.B_AXIS_SOFT_LIMIT_DEG,
+            ),
+        )
+
+    def _store_b_axis_zero_position(
+        self,
+        value: float,
+        emit_status: bool,
+    ) -> None:
+        self._b_axis_zero_position = float(value)
+        if emit_status:
+            self.status_message.emit(
+                "B zero reference set to current position "
+                f"({self._b_axis_zero_position:.3f})."
+            )
 
     def set_optical_session_manager(self, manager: object) -> None:
         """Inject the fixed-exposure session dependency for optical operations."""

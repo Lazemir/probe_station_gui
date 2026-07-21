@@ -10,16 +10,12 @@ import serial
 
 from probe_station_gui.stage.errors import StageControllerError
 from probe_station_gui.stage.jog_commands import format_gcode_value
-from probe_station_gui.stage.motion_command_planning import (
-    absolute_axis_g1_command,
-    absolute_axis_target_limit_error,
-    clamped_motion_feedrate,
-    ordered_absolute_axis_targets,
+from probe_station_gui.stage.motion_execution import (
+    AbsoluteMotionPlan,
+    RelativeMotionPlan,
 )
 from probe_station_gui.stage.motion_timing import (
-    absolute_move_distance_for_timeout,
     idle_timeout_for_distance,
-    move_distance_for_timeout,
 )
 from probe_station_gui.stage.types import MoveVector, _Status
 
@@ -513,62 +509,11 @@ class StageControllerMotionCommandsMixin:
         motion_started_callback: Optional[Callable[[MoveVector, float], None]] = None,
         as_jog: bool = False,
     ) -> None:
-        if move.is_zero():
-            return
-        if not ignore_needle_safety:
-            self._move_safety_check()
-        if not self._motion_safety_disabled:
-            self._ensure_axis_limits(
-                required_axes=tuple(
-                    axis for axis, delta in move.items() if abs(delta) >= 1e-6
-                ),
-            )
-            self._check_relative_move_limits(move, allow_relative=allow_relative)
-        move_parts: list[str] = [
-            f"{axis}{self._format_gcode_value(value, decimals=6)}"
-            for axis, value in move.items()
-            if abs(value) >= 1e-6
-        ]
-        if not move_parts:
-            return
-        effective_feedrate = (
-            self.DEFAULT_FEEDRATE if feedrate is None else max(self.MIN_FEEDRATE, float(feedrate))
+        plan = RelativeMotionPlan(
+            move, feedrate, allow_relative, ignore_needle_safety,
+            wait_for_completion, motion_started_callback, as_jog,
         )
-        move_distance = self._move_distance_for_timeout(move)
-        command = (
-            "G1 "
-            + " ".join(move_parts)
-            + f" F{self._format_gcode_value(effective_feedrate)}"
-        )
-        self._reset_feed_override()
-        if as_jog:
-            command = (
-                "$J=G91 G21 "
-                + " ".join(move_parts)
-                + f" F{self._format_gcode_value(effective_feedrate)}"
-            )
-            self._write_current_command_and_wait(command)
-            if motion_started_callback is not None:
-                motion_started_callback(move, effective_feedrate)
-            if wait_for_completion:
-                self._wait_for_idle(
-                    timeout=self._idle_timeout_for_distance(
-                        move_distance, effective_feedrate
-                    ),
-                )
-            return
-        self._write_current_command_and_wait("G21")
-        self._write_current_command_and_wait("G91")
-        self._write_current_command_and_wait(command)
-        if motion_started_callback is not None:
-            motion_started_callback(move, effective_feedrate)
-        self._write_current_command_and_wait("G90")
-        if wait_for_completion:
-            self._wait_for_idle(
-                timeout=self._idle_timeout_for_distance(
-                    move_distance, effective_feedrate
-                ),
-            )
+        self._motion_execution.run_relative(plan)
 
     def _send_absolute_axis_targets_move(
         self,
@@ -581,82 +526,12 @@ class StageControllerMotionCommandsMixin:
         as_jog: bool = False,
         motion_started_callback: Callable[[], None] | None = None,
     ) -> None:
-        ordered_targets = ordered_absolute_axis_targets(
-            targets,
-            axis_order=self.AXIS_INDEX,
+        plan = AbsoluteMotionPlan(
+            targets, feedrate, ignore_needle_safety, wait_for_completion,
+            allow_unhomed, as_jog, motion_started_callback,
+            self._position_reporting_mode == "machine", tuple(self.AXIS_INDEX),
         )
-        if not ordered_targets:
-            return
-        serial_connection = self._current_serial()
-        if not ignore_needle_safety:
-            self._move_safety_check()
-        current_values: dict[str, float] = {}
-        if not self._motion_safety_disabled:
-            self._ensure_axis_limits(required_axes=tuple(ordered_targets))
-            status = self._query_status_with_required_coordinates(
-                serial_connection,
-                axes=tuple(ordered_targets),
-            )
-            if status is None:
-                raise StageControllerError("Unable to read position for absolute move.")
-            self._require_homed_axes(
-                status,
-                set(ordered_targets),
-                allow_relative=allow_unhomed,
-            )
-            for axis, value in ordered_targets.items():
-                current_value = self._axis_value_for_configured_mode(status, axis)
-                if current_value is not None:
-                    current_values[axis] = float(current_value)
-                limits = self._axis_limits_for_configured_mode(axis, status)
-                if limits and self._axis_software_limit_ready(status, axis):
-                    error = absolute_axis_target_limit_error(axis, value, limits)
-                    if error is not None:
-                        raise StageControllerError(error)
-        effective_feedrate = clamped_motion_feedrate(
-            feedrate,
-            default_feedrate=self.DEFAULT_FEEDRATE,
-            min_feedrate=self.MIN_FEEDRATE,
-        )
-        if as_jog:
-            self._write_current_command_and_wait(
-                self._absolute_axis_targets_jog_command(
-                    ordered_targets,
-                    effective_feedrate,
-                ),
-            )
-            if motion_started_callback is not None:
-                motion_started_callback()
-            if wait_for_completion:
-                move_distance = self._absolute_move_distance_for_timeout(
-                    ordered_targets,
-                    current_values,
-                )
-                self._wait_for_idle_at_targets(
-                    ordered_targets,
-                    timeout=self._idle_timeout_for_distance(
-                        move_distance, effective_feedrate
-                    ),
-                )
-            return
-        self._write_current_command_and_wait("G21")
-        self._write_current_command_and_wait("G90")
-        self._reset_feed_override()
-        self._write_current_command_and_wait(
-            absolute_axis_g1_command(ordered_targets, effective_feedrate),
-        )
-        if motion_started_callback is not None:
-            motion_started_callback()
-        if wait_for_completion:
-            move_distance = self._absolute_move_distance_for_timeout(
-                ordered_targets,
-                current_values,
-            )
-            self._wait_for_idle(
-                timeout=self._idle_timeout_for_distance(
-                    move_distance, effective_feedrate
-                ),
-            )
+        self._motion_execution.run_absolute(plan)
 
     def _validate_absolute_axis_targets_move(
         self,
@@ -667,30 +542,11 @@ class StageControllerMotionCommandsMixin:
     ) -> None:
         """Validate a target map without sending controller commands."""
 
-        ordered_targets = ordered_absolute_axis_targets(
-            targets,
-            axis_order=self.AXIS_INDEX,
+        plan = AbsoluteMotionPlan(
+            targets=targets, allow_unhomed=allow_unhomed,
+            axis_order=tuple(self.AXIS_INDEX),
         )
-        if not ordered_targets or self._motion_safety_disabled:
-            return
-        self._ensure_axis_limits(required_axes=tuple(ordered_targets))
-        if status is None:
-            status = self._query_current_status_with_required_coordinates(
-                axes=tuple(ordered_targets),
-            )
-        if status is None:
-            raise StageControllerError("Unable to read position for absolute move.")
-        self._require_homed_axes(
-            status,
-            set(ordered_targets),
-            allow_relative=allow_unhomed,
-        )
-        for axis, value in ordered_targets.items():
-            limits = self._axis_limits_for_configured_mode(axis, status)
-            if limits and self._axis_software_limit_ready(status, axis):
-                error = absolute_axis_target_limit_error(axis, value, limits)
-                if error is not None:
-                    raise StageControllerError(error)
+        self._motion_execution.validate_absolute(plan, status=status)
 
     def _send_absolute_axis_move(
         self,
@@ -705,24 +561,10 @@ class StageControllerMotionCommandsMixin:
     ) -> None:
         axis = axis.upper().strip()
         self._send_absolute_axis_targets_move(
-            {axis: float(value)},
-            ignore_needle_safety=ignore_needle_safety,
-            feedrate=feedrate,
-            wait_for_completion=wait_for_completion,
-            allow_unhomed=allow_unhomed,
-            as_jog=as_jog,
+            {axis: float(value)}, ignore_needle_safety=ignore_needle_safety,
+            feedrate=feedrate, wait_for_completion=wait_for_completion,
+            allow_unhomed=allow_unhomed, as_jog=as_jog,
         )
-
-    @staticmethod
-    def _absolute_move_distance_for_timeout(
-        targets: dict[str, float],
-        current_values: dict[str, float],
-    ) -> float:
-        return absolute_move_distance_for_timeout(targets, current_values)
-
-    @staticmethod
-    def _move_distance_for_timeout(move: MoveVector) -> float:
-        return move_distance_for_timeout(move)
 
     @staticmethod
     def _format_gcode_value(value: float, decimals: int = 3) -> str:
@@ -747,131 +589,33 @@ class StageControllerMotionCommandsMixin:
         feedrate: Optional[float] = None,
     ) -> None:
         """Send a single relative G1 move assuming the controller is already in G91."""
-
-        if move.is_zero():
-            return
-        move_parts: list[str] = [
-            f"{axis}{self._format_gcode_value(value, decimals=6)}"
-            for axis, value in move.items()
-            if abs(value) >= 1e-6
-        ]
-        if not move_parts:
-            return
-        effective_feedrate = (
-            self.DEFAULT_FEEDRATE if feedrate is None else max(self.MIN_FEEDRATE, float(feedrate))
-        )
-        self._write_current_command_and_wait(
-            "G1 "
-            + " ".join(move_parts)
-            + f" F{self._format_gcode_value(effective_feedrate)}",
-        )
-
-    def _check_relative_move_limits(
-        self,
-        move: MoveVector,
-        *,
-        allow_relative: bool = False,
-    ) -> None:
-        if not self._axis_limits and abs(move.b) < 1e-6:
-            return
-        moved_limited_axes = tuple(
-            axis
-            for axis, delta in move.items()
-            if abs(delta) >= 1e-6
-            and (axis == "B" or axis in self._axis_limits)
-        )
-        status = self._query_current_status_with_required_coordinates(
-            axes=moved_limited_axes,
-        )
-        positions = self._position_for_configured_mode(status)
-        if status is None or not positions:
-            return
-        self._ensure_b_axis_zero_reference(status)
-        for axis, delta in move.items():
-            if abs(delta) < 1e-6:
-                continue
-            idx = self.AXIS_INDEX.get(axis)
-            if idx is None or idx >= len(positions):
-                continue
-            if axis == "B":
-                current_b = self._relative_b_position(status)
-                limit = self.B_AXIS_SOFT_LIMIT_DEG
-                target_b = current_b + delta
-                if target_b < -limit or target_b > limit:
-                    raise StageControllerError(
-                        f"B move {delta:+.3f} exceeds software limit ({-limit:.3f}, {limit:.3f}) relative to B zero."
-                    )
-                continue
-            limits = self._axis_limits_for_configured_mode(axis, status)
-            if not limits:
-                continue
-            if not self._axis_software_limit_ready(status, axis):
-                continue
-            self._require_homed_axes(
-                status, {axis}, allow_relative=allow_relative
-            )
-            min_value, max_value = limits
-            target = positions[idx] + delta
-            if target < min_value or target > max_value:
-                raise StageControllerError(
-                    f"{axis} move {delta:+.3f} exceeds limits ({min_value:.3f}, {max_value:.3f})."
-                )
+        self._motion_execution.write_relative_unchecked(move, feedrate=feedrate)
 
     def _require_position_for_absolute_motion(
         self, status: _Status, *, required_axes: int
     ) -> tuple[float, ...]:
-        position = self._position_for_configured_mode(status)
-        if position is None or len(position) < required_axes:
-            raise StageControllerError(
-                "Controller did not report a complete position for absolute motion."
-            )
-        return tuple(float(value) for value in position[:required_axes])
+        return self._motion_execution.require_position_for_absolute_motion(
+            status,
+            required_axes=required_axes,
+        )
 
     def _ensure_b_axis_zero_reference(self, status: _Status) -> None:
-        if self._b_axis_zero_position is not None:
-            return
-        if self._axis_value_for_configured_mode(status, "B") is None:
-            return
-        self._set_b_axis_zero_reference(status, emit_status=False)
+        self._motion_execution.ensure_b_axis_zero_reference(status)
 
     def _set_b_axis_zero_reference(
         self, status: _Status, *, emit_status: bool = True
     ) -> None:
-        b_position = self._axis_value_for_configured_mode(status, "B")
-        if b_position is None:
-            raise StageControllerError("B axis position unavailable.")
-        self._b_axis_zero_position = b_position
-        if emit_status:
-            self.status_message.emit(
-                f"B zero reference set to current position ({self._b_axis_zero_position:.3f})."
-            )
+        self._motion_execution.set_b_axis_zero_reference(
+            status,
+            emit_status=emit_status,
+        )
 
     def _relative_b_position(self, status: _Status) -> float:
-        b_position = self._axis_value_for_configured_mode(status, "B")
-        if b_position is None:
-            raise StageControllerError("B axis position unavailable.")
-        self._ensure_b_axis_zero_reference(status)
-        zero = self._b_axis_zero_position
-        if zero is None:
-            raise StageControllerError("B zero reference is not initialized.")
-        return b_position - zero
+        return self._motion_execution.relative_b_position(status)
 
     def _move_vector_for_axis(self, axis: str, delta: float) -> MoveVector:
         """Create a single-axis move vector."""
-
-        if axis == "X":
-            return MoveVector(x=delta)
-        if axis == "Y":
-            return MoveVector(y=delta)
-        if axis == "Z":
-            return MoveVector(z=delta)
-        if axis == "A":
-            return MoveVector(a=delta)
-        if axis == "B":
-            return MoveVector(b=delta)
-        if axis == "C":
-            return MoveVector(c=delta)
-        raise StageControllerError(f"Unsupported axis: {axis}")
+        return self._motion_execution.move_vector_for_axis(axis, delta)
 
     def _run_linear_pattern(
         self,

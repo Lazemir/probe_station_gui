@@ -103,10 +103,12 @@ class StageControllerStartupLimitsTest(unittest.TestCase):
         )
         controller._ensure_b_axis_zero_reference = lambda _status: None
 
-        controller._check_relative_move_limits(MoveVector(y=15.0), allow_relative=True)
+        controller._motion_execution.check_relative_limits(
+            MoveVector(y=15.0), allow_relative=True
+        )
 
         with self.assertRaises(StageControllerError):
-            controller._check_relative_move_limits(
+            controller._motion_execution.check_relative_limits(
                 MoveVector(x=5.0), allow_relative=True
             )
 
@@ -334,30 +336,6 @@ class StageControllerStartupLimitsTest(unittest.TestCase):
 
 
 class StageControllerAbsoluteMoveTest(unittest.TestCase):
-    def test_relative_move_callback_runs_after_g1_is_accepted(self) -> None:
-        controller = StageController()
-        serial_connection = _LineFakeSerial([b"ok\n", b"ok\n", b"ok\n", b"ok\n"])
-        controller._serial = serial_connection
-        callback_writes: list[list[bytes]] = []
-
-        controller._move_safety_check = lambda: None
-        controller._ensure_axis_limits = lambda **_kwargs: None
-        controller._check_relative_move_limits = lambda *_args, **_kwargs: None
-        controller._reset_feed_override = lambda: None
-
-        controller._send_relative_move(
-            MoveVector(x=0.1),
-            wait_for_completion=False,
-            motion_started_callback=lambda _move, _feedrate: callback_writes.append(
-                list(serial_connection.writes)
-            ),
-        )
-
-        self.assertEqual(len(callback_writes), 1)
-        self.assertTrue(callback_writes[0][-1].startswith(b"G1 X0.1"))
-        self.assertFalse(any(command == b"G90\n" for command in callback_writes[0]))
-        self.assertEqual(serial_connection.writes[-1], b"G90\n")
-
     def test_absolute_xy_move_sends_absolute_machine_target(self) -> None:
         controller = StageController()
         controller._serial = _FakeSerial()

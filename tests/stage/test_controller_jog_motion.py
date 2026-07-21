@@ -245,6 +245,42 @@ class StageControllerJogQueueTest(unittest.TestCase):
 
 
 class StageControllerMotionSafetyBypassTest(unittest.TestCase):
+    def test_relative_move_without_configured_limits_skips_status_read(self) -> None:
+        controller = StageController()
+        controller._serial = _FakeSerial()
+        controller._needles_known = True
+        controller._needles_up = True
+        events: list[str] = []
+        controller._ensure_axis_limits = lambda **_kwargs: events.append(
+            "limits:ensure"
+        )
+        controller._query_current_status_with_required_coordinates = (
+            lambda **_kwargs: (_ for _ in ()).throw(
+                AssertionError("status queried without configured limits")
+            )
+        )
+        controller._write_current_command_and_wait = (
+            lambda command: events.append(f"serial:{command}")
+        )
+        controller._reset_feed_override = lambda: None
+
+        controller._send_relative_move(
+            MoveVector(x=0.25),
+            feedrate=120.0,
+            wait_for_completion=False,
+        )
+
+        self.assertEqual(
+            events,
+            [
+                "limits:ensure",
+                "serial:G21",
+                "serial:G91",
+                "serial:G1 X0.25 F120",
+                "serial:G90",
+            ],
+        )
+
     def test_disabled_motion_safety_bypasses_needle_safety_and_axis_limits(self) -> None:
         controller = StageController()
         controller.set_motion_safety_disabled(True)
