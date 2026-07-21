@@ -154,6 +154,13 @@ def _window() -> tuple[Main, _Stage, _SettingsManager, list[str]]:
     window._design_session = types.SimpleNamespace(document=None)
     window._manual_alignment_pick_slot = None
     window._manual_alignment_capture_context = None
+    window._optical_calibration_runtime = types.SimpleNamespace(
+        state=lambda: types.SimpleNamespace(
+            active_run_id=None,
+            active_kind=None,
+            parent_session_token=None,
+        )
+    )
     window._current_linear_feedrate = lambda: 123.0
     window._refresh_design_position = lambda: setattr(
         window,

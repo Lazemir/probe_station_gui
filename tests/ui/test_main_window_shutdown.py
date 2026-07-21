@@ -34,49 +34,25 @@ class _AliveThread:
             self.on_join()
 
 
-def test_shutdown_waits_for_calibration_and_outer_session_close() -> None:
+def test_shutdown_delegates_calibration_drain_to_runtime() -> None:
     events: list[object] = []
-    calibration_thread = _AliveThread(events, "calibration_thread")
-    close_thread = _AliveThread(
-        events,
-        "session_close_thread",
-        on_join=lambda: setattr(owner, "_optical_calibration_outer_lease", None),
-    )
     owner = SimpleNamespace(
-        _flat_field_calibration_thread=calibration_thread,
-        _lens_distortion_thread=None,
-        _optical_calibration_outer_close_thread=None,
-        _optical_calibration_outer_lease=object(),
-        _cancel_optical_calibration_wizard=lambda: events.append(("cancel",)),
+        _optical_calibration_runtime=SimpleNamespace(
+            shutdown=lambda timeout: events.append(("shutdown", timeout)) or True
+        )
     )
-
-    def schedule_close() -> None:
-        events.append(("schedule_close",))
-        owner._optical_calibration_outer_close_thread = close_thread
-
-    owner._schedule_optical_calibration_outer_close = schedule_close
 
     shutdown_ui._stop_optical_calibration(owner)
 
-    assert events == [
-        ("cancel",),
-        ("calibration_thread", "join", 2.0),
-        ("schedule_close",),
-        ("session_close_thread", "join", 2.0),
-    ]
+    assert events == [("shutdown", 2.0)]
 
 
-def test_shutdown_fails_closed_when_outer_session_cleanup_cannot_start() -> None:
+def test_shutdown_fails_closed_when_runtime_does_not_drain() -> None:
     owner = SimpleNamespace(
-        _flat_field_calibration_thread=None,
-        _lens_distortion_thread=None,
-        _optical_calibration_outer_close_thread=None,
-        _optical_calibration_outer_lease=object(),
-        _cancel_optical_calibration_wizard=lambda: None,
-        _schedule_optical_calibration_outer_close=lambda: False,
+        _optical_calibration_runtime=SimpleNamespace(shutdown=lambda _timeout: False),
     )
 
-    with pytest.raises(RuntimeError, match="exposure session is still active"):
+    with pytest.raises(RuntimeError, match="still stopping"):
         shutdown_ui._stop_optical_calibration(owner)
 
 

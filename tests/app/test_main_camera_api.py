@@ -143,6 +143,13 @@ def test_settings_dialog_transaction_preserves_concurrent_exposure_policy(
     window = Main.__new__(Main)
     window.settings_manager = manager
     window._apply_settings = lambda: None
+    window._optical_calibration_runtime = SimpleNamespace(
+        state=lambda: SimpleNamespace(
+            active_run_id=None,
+            active_kind=None,
+            parent_session_token=None,
+        )
+    )
 
     Main._apply_settings_from_dialog(window, stale_dialog_settings)
 
