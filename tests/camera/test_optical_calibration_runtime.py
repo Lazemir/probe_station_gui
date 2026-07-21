@@ -237,6 +237,28 @@ def _frame(width: int = 100, height: int = 50) -> QImage:
     return image
 
 
+def _valid_lens_payload() -> dict[str, object]:
+    return {
+        "model_version": 1,
+        "model_type": "stage_geometry",
+        "frame_size": [100, 50],
+        "pixels_to_mm": [[-0.001, 0.0002], [-0.0003, -0.002]],
+        "calibrated_pixels_to_mm": [[-0.001, 0.0002], [-0.0003, -0.002]],
+        "center_px": [50.0, 25.0],
+        "k1": 0.0,
+        "k2": 0.0,
+        "p1": 0.0,
+        "p2": 0.0,
+        "baseline_residual_mean_px": 1.5,
+        "baseline_residual_max_px": 2.5,
+        "residual_mean_px": 0.5,
+        "residual_max_px": 1.0,
+        "feature_count": 20,
+        "observation_count": 40,
+        "optimizer_success": True,
+    }
+
+
 def _flat_request(**changes) -> FlatFieldCalibrationRequest:
     request = FlatFieldCalibrationRequest(
         run_id="flat-1",
@@ -567,7 +589,7 @@ def test_full_wizard_reuses_parent_session_across_flat_then_lens(monkeypatch) ->
         frames=[_frame() for _ in range(20)],
         sessions=sessions,
     )
-    artifact = LensCalibrationArtifact({}, _frame(), _frame())
+    artifact = LensCalibrationArtifact(_valid_lens_payload(), _frame(), _frame())
     monkeypatch.setattr(
         "probe_station_gui.camera.optical_calibration_runtime.fit_lens_artifact",
         lambda *_args, **_kwargs: artifact,
@@ -887,6 +909,31 @@ def test_lens_artifact_survives_camera_restore_warning(monkeypatch) -> None:
     assert outcome.restore_warning == "gain restore failed"
 
 
+def test_lens_success_message_failure_cannot_publish_success(monkeypatch) -> None:
+    events: list[object] = []
+    runtime, emitted = _runtime(events, frames=[_frame() for _ in range(10)])
+    artifact = LensCalibrationArtifact(_valid_lens_payload(), _frame(), _frame())
+    monkeypatch.setattr(
+        "probe_station_gui.camera.optical_calibration_runtime.fit_lens_artifact",
+        lambda *_args, **_kwargs: artifact,
+    )
+
+    def fail_message(*_args, **_kwargs):
+        raise RuntimeError("payload validation failed")
+
+    monkeypatch.setattr(
+        "probe_station_gui.camera.optical_calibration_runtime.lens_success_message",
+        fail_message,
+    )
+
+    runtime.start_lens(_lens_request())
+
+    outcome = emitted.finished[0]
+    assert outcome.success is False
+    assert outcome.lens_artifact is not None
+    assert "payload validation failed" in outcome.message
+
+
 def test_lens_offsets_apply_affine_matrix_and_image_y_convention() -> None:
     offsets = lens_capture_offsets_mm(
         (1000, 800),
@@ -982,6 +1029,39 @@ def test_shutdown_timeout_bounds_parent_session_contention_and_can_retry() -> No
     assert lifecycle.shutdown(0.0) is False
     sessions.leases[0].busy = False
     assert lifecycle.shutdown(0.1) is True
+
+
+def test_parent_session_shutdown_close_runs_off_calling_thread() -> None:
+    caller_thread_id = threading.get_ident()
+    close_thread_ids: list[int] = []
+
+    class _RecordingLease(_Lease):
+        def close(self) -> dict[str, object]:
+            if self.operation == "optical calibration":
+                close_thread_ids.append(threading.get_ident())
+            return super().close()
+
+    class _RecordingSessions(_Sessions):
+        def open(self, operation: str, parent_token: str | None = None) -> _Lease:
+            token = f"lease-{len(self.leases) + 1}"
+            lease = _RecordingLease(self.events, operation, token)
+            self.leases.append(lease)
+            return lease
+
+    events: list[object] = []
+    lifecycle = OpticalCalibrationLifecycle(
+        sessions=_RecordingSessions(events),
+        events=_Events(),
+        thread_factory=threading.Thread,
+    )
+    child = lifecycle.open_child_session(
+        "flat-field calibration", _flat_request(full_wizard=True)
+    )
+    lifecycle.close_child(child)
+
+    assert lifecycle.shutdown(1.0) is True
+    assert close_thread_ids
+    assert all(thread_id != caller_thread_id for thread_id in close_thread_ids)
 
 
 def _production_adapter_runtime(

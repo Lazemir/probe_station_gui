@@ -1224,10 +1224,12 @@ class Main(QMainWindow):
             store=OpticalCalibrationStoreAdapter(
                 self._flat_field_calibration_store.install
             ),
-            events=OpticalCalibrationEventAdapter(
-                progress_callback=self._emit_optical_calibration_progress,
-                completion_callback=self._emit_optical_calibration_outcome,
-                warning_callback=self._on_optical_calibration_runtime_warning,
+            events=OpticalCalibrationEventAdapter.from_signal_emitters(
+                status=self.status_message_requested.emit,
+                flat_progress=self.flat_field_calibration_progress.emit,
+                lens_progress=self.lens_distortion_calibration_progress.emit,
+                flat_completion=self.flat_field_calibration_finished.emit,
+                lens_completion=self.lens_distortion_calibration_finished.emit,
             ),
         )
 
@@ -4745,7 +4747,7 @@ class Main(QMainWindow):
             return True
         if self._microscope_scan_running():
             return True
-        optical_owner = self._optical_mutation_context_is_current(optical_context)
+        optical_owner = isinstance(optical_context, OpticalCalibrationOutcome)
         if optical_calibration_blocks_mutation(
             self._optical_calibration_runtime.state(),
             outcome_owns_mutation=optical_owner,
@@ -4757,12 +4759,6 @@ class Main(QMainWindow):
             and stage_controller.is_busy()
             and not allow_stage_task
         )
-
-    def _optical_mutation_context_is_current(
-        self,
-        context: OpticalCalibrationOutcome | None,
-    ) -> bool:
-        return isinstance(context, OpticalCalibrationOutcome)
 
     def _objective_profile_mutation_busy(
         self,
@@ -5069,7 +5065,17 @@ class Main(QMainWindow):
         wizard.set_flat_field_result(False, "Flat-field calibration did not start.", run_id=run_id)
 
     def _cancel_optical_calibration_wizard(self, _run_id: object = None) -> None:
+        wizard = self._optical_calibration_wizard
+        if (
+            _run_id is not None
+            and (wizard is None or wizard.active_run_id() != _run_id)
+        ):
+            return
         self._optical_calibration_runtime.cancel()
+        dialog = self._lens_distortion_dialog
+        if dialog is not None:
+            dialog.set_running(False)
+            dialog.set_status("Lens distortion calibration stopped.")
 
     def _start_lens_distortion_calibration_from_wizard(self) -> None:
         wizard = self._optical_calibration_wizard
@@ -5140,37 +5146,6 @@ class Main(QMainWindow):
         decision = self._optical_calibration_runtime.start_flat(request)
         self._show_status(decision.message, 4000 if decision.accepted else 8000)
         return decision.accepted
-
-    def _emit_optical_calibration_progress(
-        self,
-        event: OpticalCalibrationProgress,
-    ) -> None:
-        self.status_message_requested.emit(event.message, 0)
-        signal = (
-            self.flat_field_calibration_progress
-            if event.kind == "flat"
-            else self.lens_distortion_calibration_progress
-        )
-        signal.emit(event, event.message)
-
-    def _emit_optical_calibration_outcome(
-        self,
-        outcome: OpticalCalibrationOutcome,
-    ) -> None:
-        if outcome.kind == "flat":
-            self.flat_field_calibration_finished.emit(
-                outcome, outcome.success, outcome.message, outcome.flat_payload
-            )
-        else:
-            self.lens_distortion_calibration_finished.emit(
-                outcome, outcome.success, outcome.message, outcome.lens_artifact
-            )
-
-    def _on_optical_calibration_runtime_warning(self, message: str) -> None:
-        try:
-            self.status_message_requested.emit(message, 10000)
-        except RuntimeError:
-            pass
 
     def _on_flat_field_calibration_progress(
         self,
@@ -5372,7 +5347,7 @@ class Main(QMainWindow):
             raise RuntimeError("No active objective selected.")
         if (
             optical_context is not None
-            and not self._optical_mutation_context_is_current(optical_context)
+            and not isinstance(optical_context, OpticalCalibrationOutcome)
         ):
             raise RuntimeError(
                 "Optical calibration result was canceled or is no longer current."

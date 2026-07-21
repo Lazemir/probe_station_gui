@@ -398,6 +398,45 @@ class OpticalCalibrationEventAdapter:
     completion_callback: Callable[[OpticalCalibrationOutcome], None]
     warning_callback: Callable[[str], None]
 
+    @classmethod
+    def from_signal_emitters(
+        cls,
+        *,
+        status: Callable[..., None],
+        flat_progress: Callable[..., None],
+        lens_progress: Callable[..., None],
+        flat_completion: Callable[..., None],
+        lens_completion: Callable[..., None],
+    ) -> "OpticalCalibrationEventAdapter":
+        def progress(event: OpticalCalibrationProgress) -> None:
+            _emit_safely(status, event.message, 0)
+            signal = flat_progress if event.kind == "flat" else lens_progress
+            _emit_safely(signal, event, event.message)
+
+        def complete(outcome: OpticalCalibrationOutcome) -> None:
+            if outcome.kind == "flat":
+                _emit_safely(
+                    flat_completion,
+                    outcome,
+                    outcome.success,
+                    outcome.message,
+                    outcome.flat_payload,
+                )
+            else:
+                _emit_safely(
+                    lens_completion,
+                    outcome,
+                    outcome.success,
+                    outcome.message,
+                    outcome.lens_artifact,
+                )
+
+        return cls(
+            progress_callback=progress,
+            completion_callback=complete,
+            warning_callback=lambda message: _emit_safely(status, message, 10000),
+        )
+
     def progress(self, event: OpticalCalibrationProgress) -> None:
         self.progress_callback(event)
 
@@ -406,6 +445,13 @@ class OpticalCalibrationEventAdapter:
 
     def warning(self, message: str) -> None:
         self.warning_callback(str(message))
+
+
+def _emit_safely(callback: Callable[..., None], *args: object) -> None:
+    try:
+        callback(*args)
+    except RuntimeError:
+        pass
 
 
 __all__ = [

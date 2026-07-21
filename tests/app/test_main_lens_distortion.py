@@ -286,16 +286,22 @@ def test_queued_lens_outcome_cannot_mutate_after_invalidation(invalidated_by) ->
     runtime, request, outcome, artifact = _queued_lens_delivery()
     if invalidated_by == "new-run":
         runtime.start_lens(replace(request, run_id="lens-b"))
-    elif invalidated_by == "cancel":
-        runtime.cancel()
     window = Main.__new__(Main)
     window._optical_calibration_runtime = runtime
     window._microscope_scan_running = lambda: invalidated_by == "scan"
-    window._lens_distortion_dialog = SimpleNamespace(
-        set_running=lambda _value: pytest.fail("stale outcome changed dialog"),
-        set_status=lambda _message: pytest.fail("stale outcome changed status"),
-    )
+    dialog_updates: list[tuple[str, object]] = []
+    if invalidated_by == "cancel":
+        window._lens_distortion_dialog = SimpleNamespace(
+            set_running=lambda value: dialog_updates.append(("running", value)),
+            set_status=lambda message: dialog_updates.append(("status", message)),
+        )
+    else:
+        window._lens_distortion_dialog = SimpleNamespace(
+            set_running=lambda _value: pytest.fail("stale outcome changed dialog"),
+            set_status=lambda _message: pytest.fail("stale outcome changed status"),
+        )
     window._optical_calibration_wizard = SimpleNamespace(
+        active_run_id=lambda: 17,
         set_lens_distortion_result=lambda *_args, **_kwargs: pytest.fail(
             "stale outcome changed wizard"
         )
@@ -304,10 +310,18 @@ def test_queued_lens_outcome_cannot_mutate_after_invalidation(invalidated_by) ->
         "stale outcome saved correction"
     )
     window._show_status = lambda *_args: pytest.fail("stale outcome was shown")
+    if invalidated_by == "cancel":
+        Main._cancel_optical_calibration_wizard(window, 17)
 
     Main._on_lens_distortion_calibration_finished(
         window, outcome, True, outcome.message, artifact
     )
+
+    if invalidated_by == "cancel":
+        assert dialog_updates == [
+            ("running", False),
+            ("status", "Lens distortion calibration stopped."),
+        ]
 
 
 def test_lens_start_captures_request_without_gui_thread_serial_read() -> None:

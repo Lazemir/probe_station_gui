@@ -156,6 +156,86 @@ def test_validation_previews_and_success_message_use_persisted_residuals() -> No
     assert "1.00 px max" in message
 
 
+def test_validation_allows_high_finite_baseline_metrics() -> None:
+    payload = _valid_payload(
+        baseline_residual_mean_px=50.0,
+        baseline_residual_max_px=100.0,
+    )
+
+    geometry.validate_lens_payload(payload, geometry.LensFitLimits())
+
+
+@pytest.mark.parametrize(
+    ("payload", "message"),
+    (
+        (_valid_payload(residual_mean_px=-0.1), "negative"),
+        (_valid_payload(residual_max_px=float("nan")), "not finite"),
+    ),
+)
+def test_validation_rejects_negative_or_nonfinite_residuals(payload, message) -> None:
+    with pytest.raises(RuntimeError, match=message):
+        geometry.validate_lens_payload(payload, geometry.LensFitLimits())
+
+
+def test_fit_propagates_preview_generation_failure(monkeypatch) -> None:
+    frames = (GridCalibrationFrame(_frame(), (0.0, 0.0)),)
+    monkeypatch.setattr(geometry_mask, "segment_metal_geometry", lambda _frame: object())
+    monkeypatch.setattr(
+        geometry_mask,
+        "build_geometry_feature_observations",
+        lambda *_args, **_kwargs: (),
+    )
+    monkeypatch.setattr(
+        geometry,
+        "fit_stage_geometry_from_observations",
+        lambda *_args, **_kwargs: SimpleNamespace(to_payload=_valid_payload),
+    )
+    monkeypatch.setattr(geometry, "validate_lens_payload", lambda *_args: None)
+
+    def fail_previews(*_args, **_kwargs):
+        raise RuntimeError("preview generation failed")
+
+    monkeypatch.setattr(
+        geometry_mask, "build_geometry_alignment_previews", fail_previews
+    )
+
+    with pytest.raises(RuntimeError, match="preview generation failed"):
+        geometry.fit_lens_artifact(
+            frames,
+            size_px=(100, 50),
+            pixels_to_mm=((-0.001, 0.0002), (-0.0003, -0.002)),
+            limits=geometry.LensFitLimits(),
+        )
+
+
+def test_fit_propagates_stage_geometry_failure(monkeypatch) -> None:
+    frames = (GridCalibrationFrame(_frame(), (0.0, 0.0)),)
+    monkeypatch.setattr(geometry_mask, "segment_metal_geometry", lambda _frame: object())
+    monkeypatch.setattr(
+        geometry_mask,
+        "build_geometry_feature_observations",
+        lambda *_args, **_kwargs: (),
+    )
+
+    def fail_fit(*_args, **_kwargs):
+        raise RuntimeError("stage geometry fit failed")
+
+    monkeypatch.setattr(geometry, "fit_stage_geometry_from_observations", fail_fit)
+    monkeypatch.setattr(
+        geometry_mask,
+        "build_geometry_alignment_previews",
+        lambda *_args, **_kwargs: pytest.fail("preview must not run after fit failure"),
+    )
+
+    with pytest.raises(RuntimeError, match="stage geometry fit failed"):
+        geometry.fit_lens_artifact(
+            frames,
+            size_px=(100, 50),
+            pixels_to_mm=((-0.001, 0.0002), (-0.0003, -0.002)),
+            limits=geometry.LensFitLimits(),
+        )
+
+
 @pytest.mark.parametrize(
     ("payload", "message"),
     (

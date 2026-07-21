@@ -261,8 +261,8 @@ class OpticalCalibrationRuntime:
                 fitted.before_preview,
                 fitted.after_preview,
             )
-            success = True
             message = lens_success_message(artifact.payload, request.fit_limits)
+            success = True
         except Exception as exc:
             message = f"Lens distortion calibration failed: {exc}"
         finally:

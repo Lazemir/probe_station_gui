@@ -9,7 +9,12 @@ import pytest
 
 import main as main_module
 from main import Main
+from probe_station_gui.camera.optical_calibration_adapters import (
+    OpticalCalibrationEventAdapter,
+    OpticalCalibrationRequestData,
+)
 from probe_station_gui.camera.optical_calibration_runtime import (
+    CalibrationStartDecision,
     FlatFieldCalibrationRequest,
     OpticalCalibrationOutcome,
     OpticalCalibrationProgress,
@@ -62,6 +67,8 @@ class _FakeWizard:
 
     def prepare(self, mode=None) -> bool:
         self.prepared.append(mode)
+        if mode is not None:
+            self.selected_mode = mode
         return True
 
     def set_objective(self, name, **kwargs) -> None:
@@ -107,7 +114,15 @@ class _FakeLensDialog:
     def __init__(self, _parent=None) -> None:
         self.calibrate_requested = _Signal()
         self.reset_requested = _Signal()
+        self.running = []
+        self.statuses = []
         self.shown = 0
+
+    def set_running(self, running) -> None:
+        self.running.append(bool(running))
+
+    def set_status(self, message) -> None:
+        self.statuses.append(str(message))
 
     def show(self) -> None:
         self.shown += 1
@@ -257,13 +272,43 @@ def test_runtime_worker_progress_uses_queued_status_and_calibration_signals(
     event = OpticalCalibrationProgress("run-1", 8, kind, "capture 2/9")
     status_signal = _RecordingSignal()
     progress_signal = _RecordingSignal()
-    window = Main.__new__(Main)
-    window.status_message_requested = status_signal
-    setattr(window, progress_signal_name, progress_signal)
+    other_progress_signal = _RecordingSignal()
+    adapter = OpticalCalibrationEventAdapter.from_signal_emitters(
+        status=status_signal.emit,
+        flat_progress=(
+            progress_signal.emit if kind == "flat" else other_progress_signal.emit
+        ),
+        lens_progress=(
+            progress_signal.emit if kind == "lens" else other_progress_signal.emit
+        ),
+        flat_completion=lambda *_args: None,
+        lens_completion=lambda *_args: None,
+    )
 
-    Main._emit_optical_calibration_progress(window, event)
+    adapter.progress(event)
 
     assert status_signal.calls == [("capture 2/9", 0)]
+    assert progress_signal.calls == [(event, "capture 2/9")]
+    assert other_progress_signal.calls == []
+
+
+def test_runtime_progress_survives_deleted_status_signal() -> None:
+    progress_signal = _RecordingSignal()
+
+    def deleted_status(*_args) -> None:
+        raise RuntimeError("deleted")
+
+    adapter = OpticalCalibrationEventAdapter.from_signal_emitters(
+        status=deleted_status,
+        flat_progress=progress_signal.emit,
+        lens_progress=lambda *_args: None,
+        flat_completion=lambda *_args: None,
+        lens_completion=lambda *_args: None,
+    )
+    event = OpticalCalibrationProgress("run-1", 8, "flat", "capture 2/9")
+
+    adapter.progress(event)
+
     assert progress_signal.calls == [(event, "capture 2/9")]
 
 
@@ -525,3 +570,87 @@ def test_lens_dialog_calibrate_opens_lens_only_wizard(monkeypatch) -> None:
     window._lens_distortion_dialog.calibrate_requested.emit()
 
     assert modes == [OpticalCalibrationMode.LENS_DISTORTION]
+
+
+def test_lens_dialog_wizard_cancel_restores_controls_without_publishing(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    class _Runtime:
+        active_kind = None
+        cancellations = 0
+
+        def state(self):
+            return SimpleNamespace(
+                active_run_id="lens-runtime" if self.active_kind else None,
+                active_kind=self.active_kind,
+                parent_session_token=None,
+            )
+
+        def start_lens(self, request):
+            self.active_kind = "lens"
+            return CalibrationStartDecision(True, 202, "started", request.run_id)
+
+        def cancel(self):
+            self.cancellations += 1
+            self.active_kind = None
+
+    runtime = _Runtime()
+    manifest = tmp_path / "missing-flat.json"
+    window = Main.__new__(Main)
+    window._lens_distortion_dialog = None
+    window._optical_calibration_wizard = None
+    window._optical_calibration_runtime = runtime
+    window.settings_manager = SimpleNamespace(
+        objectives_configuration=_objective_settings,
+    )
+    window._flat_field_calibration_store = SimpleNamespace(
+        current_manifest_path=lambda _objective: manifest,
+    )
+    window._refresh_lens_distortion_ui = lambda: None
+    window._reset_lens_distortion_calibration = lambda: None
+    window._active_objective_metadata = lambda: ("X20", 20.0)
+    window._optical_calibration_request_adapter = SimpleNamespace(
+        capture=lambda: OpticalCalibrationRequestData(
+            "X20",
+            20.0,
+            ((-0.001, 0.0), (0.0, -0.001)),
+            (0.001, 0.001),
+        )
+    )
+    window._stage_serial_ready = lambda: True
+    window.stage_controller = SimpleNamespace(is_busy=lambda: False)
+    window._coordinate_feedrate_for_axes = lambda _axes: 120.0
+    window._current_needle_feedrate = lambda: 70.0
+    window._show_status = lambda *_args: None
+    window._save_objective_distortion = lambda *_args, **_kwargs: pytest.fail(
+        "cancelled calibration saved a correction"
+    )
+    monkeypatch.setattr(main_module, "LensDistortionDialog", _FakeLensDialog)
+    monkeypatch.setattr(main_module, "OpticalCalibrationWizard", _FakeWizard)
+
+    Main._show_lens_distortion_dialog(window)
+    dialog = window._lens_distortion_dialog
+    dialog.calibrate_requested.emit()
+    wizard = window._optical_calibration_wizard
+    wizard.start_lens_distortion_requested.emit()
+    wizard.cancel_requested.emit(wizard.active_run_id())
+
+    assert runtime.cancellations == 1
+    assert dialog.running == [True, False]
+    assert dialog.statuses == ["started", "Lens distortion calibration stopped."]
+    assert wizard.results == []
+
+
+def test_stale_wizard_cancel_cannot_stop_new_lens_run() -> None:
+    window = Main.__new__(Main)
+    window._optical_calibration_wizard = SimpleNamespace(active_run_id=lambda: 18)
+    window._optical_calibration_runtime = SimpleNamespace(
+        cancel=lambda: pytest.fail("stale cancel stopped the current run")
+    )
+    window._lens_distortion_dialog = SimpleNamespace(
+        set_running=lambda _value: pytest.fail("stale cancel changed controls"),
+        set_status=lambda _message: pytest.fail("stale cancel changed status"),
+    )
+
+    Main._cancel_optical_calibration_wizard(window, 17)
