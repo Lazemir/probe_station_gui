@@ -19,7 +19,7 @@ from probe_station_gui.route.contact_quality import (
     route_measurement_sample_from_raw,
     summarize_route_contact_quality,
 )
-from probe_station_gui.route import contact_lifecycle
+from probe_station_gui.route import contact_lifecycle_adapter
 from probe_station_gui.route import contact_measurement
 from probe_station_gui.route import measurement_recording
 from probe_station_gui.route.contact_seek import (
@@ -294,6 +294,7 @@ class RouteMeasurementRunner:
         self._waiting = False
         self._meter_output_context: object | None = None
         self._csv_write_retry_interval_s = self.CSV_WRITE_RETRY_INTERVAL_S
+        self._contact_adapter = self._build_contact_adapter()
 
     @property
     def csv_path(self) -> Path:
@@ -482,8 +483,7 @@ class RouteMeasurementRunner:
         This intentionally reuses the same short contact check and automatic
         deeper-contact seek path as route measurements, but does not write a CSV row.
         """
-        return contact_lifecycle.place_contact(
-            self,
+        return self._contact_adapter.place_contact(
             point,
             position=position,
             total=total,
@@ -492,44 +492,6 @@ class RouteMeasurementRunner:
             lift_on_failure=lift_on_failure,
             clear_interrupt=clear_interrupt,
         )
-
-    def _prepare_contact_placement_move(
-        self,
-        point: RouteMeasurementPoint,
-        *,
-        position: int,
-        total: int,
-        move_to_point: bool,
-        lift_before_move: bool,
-    ) -> None:
-        contact_lifecycle.prepare_contact_placement_move(
-            self,
-            point,
-            position=position,
-            total=total,
-            move_to_point=move_to_point,
-            lift_before_move=lift_before_move,
-        )
-
-    def _prepare_contact_measurement_batch(self) -> None:
-        contact_lifecycle.prepare_contact_measurement_batch(self)
-
-    def _measure_contact_placement_record(
-        self,
-        point: RouteMeasurementPoint,
-        *,
-        position: int,
-        total: int,
-    ) -> RouteMeasurementRecord:
-        return contact_lifecycle.measure_contact_placement_record(
-            self,
-            point,
-            position=position,
-            total=total,
-        )
-
-    def _lift_needles_after_failed_contact(self) -> None:
-        contact_lifecycle.lift_needles_after_failed_contact(self)
 
     def prepare_external_contact(
         self,
@@ -543,14 +505,9 @@ class RouteMeasurementRunner:
         lift_before_move: bool = True,
         lift_on_failure: bool = False,
     ) -> RouteExternalContactPreparation:
-        """Prepare one route contact and leave needles down when usable.
+        """Prepare one route contact for the external route-control session."""
 
-        This is the contact lifecycle used by API-driven external measurement
-        sessions. It reuses the route photo/autofocus and resistance/contact seek
-        code paths, but does not write resistance rows to CSV.
-        """
-        return contact_lifecycle.prepare_external_contact(
-            self,
+        return self._contact_adapter.prepare_external_contact(
             point,
             position=position,
             total=total,
@@ -561,9 +518,84 @@ class RouteMeasurementRunner:
             lift_on_failure=lift_on_failure,
         )
 
-    def _raise_if_point_interrupted(self) -> None:
-        if self._point_interrupt_requested.is_set():
-            raise RuntimeError("Route contact interrupted.")
+    def _build_contact_adapter(
+        self,
+    ) -> contact_lifecycle_adapter.RouteContactRunnerAdapter:
+        flow = contact_lifecycle_adapter.build_route_contact_flow(
+            stage=contact_lifecycle_adapter.ContactStageBindings(
+                controller=self._stage_controller,
+                needle_feedrate=lambda: self._needle_feedrate,
+                begin=self._begin_stage_task,
+                finish=self._finish_stage_task,
+                wait_for_background_tasks=self._wait_for_background_tasks,
+                lower_needles=self._lower_needles_for_measurement,
+                contact_xy=self._adjusted_stage_xy,
+                photo_xy=self._adjusted_photo_stage_xy,
+                settle_contact=self._sleep_contact_settle,
+                settle_photo=self._sleep_photo_settle,
+            ),
+            meter=contact_lifecycle_adapter.ContactMeterBindings(
+                initial_count=self._initial_measurement_count,
+                prepare=self._start_measurement_prepare_task,
+                measure=lambda position, total, task: contact_measurement.measure_samples(
+                    self,
+                    position=position,
+                    total=total,
+                    prepare_task=task,
+                ),
+                close_output=self._close_meter_output_context,
+            ),
+            quality=contact_lifecycle_adapter.ContactQualityBindings(
+                reset_seek=lambda: setattr(
+                    self, "_current_contact_seek_result", None
+                ),
+                current_seek=lambda: self._current_contact_seek_result,
+                auto_seek_enabled=lambda: self._auto_contact_seek_on_bad_contact,
+                set_auto_seek_enabled=lambda enabled: setattr(
+                    self, "_auto_contact_seek_on_bad_contact", bool(enabled)
+                ),
+                record=lambda point, samples: measurement_recording.record_for_point(
+                    self,
+                    point=point,
+                    samples=samples,
+                ),
+                placement_success=(
+                    measurement_recording.contact_placement_record_is_success
+                ),
+                placement_message=lambda message: (
+                    measurement_recording.contact_placement_message(
+                        self,
+                        action_label=message.action_label,
+                        failure_label=message.failure_label,
+                        point=message.point,
+                        record=message.record,
+                        position=message.position,
+                        total=message.total,
+                        success=message.success,
+                        seek=message.seek,
+                    )
+                ),
+            ),
+            control=contact_lifecycle_adapter.ContactControlBindings(
+                clear_interrupt=self._point_interrupt_requested.clear,
+                interrupted=self._point_interrupt_requested.is_set,
+                status=self._status,
+                pre_contact_photo=self._emit_pre_contact_photo,
+                contact_photo=self._emit_contact_photo,
+            ),
+        )
+        return contact_lifecycle_adapter.RouteContactRunnerAdapter(
+            flow,
+            autofocus=self._run_photo_focus,
+            capture_photo=lambda point, position, total, focus: str(
+                self._capture_photo(
+                    point,
+                    position,
+                    total,
+                    focus_result=focus,
+                )
+            ),
+        )
 
     def _route_point_stop_requested(self) -> bool:
         return (
@@ -579,23 +611,10 @@ class RouteMeasurementRunner:
     ) -> None:
         """Lift needles after an API-owned external measurement."""
 
-        self._begin_stage_task()
-        try:
-            self._status(
-                f"Route contact: point {position}/{total} lifting needles."
-            )
-            self._stage_controller.run_external_needles_action(
-                "lift",
-                self._needle_feedrate,
-            )
-        finally:
-            try:
-                self._wait_for_background_tasks()
-            finally:
-                try:
-                    self._close_meter_output_context()
-                finally:
-                    self._finish_stage_task()
+        self._contact_adapter.lift_after_external_measurement(
+            position=position,
+            total=total,
+        )
 
     def check_contact(
         self,
@@ -606,12 +625,10 @@ class RouteMeasurementRunner:
     ) -> RouteContactPlacementResult:
         """Measure current contact quality without moving needles deeper."""
 
-        return self._measure_current_contact(
+        return self._contact_adapter.check_contact(
             point,
             position=position,
             total=total,
-            auto_contact_seek=False,
-            action_label="Contact check",
         )
 
     def seek_contact(
@@ -623,30 +640,10 @@ class RouteMeasurementRunner:
     ) -> RouteContactPlacementResult:
         """Run automatic contact seek from the current needle position."""
 
-        return self._measure_current_contact(
+        return self._contact_adapter.seek_contact(
             point,
             position=position,
             total=total,
-            auto_contact_seek=True,
-            action_label="Contact seek",
-        )
-
-    def _measure_current_contact(
-        self,
-        point: RouteMeasurementPoint,
-        *,
-        position: int,
-        total: int,
-        auto_contact_seek: bool,
-        action_label: str,
-    ) -> RouteContactPlacementResult:
-        return contact_lifecycle.measure_current_contact(
-            self,
-            point,
-            position=position,
-            total=total,
-            auto_contact_seek=auto_contact_seek,
-            action_label=action_label,
         )
 
     def run(self) -> tuple[bool, str]:
