@@ -5,6 +5,7 @@ from __future__ import annotations
 import threading
 import time
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 
 from PySide6.QtGui import QImage
 
@@ -42,6 +43,21 @@ from probe_station_gui.camera.optical_calibration_lifecycle import (
 )
 ThreadFactory = Callable[..., threading.Thread]
 Request = FlatFieldCalibrationRequest | LensDistortionCalibrationRequest
+
+
+@dataclass
+class _MotionState:
+    moved: bool = False
+
+    def move(
+        self,
+        stage: StagePort,
+        x_mm: float,
+        y_mm: float,
+        feedrate: float,
+    ) -> None:
+        self.moved = True
+        stage.move_xy(x_mm, y_mm, feedrate)
 
 
 class OpticalCalibrationRuntime:
@@ -91,6 +107,14 @@ class OpticalCalibrationRuntime:
     def shutdown(self, timeout_s: float) -> bool:
         return self._lifecycle.shutdown(timeout_s)
 
+    def consume(
+        self,
+        outcome: OpticalCalibrationOutcome,
+        *,
+        blocked: bool = False,
+    ) -> bool:
+        return self._lifecycle.consume(outcome.run_id, blocked=blocked)
+
     def _run_flat(self, raw_request: Request) -> None:
         request = raw_request
         assert isinstance(request, FlatFieldCalibrationRequest)
@@ -104,7 +128,7 @@ class OpticalCalibrationRuntime:
         child: OpticalSessionLeasePort | None = None
         reserved = False
         camera_key: str | None = None
-        moved = False
+        motion = _MotionState()
         start_xy: tuple[float, float] | None = None
         payload: dict[str, object] | None = None
         success = False
@@ -116,6 +140,8 @@ class OpticalCalibrationRuntime:
             )
             snapshot = child.snapshot()
             self._check_cancelled("Flat-field")
+            if request.grid_size != 3:
+                raise RuntimeError("Flat-field calibration requires a 3x3 capture grid.")
             self._stage.reserve("flat-field calibration")
             reserved = True
             start_xy = self._stage.start_position()
@@ -129,7 +155,13 @@ class OpticalCalibrationRuntime:
             camera_key = self._camera.lock()
             self._progress(request, "Flat-field calibration: raising needles.")
             self._stage.raise_needles(request.needle_feedrate)
-            frames, moved = self._capture_flat_grid(request, start_xy, offsets)
+            frames = self._capture_flat_grid(
+                request,
+                start_xy,
+                offsets,
+                size_px,
+                motion,
+            )
             stored = self._store.install(
                 request.objective_name,
                 frames,
@@ -137,8 +169,8 @@ class OpticalCalibrationRuntime:
             )
             payload = {
                 "objective": request.objective_name,
-                "current_manifest": str(getattr(stored, "current_manifest", "")),
-                "reference_image": str(getattr(stored, "reference_image", "")),
+                "current_manifest": stored.current_manifest,
+                "reference_image": stored.reference_image,
             }
             success = True
             message = "Flat-field calibration saved."
@@ -150,7 +182,7 @@ class OpticalCalibrationRuntime:
                 request=request,
                 child=child,
                 reserved=reserved,
-                moved=moved,
+                moved=motion.moved,
                 start_xy=start_xy,
                 camera_key=camera_key,
                 success=success,
@@ -181,7 +213,7 @@ class OpticalCalibrationRuntime:
         child: OpticalSessionLeasePort | None = None
         reserved = False
         camera_key: str | None = None
-        moved = False
+        motion = _MotionState()
         start_xy: tuple[float, float] | None = None
         artifact: LensCalibrationArtifact | None = None
         success = False
@@ -208,9 +240,15 @@ class OpticalCalibrationRuntime:
                 grid_size=request.grid_size,
                 fov_fraction=request.fov_fraction,
             )
-            frames, moved = self._capture_lens_grid(request, start_xy, offsets, size_px)
+            frames = self._capture_lens_grid(
+                request,
+                start_xy,
+                offsets,
+                size_px,
+                motion,
+            )
             self._return_to_start(request, start_xy)
-            moved = False
+            motion.moved = False
             fitted = fit_lens_artifact(
                 frames,
                 size_px=size_px,
@@ -233,7 +271,7 @@ class OpticalCalibrationRuntime:
                 request=request,
                 child=child,
                 reserved=reserved,
-                moved=moved,
+                moved=motion.moved,
                 start_xy=start_xy,
                 camera_key=camera_key,
                 success=success,
@@ -256,13 +294,15 @@ class OpticalCalibrationRuntime:
         request: FlatFieldCalibrationRequest,
         start_xy: tuple[float, float],
         offsets: Sequence[tuple[float, float]],
-    ) -> tuple[list[QImage], bool]:
+        expected_size: tuple[int, int],
+        motion: _MotionState,
+    ) -> list[QImage]:
         frames: list[QImage] = []
-        expected_size: tuple[int, int] | None = None
         for index, (dx_mm, dy_mm) in enumerate(offsets, start=1):
             self._check_cancelled("Flat-field")
             self._progress(request, f"Flat-field calibration: capture {index}/{len(offsets)}.")
-            self._stage.move_xy(
+            motion.move(
+                self._stage,
                 start_xy[0] + dx_mm,
                 start_xy[1] + dy_mm,
                 request.linear_feedrate,
@@ -270,11 +310,10 @@ class OpticalCalibrationRuntime:
             self._settle(request.settle_s, "Flat-field")
             frame = self._require_fresh_frame(request.camera_timeout_s)
             current_size = frame_size(frame)
-            expected_size = current_size if expected_size is None else expected_size
             if current_size != expected_size:
                 raise RuntimeError("Camera frame size changed during calibration.")
             frames.append(frame)
-        return frames, True
+        return frames
 
     def _capture_lens_grid(
         self,
@@ -282,7 +321,8 @@ class OpticalCalibrationRuntime:
         start_xy: tuple[float, float],
         offsets: Sequence[tuple[float, float]],
         expected_size: tuple[int, int],
-    ) -> tuple[list[GridCalibrationFrame], bool]:
+        motion: _MotionState,
+    ) -> list[GridCalibrationFrame]:
         frames: list[GridCalibrationFrame] = []
         for index, (dx_mm, dy_mm) in enumerate(offsets, start=1):
             self._check_cancelled("Lens distortion")
@@ -290,7 +330,8 @@ class OpticalCalibrationRuntime:
                 request,
                 f"Lens distortion calibration: capture {index}/{len(offsets)}.",
             )
-            self._stage.move_xy(
+            motion.move(
+                self._stage,
                 start_xy[0] + dx_mm,
                 start_xy[1] + dy_mm,
                 request.linear_feedrate,
@@ -300,7 +341,7 @@ class OpticalCalibrationRuntime:
             if frame_size(frame) != expected_size:
                 raise RuntimeError("Camera frame size changed during calibration.")
             frames.append(GridCalibrationFrame(frame, (dx_mm, dy_mm)))
-        return frames, True
+        return frames
 
     def _cleanup(
         self,
@@ -353,11 +394,17 @@ class OpticalCalibrationRuntime:
                 success = False
                 message = f"{self._label(kind)} calibration restore failed: {exc}"
         if reserved and camera_key is not None:
-            camera_warning = self._camera.restore(camera_key)
-            if camera_warning:
-                warnings.append(str(camera_warning))
+            try:
+                camera_warning = self._camera.restore(camera_key)
+                if camera_warning:
+                    warnings.append(str(camera_warning))
+            except Exception as exc:
+                warnings.append(f"Camera restore failed: {exc}")
         if reserved:
-            self._stage.release()
+            try:
+                self._stage.release()
+            except Exception as exc:
+                warnings.append(f"Stage release failed: {exc}")
         return success, message, warnings
 
     def _apply_restore_warnings(

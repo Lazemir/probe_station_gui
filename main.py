@@ -1190,6 +1190,16 @@ class Main(QMainWindow):
         return controller
 
     def _compose_optical_calibration_runtime(self) -> None:
+        camera = MicroscopeScanCameraAdapter(
+            grabber=self.grabber,
+            stop_event=self._microscope_scan_stop_requested,
+            latest_frame_counter=self._latest_camera_counter,
+            wait_for_frame=self._wait_for_camera_frame,
+            latest_raw_frame_counter=self._latest_raw_camera_counter,
+            wait_for_raw_frame=self._wait_for_raw_camera_frame,
+            correct_lens=self._correct_camera_frame_for_active_objective,
+            settings_timeout_s=self.MICROSCOPE_SCAN_CAMERA_SETTINGS_TIMEOUT_S,
+        )
         self._optical_calibration_request_adapter = OpticalCalibrationRequestAdapter(
             objective_metadata=self._active_objective_metadata,
             objective_scale=self._active_microscope_scale,
@@ -1203,8 +1213,8 @@ class Main(QMainWindow):
                 finish_task=self.stage_controller.finish_external_task,
             ),
             camera=OpticalCalibrationCameraAdapter(
-                apply_lock=self._apply_microscope_scan_camera_lock,
-                restore_lock=self._restore_microscope_scan_camera_lock,
+                apply_lock=camera.apply_lock,
+                restore_lock=camera.restore_lock,
                 raw_counter=self._latest_raw_camera_counter,
                 wait_raw_callback=self._wait_for_raw_camera_frame,
             ),
@@ -5135,6 +5145,7 @@ class Main(QMainWindow):
         self,
         event: OpticalCalibrationProgress,
     ) -> None:
+        self.status_message_requested.emit(event.message, 0)
         signal = (
             self.flat_field_calibration_progress
             if event.kind == "flat"
@@ -5180,6 +5191,11 @@ class Main(QMainWindow):
         _payload: object,
     ) -> None:
         if not isinstance(outcome, OpticalCalibrationOutcome):
+            return
+        if not self._optical_calibration_runtime.consume(
+            outcome,
+            blocked=self._microscope_scan_running(),
+        ):
             return
         wizard = getattr(self, "_optical_calibration_wizard", None)
         if wizard is not None and outcome.wizard_run_id is not None:
@@ -5288,6 +5304,11 @@ class Main(QMainWindow):
         artifact: object,
     ) -> None:
         if not isinstance(outcome, OpticalCalibrationOutcome):
+            return
+        if not self._optical_calibration_runtime.consume(
+            outcome,
+            blocked=self._microscope_scan_running(),
+        ):
             return
         presentation = prepare_lens_completion(
             outcome,

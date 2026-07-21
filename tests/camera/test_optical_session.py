@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import threading
+import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -8,6 +10,12 @@ from probe_station_gui.camera.exposure_policy import (
     ExposurePolicyBusyError,
     ExposurePolicyError,
     OpticalSessionManager,
+)
+from probe_station_gui.camera.optical_calibration_lifecycle import (
+    OpticalCalibrationLifecycle,
+)
+from probe_station_gui.camera.optical_calibration_runtime import (
+    FlatFieldCalibrationRequest,
 )
 from tests.camera.test_exposure_policy import PolicyRig
 
@@ -79,6 +87,53 @@ def test_full_wizard_nested_and_outer_close_wait_for_policy_contention() -> None
     assert outer_result["accepted"] is True
     assert rig.controller.snapshot()["session_active"] is False
     assert sessions._records == {}
+
+
+def test_runtime_shutdown_is_bounded_while_real_session_lock_is_held() -> None:
+    rig = PolicyRig(auto_enabled=True, engine="software")
+    sessions = OpticalSessionManager(rig.controller)
+    lifecycle = OpticalCalibrationLifecycle(
+        sessions=sessions,
+        events=SimpleNamespace(warning=lambda _message: None),
+        thread_factory=threading.Thread,
+    )
+    request = FlatFieldCalibrationRequest(
+        run_id="flat",
+        wizard_run_id=17,
+        objective_name="X20",
+        magnification=20.0,
+        pixels_to_mm=((-0.001, 0.0), (0.0, -0.001)),
+        pixel_size_mm=(0.001, 0.001),
+        linear_feedrate=120.0,
+        needle_feedrate=70.0,
+        full_wizard=True,
+    )
+    child = lifecycle.open_child_session("flat-field calibration", request)
+    lifecycle.close_child(child)
+    release = threading.Event()
+    locked = threading.Event()
+
+    def hold_command_lock() -> None:
+        rig.controller._command_lock.acquire()
+        locked.set()
+        release.wait(0.5)
+        rig.controller._command_lock.release()
+
+    holder = threading.Thread(target=hold_command_lock, daemon=True)
+    holder.start()
+    assert locked.wait(1.0)
+    started = time.monotonic()
+    try:
+        completed = lifecycle.shutdown(0.02)
+        elapsed = time.monotonic() - started
+        assert lifecycle.state().parent_session_token is not None
+    finally:
+        release.set()
+        holder.join(timeout=1.0)
+
+    assert completed is False
+    assert elapsed < 0.15
+    assert lifecycle.shutdown(1.0) is True
 
 
 def test_outer_session_adjusts_before_ready_and_nested_session_does_not() -> None:

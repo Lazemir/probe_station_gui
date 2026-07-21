@@ -45,6 +45,7 @@ class OpticalCalibrationLifecycle:
         self._parent_lease: OpticalSessionLeasePort | None = None
         self._parent_token: str | None = None
         self._parent_close_thread: threading.Thread | None = None
+        self._deliverable_run_id: str | None = None
         self._shutdown_requested = False
 
     def start(
@@ -58,6 +59,7 @@ class OpticalCalibrationLifecycle:
             if rejection is not None:
                 return rejection
             self.cancel_event.clear()
+            self._deliverable_run_id = None
             self._active_request = request
             thread = self._thread_factory(
                 target=lambda: runner(request),
@@ -88,6 +90,7 @@ class OpticalCalibrationLifecycle:
             if run_id is not None and active is not None and active.run_id != run_id:
                 return
             self.cancel_event.set()
+            self._deliverable_run_id = None
             close_parent = self._parent_lease is not None and not _thread_alive(
                 self._worker
             )
@@ -116,9 +119,7 @@ class OpticalCalibrationLifecycle:
             self._active_request = None
             self._worker = None
         if self._parent_lease is not None:
-            self.close_parent_session(deadline=deadline)
-        if self._parent_lease is not None:
-            return False
+            self._schedule_parent_close()
         if not _join_worker(self._parent_close_thread, deadline):
             return False
         with self._lock:
@@ -180,12 +181,22 @@ class OpticalCalibrationLifecycle:
             if publish:
                 self._active_request = None
                 self._worker = None
+                self._deliverable_run_id = (
+                    None if self.cancel_event.is_set() else request.run_id
+                )
             close_parent = (
                 publish and self.cancel_event.is_set() and self._parent_lease is not None
             )
         if close_parent:
             self._schedule_parent_close()
         return publish
+
+    def consume(self, run_id: str, *, blocked: bool = False) -> bool:
+        with self._lock:
+            consumable = not blocked and self._deliverable_run_id == run_id
+            if blocked or consumable:
+                self._deliverable_run_id = None
+            return consumable
 
     def _start_rejection(
         self,
@@ -210,10 +221,11 @@ class OpticalCalibrationLifecycle:
                 self._active_request = None
 
     def _parent_matches_request(self, request: Request) -> bool:
-        if not request.full_wizard or request.parent_session_token is None:
-            return True
-        return (
-            self._parent_lease is not None
+        if self._parent_lease is None:
+            return request.parent_session_token is None
+        return bool(
+            request.full_wizard
+            and request.parent_session_token is not None
             and self._parent_token == request.parent_session_token
         )
 
@@ -221,11 +233,13 @@ class OpticalCalibrationLifecycle:
         outer = self._sessions.open("optical calibration")
         parent_token = str(outer.token)
         with self._lock:
-            if self._parent_lease is not None:
-                outer.close()
-                raise RuntimeError("Optical calibration session is already active.")
-            self._parent_lease = outer
-            self._parent_token = parent_token
+            duplicate = self._parent_lease is not None
+            if not duplicate:
+                self._parent_lease = outer
+                self._parent_token = parent_token
+        if duplicate:
+            outer.close()
+            raise RuntimeError("Optical calibration session is already active.")
         return parent_token
 
     def _close_parent_lease(

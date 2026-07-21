@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 from PySide6.QtGui import QColor, QImage
 
+from probe_station_gui.camera import optical_calibration_adapters as calibration_adapters
 from probe_station_gui.camera.exposure_policy import ExposurePolicyBusyError
 from probe_station_gui.camera.optical_calibration_lifecycle import (
     OpticalCalibrationLifecycle,
@@ -15,15 +16,21 @@ from probe_station_gui.camera.optical_calibration_runtime import (
     FlatFieldCalibrationRequest,
     LensCalibrationArtifact,
     LensDistortionCalibrationRequest,
+    OpticalCalibrationOutcome,
     OpticalCalibrationRuntime,
 )
 from probe_station_gui.camera.optical_calibration_geometry import (
+    LensFitLimits,
     flat_field_capture_offsets_mm,
     lens_capture_offsets_mm,
 )
 from probe_station_gui.camera.optical_calibration_adapters import (
     OpticalCalibrationCameraAdapter,
+    OpticalCalibrationEventAdapter,
+    OpticalCalibrationSessionAdapter,
     OpticalCalibrationStageAdapter,
+    OpticalCalibrationStoreAdapter,
+    prepare_lens_completion,
 )
 
 
@@ -53,6 +60,8 @@ class _Events:
 
 
 class _InlineThread:
+    errors: list[BaseException] = []
+
     def __init__(self, *, target, **_kwargs) -> None:
         self._target = target
         self._alive = False
@@ -61,6 +70,8 @@ class _InlineThread:
         self._alive = True
         try:
             self._target()
+        except BaseException as exc:
+            self.errors.append(exc)
         finally:
             self._alive = False
 
@@ -69,6 +80,27 @@ class _InlineThread:
 
     def join(self, _timeout=None) -> None:
         return None
+
+
+class _DeferredThread:
+    def __init__(self, *, target, **_kwargs) -> None:
+        self.target = target
+
+    def start(self) -> None:
+        return None
+
+    def is_alive(self) -> bool:
+        return False
+
+    def join(self, _timeout=None) -> None:
+        return None
+
+
+@pytest.fixture(autouse=True)
+def _surface_inline_worker_errors():
+    _InlineThread.errors.clear()
+    yield
+    assert _InlineThread.errors == []
 
 
 class _Lease:
@@ -129,6 +161,7 @@ class _Stage:
     def __init__(self, events: list[object]) -> None:
         self.events = events
         self.fail_on: str | None = None
+        self.release_error: Exception | None = None
 
     def reserve(self, operation: str) -> None:
         self.events.append(("stage_reserve", operation))
@@ -151,6 +184,8 @@ class _Stage:
 
     def release(self) -> None:
         self.events.append(("stage_release",))
+        if self.release_error is not None:
+            raise self.release_error
 
 
 class _Camera:
@@ -159,6 +194,7 @@ class _Camera:
         self.frames = list(frames)
         self.counter = 0
         self.restore_warning = ""
+        self.restore_error: Exception | None = None
 
     def lock(self) -> str:
         self.events.append(("camera_lock",))
@@ -166,6 +202,8 @@ class _Camera:
 
     def restore(self, key: str) -> str:
         self.events.append(("camera_restore", key))
+        if self.restore_error is not None:
+            raise self.restore_error
         return self.restore_warning
 
     def latest_raw_counter(self) -> int:
@@ -275,6 +313,32 @@ def test_session_open_failure_causes_zero_stage_and_camera_calls() -> None:
     )
 
 
+def test_lens_session_or_position_failure_avoids_camera_work() -> None:
+    emitted = _Events()
+    runtime = OpticalCalibrationRuntime(
+        stage=_ForbiddenPort(),
+        camera=_ForbiddenPort(),
+        sessions=_FailingSession(),
+        store=_ForbiddenPort(),
+        events=emitted,
+        thread_factory=_InlineThread,
+    )
+    runtime.start_lens(_lens_request())
+    assert emitted.finished[0].success is False
+
+    events: list[object] = []
+    stage = _Stage(events)
+    stage.fail_on = "position"
+    runtime, emitted = _runtime(events, frames=[], stage=stage)
+    runtime.start_lens(_lens_request())
+    assert not any(event[0].startswith("camera_") for event in events)
+    assert events[-2:] == [
+        ("stage_release",),
+        ("session_close", "lens distortion calibration"),
+    ]
+    assert emitted.finished[0].success is False
+
+
 def test_flat_capture_uses_raw_serpentine_grid_and_cleanup_order() -> None:
     events: list[object] = []
     store = _Store(events)
@@ -323,6 +387,178 @@ def test_reserved_failure_restores_camera_releases_stage_then_closes_session(
     assert emitted.finished[0].success is False
 
 
+@pytest.mark.parametrize("kind", ("flat", "lens"))
+def test_capture_two_timeout_returns_to_start_before_cleanup(kind, monkeypatch) -> None:
+    events: list[object] = []
+    runtime, emitted = _runtime(events, frames=[_frame(), _frame()])
+    monkeypatch.setattr(
+        "probe_station_gui.camera.optical_calibration_runtime.fit_lens_artifact",
+        lambda *_args, **_kwargs: pytest.fail("fit must not run after timeout"),
+    )
+
+    if kind == "flat":
+        runtime.start_flat(_flat_request())
+        child_label = "flat-field calibration"
+    else:
+        runtime.start_lens(_lens_request())
+        child_label = "lens distortion calibration"
+
+    moves = [event for event in events if event[0] == "move"]
+    assert len(moves) == 3
+    assert moves[-1] == ("move", 10.0, 20.0, 120.0)
+    assert events.index(moves[-1]) < events.index(("camera_restore", "camera-key"))
+    assert events.index(("camera_restore", "camera-key")) < events.index(
+        ("stage_release",)
+    )
+    assert events.index(("stage_release",)) < events.index(
+        ("session_close", child_label)
+    )
+    assert emitted.finished[0].success is False
+
+
+@pytest.mark.parametrize("kind", ("flat", "lens"))
+def test_cancel_after_first_grid_capture_returns_to_start_and_invalidates_outcome(
+    kind,
+    monkeypatch,
+) -> None:
+    events: list[object] = []
+    emitted = _Events()
+    runtime: OpticalCalibrationRuntime
+
+    class _CancelAfterFirstCapture(_Camera):
+        def wait_raw(self, *, after_counter: int | None, timeout_s: float):
+            frame = super().wait_raw(after_counter=after_counter, timeout_s=timeout_s)
+            if self.counter == 2:
+                runtime.cancel()
+            return frame
+
+    camera = _CancelAfterFirstCapture(events, [_frame() for _ in range(10)])
+    runtime = OpticalCalibrationRuntime(
+        stage=_Stage(events),
+        camera=camera,
+        sessions=_Sessions(events),
+        store=_Store(events),
+        events=emitted,
+        thread_factory=_InlineThread,
+    )
+    monkeypatch.setattr(
+        "probe_station_gui.camera.optical_calibration_runtime.fit_lens_artifact",
+        lambda *_args, **_kwargs: pytest.fail("cancelled lens must not fit"),
+    )
+    request = _flat_request() if kind == "flat" else _lens_request()
+
+    decision = runtime.start_flat(request) if kind == "flat" else runtime.start_lens(request)
+
+    assert decision.accepted is True
+    moves = [event for event in events if event[0] == "move"]
+    assert moves == [
+        ("move", 10.0, 20.0, 120.0),
+        ("move", 10.0, 20.0, 120.0),
+    ]
+    outcome = emitted.finished[0]
+    assert outcome.success is False
+    assert "stopped by user" in outcome.message
+    assert runtime.consume(outcome) is False
+    operation = "flat-field calibration" if kind == "flat" else "lens distortion calibration"
+    assert events[-3:] == [
+        ("camera_restore", "camera-key"),
+        ("stage_release",),
+        ("session_close", operation),
+    ]
+
+
+def test_real_worker_thread_start_is_nonblocking_and_cancel_wins_initial_capture() -> None:
+    events: list[object] = []
+    entered_capture = threading.Event()
+    release_capture = threading.Event()
+    completed = threading.Event()
+
+    class _BlockingCamera(_Camera):
+        def wait_raw(self, *, after_counter: int | None, timeout_s: float):
+            entered_capture.set()
+            assert release_capture.wait(1.0)
+            return super().wait_raw(after_counter=after_counter, timeout_s=timeout_s)
+
+    class _ThreadEvents(_Events):
+        def complete(self, outcome) -> None:
+            super().complete(outcome)
+            completed.set()
+
+    emitted = _ThreadEvents()
+    runtime = OpticalCalibrationRuntime(
+        stage=_Stage(events),
+        camera=_BlockingCamera(events, [_frame()]),
+        sessions=_Sessions(events),
+        store=_Store(events),
+        events=emitted,
+    )
+
+    decision = runtime.start_flat(_flat_request())
+
+    assert decision.accepted is True
+    assert entered_capture.wait(0.5)
+    assert runtime.state().active_run_id == "flat-1"
+    runtime.cancel("flat-1")
+    release_capture.set()
+    assert completed.wait(1.0)
+    assert emitted.finished[0].success is False
+    assert "stopped by user" in emitted.finished[0].message
+    assert [event for event in events if event[0] == "move"] == []
+    assert runtime.consume(emitted.finished[0]) is False
+
+
+@pytest.mark.parametrize("failure", ("camera_restore", "stage_release"))
+def test_cleanup_exception_does_not_skip_later_cleanup_or_outcome(failure) -> None:
+    events: list[object] = []
+    stage = _Stage(events)
+    camera = _Camera(events, [_frame() for _ in range(10)])
+    if failure == "camera_restore":
+        camera.restore_error = RuntimeError("restore exploded")
+    else:
+        stage.release_error = RuntimeError("release exploded")
+    emitted = _Events()
+    runtime = OpticalCalibrationRuntime(
+        stage=stage,
+        camera=camera,
+        sessions=_Sessions(events),
+        store=_Store(events),
+        events=emitted,
+        thread_factory=_InlineThread,
+    )
+
+    runtime.start_flat(_flat_request())
+
+    assert ("session_close", "flat-field calibration") in events
+    assert runtime.state().active_run_id is None
+    assert len(emitted.finished) == 1
+    assert emitted.finished[0].success is False
+    assert failure.split("_")[-1] in emitted.finished[0].message.lower()
+
+
+def test_flat_capture_rejects_first_frame_that_differs_from_sizing_frame() -> None:
+    events: list[object] = []
+    runtime, emitted = _runtime(
+        events,
+        frames=[_frame(100, 50), *[_frame(101, 50) for _ in range(9)]],
+    )
+
+    runtime.start_flat(_flat_request())
+
+    assert emitted.finished[0].success is False
+    assert "frame size changed" in emitted.finished[0].message.lower()
+
+
+def test_flat_capture_rejects_non_three_by_three_request_before_stage_work() -> None:
+    events: list[object] = []
+    runtime, emitted = _runtime(events, frames=[])
+
+    runtime.start_flat(_flat_request(grid_size=4))
+
+    assert not any(event[0].startswith("stage_") for event in events)
+    assert emitted.finished[0].success is False
+    assert "3x3" in emitted.finished[0].message
+
+
 def test_full_wizard_reuses_parent_session_across_flat_then_lens(monkeypatch) -> None:
     events: list[object] = []
     sessions = _Sessions(events)
@@ -354,6 +590,23 @@ def test_full_wizard_reuses_parent_session_across_flat_then_lens(monkeypatch) ->
     ]
     assert events[-1] == ("session_close", "optical calibration")
     assert [item.success for item in emitted.finished] == [True, True]
+
+
+def test_retained_parent_rejects_standalone_and_missing_token_continuations() -> None:
+    events: list[object] = []
+    runtime, _emitted = _runtime(events, frames=[_frame() for _ in range(10)])
+    runtime.start_flat(_flat_request(full_wizard=True, wizard_run_id=17))
+    parent_token = runtime.state().parent_session_token
+
+    standalone = runtime.start_flat(_flat_request(run_id="standalone"))
+    missing_token = runtime.start_lens(
+        _lens_request(run_id="missing", full_wizard=True, wizard_run_id=17)
+    )
+
+    assert parent_token is not None
+    assert standalone.accepted is False
+    assert missing_token.accepted is False
+    assert runtime.state().parent_session_token == parent_token
 
 
 def test_cancel_between_full_wizard_phases_closes_parent_session() -> None:
@@ -406,19 +659,6 @@ def test_thread_start_failure_preserves_retained_parent() -> None:
 
 
 def test_stale_finish_does_not_clear_or_publish_current_run() -> None:
-    class _DeferredThread:
-        def __init__(self, *, target, **_kwargs) -> None:
-            self.target = target
-
-        def start(self) -> None:
-            return None
-
-        def is_alive(self) -> bool:
-            return False
-
-        def join(self, _timeout=None) -> None:
-            return None
-
     events: list[object] = []
     lifecycle = OpticalCalibrationLifecycle(
         sessions=_Sessions(events),
@@ -431,6 +671,40 @@ def test_stale_finish_does_not_clear_or_publish_current_run() -> None:
     assert lifecycle.start(current, "flat", lambda _request: None).accepted is True
     assert lifecycle.finish(stale) is False
     assert lifecycle.state().active_run_id == "current"
+
+
+def test_queued_outcome_is_single_use_and_new_run_or_cancel_invalidates_it() -> None:
+    events: list[object] = []
+    emitted = _Events()
+    runtime = OpticalCalibrationRuntime(
+        stage=_Stage(events),
+        camera=_Camera(events, []),
+        sessions=_Sessions(events),
+        store=_Store(events),
+        events=emitted,
+        thread_factory=_DeferredThread,
+    )
+    first = _flat_request(run_id="first")
+    first_outcome = OpticalCalibrationOutcome(
+        "first", None, "flat", True, "saved", "X20", False, flat_payload={}
+    )
+    runtime.start_flat(first)
+    runtime._finish_run(first, first_outcome)
+
+    assert runtime.consume(first_outcome) is True
+    assert runtime.consume(first_outcome) is False
+
+    second = _flat_request(run_id="second")
+    second_outcome = replace(first_outcome, run_id="second")
+    runtime.start_flat(second)
+    runtime._finish_run(second, second_outcome)
+    runtime.start_flat(_flat_request(run_id="third"))
+    assert runtime.consume(second_outcome) is False
+
+    third_outcome = replace(first_outcome, run_id="third")
+    runtime._finish_run(_flat_request(run_id="third"), third_outcome)
+    runtime.cancel()
+    assert runtime.consume(third_outcome) is False
 
 
 def test_parent_session_close_retries_exposure_policy_contention() -> None:
@@ -505,6 +779,68 @@ def test_parent_close_thread_start_failure_retains_session_and_warns() -> None:
     assert emitted.finished == [
         ("warning", "Exposure policy restore could not start: thread start failed")
     ]
+
+
+def test_duplicate_parent_race_closes_loser_without_holding_lifecycle_lock() -> None:
+    barrier = threading.Barrier(2)
+    lifecycle_holder = []
+
+    class _RaceLease(_Lease):
+        closed_without_lock = False
+
+        def close(self) -> dict[str, object]:
+            probe_finished = threading.Event()
+
+            def probe_state() -> None:
+                lifecycle_holder[0].state()
+                probe_finished.set()
+
+            probe = threading.Thread(target=probe_state, daemon=True)
+            probe.start()
+            self.closed_without_lock = probe_finished.wait(0.2)
+            probe.join(timeout=1.0)
+            if not self.closed_without_lock:
+                raise AssertionError("outer lease closed while lifecycle lock was held")
+            return super().close()
+
+    class _RaceSessions(_Sessions):
+        def open(self, operation: str, parent_token: str | None = None) -> _Lease:
+            lease = _RaceLease(
+                self.events,
+                operation,
+                f"lease-{len(self.leases) + 1}",
+            )
+            self.leases.append(lease)
+            barrier.wait(timeout=1.0)
+            return lease
+
+    events: list[object] = []
+    sessions = _RaceSessions(events)
+    lifecycle = OpticalCalibrationLifecycle(
+        sessions=sessions,
+        events=_Events(),
+        thread_factory=threading.Thread,
+    )
+    lifecycle_holder.append(lifecycle)
+    errors = []
+
+    def open_parent() -> None:
+        try:
+            lifecycle._open_parent_session()
+        except Exception as exc:
+            errors.append(exc)
+
+    threads = [threading.Thread(target=open_parent) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=2.0)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert len(errors) == 1
+    assert isinstance(errors[0], RuntimeError)
+    loser = next(lease for lease in sessions.leases if not lease.active)
+    assert loser.closed_without_lock is True
 
 
 def test_lens_rejects_frame_size_change_before_fit(monkeypatch) -> None:
@@ -636,10 +972,7 @@ def test_shutdown_timeout_bounds_parent_session_contention_and_can_retry() -> No
     lifecycle = OpticalCalibrationLifecycle(
         sessions=sessions,
         events=_Events(),
-        thread_factory=_DeferredThread,
-        sleep=lambda _seconds: (_ for _ in ()).throw(
-            AssertionError("shutdown exceeded its timeout")
-        ),
+        thread_factory=threading.Thread,
     )
     child = lifecycle.open_child_session(
         "flat-field calibration", _flat_request(full_wizard=True)
@@ -651,12 +984,25 @@ def test_shutdown_timeout_bounds_parent_session_contention_and_can_retry() -> No
     assert lifecycle.shutdown(0.1) is True
 
 
-def test_production_stage_and_camera_adapters_preserve_binding_order() -> None:
+def _production_adapter_runtime(
+    monkeypatch,
+    *,
+    fit_error: Exception | None = None,
+) -> tuple[OpticalCalibrationRuntime, list[object], list[OpticalCalibrationOutcome]]:
     events: list[object] = []
-    frame = _frame()
+    completions: list[OpticalCalibrationOutcome] = []
+    frames = [_frame() for _ in range(20)]
+    counter = 0
+
+    def wait_raw(**kwargs):
+        nonlocal counter
+        events.append(("frame", kwargs["after_counter"]))
+        counter += 1
+        return frames.pop(0), counter
+
     stage = OpticalCalibrationStageAdapter(
         begin_task=lambda label: events.append(("begin", label)),
-        read_position=lambda: events.append(("position",)) or (1.0, 2.0, 3.0),
+        read_position=lambda: events.append(("position",)) or (10.0, 20.0, 3.0),
         raise_action=lambda action, feed: events.append(("needles", action, feed)),
         move_xy_callback=lambda x, y, *, feedrate: events.append(
             ("move", x, y, feedrate)
@@ -666,29 +1012,197 @@ def test_production_stage_and_camera_adapters_preserve_binding_order() -> None:
     camera = OpticalCalibrationCameraAdapter(
         apply_lock=lambda settings: events.append(("lock", settings.enabled)) or "key",
         restore_lock=lambda key: events.append(("restore", key)) or "",
-        raw_counter=lambda: 7,
-        wait_raw_callback=lambda **kwargs: (
-            events.append(("frame", kwargs)) or (frame, 8)
-        ),
+        raw_counter=lambda: counter,
+        wait_raw_callback=wait_raw,
     )
+    sessions = _Sessions(events)
+    store = OpticalCalibrationStoreAdapter(
+        lambda objective, captured, *, metadata: (
+            events.append(("store", objective, len(captured), metadata["capture_grid"]))
+            or SimpleNamespace(
+                current_manifest="current.json", reference_image="reference.png"
+            )
+        )
+    )
+    event_adapter = OpticalCalibrationEventAdapter(
+        progress_callback=lambda event: events.append(("progress", event.message)),
+        completion_callback=completions.append,
+        warning_callback=lambda message: events.append(("warning", message)),
+    )
+    if fit_error is None:
+        monkeypatch.setattr(
+            "probe_station_gui.camera.optical_calibration_runtime.fit_lens_artifact",
+            lambda *_args, **_kwargs: SimpleNamespace(
+                payload={}, before_preview=_frame(), after_preview=_frame()
+            ),
+        )
+        monkeypatch.setattr(
+            "probe_station_gui.camera.optical_calibration_runtime.lens_success_message",
+            lambda *_args, **_kwargs: "Lens distortion calibration saved.",
+        )
+    else:
+        def fail_fit(*_args, **_kwargs):
+            raise fit_error
 
-    stage.reserve("flat-field calibration")
-    assert stage.start_position() == (1.0, 2.0)
-    key = camera.lock()
-    stage.raise_needles(70.0)
-    captured = camera.wait_raw(after_counter=7, timeout_s=2.0)
-    stage.move_xy(3.0, 4.0, 120.0)
-    assert camera.restore(key) == ""
-    stage.release()
+        monkeypatch.setattr(
+            "probe_station_gui.camera.optical_calibration_runtime.fit_lens_artifact",
+            fail_fit,
+        )
+    runtime = OpticalCalibrationRuntime(
+        stage=stage,
+        camera=camera,
+        sessions=OpticalCalibrationSessionAdapter(sessions),
+        store=store,
+        events=event_adapter,
+        thread_factory=_InlineThread,
+    )
+    return runtime, events, completions
 
-    assert captured is frame
-    assert events == [
-        ("begin", "flat-field calibration"),
-        ("position",),
-        ("lock", True),
-        ("needles", "raise", 70.0),
-        ("frame", {"after_counter": 7, "timeout_s": 2.0}),
-        ("move", 3.0, 4.0, 120.0),
+
+def test_runtime_drives_production_adapters_with_literal_capture_positions(
+    monkeypatch,
+) -> None:
+    runtime, flat_events, completions = _production_adapter_runtime(monkeypatch)
+
+    runtime.start_flat(_flat_request())
+
+    flat_moves = [event[1:3] for event in flat_events if event[0] == "move"]
+    assert flat_moves == pytest.approx(
+        [
+            (10.0, 20.0),
+            (9.98, 19.98),
+            (10.0, 19.98),
+            (10.02, 19.98),
+            (10.02, 20.0),
+            (9.98, 20.0),
+            (9.98, 20.02),
+            (10.0, 20.02),
+            (10.02, 20.02),
+            (10.0, 20.0),
+        ]
+    )
+    assert completions[-1].success is True
+    assert ("store", "X20", 9, [3, 3]) in flat_events
+    assert flat_events[-3:] == [
         ("restore", "key"),
         ("finish",),
+        ("session_close", "flat-field calibration"),
     ]
+
+    runtime, lens_events, completions = _production_adapter_runtime(monkeypatch)
+    runtime.start_lens(_lens_request())
+
+    lens_moves = [event[1:3] for event in lens_events if event[0] == "move"]
+    assert lens_moves == pytest.approx(
+        [
+            (10.0, 20.0),
+            (10.0385, 19.9545),
+            (10.0035, 19.965),
+            (9.9685, 19.9755),
+            (9.965, 20.0105),
+            (10.035, 19.9895),
+            (10.0315, 20.0245),
+            (9.9965, 20.035),
+            (9.9615, 20.0455),
+            (10.0, 20.0),
+        ]
+    )
+    assert completions[-1].success is True
+    assert lens_events[-3:] == [
+        ("restore", "key"),
+        ("finish",),
+        ("session_close", "lens distortion calibration"),
+    ]
+
+
+def test_production_adapter_lens_fit_failure_still_restores_every_resource(
+    monkeypatch,
+) -> None:
+    runtime, events, completions = _production_adapter_runtime(
+        monkeypatch,
+        fit_error=RuntimeError("fit failed"),
+    )
+
+    runtime.start_lens(_lens_request())
+
+    assert completions[-1].success is False
+    assert "fit failed" in completions[-1].message
+    assert [event[1:3] for event in events if event[0] == "move"][-1] == (
+        10.0,
+        20.0,
+    )
+    assert events[-3:] == [
+        ("restore", "key"),
+        ("finish",),
+        ("session_close", "lens distortion calibration"),
+    ]
+
+
+def test_store_adapter_returns_typed_install_result() -> None:
+    adapter = OpticalCalibrationStoreAdapter(
+        lambda *_args, **_kwargs: SimpleNamespace(
+            current_manifest="current.json",
+            reference_image="reference.png",
+        )
+    )
+
+    result = adapter.install("X20", [_frame()], {})
+
+    result_type = getattr(calibration_adapters, "FlatFieldInstallResult", None)
+    assert result_type is not None
+    assert isinstance(result, result_type)
+    assert result.current_manifest == "current.json"
+    assert result.reference_image == "reference.png"
+
+
+@pytest.mark.parametrize(
+    "payload, expected",
+    (
+        ({"model_type": "stage_geometry"}, "baseline_residual_mean_px"),
+        (
+            {
+                "model_version": 1,
+                "model_type": "unsupported",
+                "frame_size": [100, 50],
+                "pixels_to_mm": [[-0.001, 0.0], [0.0, -0.001]],
+                "calibrated_pixels_to_mm": [[-0.001, 0.0], [0.0, -0.001]],
+                "center_px": [50.0, 25.0],
+                "k1": 0.0,
+                "k2": 0.0,
+                "p1": 0.0,
+                "p2": 0.0,
+                "baseline_residual_mean_px": 1.0,
+                "baseline_residual_max_px": 2.0,
+                "residual_mean_px": 0.5,
+                "residual_max_px": 1.0,
+                "feature_count": 20,
+                "observation_count": 40,
+                "optimizer_success": True,
+            },
+            "model_type",
+        ),
+    ),
+)
+def test_successful_malformed_completion_discards_artifact(payload, expected) -> None:
+    artifact = LensCalibrationArtifact(payload, _frame(), _frame())
+    outcome = OpticalCalibrationOutcome(
+        "lens", None, "lens", True, "complete", "X20", False,
+        lens_artifact=artifact,
+    )
+    saves = []
+
+    presentation = prepare_lens_completion(
+        outcome,
+        True,
+        "complete",
+        artifact,
+        limits=LensFitLimits(),
+        save=lambda *_args: saves.append(True),
+    )
+
+    assert presentation.success is False
+    assert presentation.artifact is None
+    assert presentation.metrics is None
+    assert presentation.wizard_kwargs() == {}
+    assert saves == []
+    assert expected in presentation.message.lower()

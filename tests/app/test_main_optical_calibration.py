@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import threading
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -8,8 +10,10 @@ import pytest
 import main as main_module
 from main import Main
 from probe_station_gui.camera.optical_calibration_runtime import (
+    FlatFieldCalibrationRequest,
     OpticalCalibrationOutcome,
     OpticalCalibrationProgress,
+    OpticalCalibrationRuntime,
 )
 from probe_station_gui.settings.manager import Settings
 from probe_station_gui.dialogs.optical_calibration_wizard import (
@@ -213,6 +217,128 @@ def test_show_optical_calibration_wizard_reports_active_objective(
     ]
     assert wizard.shown == wizard.raised == wizard.activated == 1
 
+
+def test_runtime_composition_is_inert_and_uses_existing_camera_adapter() -> None:
+    class _ForbiddenGrabber:
+        def __getattr__(self, name: str):
+            raise AssertionError(f"startup touched camera: {name}")
+
+    window = Main.__new__(Main)
+    window.stage_controller = SimpleNamespace(
+        begin_external_task=lambda _label: None,
+        run_external_current_stage_position=lambda: (0.0, 0.0, 0.0),
+        run_external_needles_action=lambda _action, _feed: None,
+        run_external_move_to_xy=lambda _x, _y, **_kwargs: None,
+        finish_external_task=lambda: None,
+    )
+    window.grabber = _ForbiddenGrabber()
+    window._microscope_scan_stop_requested = threading.Event()
+    window._flat_field_calibration_store = SimpleNamespace(
+        install=lambda *_args, **_kwargs: None
+    )
+    window._optical_session_manager = SimpleNamespace()
+
+    Main._compose_optical_calibration_runtime(window)
+
+    assert window._optical_calibration_runtime.state().active_run_id is None
+
+
+@pytest.mark.parametrize(
+    ("kind", "progress_signal_name"),
+    (
+        ("flat", "flat_field_calibration_progress"),
+        ("lens", "lens_distortion_calibration_progress"),
+    ),
+)
+def test_runtime_worker_progress_uses_queued_status_and_calibration_signals(
+    kind,
+    progress_signal_name,
+) -> None:
+    event = OpticalCalibrationProgress("run-1", 8, kind, "capture 2/9")
+    status_signal = _RecordingSignal()
+    progress_signal = _RecordingSignal()
+    window = Main.__new__(Main)
+    window.status_message_requested = status_signal
+    setattr(window, progress_signal_name, progress_signal)
+
+    Main._emit_optical_calibration_progress(window, event)
+
+    assert status_signal.calls == [("capture 2/9", 0)]
+    assert progress_signal.calls == [(event, "capture 2/9")]
+
+
+@pytest.mark.parametrize("invalidated_by", ("new-run", "cancel", "scan"))
+def test_queued_flat_outcome_cannot_update_ui_after_invalidation(invalidated_by) -> None:
+    class _DeferredThread:
+        def __init__(self, *, target, **_kwargs) -> None:
+            self.target = target
+
+        def start(self) -> None:
+            return None
+
+        def is_alive(self) -> bool:
+            return False
+
+        def join(self, _timeout=None) -> None:
+            return None
+
+    class _Unused:
+        def __getattr__(self, name: str):
+            raise AssertionError(f"queued delivery touched port: {name}")
+
+    events = SimpleNamespace(
+        progress=lambda _event: None,
+        complete=lambda _outcome: None,
+        warning=lambda _message: None,
+    )
+    runtime = OpticalCalibrationRuntime(
+        stage=_Unused(),
+        camera=_Unused(),
+        sessions=_Unused(),
+        store=_Unused(),
+        events=events,
+        thread_factory=_DeferredThread,
+    )
+    request = FlatFieldCalibrationRequest(
+        run_id="flat-a",
+        wizard_run_id=17,
+        objective_name="X20",
+        magnification=20.0,
+        pixels_to_mm=((-0.001, 0.0), (0.0, -0.001)),
+        pixel_size_mm=(0.001, 0.001),
+        linear_feedrate=120.0,
+        needle_feedrate=70.0,
+    )
+    outcome = OpticalCalibrationOutcome(
+        request.run_id,
+        request.wizard_run_id,
+        "flat",
+        True,
+        "saved",
+        request.objective_name,
+        False,
+        flat_payload={},
+    )
+    runtime.start_flat(request)
+    runtime._finish_run(request, outcome)
+    if invalidated_by == "new-run":
+        runtime.start_flat(replace(request, run_id="flat-b"))
+    elif invalidated_by == "cancel":
+        runtime.cancel()
+    window = Main.__new__(Main)
+    window._optical_calibration_runtime = runtime
+    window._microscope_scan_running = lambda: invalidated_by == "scan"
+    window._optical_calibration_wizard = SimpleNamespace(
+        set_flat_field_result=lambda *_args, **_kwargs: pytest.fail(
+            "stale outcome changed wizard"
+        )
+    )
+    window._show_status = lambda *_args: pytest.fail("stale outcome was shown")
+
+    Main._on_flat_field_calibration_finished(
+        window, outcome, True, outcome.message, outcome.flat_payload
+    )
+
 def test_show_optical_calibration_wizard_does_not_reprepare_retained_full_run(
     tmp_path: Path,
 ) -> None:
@@ -251,6 +377,10 @@ def test_wizard_routes_run_identity_through_progress_and_completion() -> None:
         flat_payload={},
     )
     window._optical_calibration_wizard = wizard
+    window._optical_calibration_runtime = SimpleNamespace(
+        consume=lambda received, **_kwargs: received is context
+    )
+    window._microscope_scan_running = lambda: False
     window._show_status = lambda *_args: None
 
     Main._on_flat_field_calibration_progress(
@@ -271,6 +401,10 @@ def test_failed_lens_wizard_stage_returns_matching_result() -> None:
         "lens-23", 23, "lens", False, "fit failed", "X20", True,
     )
     window._optical_calibration_wizard = wizard
+    window._optical_calibration_runtime = SimpleNamespace(
+        consume=lambda received, **_kwargs: received is context
+    )
+    window._microscope_scan_running = lambda: False
     window._lens_distortion_dialog = None
     window._show_status = lambda *_args: None
 

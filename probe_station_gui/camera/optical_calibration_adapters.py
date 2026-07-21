@@ -9,6 +9,7 @@ from typing import Protocol
 from PySide6.QtGui import QImage
 
 from probe_station_gui.camera import microscope_scan
+from probe_station_gui.camera.flat_field_calibration import StoredFlatFieldCalibration
 from probe_station_gui.camera.optical_calibration_geometry import (
     LensFitLimits,
     LensPreviewMetrics,
@@ -71,6 +72,12 @@ class LensCalibrationArtifact:
     payload: dict[str, object]
     before_preview: QImage
     after_preview: QImage
+
+
+@dataclass(frozen=True)
+class FlatFieldInstallResult:
+    current_manifest: str
+    reference_image: str
 
 
 @dataclass(frozen=True)
@@ -202,7 +209,7 @@ class FlatFieldStorePort(Protocol):
         objective_name: str,
         frames: Sequence[QImage],
         metadata: dict[str, object],
-    ) -> object: ...
+    ) -> FlatFieldInstallResult: ...
 
 
 class OpticalCalibrationEventPort(Protocol):
@@ -253,7 +260,12 @@ def prepare_lens_completion(
     save: Callable[[dict[str, object], str, OpticalCalibrationOutcome], None],
 ) -> LensCompletionPresentation:
     if not isinstance(artifact, LensCalibrationArtifact):
-        return LensCompletionPresentation(bool(success), str(message), None, None)
+        result_message = (
+            "Lens distortion calibration result is invalid: calibration artifact is missing."
+            if success
+            else str(message)
+        )
+        return LensCompletionPresentation(False, result_message, None, None)
     if not success and not outcome.restore_warning:
         return LensCompletionPresentation(False, str(message), artifact, None)
     try:
@@ -263,6 +275,14 @@ def prepare_lens_completion(
             artifact.after_preview,
             limits,
         )
+    except Exception as exc:
+        return LensCompletionPresentation(
+            False,
+            f"Lens distortion calibration result is invalid: {exc}",
+            None,
+            None,
+        )
+    try:
         save(artifact.payload, outcome.objective_name, outcome)
     except Exception as exc:
         return LensCompletionPresentation(
@@ -353,18 +373,22 @@ class OpticalCalibrationSessionAdapter:
 
 @dataclass(frozen=True)
 class OpticalCalibrationStoreAdapter:
-    install_callback: Callable[..., object]
+    install_callback: Callable[..., StoredFlatFieldCalibration]
 
     def install(
         self,
         objective_name: str,
         frames: Sequence[QImage],
         metadata: dict[str, object],
-    ) -> object:
-        return self.install_callback(
+    ) -> FlatFieldInstallResult:
+        stored = self.install_callback(
             objective_name,
             frames,
             metadata=metadata,
+        )
+        return FlatFieldInstallResult(
+            current_manifest=str(stored.current_manifest),
+            reference_image=str(stored.reference_image),
         )
 
 
@@ -388,6 +412,7 @@ __all__ = [
     "CalibrationStartDecision",
     "CameraPort",
     "FlatFieldCalibrationRequest",
+    "FlatFieldInstallResult",
     "FlatFieldStorePort",
     "LensCalibrationArtifact",
     "LensCompletionPresentation",
