@@ -377,7 +377,7 @@ class StageControllerClickMoveMixin:
             if status is None:
                 raise StageControllerError("Unable to read current stage position.")
             self._require_homed_axes(status, {"X", "Y"})
-            current_position = self._require_position_for_absolute_motion(
+            self._require_position_for_absolute_motion(
                 status,
                 required_axes=2,
             )

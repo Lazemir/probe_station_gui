@@ -831,7 +831,7 @@ def test_geometry_alignment_previews_keep_combs_and_reduce_mask_spread() -> None
     assert before.size() == after.size()
     assert before.format() == QImage.Format_RGB888
     assert after.format() == QImage.Format_RGB888
-    before_values = _assert_preview_occupancy_levels(before)
+    _assert_preview_occupancy_levels(before)
     after_values = _assert_preview_occupancy_levels(after)
 
     assert np.count_nonzero(after_values) > 2500
