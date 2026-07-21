@@ -384,3 +384,20 @@ def test_interrupted_current_check_preserves_compatibility_error_message() -> No
     assert interrupt.requested() is True
     with pytest.raises(RuntimeError, match="^Contact check stopped\\.$"):
         result.require_placement()
+
+
+def test_preexisting_interrupt_without_clear_preserves_placement_error_and_flag() -> None:
+    events: list[str] = []
+    interrupt = _InterruptAdapter()
+    interrupt.request()
+    flow = _contact_flow(events, interrupt=interrupt)
+
+    result = flow.place_contact(
+        replace(_contact_request(), clear_interrupt=False)
+    )
+
+    assert result.interrupted is True
+    assert interrupt.requested() is True
+    assert "stage:begin" not in events
+    with pytest.raises(RuntimeError, match="^Contact placement interrupted\\.$"):
+        result.require_placement()

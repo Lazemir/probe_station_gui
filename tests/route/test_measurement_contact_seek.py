@@ -178,6 +178,32 @@ class RouteMeasurementContactSeekTest(unittest.TestCase):
         self.assertEqual(stage.calls[-1], ("finish",))
         self.assertNotIn(("needles", "lift", 75.0), stage.calls[-2:])
 
+    def test_place_contact_preserves_preexisting_interrupt_error_and_flag(self) -> None:
+        point = _point(1)
+        stage = _FakeStage()
+        lcr = _FakeBatchRouteLCR([])
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runner = RouteMeasurementRunner(
+                points=[point],
+                csv_path=Path(tmpdir) / "route.csv",
+                stage_controller=stage,
+                lcr_controller=lcr,
+                needle_feedrate=None,
+                contact_settle_s=0.0,
+            )
+            runner.request_current_point_correction()
+
+            for _ in range(2):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    r"^Contact placement interrupted\.$",
+                ):
+                    runner.place_contact(point, clear_interrupt=False)
+
+        self.assertEqual(stage.calls, [])
+        self.assertEqual(lcr.batch_counts, [])
+
     def test_place_contact_failure_lifts_needles_without_csv(self) -> None:
         point = _point(1)
         stage = _FakeStage()

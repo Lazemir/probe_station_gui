@@ -515,8 +515,8 @@ class RouteContactFlow:
     def _prepare_interrupt(self, clear_interrupt: bool) -> None:
         if clear_interrupt:
             self._interrupt.clear()
-        else:
-            self._raise_if_interrupted()
+        elif self._interrupt.requested():
+            raise _ContactInterrupted("Contact placement interrupted.")
 
     def _prepare_contact_move(self, request: RouteContactRequest) -> None:
         if request.lift_before_move:
