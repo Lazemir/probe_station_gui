@@ -373,3 +373,19 @@ def test_api_microscope_area_scan_rejects_removed_auto_exposure(monkeypatch) -> 
         "message": "auto_exposure is no longer supported for area scans.",
     }
     assert created_threads == []
+
+
+@pytest.mark.parametrize("field", ("tile_approach_mm", "approach_mm"))
+def test_api_microscope_area_scan_rejects_removed_approach(field: str) -> None:
+    window = Main.__new__(Main)
+    window._microscope_scan_running = lambda: pytest.fail(
+        "obsolete approach must be rejected before scan state is read"
+    )
+
+    response = Main._api_microscope_area_scan(window, {field: 0.01})
+
+    assert response == {
+        "accepted": False,
+        "status_code": 400,
+        "message": f"{field} is no longer supported for area scans.",
+    }

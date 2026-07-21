@@ -70,6 +70,39 @@ def test_standalone_lease_close_waits_for_policy_contention(operation: str) -> N
     assert sessions._records == {}
 
 
+def test_open_waits_for_policy_monitor_contention() -> None:
+    rig = PolicyRig(auto_enabled=True, engine="software")
+    sessions = OpticalSessionManager(rig.controller)
+    entered = threading.Event()
+    finished = threading.Event()
+    leases = []
+    errors: list[Exception] = []
+
+    def open_session() -> None:
+        entered.set()
+        try:
+            leases.append(sessions.open("route photography"))
+        except Exception as exc:  # pragma: no cover - asserted below
+            errors.append(exc)
+        finally:
+            finished.set()
+
+    rig.controller._command_lock.acquire()
+    thread = threading.Thread(target=open_session, daemon=True)
+    thread.start()
+    assert entered.wait(1.0)
+    try:
+        assert not finished.wait(0.05)
+    finally:
+        rig.controller._command_lock.release()
+    thread.join(timeout=1.0)
+
+    assert not thread.is_alive()
+    assert errors == []
+    assert len(leases) == 1
+    leases[0].close()
+
+
 def test_full_wizard_nested_and_outer_close_wait_for_policy_contention() -> None:
     rig = PolicyRig(auto_enabled=True, engine="software")
     sessions = OpticalSessionManager(rig.controller)

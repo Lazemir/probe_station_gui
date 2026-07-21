@@ -224,6 +224,24 @@ class ApiServerHttpTest(unittest.TestCase):
         self.assertEqual(calls, [])
         self.assertIn("auto_exposure", response.json()["detail"]["message"])
 
+    def test_area_scan_rejects_removed_approach_payloads(self) -> None:
+        for field in ("tile_approach_mm", "approach_mm"):
+            with self.subTest(field=field):
+                calls = []
+                client = self._client(
+                    command_callback=lambda request: calls.append(request)
+                    or {"accepted": True, "status_code": 202}
+                )
+
+                response = client.post(
+                    "/api/v1/camera/area-scan",
+                    json={"rows": 3, "columns": 3, field: 0.01},
+                )
+
+                self.assertEqual(response.status_code, 400)
+                self.assertEqual(calls, [])
+                self.assertIn(field, response.json()["detail"]["message"])
+
     def test_area_scan_default_camera_lock_requires_only_stage_write(self) -> None:
         auth_calls = []
 

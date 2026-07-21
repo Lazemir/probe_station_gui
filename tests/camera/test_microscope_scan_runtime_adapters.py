@@ -64,7 +64,7 @@ def _camera_adapter(
     )
 
 
-def test_stage_adapter_uses_a_real_positive_approach_move() -> None:
+def test_stage_adapter_uses_one_coordinate_move() -> None:
     moves: list[tuple[float, float]] = []
     adapter = adapters.MicroscopeScanStageAdapter(
         reserve_task=lambda _name: type(
@@ -77,9 +77,9 @@ def test_stage_adapter_uses_a_real_positive_approach_move() -> None:
         latest_position=lambda: (0.0, 0.0),
     )
 
-    adapter.move_to(_tile(), approach_mm=0.01)
+    adapter.move_to(_tile())
 
-    assert moves == [(1.24, -2.51), (1.25, -2.5)]
+    assert moves == [(1.25, -2.5)]
 
 
 def test_camera_adapter_selects_the_fresh_raw_frame_for_scan_flat_fielding() -> None:
@@ -255,7 +255,6 @@ def _run_request(
         flat_field_options=microscope_scan.FlatFieldScanOptions(enabled=False),
         camera_lock_settings=microscope_scan.CameraLockSettings(enabled=False),
         settle_s=0.0,
-        tile_approach_mm=0.0,
         refine_scale_from_overlaps=False,
     )
 

@@ -32,7 +32,7 @@ class StagePort(Protocol):
 
     def raise_needles(self) -> None: ...
 
-    def move_to(self, tile: MicroscopeScanTile, *, approach_mm: float) -> None: ...
+    def move_to(self, tile: MicroscopeScanTile) -> None: ...
 
     def actual_position(self) -> tuple[float, ...] | None: ...
 
@@ -145,7 +145,6 @@ class MicroscopeScanRunRequest:
     flat_field_options: FlatFieldScanOptions = FlatFieldScanOptions(enabled=False)
     camera_lock_settings: CameraLockSettings = CameraLockSettings(enabled=False)
     settle_s: float = 0.0
-    tile_approach_mm: float = 0.0
     scan_pattern: str = "grid"
     refine_scale_from_overlaps: bool = True
 
@@ -282,7 +281,7 @@ class MicroscopeScanRuntime:
             if self._camera.stop_requested():
                 return captured_frames, True
             self._events.status(tile_status(tile, len(plan.tiles)))
-            self._stage.move_to(tile, approach_mm=request.tile_approach_mm)
+            self._stage.move_to(tile)
             if not self._camera.settle(request.settle_s):
                 return captured_frames, True
             captured_frames.append(

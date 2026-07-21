@@ -32,6 +32,219 @@ from tests.app.main_coordinate_feedrate_support import (
 
 
 class MainRouteMeasurementSessionTest(unittest.TestCase):
+    def test_restore_active_session_loads_saved_route_when_design_route_is_missing(
+        self,
+    ) -> None:
+        route_path = Path("C:/routes/stripes.probe-route.json")
+        route = types.SimpleNamespace(
+            name="stripes",
+            path=route_path,
+            points=[object()] * 450,
+        )
+        state = {
+            "measurement_session_active": True,
+            "current_point": 223,
+            "session_route_name": "stripes",
+            "session_route_point_count": 450,
+            "session_route_path": str(route_path),
+        }
+        events: list[object] = []
+        window = Main.__new__(Main)
+        window._design_session = types.SimpleNamespace(route=None)
+        window._route_measurement_session_active = False
+        window._route_measurement_settings_store = lambda: types.SimpleNamespace(
+            load=lambda: dict(state)
+        )
+        window._apply_route_edit_plan = lambda plan: events.append(
+            ("apply", plan)
+        ) or True
+        window._set_route_measurement_resume_point = lambda point: events.append(
+            ("point", int(point))
+        )
+
+        def load_route(session, path):
+            events.append(("load", str(path)))
+            session.route = route
+            return "route-plan"
+
+        with (
+            mock.patch.object(
+                main_module.design_navigation,
+                "load_measurement_route",
+                side_effect=load_route,
+            ),
+            mock.patch.object(
+                main_module.QTimer,
+                "singleShot",
+                side_effect=lambda delay, callback: events.append(
+                    ("open", int(delay), callback)
+                ),
+            ),
+        ):
+            Main._restore_route_measurement_state_after_design_load(window)
+
+        self.assertEqual(events[0], ("load", str(route_path)))
+        self.assertEqual(events[1], ("apply", "route-plan"))
+        self.assertEqual(events[2], ("point", 223))
+        self.assertEqual(events[3][0:2], ("open", 0))
+        self.assertTrue(window._route_measurement_session_active)
+
+    def test_route_run_holds_one_optical_session_around_runner(self) -> None:
+        events: list[object] = []
+
+        class _Lease:
+            token = "route-token"
+
+            def __enter__(self):
+                events.append("enter")
+                return self
+
+            def __exit__(self, exc_type, exc, traceback):
+                events.append(("exit", exc_type))
+                return False
+
+        class _Manager:
+            def open(self, operation: str):
+                events.append(("open", operation))
+                return _Lease()
+
+        window = Main.__new__(Main)
+        window._optical_session_manager = _Manager()
+        window.route_measurement_status = types.SimpleNamespace(emit=lambda message: None)
+        emitted: list[tuple[object, ...]] = []
+        window.route_measurement_finished = types.SimpleNamespace(
+            emit=lambda *args: emitted.append(args)
+        )
+
+        class _Runner:
+            csv_path = Path("route.csv")
+
+            @staticmethod
+            def requires_optical_session() -> bool:
+                return True
+
+            @staticmethod
+            def run() -> tuple[bool, str]:
+                events.append(
+                    ("run", window._route_measurement_optical_session_token)
+                )
+                return True, "complete"
+
+        runner = _Runner()
+
+        Main._run_route_measurement(window, runner)
+
+        self.assertEqual(
+            events,
+            [
+                ("open", "route photography"),
+                "enter",
+                ("run", "route-token"),
+                ("exit", None),
+            ],
+        )
+        self.assertIsNone(window._route_measurement_optical_session_token)
+        self.assertEqual(emitted, [(runner, True, "complete", "route.csv")])
+
+    def test_route_run_closes_optical_session_when_runner_raises(self) -> None:
+        events: list[object] = []
+
+        class _Lease:
+            token = "route-token"
+
+            def __enter__(self):
+                events.append("enter")
+                return self
+
+            def __exit__(self, exc_type, exc, traceback):
+                events.append(("exit", exc_type))
+                return False
+
+        window = Main.__new__(Main)
+        window._optical_session_manager = types.SimpleNamespace(
+            open=lambda operation: (
+                events.append(("open", operation)) or _Lease()
+            )
+        )
+        statuses: list[str] = []
+        window.route_measurement_status = types.SimpleNamespace(emit=statuses.append)
+        emitted: list[tuple[object, ...]] = []
+        window.route_measurement_finished = types.SimpleNamespace(
+            emit=lambda *args: emitted.append(args)
+        )
+
+        class _Runner:
+            csv_path = Path("route.csv")
+
+            @staticmethod
+            def requires_optical_session() -> bool:
+                return True
+
+            @staticmethod
+            def run() -> tuple[bool, str]:
+                raise RuntimeError("capture failed")
+
+        runner = _Runner()
+
+        Main._run_route_measurement(window, runner)
+
+        self.assertEqual(events[-1], ("exit", RuntimeError))
+        self.assertIsNone(window._route_measurement_optical_session_token)
+        self.assertEqual(statuses, ["Route measurement failed: capture failed"])
+        self.assertEqual(
+            emitted,
+            [(runner, False, "capture failed", "route.csv")],
+        )
+
+    def test_route_autofocus_uses_outer_optical_session(self) -> None:
+        calls: list[dict[str, object]] = []
+        window = Main.__new__(Main)
+        window._route_measurement_optical_session_token = "route-token"
+        window.route_measurement_status = types.SimpleNamespace(emit=lambda message: None)
+        window.stage_controller = types.SimpleNamespace(
+            run_external_local_autofocus=lambda **kwargs: calls.append(kwargs)
+            or "focused"
+        )
+        settings = types.SimpleNamespace(autofocus_range_mm=0.03)
+
+        result = Main._route_photo_autofocus(
+            window,
+            object(),
+            1,
+            10,
+            settings=settings,
+        )
+
+        self.assertEqual(result, "focused")
+        self.assertEqual(
+            calls,
+            [{"range_mm": 0.03, "parent_token": "route-token"}],
+        )
+
+    def test_api_route_autofocus_uses_outer_optical_session(self) -> None:
+        calls: list[dict[str, object]] = []
+        window = Main.__new__(Main)
+        window._route_measurement_optical_session_token = "route-token"
+        window.route_measurement_status = types.SimpleNamespace(emit=lambda message: None)
+        window.stage_controller = types.SimpleNamespace(
+            run_external_local_autofocus=lambda **kwargs: calls.append(kwargs)
+            or "focused"
+        )
+
+        result = Main._api_route_photo_autofocus(
+            window,
+            object(),
+            1,
+            10,
+            range_mm=0.04,
+        )
+
+        self.assertEqual(result, "focused")
+        self.assertEqual(
+            calls,
+            [{"range_mm": 0.04, "parent_token": "route-token"}],
+        )
+
     def test_api_route_session_reports_unexpected_instrument_setup_error(self) -> None:
         class _FailingLcr:
             def is_connected(self) -> bool:
@@ -751,6 +964,11 @@ class MainRouteMeasurementSessionTest(unittest.TestCase):
         window.route_measurement_waiting_changed = _FakeEmit()
         window.route_measurement_started = _FakeEmit()
         window.route_measurement_finished = _FakeEmit()
+        optical_lease = mock.MagicMock()
+        optical_lease.token = "route-token"
+        optical_lease.__enter__.return_value = optical_lease
+        window._optical_session_manager = mock.MagicMock()
+        window._optical_session_manager.open.return_value = optical_lease
         window._route_measurement_points = lambda _route: [point]
         window._wait_for_camera_frame = lambda timeout_s=0.1: (None, None)
         window._api_route_meter_configuration = (

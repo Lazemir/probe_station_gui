@@ -20,7 +20,7 @@ class _StageAdapter:
     def raise_needles(self) -> None:
         self._events.append("stage:raise")
 
-    def move_to(self, tile: MicroscopeScanTile, *, approach_mm: float) -> None:
+    def move_to(self, tile: MicroscopeScanTile) -> None:
         self._events.append("stage:move")
 
     def actual_position(self) -> tuple[float, ...]:
@@ -112,7 +112,6 @@ def _single_tile_request() -> microscope_scan_runtime.MicroscopeScanRunRequest:
             settings=(("GainAuto", "Off"),),
         ),
         settle_s=0.0,
-        tile_approach_mm=0.0,
         refine_scale_from_overlaps=False,
     )
 
@@ -447,6 +446,5 @@ def _single_tile_request_for(
         flat_field_options=base.flat_field_options,
         camera_lock_settings=base.camera_lock_settings,
         settle_s=base.settle_s,
-        tile_approach_mm=base.tile_approach_mm,
         refine_scale_from_overlaps=False,
     )

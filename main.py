@@ -658,8 +658,6 @@ class Main(QMainWindow):
     MICROSCOPE_AREA_SCAN_MAX_TILES = 121
     MICROSCOPE_AREA_SCAN_DEFAULT_OVERLAP_FRACTION = 0.25
     MICROSCOPE_AREA_SCAN_DEFAULT_SETTLE_S = 0.2
-    MICROSCOPE_AREA_SCAN_DEFAULT_TILE_APPROACH_MM = 0.010
-    MICROSCOPE_AREA_SCAN_MAX_TILE_APPROACH_MM = 0.200
     MICROSCOPE_AREA_SCAN_STITCH_DEBUG_STRUCTURE_MM = 1.0
     MICROSCOPE_AREA_SCAN_STITCH_DEBUG_PLACEMENT_FRACTION = 1.0
     MICROSCOPE_AREA_SCAN_STITCH_DEBUG_OVERLAP_FRACTION = 0.25
@@ -916,6 +914,7 @@ class Main(QMainWindow):
         self._route_measurement_waiting_reason = ""
         self._route_measurement_photo_enabled = False
         self._route_measurement_measure_enabled = False
+        self._route_measurement_optical_session_token: str | None = None
         self._route_measurement_point_numbers: list[int] = []
         self._route_measurement_current_point: int | None = None
         self._last_route_measurement_result: tuple[
@@ -3333,6 +3332,13 @@ class Main(QMainWindow):
                 "status_code": 400,
                 "message": "auto_exposure is no longer supported for area scans.",
             }
+        for field in ("tile_approach_mm", "approach_mm"):
+            if field in payload:
+                return {
+                    "accepted": False,
+                    "status_code": 400,
+                    "message": f"{field} is no longer supported for area scans.",
+                }
         if self._microscope_scan_running():
             return {
                 "accepted": False,
@@ -3413,18 +3419,6 @@ class Main(QMainWindow):
                 minimum=0.0,
                 maximum=10.0,
             )
-            tile_approach_mm = self._microscope_area_scan_float(
-                payload.get(
-                    "tile_approach_mm",
-                    payload.get(
-                        "approach_mm",
-                        self.MICROSCOPE_AREA_SCAN_DEFAULT_TILE_APPROACH_MM,
-                    ),
-                ),
-                "tile_approach_mm",
-                minimum=0.0,
-                maximum=self.MICROSCOPE_AREA_SCAN_MAX_TILE_APPROACH_MM,
-            )
             flat_field_options = microscope_scan.flat_field_options_from_payload(
                 payload,
                 default_enabled=True,
@@ -3468,7 +3462,6 @@ class Main(QMainWindow):
             output_dir=output_dir,
             overlap_fraction=overlap_fraction,
             settle_s=settle_s,
-            tile_approach_mm=tile_approach_mm,
             scan_pattern=scan_pattern,
             refine_scale_from_overlaps=(scan_pattern != "stitch_debug"),
             structure_size_mm=structure_size_mm,
@@ -3592,6 +3585,7 @@ class Main(QMainWindow):
         )
         return self.stage_controller.run_external_local_autofocus(
             range_mm=range_mm,
+            parent_token=self._route_optical_session_token(),
         )
 
     def _api_contact_context(self, contact_number: int) -> dict[str, Any]:
@@ -7460,11 +7454,25 @@ class Main(QMainWindow):
             )
 
     def _restore_route_measurement_state_after_design_load(self) -> None:
+        state = self._route_measurement_settings_store().load()
         route = self._design_session.route
+        if route is None or not route.points:
+            route_path = str(state.get("session_route_path") or "").strip()
+            if RouteMeasurementSettingsStore.session_active(state) and route_path:
+                try:
+                    route_plan = design_navigation.load_measurement_route(
+                        self._design_session,
+                        route_path,
+                    )
+                except DesignModelError as exc:
+                    logger.warning("Unable to restore saved probe route: %s", exc)
+                else:
+                    if self._apply_route_edit_plan(route_plan):
+                        route = self._design_session.route
         if route is None or not route.points:
             return
         plan = route_dialog_restore_plan(
-            self._route_measurement_settings_store().load(),
+            state,
             route,
         )
         self._route_measurement_session_active = plan.session_active
@@ -7799,7 +7807,16 @@ class Main(QMainWindow):
         )
         return self.stage_controller.run_external_local_autofocus(
             range_mm=settings.autofocus_range_mm,
+            parent_token=self._route_optical_session_token(),
         )
+
+    def _route_optical_session_token(self) -> str:
+        token = str(
+            getattr(self, "_route_measurement_optical_session_token", "") or ""
+        )
+        if not token:
+            raise RuntimeError("Route optical session is unavailable.")
+        return token
 
     def _record_route_photo(
         self,
@@ -7941,7 +7958,27 @@ class Main(QMainWindow):
         return route.name
 
     def _run_route_measurement(self, runner: RouteMeasurementRunner) -> None:
-        success, message = runner.run()
+        success = False
+        message = "Route measurement failed."
+        self._route_measurement_optical_session_token = None
+        try:
+            if runner.requires_optical_session():
+                with self._optical_session_manager.open(
+                    "route photography"
+                ) as optical_session:
+                    self._route_measurement_optical_session_token = (
+                        optical_session.token
+                    )
+                    success, message = runner.run()
+            else:
+                success, message = runner.run()
+        except Exception as exc:
+            message = str(exc) or type(exc).__name__
+            self.route_measurement_status.emit(
+                f"Route measurement failed: {message}"
+            )
+        finally:
+            self._route_measurement_optical_session_token = None
         csv_path = (
             ""
             if isinstance(runner, RouteExternalMeasurementSessionRunner)
@@ -9432,7 +9469,6 @@ class Main(QMainWindow):
             flat_field_options=flat_field_options,
             camera_lock_settings=camera_lock_settings,
             settle_s=float(configuration.settle_s),
-            tile_approach_mm=float(getattr(configuration, "tile_approach_mm", 0.0)),
             scan_pattern=str(getattr(configuration, "scan_pattern", "grid") or "grid"),
             refine_scale_from_overlaps=bool(
                 getattr(configuration, "refine_scale_from_overlaps", True)

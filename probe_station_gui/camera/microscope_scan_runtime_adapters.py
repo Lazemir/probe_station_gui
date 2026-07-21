@@ -212,12 +212,9 @@ class MicroscopeScanStageAdapter:
     def raise_needles(self) -> None:
         self.raise_action("raise", self.needle_feedrate())
 
-    def move_to(self, tile: MicroscopeScanTile, *, approach_mm: float) -> None:
+    def move_to(self, tile: MicroscopeScanTile) -> None:
         target_x = float(tile.stage_xy[0])
         target_y = float(tile.stage_xy[1])
-        approach = max(0.0, float(approach_mm))
-        if approach > 1e-9:
-            self.move_xy(target_x - approach, target_y - approach)
         self.move_xy(target_x, target_y)
 
     def actual_position(self) -> tuple[float, ...] | None:

@@ -22,6 +22,8 @@ def test_scan_dialog_has_no_scan_specific_exposure_control(app) -> None:
     try:
         configuration = dialog.current_configuration()
         assert not hasattr(configuration, "auto_exposure")
+        assert not hasattr(configuration, "tile_approach_mm")
         assert not hasattr(dialog, "_auto_exposure_check")
+        assert not hasattr(dialog, "_approach_spin")
     finally:
         dialog.close()
