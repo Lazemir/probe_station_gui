@@ -163,7 +163,7 @@ class CallbackContactAutofocusAdapter:
 @dataclass(frozen=True)
 class CallbackContactPhotoAdapter:
     capture_callback: Callable[
-        [RouteMeasurementPoint, int, int, object | None], str
+        [RouteMeasurementPoint, int, int, object | None], object
     ]
 
     def capture(
@@ -174,7 +174,7 @@ class CallbackContactPhotoAdapter:
         *,
         focus_result: object | None,
     ) -> str:
-        return self.capture_callback(point, position, total, focus_result)
+        return str(self.capture_callback(point, position, total, focus_result))
 
 
 @dataclass(frozen=True)

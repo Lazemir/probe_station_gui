@@ -10,6 +10,12 @@ from probe_station_gui.route.contact_lifecycle import (
     RouteContactMessage,
     RouteContactRequest,
 )
+from probe_station_gui.route.contact_lifecycle_adapter import (
+    ContactControlBindings,
+    ContactMeterBindings,
+    ContactQualityBindings,
+    ContactStageBindings,
+)
 from probe_station_gui.route.contact_quality import RouteMeasurementSample
 from probe_station_gui.route.measurement_records import (
     RouteMeasurementPoint,
@@ -23,8 +29,14 @@ class _Task:
 
 
 class _StageAdapter:
-    def __init__(self, events: list[str]) -> None:
+    def __init__(
+        self,
+        events: list[str],
+        *,
+        after_contact_move: Callable[[], None] | None = None,
+    ) -> None:
         self._events = events
+        self._after_contact_move = after_contact_move
 
     def begin(self) -> None:
         self._events.append("stage:begin")
@@ -46,6 +58,8 @@ class _StageAdapter:
 
     def move_to_contact(self, point: RouteMeasurementPoint) -> None:
         self._events.append(f"stage:contact:{point.point_id}")
+        if self._after_contact_move is not None:
+            self._after_contact_move()
 
     def move_to_photo(self, point: RouteMeasurementPoint) -> tuple[float, float]:
         self._events.append(f"stage:photo:{point.point_id}")
@@ -203,8 +217,14 @@ class _AutofocusAdapter:
 
 
 class _PhotoAdapter:
-    def __init__(self, events: list[str]) -> None:
+    def __init__(
+        self,
+        events: list[str],
+        *,
+        after: Callable[[], None] | None = None,
+    ) -> None:
         self._events = events
+        self._after = after
 
     def capture(
         self,
@@ -215,23 +235,24 @@ class _PhotoAdapter:
         focus_result: object | None,
     ) -> str:
         self._events.append(f"photo:capture:{focus_result}")
+        if self._after is not None:
+            self._after()
         return "contact.png"
 
 
-class _PauseControl:
-    """Coordinator-owned Pause Request/Pause Ack state used by the contract test."""
+class _BindingStageController:
+    def __init__(self, events: list[str]) -> None:
+        self._events = events
 
-    def __init__(self) -> None:
-        self.pause_requested = False
-        self.pause_ack = False
+    def run_external_needles_action(
+        self,
+        action: str,
+        feedrate: float | None,
+    ) -> None:
+        self._events.append(f"needles:{action}:{feedrate}")
 
-    def request_pause(self) -> None:
-        self.pause_requested = True
-
-    def safe_waiting_point(self) -> None:
-        if self.pause_requested:
-            self.pause_requested = False
-            self.pause_ack = True
+    def run_external_move_to_xy(self, x: float, y: float) -> None:
+        self._events.append(f"stage:xy:{x}:{y}")
 
 
 def _point() -> RouteMeasurementPoint:
@@ -309,24 +330,102 @@ def test_interrupt_after_autofocus_skips_lower_check_and_external_measurement() 
     assert interrupt.requested() is True
 
 
-def test_pause_request_is_not_acknowledged_until_coordinator_safe_waiting_point() -> None:
+@pytest.mark.parametrize("boundary", ["autofocus", "photo", "contact_move"])
+def test_interrupt_boundaries_stop_before_contact_or_external_wait(
+    boundary: str,
+) -> None:
     events: list[str] = []
-    control = _PauseControl()
-    flow = _contact_flow(events)
-    control.request_pause()
+    interrupt = _InterruptAdapter()
+    stage = _StageAdapter(
+        events,
+        after_contact_move=(
+            interrupt.request if boundary == "contact_move" else None
+        ),
+    )
+    flow = RouteContactFlow(
+        stage=stage,
+        meter=_MeterAdapter(events),
+        quality=_QualityAdapter(events),
+        interrupt=interrupt,
+        events=_EventAdapter(events),
+    )
+    autofocus = _AutofocusAdapter(
+        events,
+        after=interrupt.request if boundary == "autofocus" else None,
+    )
+    photo = _PhotoAdapter(
+        events,
+        after=interrupt.request if boundary == "photo" else None,
+    )
 
-    result = flow.place_contact(_contact_request())
+    result = flow.prepare_external_contact(
+        _contact_request(autofocus=autofocus, photo=photo)
+    )
 
-    assert result.interrupted is False
-    assert control.pause_requested is True
-    assert control.pause_ack is False
+    assert result.interrupted is True
+    assert interrupt.requested() is True
+    assert "needles:lower" not in events
+    assert "contact:check" not in events
+    assert "meter:external" not in events
+    assert not any(event.startswith("meter:prepare") for event in events)
 
-    flow.lift_after_external_measurement(position=1, total=1)
-    assert control.pause_ack is False
 
-    control.safe_waiting_point()
-    assert control.pause_requested is False
-    assert control.pause_ack is True
+def test_production_bindings_are_direct_contact_flow_ports() -> None:
+    events: list[str] = []
+    stage_callbacks = _StageAdapter(events)
+    meter_callbacks = _MeterAdapter(events)
+    quality_callbacks = _QualityAdapter(events)
+    interrupt = _InterruptAdapter()
+    event_callbacks = _EventAdapter(events)
+    flow = RouteContactFlow(
+        stage=ContactStageBindings(
+            controller=_BindingStageController(events),
+            needle_feedrate=lambda: 75.0,
+            begin=stage_callbacks.begin,
+            finish=stage_callbacks.finish,
+            wait_for_background_tasks=stage_callbacks.wait_for_background_tasks,
+            lower_needles=stage_callbacks.lower_needles,
+            contact_xy=lambda point: point.stage_xy,
+            photo_xy=lambda point: point.photo_stage_xy or point.stage_xy,
+            settle_contact=stage_callbacks.settle_contact,
+            settle_photo=stage_callbacks.settle_photo,
+        ),
+        meter=ContactMeterBindings(
+            initial_count=meter_callbacks.initial_count,
+            prepare=meter_callbacks.prepare,
+            measure=meter_callbacks.measure,
+            close_output=meter_callbacks.close_output,
+        ),
+        quality=ContactQualityBindings(
+            reset_seek=quality_callbacks.reset_seek,
+            current_seek=quality_callbacks.current_seek,
+            auto_seek_enabled=quality_callbacks.auto_seek_enabled,
+            set_auto_seek_enabled=quality_callbacks.set_auto_seek_enabled,
+            record=quality_callbacks.record,
+            placement_success=quality_callbacks.placement_success,
+            placement_message=quality_callbacks.placement_message,
+        ),
+        interrupt=ContactControlBindings(
+            clear=interrupt.clear,
+            requested=interrupt.requested,
+            status=event_callbacks.status,
+            pre_contact_photo=event_callbacks.pre_contact_photo,
+            contact_photo=event_callbacks.contact_photo,
+        ),
+        events=ContactControlBindings(
+            clear=interrupt.clear,
+            requested=interrupt.requested,
+            status=event_callbacks.status,
+            pre_contact_photo=event_callbacks.pre_contact_photo,
+            contact_photo=event_callbacks.contact_photo,
+        ),
+    )
+
+    result = flow.place_contact(_contact_request()).require_placement()
+
+    assert result.success is True
+    assert "needles:lift:75.0" in events
+    assert "stage:xy:10.0:20.0" in events
 
 
 def test_external_contact_preserves_focus_photo_and_contact_metadata() -> None:

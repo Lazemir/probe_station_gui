@@ -101,6 +101,8 @@ class RouteExternalMeasurementSessionRunner:
     ) -> None:
         self.session_id = str(session_id)
         self._points = list(points)
+        self._lcr_controller = lcr_controller
+        self._start_point_number = max(1, int(start_point_number))
         self._csv_path = Path(os.devnull)
         self._status_callback = status_callback
         self._progress_callback = progress_callback
@@ -302,7 +304,7 @@ class RouteExternalMeasurementSessionRunner:
         try:
             if not self._points:
                 raise ValueError("Route has no enabled points.")
-            lcr = self._contact_runner._lcr_controller
+            lcr = self._lcr_controller
             if hasattr(lcr, "open"):
                 self._status("Route API session: connecting meter.")
                 lcr.open()
@@ -324,7 +326,7 @@ class RouteExternalMeasurementSessionRunner:
             self._status(f"Route API session failed: {message}")
         finally:
             try:
-                lcr = self._contact_runner._lcr_controller
+                lcr = self._lcr_controller
                 if hasattr(lcr, "close"):
                     lcr.close()
             except Exception as exc:
@@ -419,8 +421,9 @@ class RouteExternalMeasurementSessionRunner:
         return normalize_route_control_action(action)
 
     def _start_index(self) -> int:
-        start = self._contact_runner._start_point_number
-        index = self._contact_runner._index_for_point_number(start)
+        index = self._contact_runner.index_for_point_number(
+            self._start_point_number
+        )
         return 0 if index is None else index
 
     def _prepare_point(
@@ -756,7 +759,7 @@ class RouteExternalMeasurementSessionRunner:
             point_number = int(str(action).split(":", 1)[1])
         except ValueError:
             return None
-        index = self._contact_runner._index_for_point_number(point_number)
+        index = self._contact_runner.index_for_point_number(point_number)
         return index
 
     def _stop_requested_now(self) -> bool:
@@ -764,7 +767,7 @@ class RouteExternalMeasurementSessionRunner:
             return bool(self._stop_requested)
 
     def _point_interrupted(self) -> bool:
-        return bool(self._contact_runner._point_interrupt_requested.is_set())
+        return self._contact_runner.current_point_correction_requested()
 
     def _set_current(self, position: int, point: RouteMeasurementPoint) -> None:
         with self._condition:

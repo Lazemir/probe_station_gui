@@ -134,6 +134,83 @@ class RouteApiControlTest(unittest.TestCase):
         self.assertEqual(events.count(("output", True)), 1)
         self.assertEqual(events.count(("output", False)), 1)
 
+    def test_pause_during_contact_acks_only_after_lift_and_keeps_interrupt_path(
+        self,
+    ) -> None:
+        point = _point(1)
+        runner_holder: dict[str, RouteExternalMeasurementSessionRunner] = {}
+
+        class _PauseOnFirstLowerStage(_FakeStage):
+            def __init__(self) -> None:
+                super().__init__()
+                self.pause_requested = False
+
+            def run_external_needles_action(
+                self,
+                action: str,
+                feedrate: float | None = None,
+            ) -> str:
+                result = super().run_external_needles_action(action, feedrate)
+                if action == "lower" and not self.pause_requested:
+                    self.pause_requested = True
+                    runner_holder["runner"].request_pause_after_current_point()
+                return result
+
+        stage = _PauseOnFirstLowerStage()
+        lcr = _FakeBatchRouteLCR(
+            [
+                {"differential_resistance_ohm": 100.0 + index}
+                for index in range(10)
+            ]
+        )
+        runner = RouteExternalMeasurementSessionRunner(
+            session_id="session-1",
+            points=[point],
+            stage_controller=stage,
+            lcr_controller=lcr,
+            needle_feedrate=75.0,
+            measurement_count=5,
+            initial_measurement_count=2,
+            contact_settle_s=0.0,
+            photo_enabled=False,
+            photo_focus_enabled=False,
+        )
+        runner_holder["runner"] = runner
+        finished: list[tuple[bool, str]] = []
+        thread = threading.Thread(
+            target=lambda: finished.append(runner.run()),
+            daemon=True,
+        )
+
+        thread.start()
+        self.assertTrue(self._wait_for_external_request(runner, 1))
+        pending_status = runner.status_payload()
+        self.assertEqual(pending_status["state"], "waiting_external_measurement")
+        self.assertNotEqual(pending_status["waiting_reason"], "paused")
+
+        runner.request_current_point_correction()
+        self.assertTrue(self._wait_for_external_request(runner, 2))
+        self.assertEqual(
+            stage.calls.count(("needles", "lower", 75.0)),
+            2,
+        )
+        self.assertEqual(runner.status_payload()["history"], [])
+
+        self.assertTrue(runner.submit_external_result({"status": "ok"}))
+        self.assertTrue(self._wait_for_state(runner, "waiting_paused"))
+        paused_status = runner.status_payload()
+        self.assertEqual(paused_status["waiting_reason"], "paused")
+        self.assertGreaterEqual(
+            stage.calls.count(("needles", "lift", 75.0)),
+            2,
+        )
+
+        self.assertTrue(runner.submit_confirmation("next"))
+        thread.join(timeout=2.0)
+
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(finished, [(True, "Route API session complete.")])
+
     def test_external_session_short_skips_external_wait_and_followup(self) -> None:
         point = _point(1)
         stage = _FakeStage()
@@ -523,6 +600,24 @@ class RouteApiControlTest(unittest.TestCase):
         deadline = time.monotonic() + timeout_s
         while time.monotonic() < deadline:
             if runner.status_payload().get("state") == state:
+                return True
+            time.sleep(0.01)
+        return False
+
+    @staticmethod
+    def _wait_for_external_request(
+        runner: RouteExternalMeasurementSessionRunner,
+        request_id: int,
+        *,
+        timeout_s: float = 2.0,
+    ) -> bool:
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            status = runner.status_payload()
+            if (
+                status.get("state") == "waiting_external_measurement"
+                and status.get("external_measurement_request_id") == request_id
+            ):
                 return True
             time.sleep(0.01)
         return False
