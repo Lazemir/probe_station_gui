@@ -343,18 +343,19 @@ class MicroscopeScanCameraAdapter:
     ) -> QImage:
         if not isinstance(frame, QImage):
             raise TypeError("Microscope scan frame must be a QImage.")
-        if options.mode in {"scan", "reference"}:
+        mode = options.mode.lower()
+        if mode in {"scan", "reference"}:
             if flat_field_profile is None:
                 raise RuntimeError("Flat-field profile is unavailable.")
             flat_corrected = apply_flat_field_correction(frame, flat_field_profile)
-        elif options.mode == "self":
+        elif mode == "self":
             flat_corrected = apply_self_flat_field_correction(
                 frame,
                 blur_radius_px=options.blur_radius_px,
                 max_gain=options.max_gain,
             )
         else:
-            raise RuntimeError(f"Unsupported flat-field mode: {options.mode}")
+            raise RuntimeError(f"Unsupported flat-field mode: {mode}")
         return self.correct_lens(flat_corrected)
 
     def restore_lock(self, restore_key: object) -> None:
