@@ -82,7 +82,7 @@ class MicroscopeView(QWidget):
         self._alignment_instruction = ""
         self._display_rect: QRect | None = None
         self._minimap = MicroscopeMinimap(
-            renderer=minimap_render_worker_factory,
+            worker_factory=minimap_render_worker_factory,
             device_pixel_ratio=self.devicePixelRatioF,
             parent=self,
         )

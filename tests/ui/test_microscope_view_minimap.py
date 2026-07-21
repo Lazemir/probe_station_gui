@@ -1,13 +1,15 @@
 import os
+from pathlib import Path
 import sys
 import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QEvent, QPointF, QRect, Qt
-from PySide6.QtGui import QImage, QMouseEvent
+from PySide6.QtGui import QColor, QImage, QMouseEvent
 from PySide6.QtWidgets import QApplication
 
+from probe_station_gui.design.model import DesignDocument
 from probe_station_gui.views.microscope_view import MicroscopeView
 
 
@@ -49,7 +51,52 @@ def _mouse_event(
     )
 
 
+def _design_document() -> DesignDocument:
+    return DesignDocument(
+        path=Path("integration.gds"),
+        library=None,
+        top_cell=None,
+        top_cell_name="TOP",
+        cell_names=("TOP",),
+        dbu=1e-6,
+        user_unit=1e-9,
+        bounds=(0.0, 0.0, 100.0, 100.0),
+        polygons_by_layer={},
+        visible_layers=frozenset(),
+    )
+
+
 class MicroscopeViewMinimapTest(unittest.TestCase):
+    def test_widget_paint_renders_configured_minimap_panel(self) -> None:
+        _app()
+        view = MicroscopeView()
+        view.resize(1000, 1000)
+        frame = QImage(1000, 1000, QImage.Format_RGB32)
+        frame.fill(QColor("white"))
+        view.set_frame(frame)
+        view.set_design_minimap_data(
+            document=_design_document(),
+            targets=[],
+            selected_target_id=None,
+            probe_route=None,
+            selected_route_point_index=-1,
+            selected_design_point=None,
+            current_design_position=None,
+            fov_design_size=None,
+            source_design_marks=[],
+            check_design_marks=[],
+        )
+
+        canvas = QImage(1000, 1000, QImage.Format_ARGB32)
+        canvas.fill(QColor("black"))
+        view.render(canvas)
+
+        panel_pixel = canvas.pixelColor(760, 60)
+        self.assertLess(panel_pixel.red(), 80)
+        self.assertLess(panel_pixel.green(), 80)
+        self.assertLess(panel_pixel.blue(), 80)
+        view.shutdown()
+
     def test_minimap_press_delegates_point_and_display_rect(self) -> None:
         view = _view_with_frame()
         calls: list[tuple[object, object]] = []
