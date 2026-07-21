@@ -4,7 +4,7 @@ import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QEvent, QPointF, QRect, QRectF, Qt
+from PySide6.QtCore import QEvent, QPointF, QRect, Qt
 from PySide6.QtGui import QImage, QMouseEvent
 from PySide6.QtWidgets import QApplication
 
@@ -50,32 +50,33 @@ def _mouse_event(
 
 
 class MicroscopeViewMinimapTest(unittest.TestCase):
-    def test_minimap_click_delay_leaves_room_for_double_click_event(self) -> None:
-        app = _app()
-        original_interval = app.doubleClickInterval()
-        try:
-            app.setDoubleClickInterval(250)
+    def test_minimap_press_delegates_point_and_display_rect(self) -> None:
+        view = _view_with_frame()
+        calls: list[tuple[object, object]] = []
 
-            self.assertEqual(
-                MicroscopeView._minimap_click_delay_ms(),
-                250 + MicroscopeView._MINIMAP_CLICK_DELAY_PADDING_MS,
+        class _MinimapAdapter:
+            @staticmethod
+            def contains(point, display_rect) -> bool:
+                return True
+
+            @staticmethod
+            def queue_click(point, display_rect) -> None:
+                calls.append((point, display_rect))
+
+        view._minimap = _MinimapAdapter()  # type: ignore[assignment]
+        view.mousePressEvent(
+            _mouse_event(
+                QEvent.Type.MouseButtonPress,
+                150,
+                100,
+                button=Qt.LeftButton,
+                buttons=Qt.LeftButton,
             )
-        finally:
-            app.setDoubleClickInterval(original_interval)
+        )
 
-    def test_visible_minimap_fov_rect_stays_inside_content_rect(self) -> None:
-        content = QRect(10, 20, 100, 80)
-        raw_fov = QRectF(-25.0, 30.0, 170.0, 60.0)
-
-        visible = MicroscopeView._visible_minimap_fov_rect(raw_fov, content)
-
-        bounds = QRectF(content).adjusted(1.0, 1.0, -1.0, -1.0)
-        self.assertGreater(visible.width(), 0.0)
-        self.assertGreater(visible.height(), 0.0)
-        self.assertGreaterEqual(visible.left(), bounds.left())
-        self.assertLessEqual(visible.right(), bounds.right())
-        self.assertGreaterEqual(visible.top(), bounds.top())
-        self.assertLessEqual(visible.bottom(), bounds.bottom())
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][0], QPointF(150, 100).toPoint())
+        self.assertEqual(calls[0][1], QRect(10, 20, 200, 160))
 
     def test_click_to_move_emits_on_release_not_press(self) -> None:
         view = _view_with_frame()

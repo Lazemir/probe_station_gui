@@ -19,7 +19,7 @@ from PySide6.QtWidgets import QApplication
 
 from probe_station_gui.design.klayout_types import RenderFailure, RenderFrame
 from probe_station_gui.design.model import DesignDocument
-from probe_station_gui.views.microscope_view import MicroscopeView
+from probe_station_gui.views.microscope_minimap import MicroscopeMinimap
 
 
 @pytest.fixture(scope="module")
@@ -58,9 +58,7 @@ def _document(
     turns: int = 0,
 ) -> DesignDocument:
     source_bounds = (10.0, 20.0, 110.0, 70.0)
-    display_bounds = (
-        (35.0, -5.0, 85.0, 95.0) if turns % 2 else source_bounds
-    )
+    display_bounds = (35.0, -5.0, 85.0, 95.0) if turns % 2 else source_bounds
     return DesignDocument(
         path=path,
         library=None,
@@ -98,9 +96,10 @@ def _legacy_document(path: Path) -> DesignDocument:
     )
 
 
-def _set_document(view: MicroscopeView, document: DesignDocument | None) -> None:
-    view.set_design_minimap_data(
-        document=document,
+def _set_document(minimap: MicroscopeMinimap, document: DesignDocument | None) -> None:
+    minimap.configure(
+        document,
+        document.bounds if document is not None else (0.0, 0.0, 1.0, 1.0),
         targets=[],
         selected_target_id=None,
         probe_route=None,
@@ -115,7 +114,7 @@ def _set_document(view: MicroscopeView, document: DesignDocument | None) -> None
 
 def _view_with_workers(
     worker_type: type[_RenderWorker] = _RenderWorker,
-) -> tuple[MicroscopeView, list[_RenderWorker]]:
+) -> tuple[MicroscopeMinimap, list[_RenderWorker]]:
     workers: list[_RenderWorker] = []
 
     def factory() -> _RenderWorker:
@@ -123,7 +122,7 @@ def _view_with_workers(
         workers.append(worker)
         return worker
 
-    view = MicroscopeView(minimap_render_worker_factory=factory)
+    view = MicroscopeMinimap(renderer=factory)
     return view, workers
 
 
@@ -160,9 +159,7 @@ def _write_reload_design(path: Path, *, box_left_um: float) -> None:
     layout.dbu = 0.001
     top = layout.create_cell("TOP")
     left = round(box_left_um * 1000.0)
-    top.shapes(layout.layer(1, 0)).insert(
-        db.Box(left, 40_000, left + 10_000, 50_000)
-    )
+    top.shapes(layout.layer(1, 0)).insert(db.Box(left, 40_000, left + 10_000, 50_000))
     top.shapes(layout.layer(9, 0)).insert(db.Box(0, 0, 1_000, 1_000))
     top.shapes(layout.layer(9, 0)).insert(db.Box(99_000, 99_000, 100_000, 100_000))
     layout.write(str(path))
@@ -212,7 +209,7 @@ def test_file_backed_minimap_uses_full_bounds_physical_klayout_request(
         return {}
 
     monkeypatch.setattr(DesignDocument, "visible_polygons", observe_visible_polygons)
-    monkeypatch.setattr(view, "devicePixelRatioF", lambda: 2.0)
+    monkeypatch.setattr(view, "_device_pixel_ratio", lambda: 2.0)
     _set_document(view, document)
 
     assert workers == []
@@ -239,7 +236,7 @@ def test_file_backed_minimap_uses_full_bounds_physical_klayout_request(
     assert request.config.source_bounds == document.cell_bounds["TOP"]
     assert request.config.display_bounds == document.bounds
     assert request.config.rotation_quarter_turns == 0
-    view.close()
+    view.shutdown()
 
 
 def test_real_tall_klayout_raster_aligns_overlay_and_click_aspect_fit(
@@ -249,7 +246,7 @@ def test_real_tall_klayout_raster_aligns_overlay_and_click_aspect_fit(
     design_path = tmp_path / "tall.gds"
     _write_tall_design(design_path)
     document = DesignDocument.load(design_path)
-    view = MicroscopeView()
+    view = MicroscopeMinimap()
     _set_document(view, document)
     content_size = QSize(224, 206)
 
@@ -264,7 +261,7 @@ def test_real_tall_klayout_raster_aligns_overlay_and_click_aspect_fit(
     canvas.fill(QColor("#000000"))
     painter = QPainter(canvas)
     display_rect = QRect(0, 0, 1000, 1000)
-    view._draw_design_minimap(painter, display_rect)
+    view.draw(painter, display_rect)
     painter.end()
     assert view._minimap_rect is not None
     content_rect = QRect(
@@ -304,10 +301,10 @@ def test_real_tall_klayout_raster_aligns_overlay_and_click_aspect_fit(
         ((left + right) * 0.5, (bottom + top) * 0.5),
         content_rect,
     )
-    assert view._map_rect_point_to_design(mapped_center, content_rect) == pytest.approx(
+    assert view.map_click(mapped_center, display_rect) == pytest.approx(
         ((left + right) * 0.5, (bottom + top) * 0.5),
     )
-    view.close()
+    view.shutdown()
 
 
 def test_real_minimap_reloads_replaced_file_at_same_path(
@@ -318,7 +315,7 @@ def test_real_minimap_reloads_replaced_file_at_same_path(
     replacement_path = tmp_path / "replacement.gds"
     _write_reload_design(design_path, box_left_um=10.0)
     first = DesignDocument.load(design_path).with_visible_layers({(1, 0)})
-    view = MicroscopeView()
+    view = MicroscopeMinimap()
     _set_document(view, first)
     view._design_background_for_size(QSize(180, 160))
     _process_until(qt_app, lambda: view._minimap_background is not None)
@@ -341,7 +338,7 @@ def test_real_minimap_reloads_replaced_file_at_same_path(
 
     assert first.source_load_id != second.source_load_id
     assert first_image != second_image
-    view.close()
+    view.shutdown()
 
 
 def test_resize_coalesces_to_one_newest_minimap_request(
@@ -363,7 +360,7 @@ def test_resize_coalesces_to_one_newest_minimap_request(
     request = workers[0].requests[0]
     assert (request.pixel_width, request.pixel_height) == (128, 64)
     assert request.purpose == "minimap"
-    view.close()
+    view.shutdown()
 
 
 def test_stale_frame_is_ignored_and_last_matching_image_survives_resize(
@@ -406,7 +403,7 @@ def test_stale_frame_is_ignored_and_last_matching_image_survives_resize(
     assert replacement_image.pixelColor(0, replacement_image.height() - 1) == QColor(
         "#42a5f5"
     )
-    view.close()
+    view.shutdown()
 
 
 def test_layer_and_rotation_changes_reuse_path_but_invalidate_frame(
@@ -442,7 +439,7 @@ def test_layer_and_rotation_changes_reuse_path_but_invalidate_frame(
     assert changed_request.config.display_bounds == changed.bounds
     workers[0].frame_ready.emit(_frame(first_request))
     assert view._minimap_background is None
-    view.close()
+    view.shutdown()
 
 
 def test_same_path_new_source_retires_minimap_worker(
@@ -501,7 +498,7 @@ def test_path_switch_detaches_and_removal_or_close_stops_bounded(
     view._design_background_for_size(QSize(100, 80))
     _drain_events(qt_app)
     started = time.monotonic()
-    view.close()
+    view.shutdown()
     assert time.monotonic() - started < 0.2
     assert workers[2].stop_calls == [0.0]
 
@@ -521,7 +518,7 @@ def test_removal_and_close_do_not_wait_for_running_worker(
     if action == "remove":
         _set_document(view, None)
     else:
-        view.close()
+        view.shutdown()
     elapsed = time.monotonic() - started
 
     assert elapsed < 0.1
@@ -577,7 +574,7 @@ def test_render_failure_retries_once_and_stale_failure_preserves_newer_state(
     assert view._design_background_for_size(QSize(100, 80)) is None
     _drain_events(qt_app)
     assert len(workers[0].requests) == 2
-    view.close()
+    view.shutdown()
 
 
 def test_failure_for_size_superseded_before_delivery_does_not_retry(
@@ -604,7 +601,7 @@ def test_failure_for_size_superseded_before_delivery_does_not_retry(
 
     assert len(workers[0].requests) == 2
     assert workers[0].requests[-1].pixel_width != first.pixel_width
-    view.close()
+    view.shutdown()
 
 
 def test_retired_minimap_worker_finalizes_on_creator_thread(
@@ -637,7 +634,7 @@ def test_retired_minimap_worker_finalizes_on_creator_thread(
 
 
 def test_legacy_in_memory_minimap_keeps_polygon_renderer(tmp_path: Path) -> None:
-    image, point_count = MicroscopeView._render_minimap_background_image(
+    image, point_count = MicroscopeMinimap._render_minimap_background_image(
         _legacy_document(tmp_path / "legacy.gds"),
         QSize(100, 80),
     )
