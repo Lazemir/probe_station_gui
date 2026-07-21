@@ -699,6 +699,9 @@ class RouteMeasurementRunner:
             )
         return success, message
 
+    def requires_optical_session(self) -> bool:
+        return bool(self._photo_enabled or self._photo_focus_enabled)
+
     def _validate_route_run_configuration(self) -> None:
         if not self._points:
             raise ValueError("Route has no enabled points.")

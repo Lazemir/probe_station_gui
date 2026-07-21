@@ -784,8 +784,7 @@ class OpticalSessionManager:
         if not name:
             raise ExposurePolicyError("Optical session operation is required.")
         controller = self._controller
-        if not controller._command_lock.acquire(blocking=False):
-            raise ExposurePolicyBusyError("Camera exposure policy is busy.")
+        controller._command_lock.acquire()
         state_changed = False
         try:
             controller._ensure_commands_allowed()

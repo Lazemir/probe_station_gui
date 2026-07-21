@@ -164,6 +164,9 @@ class RouteExternalMeasurementSessionRunner:
     def csv_path(self) -> Path:
         return self._csv_path
 
+    def requires_optical_session(self) -> bool:
+        return bool(self._photo_enabled or self._photo_focus_enabled)
+
     def route_offset_xy(self) -> Point2D:
         return self._contact_runner.route_offset_xy()
 

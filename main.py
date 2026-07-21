@@ -913,6 +913,7 @@ class Main(QMainWindow):
         self._route_measurement_waiting_reason = ""
         self._route_measurement_photo_enabled = False
         self._route_measurement_measure_enabled = False
+        self._route_measurement_optical_session_token: str | None = None
         self._route_measurement_point_numbers: list[int] = []
         self._route_measurement_current_point: int | None = None
         self._last_route_measurement_result: tuple[
@@ -3570,6 +3571,7 @@ class Main(QMainWindow):
         )
         return self.stage_controller.run_external_local_autofocus(
             range_mm=range_mm,
+            parent_token=self._route_optical_session_token(),
         )
 
     def _api_contact_context(self, contact_number: int) -> dict[str, Any]:
@@ -8733,11 +8735,25 @@ class Main(QMainWindow):
             )
 
     def _restore_route_measurement_state_after_design_load(self) -> None:
+        state = self._route_measurement_settings_store().load()
         route = self._design_session.route
+        if route is None or not route.points:
+            route_path = str(state.get("session_route_path") or "").strip()
+            if RouteMeasurementSettingsStore.session_active(state) and route_path:
+                try:
+                    route_plan = design_navigation.load_measurement_route(
+                        self._design_session,
+                        route_path,
+                    )
+                except DesignModelError as exc:
+                    logger.warning("Unable to restore saved probe route: %s", exc)
+                else:
+                    if self._apply_route_edit_plan(route_plan):
+                        route = self._design_session.route
         if route is None or not route.points:
             return
         plan = route_dialog_restore_plan(
-            self._route_measurement_settings_store().load(),
+            state,
             route,
         )
         self._route_measurement_session_active = plan.session_active
@@ -9132,7 +9148,16 @@ class Main(QMainWindow):
         )
         return self.stage_controller.run_external_local_autofocus(
             range_mm=configuration.photo_autofocus_range_mm,
+            parent_token=self._route_optical_session_token(),
         )
+
+    def _route_optical_session_token(self) -> str:
+        token = str(
+            getattr(self, "_route_measurement_optical_session_token", "") or ""
+        )
+        if not token:
+            raise RuntimeError("Route optical session is unavailable.")
+        return token
 
     def _record_route_photo(
         self,
@@ -9274,7 +9299,27 @@ class Main(QMainWindow):
         return route.name
 
     def _run_route_measurement(self, runner: RouteMeasurementRunner) -> None:
-        success, message = runner.run()
+        success = False
+        message = "Route measurement failed."
+        self._route_measurement_optical_session_token = None
+        try:
+            if runner.requires_optical_session():
+                with self._optical_session_manager.open(
+                    "route photography"
+                ) as optical_session:
+                    self._route_measurement_optical_session_token = (
+                        optical_session.token
+                    )
+                    success, message = runner.run()
+            else:
+                success, message = runner.run()
+        except Exception as exc:
+            message = str(exc) or type(exc).__name__
+            self.route_measurement_status.emit(
+                f"Route measurement failed: {message}"
+            )
+        finally:
+            self._route_measurement_optical_session_token = None
         csv_path = (
             ""
             if isinstance(runner, RouteExternalMeasurementSessionRunner)

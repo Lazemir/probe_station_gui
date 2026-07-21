@@ -213,14 +213,15 @@ assert image.height() == 4
     def test_route_photo_autofocus_reports_status_through_signal(self) -> None:
         window = Main.__new__(Main)
         emitted: list[str] = []
-        requested_ranges: list[float] = []
+        requests: list[tuple[float, str]] = []
+        window._route_measurement_optical_session_token = "route-token"
 
         window.route_measurement_status = types.SimpleNamespace(
             emit=lambda message: emitted.append(str(message))
         )
         window.stage_controller = types.SimpleNamespace(
-            run_external_local_autofocus=lambda *, range_mm: requested_ranges.append(
-                float(range_mm)
+            run_external_local_autofocus=lambda *, range_mm, parent_token: requests.append(
+                (float(range_mm), str(parent_token))
             )
             or "focus-result"
         )
@@ -235,7 +236,7 @@ assert image.height() == 4
         )
 
         self.assertEqual(result, "focus-result")
-        self.assertEqual(requested_ranges, [0.03])
+        self.assertEqual(requests, [(0.03, "route-token")])
         self.assertEqual(
             emitted,
             ["Route photo autofocus: point 2/5, +/-0.030 mm."],
