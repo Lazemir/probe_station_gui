@@ -351,4 +351,3 @@ After Task 4 review is approved:
 2. Record current MI/LOC/CC for `main.py`, `microscope_view.py`, `motion_commands.py`, and `route/measurement.py` in `.superpowers/sdd/progress.md`.
 3. Dispatch a whole-branch reviewer.
 4. If `main.py` MI remains `0.00`, create Cycle 2 from current hotspots and continue automatically in the same order: Camera/Main, MicroscopeView, Stage, Route.
-
