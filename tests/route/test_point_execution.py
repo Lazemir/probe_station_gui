@@ -268,6 +268,90 @@ def test_interrupt_during_pre_contact_skips_lower_read_and_recording() -> None:
     assert not {"csv", "result"}.intersection(events.calls)
 
 
+def test_interrupt_after_prepare_wait_skips_pre_contact_and_cleans_up() -> None:
+    from probe_station_gui.route.point_execution import RoutePointExecution
+
+    control = _Control()
+    motion = _Motion()
+    acquisition = _Acquisition()
+    events = _Events()
+
+    class _InterruptingPrepare:
+        def wait(self) -> None:
+            control.interrupt = True
+
+    acquisition.prepare = lambda _count, _source_count: _InterruptingPrepare()
+    result = RoutePointExecution(
+        motion=motion,
+        acquisition=acquisition,
+        photo=_Photo(motion, control),
+        control=control,
+        events=events,
+    ).execute(_measure_request())
+
+    assert result.interrupted is True
+    assert result.pending_cleanup is False
+    assert "lift" in motion.calls
+    assert "pre_contact" not in events.calls
+    assert "lower" not in motion.calls
+    assert not any(
+        call[0] == "read" for call in acquisition.calls if isinstance(call, tuple)
+    )
+    assert not {"csv", "result"}.intersection(events.calls)
+
+
+@pytest.mark.parametrize("cleanup_fails", [False, True])
+def test_prepare_wait_error_runs_lift_and_preserves_failure(
+    cleanup_fails: bool,
+) -> None:
+    from probe_station_gui.route.point_execution import (
+        RoutePointCleanupError,
+        RoutePointExecution,
+    )
+
+    control = _Control()
+    motion = _Motion()
+    acquisition = _Acquisition()
+    original = RuntimeError("prepare wait failed")
+
+    class _FailedPrepare:
+        def wait(self) -> None:
+            raise original
+
+    class _FailedLift:
+        def wait(self) -> None:
+            motion.calls.append("lift_wait")
+            raise RuntimeError("lift failed")
+
+    acquisition.prepare = lambda _count, _source_count: _FailedPrepare()
+    if cleanup_fails:
+        motion.start_lift = lambda _feedrate=None: (
+            motion.calls.append("lift_start") or _FailedLift()
+        )
+        motion.fallback_lift = lambda _feedrate=None: (
+            motion.calls.append("fallback_lift")
+            or (_ for _ in ()).throw(RuntimeError("fallback failed"))
+        )
+
+    with pytest.raises(RuntimeError) as raised:
+        RoutePointExecution(
+            motion=motion,
+            acquisition=acquisition,
+            photo=_Photo(motion, control),
+            control=control,
+            events=_Events(),
+        ).execute(_measure_request())
+
+    if cleanup_fails:
+        assert type(raised.value) is RoutePointCleanupError
+        assert raised.value.cause is original
+        assert raised.value.pending_cleanup is True
+        assert motion.calls[-3:] == ["lift_start", "lift_wait", "fallback_lift"]
+    else:
+        assert raised.value is original
+        assert motion.calls[-1] == "lift"
+
+
 def test_read_exception_after_lower_lifts_before_preserving_original_error() -> None:
     from probe_station_gui.route.point_execution import RoutePointExecution
 

@@ -333,8 +333,9 @@ class RoutePointExecution:
         request: RoutePointRequest,
         preparation: _PointPreparation,
     ) -> RoutePointResult:
-        if preparation.prepare_action is not None:
-            preparation.prepare_action.wait()
+        prepare_result = self._finish_prepare_action(request, preparation)
+        if prepare_result is not None:
+            return prepare_result
         self._events.pre_contact(request.point, request.position, request.total)
         control_result = self._pre_lower_control_result(preparation.photos_saved)
         if control_result is not None:
@@ -367,6 +368,27 @@ class RoutePointExecution:
             )
         return self._acquisition_flow.acquire(
             request,
+            photos_saved=preparation.photos_saved,
+        )
+
+    def _finish_prepare_action(
+        self,
+        request: RoutePointRequest,
+        preparation: _PointPreparation,
+    ) -> RoutePointResult | None:
+        if preparation.prepare_action is not None:
+            try:
+                preparation.prepare_action.wait()
+            except BaseException as exc:
+                if self._lift_needles(request.needle_feedrate):
+                    raise
+                raise RoutePointCleanupError(exc) from exc
+        if not self._control.interrupted():
+            return None
+        cleaned = self._lift_needles(request.needle_feedrate)
+        return RoutePointResult(
+            interrupted=True,
+            pending_cleanup=not cleaned,
             photos_saved=preparation.photos_saved,
         )
 
