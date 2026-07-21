@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import threading
 import time
 from typing import TYPE_CHECKING, Any
 
@@ -42,15 +41,10 @@ class StageControllerAutofocusMixin:
     def request_autofocus(self) -> None:
         """Begin an asynchronous autofocus sweep along the Z axis."""
 
-        with self._task_lock:
-            active_thread = getattr(self, "_active_thread", None)
-            if active_thread and active_thread.is_alive():
-                self.status_message.emit("Stage is busy. Ignoring autofocus request.")
-                return
-            self._cancel_event.clear()
-            thread = threading.Thread(target=self._run_autofocus, daemon=True)
-            setattr(self, "_active_thread", thread)
-            thread.start()
+        self._start_background_task(
+            target=self._run_autofocus,
+            busy_message="Stage is busy. Ignoring autofocus request.",
+        )
 
     def run_external_local_autofocus(
         self,
@@ -92,9 +86,6 @@ class StageControllerAutofocusMixin:
             self.autofocus_finished.emit(True, message)
         except StageControllerError as exc:
             self.autofocus_finished.emit(False, str(exc))
-        finally:
-            with self._task_lock:
-                setattr(self, "_active_thread", None)
 
     def _run_autofocus_locked(self) -> str:
         """Run autofocus while the caller owns serial access."""
@@ -211,8 +202,8 @@ class StageControllerAutofocusMixin:
     ) -> None:
         """Return local autofocus to its starting Z after a user interrupt."""
 
-        was_cancelled = self._cancel_event.is_set()
-        self._cancel_event.clear()
+        was_cancelled = self._operation_lifecycle.is_cancelled()
+        self._operation_lifecycle.clear_cancellation()
         setattr(
             self,
             "_queued_jog_generation",
@@ -255,7 +246,7 @@ class StageControllerAutofocusMixin:
                 )
         finally:
             if was_cancelled:
-                self._cancel_event.set()
+                self._operation_lifecycle.restore_cancellation()
 
     def _prepare_autofocus_context_locked(
         self,

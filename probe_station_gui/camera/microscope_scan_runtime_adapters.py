@@ -7,7 +7,7 @@ import math
 import threading
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Mapping, Protocol, Sequence
 
@@ -179,18 +179,24 @@ def build_microscope_scan_plan(
     raise RuntimeError("Microscope scan planning request is invalid.")
 
 
+class StageLease(Protocol):
+    def release(self) -> None: ...
+
+
 @dataclass
 class MicroscopeScanStageAdapter:
-    begin_task: Callable[[str], None]
+    reserve_task: Callable[[str], StageLease]
     read_reserved_position: Callable[[], Sequence[float]]
     raise_action: Callable[[str, float], None]
     needle_feedrate: Callable[[], float]
     move_xy: Callable[[float, float], None]
     latest_position: Callable[[], Sequence[float] | None]
-    finish_task: Callable[[], None]
+    _lease: StageLease | None = field(default=None, init=False, repr=False)
 
     def reserve(self) -> tuple[float, float]:
-        self.begin_task("microscope design scan")
+        if self._lease is not None:
+            raise RuntimeError("Microscope scan Stage is already reserved.")
+        self._lease = self.reserve_task("microscope design scan")
         try:
             position = self.read_reserved_position()
             if len(position) < 2:
@@ -200,7 +206,7 @@ class MicroscopeScanStageAdapter:
                 raise RuntimeError("Unable to read X/Y stage position.")
             return start_xy
         except BaseException:
-            self.finish_task()
+            self.release()
             raise
 
     def raise_needles(self) -> None:
@@ -230,7 +236,11 @@ class MicroscopeScanStageAdapter:
         self.move_xy(start_xy[0], start_xy[1])
 
     def release(self) -> None:
-        self.finish_task()
+        lease = self._lease
+        if lease is None:
+            return
+        lease.release()
+        self._lease = None
 
 
 @dataclass

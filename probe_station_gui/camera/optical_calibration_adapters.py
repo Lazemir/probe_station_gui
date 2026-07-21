@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Protocol
 
 from PySide6.QtGui import QImage
@@ -305,16 +305,22 @@ class SessionManager(Protocol):
     def open(self, operation: str, parent_token: str | None = None) -> SessionLease: ...
 
 
-@dataclass(frozen=True)
+class StageLease(Protocol):
+    def release(self) -> None: ...
+
+
+@dataclass
 class OpticalCalibrationStageAdapter:
-    begin_task: Callable[[str], None]
+    reserve_task: Callable[[str], StageLease]
     read_position: Callable[[], Sequence[float]]
     raise_action: Callable[[str, float], None]
     move_xy_callback: Callable[..., None]
-    finish_task: Callable[[], None]
+    _lease: StageLease | None = field(default=None, init=False, repr=False)
 
     def reserve(self, operation: str) -> None:
-        self.begin_task(operation)
+        if self._lease is not None:
+            raise RuntimeError("Optical calibration Stage is already reserved.")
+        self._lease = self.reserve_task(operation)
 
     def start_position(self) -> tuple[float, float]:
         position = self.read_position()
@@ -329,7 +335,11 @@ class OpticalCalibrationStageAdapter:
         self.move_xy_callback(float(x_mm), float(y_mm), feedrate=float(feedrate))
 
     def release(self) -> None:
-        self.finish_task()
+        lease = self._lease
+        if lease is None:
+            return
+        lease.release()
+        self._lease = None
 
 
 @dataclass(frozen=True)

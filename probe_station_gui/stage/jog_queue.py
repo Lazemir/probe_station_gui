@@ -123,7 +123,7 @@ class StageControllerJogQueueMixin:
         if not command:
             return False
         if active_busy:
-            self._cancel_event.set()
+            self._operation_lifecycle.cancel("replace_active_absolute_jog")
         self.queue_jog_stop()
         self._queued_jog_generation += 1
         self._jog_motion_active = False
@@ -190,7 +190,7 @@ class StageControllerJogQueueMixin:
     def queue_active_needles_feedrate(self, target_feedrate: float) -> int | None:
         """Apply a realtime feed override to an active needle G1 move."""
 
-        with self._task_lock:
+        with self._state_lock:
             programmed_feedrate = self._active_needles_programmed_feedrate
             action = self._active_needles_action
         if action not in {"raise", "lower", "adjust"} or programmed_feedrate is None:
@@ -515,7 +515,7 @@ class StageControllerJogQueueMixin:
     def queue_soft_reset(self, *, source: str = "unknown") -> None:
         """Queue a FluidNC soft reset without blocking the UI thread."""
 
-        with self._task_lock:
+        with self._state_lock:
             self._clear_unverified_controller_state_locked()
         self._async_write_queue.put(
             _QueuedSerialWrite(

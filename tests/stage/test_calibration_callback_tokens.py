@@ -34,8 +34,7 @@ def test_reset_calibration_emits_distinct_exact_operation_tokens() -> None:
 
 
 def _new_token(controller: StageController, source: str = "_run_move") -> StageTaskToken:
-    with controller._task_lock:
-        return controller._new_stage_task_token_locked(source)
+    return controller._calibration_signal_token(source)
 
 
 def test_calibration_candidate_does_not_publish_until_exact_token_is_accepted() -> None:

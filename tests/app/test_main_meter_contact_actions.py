@@ -16,6 +16,39 @@ from tests.app.main_coordinate_feedrate_support import (
 )
 
 
+class _StageLease:
+    def __init__(
+        self,
+        label: str,
+        calls: list[tuple[object, ...]] | None,
+    ) -> None:
+        self._calls = calls
+        self._released = False
+        if calls is not None:
+            calls.append(("begin", label))
+
+    def release(self) -> None:
+        if self._released:
+            return
+        self._released = True
+        if self._calls is not None:
+            self._calls.append(("finish",))
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, _exc_type, _exc, _traceback) -> bool:
+        self.release()
+        return False
+
+
+def _stage_lease(
+    label: str,
+    calls: list[tuple[object, ...]] | None = None,
+) -> _StageLease:
+    return _StageLease(label, calls)
+
+
 class MainMeterContactActionsTest(unittest.TestCase):
     def test_api_keithley_meter_configuration_accepts_code_auto_ranges(self) -> None:
         window = Main.__new__(Main)
@@ -272,12 +305,11 @@ class MainMeterContactActionsTest(unittest.TestCase):
         }
         window = Main.__new__(Main)
         window.stage_controller = types.SimpleNamespace(
-            begin_external_task=lambda label: calls.append(("begin", label)),
+            reserve_external_task=lambda label: _stage_lease(label, calls),
             run_external_needles_action=lambda action, feedrate: calls.append(
                 ("needles", action, feedrate)
             ),
             run_external_move_to_xy=lambda x_mm, y_mm: calls.append(("move", x_mm, y_mm)),
-            finish_external_task=lambda: calls.append(("finish",)),
         )
         window.lcr_controller = types.SimpleNamespace()
         window._api_route_meter_configuration = (
@@ -301,12 +333,11 @@ class MainMeterContactActionsTest(unittest.TestCase):
         calls: list[tuple[object, ...]] = []
         window = Main.__new__(Main)
         window.stage_controller = types.SimpleNamespace(
-            begin_external_task=lambda label: calls.append(("begin", label)),
+            reserve_external_task=lambda label: _stage_lease(label, calls),
             run_external_needles_action=lambda action, feedrate: calls.append(
                 ("needles", action, feedrate)
             ),
             run_external_move_to_xy=lambda x_mm, y_mm: calls.append(("move", x_mm, y_mm)),
-            finish_external_task=lambda: calls.append(("finish",)),
         )
         window.lcr_controller = types.SimpleNamespace()
         window._api_route_meter_configuration = (
@@ -344,12 +375,11 @@ class MainMeterContactActionsTest(unittest.TestCase):
 
         window = Main.__new__(Main)
         window.stage_controller = types.SimpleNamespace(
-            begin_external_task=lambda label: calls.append(("begin", label)),
+            reserve_external_task=lambda label: _stage_lease(label, calls),
             run_external_needles_action=lambda action, feedrate: calls.append(
                 ("needles", action, feedrate)
             ),
             run_external_move_to_xy=lambda x_mm, y_mm: calls.append(("move", x_mm, y_mm)),
-            finish_external_task=lambda: calls.append(("finish",)),
         )
         window.lcr_controller = _Lcr()
         window._api_route_meter_configuration = (
@@ -415,12 +445,11 @@ class MainMeterContactActionsTest(unittest.TestCase):
 
         window = Main.__new__(Main)
         window.stage_controller = types.SimpleNamespace(
-            begin_external_task=lambda label: calls.append(("begin", label)),
+            reserve_external_task=lambda label: _stage_lease(label, calls),
             run_external_needles_action=lambda action, feedrate: calls.append(
                 ("needles", action, feedrate)
             ),
             run_external_move_to_xy=lambda x_mm, y_mm: calls.append(("move", x_mm, y_mm)),
-            finish_external_task=lambda: calls.append(("finish",)),
         )
         window.lcr_controller = _Lcr()
         window._api_route_meter_configuration = (
@@ -479,10 +508,9 @@ class MainMeterContactActionsTest(unittest.TestCase):
 
         window = Main.__new__(Main)
         window.stage_controller = types.SimpleNamespace(
-            begin_external_task=lambda label: calls.append(("begin", label)),
+            reserve_external_task=lambda label: _stage_lease(label, calls),
             run_external_needles_action=run_needles_action,
             run_external_move_to_xy=lambda x_mm, y_mm: calls.append(("move", x_mm, y_mm)),
-            finish_external_task=lambda: calls.append(("finish",)),
         )
         window.lcr_controller = _Lcr()
         window._api_route_meter_configuration = (
@@ -541,13 +569,37 @@ class MainMeterContactActionsTest(unittest.TestCase):
             if action == "lift":
                 raise LCRMeterError("unexpected lift meter error")
 
+        class _Stage:
+            def __init__(self) -> None:
+                self.active = False
+
+            def reserve_external_task(self, label: str) -> _StageLease:
+                if self.active:
+                    raise RuntimeError("Stage lease leaked")
+                self.active = True
+                lease = _stage_lease(label)
+                original_release = lease.release
+
+                def release() -> None:
+                    original_release()
+                    self.active = False
+
+                lease.release = release
+                return lease
+
+            def run_external_needles_action(
+                self,
+                action: str,
+                feedrate: float | None,
+            ) -> None:
+                run_needles_action(action, feedrate)
+
+            def run_external_move_to_xy(self, _x_mm: float, _y_mm: float) -> None:
+                return None
+
         window = Main.__new__(Main)
-        window.stage_controller = types.SimpleNamespace(
-            begin_external_task=lambda _label: None,
-            run_external_needles_action=run_needles_action,
-            run_external_move_to_xy=lambda _x_mm, _y_mm: None,
-            finish_external_task=lambda: None,
-        )
+        stage = _Stage()
+        window.stage_controller = stage
         window.lcr_controller = _Lcr()
         window._api_route_meter_configuration = (
             lambda _payload, voltages_v=None: RouteMeterConfiguration()
@@ -576,6 +628,9 @@ class MainMeterContactActionsTest(unittest.TestCase):
         finally:
             main_module.time.monotonic = original_monotonic
 
+        with stage.reserve_external_task("next operation"):
+            self.assertTrue(stage.active)
+
     def test_api_move_to_contact_stage_side_effect_order(self) -> None:
         calls: list[tuple[object, ...]] = []
         point = object()
@@ -583,12 +638,11 @@ class MainMeterContactActionsTest(unittest.TestCase):
 
         window = Main.__new__(Main)
         window.stage_controller = types.SimpleNamespace(
-            begin_external_task=lambda label: calls.append(("begin", label)),
+            reserve_external_task=lambda label: _stage_lease(label, calls),
             run_external_needles_action=lambda action, feedrate: calls.append(
                 ("needles", action, feedrate)
             ),
             run_external_move_to_xy=lambda x_mm, y_mm: calls.append(("move", x_mm, y_mm)),
-            finish_external_task=lambda: calls.append(("finish",)),
         )
         window._api_contact_context = lambda _contact_number: {
             "accepted": True,
@@ -679,12 +733,11 @@ class MainMeterContactActionsTest(unittest.TestCase):
 
         window = Main.__new__(Main)
         window.stage_controller = types.SimpleNamespace(
-            begin_external_task=lambda label: calls.append(("begin", label)),
+            reserve_external_task=lambda label: _stage_lease(label, calls),
             run_external_needles_action=lambda action, feedrate: calls.append(
                 ("needles", action, feedrate)
             ),
             run_external_move_to_xy=lambda x_mm, y_mm: calls.append(("move", x_mm, y_mm)),
-            finish_external_task=lambda: calls.append(("finish",)),
         )
         window._api_contact_context = lambda _contact_number: {
             "accepted": True,
@@ -735,12 +788,11 @@ class MainMeterContactActionsTest(unittest.TestCase):
 
         window = Main.__new__(Main)
         window.stage_controller = types.SimpleNamespace(
-            begin_external_task=lambda label: calls.append(("begin", label)),
+            reserve_external_task=lambda label: _stage_lease(label, calls),
             run_external_needles_action=lambda action, feedrate: calls.append(
                 ("needles", action, feedrate)
             ),
             run_external_move_to_xy=run_move,
-            finish_external_task=lambda: calls.append(("finish",)),
         )
         window._api_contact_context = lambda _contact_number: {
             "accepted": True,
@@ -781,10 +833,9 @@ class MainMeterContactActionsTest(unittest.TestCase):
 
         window = Main.__new__(Main)
         window.stage_controller = types.SimpleNamespace(
-            begin_external_task=lambda label: calls.append(("begin", label)),
+            reserve_external_task=lambda label: _stage_lease(label, calls),
             run_external_needles_action=run_needles_action,
             run_external_move_to_xy=lambda x_mm, y_mm: calls.append(("move", x_mm, y_mm)),
-            finish_external_task=lambda: calls.append(("finish",)),
         )
         window._api_contact_context = lambda _contact_number: {
             "accepted": True,
@@ -837,10 +888,9 @@ class MainMeterContactActionsTest(unittest.TestCase):
 
         window = Main.__new__(Main)
         window.stage_controller = types.SimpleNamespace(
-            begin_external_task=lambda _label: None,
+            reserve_external_task=lambda label: _stage_lease(label),
             run_external_needles_action=run_needles_action,
             run_external_move_to_xy=lambda _x_mm, _y_mm: None,
-            finish_external_task=lambda: None,
         )
         window._api_contact_context = lambda _contact_number: {
             "accepted": True,
@@ -869,11 +919,10 @@ class MainMeterContactActionsTest(unittest.TestCase):
 
         window = Main.__new__(Main)
         window.stage_controller = types.SimpleNamespace(
-            begin_external_task=lambda label: calls.append(("begin", label)),
+            reserve_external_task=lambda label: _stage_lease(label, calls),
             run_external_needles_action=lambda action, feedrate: calls.append(
                 ("needles", action, feedrate)
             ),
-            finish_external_task=lambda: calls.append(("finish",)),
         )
         window._api_contact_context = lambda _contact_number: {
             "accepted": True,

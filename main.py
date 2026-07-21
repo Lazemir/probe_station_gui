@@ -1226,11 +1226,10 @@ class Main(QMainWindow):
         )
         self._optical_calibration_runtime = OpticalCalibrationRuntime(
             stage=OpticalCalibrationStageAdapter(
-                begin_task=self.stage_controller.begin_external_task,
+                reserve_task=self.stage_controller.reserve_external_task,
                 read_position=self.stage_controller.run_external_current_stage_position,
                 raise_action=self.stage_controller.run_external_needles_action,
                 move_xy_callback=self.stage_controller.run_external_move_to_xy,
-                finish_task=self.stage_controller.finish_external_task,
             ),
             camera=OpticalCalibrationCameraAdapter(
                 apply_lock=camera.apply_lock,
@@ -2100,52 +2099,49 @@ class Main(QMainWindow):
         if isinstance(contact_plan_result, dict):
             return contact_plan_result
         contact_plan = contact_plan_result
-        active_stage_task = False
         needles_lowered = False
         try:
-            self.stage_controller.begin_external_task("API contact move")
-            active_stage_task = True
-            if contact_plan.request.lift_before_move:
-                self.stage_controller.run_external_needles_action(
-                    "lift",
-                    contact_plan.request.needle_feedrate_mm_min,
-                )
-            target_xy = self._api_route_adjusted_stage_xy(contact_plan.point)
-            self.stage_controller.run_external_move_to_xy(
-                target_xy[0],
-                target_xy[1],
-            )
-            if contact_plan.request.lower_needles:
-                self.stage_controller.run_external_needles_action(
-                    "lower",
-                    contact_plan.request.needle_feedrate_mm_min,
-                )
-                needles_lowered = True
-                if contact_plan.request.contact_settle_s > 0.0:
-                    time.sleep(contact_plan.request.contact_settle_s)
-            return api_move_to_contact_success_response(
-                contact_plan,
-                timestamp_utc=self._api_timestamp_utc(),
-                route_offset_xy=self._api_route_offset_xy,
-                target_stage_xy=target_xy,
-                needles_lowered=needles_lowered,
-            )
+            with self.stage_controller.reserve_external_task("API contact move"):
+                try:
+                    if contact_plan.request.lift_before_move:
+                        self.stage_controller.run_external_needles_action(
+                            "lift",
+                            contact_plan.request.needle_feedrate_mm_min,
+                        )
+                    target_xy = self._api_route_adjusted_stage_xy(contact_plan.point)
+                    self.stage_controller.run_external_move_to_xy(
+                        target_xy[0],
+                        target_xy[1],
+                    )
+                    if contact_plan.request.lower_needles:
+                        self.stage_controller.run_external_needles_action(
+                            "lower",
+                            contact_plan.request.needle_feedrate_mm_min,
+                        )
+                        needles_lowered = True
+                        if contact_plan.request.contact_settle_s > 0.0:
+                            time.sleep(contact_plan.request.contact_settle_s)
+                    return api_move_to_contact_success_response(
+                        contact_plan,
+                        timestamp_utc=self._api_timestamp_utc(),
+                        route_offset_xy=self._api_route_offset_xy,
+                        target_stage_xy=target_xy,
+                        needles_lowered=needles_lowered,
+                    )
+                finally:
+                    if contact_plan.request.lift_after and needles_lowered:
+                        try:
+                            self.stage_controller.run_external_needles_action(
+                                "lift",
+                                contact_plan.request.needle_feedrate_mm_min,
+                            )
+                        except StageControllerError:
+                            logger.exception("API contact move failed to lift needles.")
         except StageControllerError as exc:
             return api_move_to_contact_stage_error_response(
                 str(exc),
                 contact=contact_plan.contact,
             )
-        finally:
-            if active_stage_task:
-                if contact_plan.request.lift_after and needles_lowered:
-                    try:
-                        self.stage_controller.run_external_needles_action(
-                            "lift",
-                            contact_plan.request.needle_feedrate_mm_min,
-                        )
-                    except StageControllerError:
-                        logger.exception("API contact move failed to lift needles.")
-                self.stage_controller.finish_external_task()
 
     def _api_contact_needles(self, payload: dict[str, Any]) -> dict[str, Any]:
         contact_plan_result = api_contact_needles_plan(
@@ -2157,26 +2153,21 @@ class Main(QMainWindow):
         if isinstance(contact_plan_result, dict):
             return contact_plan_result
         contact_plan = contact_plan_result
-        active_stage_task = False
         try:
-            self.stage_controller.begin_external_task("API needle action")
-            active_stage_task = True
-            self.stage_controller.run_external_needles_action(
-                contact_plan.request.action,
-                contact_plan.request.needle_feedrate_mm_min,
-            )
-            return api_contact_needles_success_response(
-                contact_plan,
-                timestamp_utc=self._api_timestamp_utc(),
-            )
+            with self.stage_controller.reserve_external_task("API needle action"):
+                self.stage_controller.run_external_needles_action(
+                    contact_plan.request.action,
+                    contact_plan.request.needle_feedrate_mm_min,
+                )
+                return api_contact_needles_success_response(
+                    contact_plan,
+                    timestamp_utc=self._api_timestamp_utc(),
+                )
         except StageControllerError as exc:
             return api_contact_needles_stage_error_response(
                 str(exc),
                 contact=contact_plan.contact,
             )
-        finally:
-            if active_stage_task:
-                self.stage_controller.finish_external_task()
 
     def _api_check_contact(self, payload: dict[str, Any]) -> dict[str, Any]:
         return self._api_measure_current_contact(payload, seek=False)
@@ -2261,29 +2252,24 @@ class Main(QMainWindow):
                 "message": str(exc),
             }
 
-        active_stage_task = False
         try:
-            self.stage_controller.begin_external_task("API local autofocus")
-            active_stage_task = True
-            needles_rejection = self._api_focus_needles_rejection(
-                "Local autofocus requires fully raised needles "
-                "(known needle zone 'raise')."
-            )
-            if needles_rejection is not None:
-                return needles_rejection
-            result = self.stage_controller.run_external_local_autofocus(
-                range_mm=focus_range_mm,
-                step_mm=focus_step_mm,
-            )
+            with self.stage_controller.reserve_external_task("API local autofocus"):
+                needles_rejection = self._api_focus_needles_rejection(
+                    "Local autofocus requires fully raised needles "
+                    "(known needle zone 'raise')."
+                )
+                if needles_rejection is not None:
+                    return needles_rejection
+                result = self.stage_controller.run_external_local_autofocus(
+                    range_mm=focus_range_mm,
+                    step_mm=focus_step_mm,
+                )
         except StageControllerError as exc:
             return {
                 "accepted": False,
                 "status_code": 409,
                 "message": str(exc),
             }
-        finally:
-            if active_stage_task:
-                self.stage_controller.finish_external_task()
         return {
             "accepted": True,
             "message": str(result.summary()),
@@ -2311,21 +2297,19 @@ class Main(QMainWindow):
                 "contact": contact,
             }
 
-        active_stage_task = False
         try:
-            self.stage_controller.begin_external_task("API route contact focus")
-            active_stage_task = True
-            needles_rejection = self._api_focus_needles_rejection(
-                "Route contact focus requires fully raised needles "
-                "(known needle zone 'raise').",
-                contact=contact,
-            )
-            if needles_rejection is not None:
-                return needles_rejection
-            result = self.stage_controller.run_external_local_autofocus(
-                range_mm=focus_range_mm,
-                step_mm=focus_step_mm,
-            )
+            with self.stage_controller.reserve_external_task("API route contact focus"):
+                needles_rejection = self._api_focus_needles_rejection(
+                    "Route contact focus requires fully raised needles "
+                    "(known needle zone 'raise').",
+                    contact=contact,
+                )
+                if needles_rejection is not None:
+                    return needles_rejection
+                result = self.stage_controller.run_external_local_autofocus(
+                    range_mm=focus_range_mm,
+                    step_mm=focus_step_mm,
+                )
         except StageControllerError as exc:
             return {
                 "accepted": False,
@@ -2333,9 +2317,6 @@ class Main(QMainWindow):
                 "message": str(exc),
                 "contact": contact,
             }
-        finally:
-            if active_stage_task:
-                self.stage_controller.finish_external_task()
         return {
             "accepted": True,
             "message": str(result.summary()),
@@ -2823,15 +2804,14 @@ class Main(QMainWindow):
             return contact_plan_result
         contact_plan = contact_plan_result
         needle_feedrate = self._api_needle_feedrate(payload)
-        active_stage_task = False
+        stage_lease = None
         needles_lowered = False
         started_at = time.monotonic()
         timestamp_utc = self._api_timestamp_utc()
         try:
             if request.move_to_contact or request.lower_needles or request.lift_after:
-                self.stage_controller.begin_external_task("API raw voltage sweep")
-                active_stage_task = True
-            if active_stage_task and request.lift_before_move:
+                stage_lease = self.stage_controller.reserve_external_task("API raw voltage sweep")
+            if stage_lease is not None and request.lift_before_move:
                 self.stage_controller.run_external_needles_action(
                     "lift",
                     needle_feedrate,
@@ -2842,7 +2822,7 @@ class Main(QMainWindow):
                     target_xy[0],
                     target_xy[1],
                 )
-            if active_stage_task and request.lower_needles:
+            if stage_lease is not None and request.lower_needles:
                 self.stage_controller.run_external_needles_action(
                     "lower",
                     needle_feedrate,
@@ -2877,16 +2857,17 @@ class Main(QMainWindow):
                 contact=contact_plan.contact,
             )
         finally:
-            if active_stage_task:
-                if request.lift_after and needles_lowered:
-                    try:
+            if stage_lease is not None:
+                try:
+                    if request.lift_after and needles_lowered:
                         self.stage_controller.run_external_needles_action(
                             "lift",
                             needle_feedrate,
                         )
-                    except StageControllerError:
-                        logger.exception("API raw voltage sweep failed to lift needles.")
-                self.stage_controller.finish_external_task()
+                except StageControllerError:
+                    logger.exception("API raw voltage sweep failed to lift needles.")
+                finally:
+                    stage_lease.release()
 
     def _api_visa_list_resources(self) -> dict[str, Any]:
         controller = self._api_visa_controller()
@@ -8209,41 +8190,35 @@ class Main(QMainWindow):
 
     def _run_route_contact_move(self, point: RouteMeasurementPoint, needle_feedrate: float | None) -> None:
         success = False
-        message = "Route contact move stopped."
-        active_stage_task = False
         try:
-            self.stage_controller.begin_external_task("route contact move")
-            active_stage_task = True
-            self.route_measurement_status.emit(
-                f"Route contact move: point {int(point.index)} {point.label}, "
-                "raising needles."
-            )
-            self.stage_controller.run_external_needles_action(
-                "raise",
-                needle_feedrate,
-            )
-            self.route_measurement_status.emit(
-                f"Route contact move: point {int(point.index)} {point.label}, moving."
-            )
-            target_xy = self._api_route_adjusted_stage_xy(point)
-            self.stage_controller.run_external_move_to_xy(
-                target_xy[0],
-                target_xy[1],
-            )
-            success = True
-            message = (
-                f"Route contact move complete: point {int(point.index)} "
-                f"{point.label}."
-            )
+            with self.stage_controller.reserve_external_task("route contact move"):
+                self.route_measurement_status.emit(
+                    f"Route contact move: point {int(point.index)} {point.label}, "
+                    "raising needles."
+                )
+                self.stage_controller.run_external_needles_action(
+                    "raise",
+                    needle_feedrate,
+                )
+                self.route_measurement_status.emit(
+                    f"Route contact move: point {int(point.index)} {point.label}, moving."
+                )
+                target_xy = self._api_route_adjusted_stage_xy(point)
+                self.stage_controller.run_external_move_to_xy(
+                    target_xy[0],
+                    target_xy[1],
+                )
+                success = True
+                message = (
+                    f"Route contact move complete: point {int(point.index)} "
+                    f"{point.label}."
+                )
         except StageControllerError as exc:
             message = f"Route contact move failed: {exc}"
         except Exception as exc:
             logger.exception("Route contact move failed")
             message = f"Route contact move failed: {exc}"
-        finally:
-            if active_stage_task:
-                self.stage_controller.finish_external_task()
-            self.route_contact_move_finished.emit(success, message)
+        self.route_contact_move_finished.emit(success, message)
 
     def _on_route_contact_move_finished(self, success: bool, message: str) -> None:
         thread = getattr(self, "_route_contact_move_thread", None)
@@ -9520,13 +9495,12 @@ class Main(QMainWindow):
         )
         runtime = MicroscopeScanRuntime(
             stage=MicroscopeScanStageAdapter(
-                begin_task=self.stage_controller.begin_external_task,
+                reserve_task=self.stage_controller.reserve_external_task,
                 read_reserved_position=self.stage_controller.run_external_current_stage_position,
                 raise_action=self.stage_controller.run_external_needles_action,
                 needle_feedrate=self._current_needle_feedrate,
                 move_xy=self.stage_controller.run_external_move_to_xy,
                 latest_position=self.stage_controller.latest_stage_position,
-                finish_task=self.stage_controller.finish_external_task,
             ),
             camera=MicroscopeScanCameraAdapter(
                 grabber=self.grabber,

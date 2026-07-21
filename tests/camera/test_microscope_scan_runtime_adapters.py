@@ -67,13 +67,14 @@ def _camera_adapter(
 def test_stage_adapter_uses_a_real_positive_approach_move() -> None:
     moves: list[tuple[float, float]] = []
     adapter = adapters.MicroscopeScanStageAdapter(
-        begin_task=lambda _name: None,
+        reserve_task=lambda _name: type(
+            "Lease", (), {"release": lambda _self: None}
+        )(),
         read_reserved_position=lambda: (0.0, 0.0),
         raise_action=lambda _action, _feedrate: None,
         needle_feedrate=lambda: 10.0,
         move_xy=lambda x_mm, y_mm: moves.append((x_mm, y_mm)),
         latest_position=lambda: (0.0, 0.0),
-        finish_task=lambda: None,
     )
 
     adapter.move_to(_tile(), approach_mm=0.01)
@@ -437,14 +438,20 @@ def test_production_adapters_preserve_session_stage_planning_frame_order(
     )
     runtime = microscope_scan_runtime.MicroscopeScanRuntime(
         stage=adapters.MicroscopeScanStageAdapter(
-            begin_task=lambda _name: events.append("stage:begin"),
+            reserve_task=lambda _name: (
+                events.append("stage:begin")
+                or type(
+                    "Lease",
+                    (),
+                    {"release": lambda _self: events.append("stage:release")},
+                )()
+            ),
             read_reserved_position=lambda: events.append("stage:position")
             or (10.0, 20.0, 3.0),
             raise_action=lambda _action, _feedrate: events.append("stage:raise"),
             needle_feedrate=lambda: 10.0,
             move_xy=lambda _x, _y: events.append("stage:move"),
             latest_position=lambda: (1.25, -2.5, 3.0),
-            finish_task=lambda: events.append("stage:release"),
         ),
         camera=adapters.MicroscopeScanCameraAdapter(
             grabber=_Grabber(events),

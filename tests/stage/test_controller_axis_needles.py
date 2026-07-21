@@ -25,6 +25,22 @@ except ImportError:
 
 
 class StageControllerNeedlesMotionTest(unittest.TestCase):
+    def test_busy_needles_adjust_preserves_status_message(self) -> None:
+        controller = StageController()
+        messages = []
+        controller.status_message = types.SimpleNamespace(emit=messages.append)
+        lease = controller.reserve_external_task("test blocker")
+        try:
+            controller.request_needles_adjust(0.01)
+
+            self.assertEqual(
+                messages,
+                ["Stage is busy. Ignoring needle adjustment."],
+            )
+        finally:
+            lease.release()
+            controller.shutdown()
+
     def test_needles_lower_uses_requested_feedrate_while_active(self) -> None:
         controller = StageController()
         try:
@@ -775,7 +791,7 @@ class StageControllerPriorityNeedlesActionTest(unittest.TestCase):
     def test_needles_lower_queues_during_oscillation(self) -> None:
         controller = StageController()
         controller._oscillation_active = True
-        controller._active_thread = types.SimpleNamespace(is_alive=lambda: True)
+        lease = controller.reserve_external_task("oscillation")
         messages = []
         controller.needles_action_started = types.SimpleNamespace(
             emit=lambda *_args, **_kwargs: None
@@ -784,7 +800,10 @@ class StageControllerPriorityNeedlesActionTest(unittest.TestCase):
             emit=lambda message: messages.append(message)
         )
 
-        controller.request_needles_lower()
+        try:
+            controller.request_needles_lower()
+        finally:
+            lease.release()
 
         self.assertFalse(controller._cancel_event.is_set())
         self.assertEqual(

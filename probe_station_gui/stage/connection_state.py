@@ -91,7 +91,7 @@ class StageControllerConnectionMixin:
     def set_serial(self, serial_connection: Optional[serial.Serial]) -> None:
         """Assign or clear the serial connection used for stage control."""
 
-        with self._task_lock:
+        with self._state_lock:
             self._serial = serial_connection
             self._queued_jog_generation += 1
             with self._feed_override_lock:

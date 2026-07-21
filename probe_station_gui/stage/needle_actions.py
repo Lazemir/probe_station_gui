@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import math
-import threading
 
 from probe_station_gui.settings.precision_approach import (
     precision_profile_is_effective,
@@ -24,19 +23,135 @@ from probe_station_gui.stage.types import MoveVector, _Status
 class StageControllerNeedleActionsMixin:
     """Internal needle action, profile, and queue methods."""
 
+    def request_needles_raise(self, feedrate: float | None = None) -> None:
+        """Raise the needles by homing the A axis."""
+
+        self._request_needles_action("raise", feedrate=feedrate)
+
+    def request_needles_lift(self, feedrate: float | None = None) -> None:
+        """Lift the needles out of the contact zone without fully raising A."""
+
+        self._request_needles_action("lift", feedrate=feedrate)
+
+    def request_needles_lower(self, feedrate: float | None = None) -> None:
+        """Lower the needles to the calibrated down position."""
+
+        self._request_needles_action("lower", feedrate=feedrate)
+
+    def request_needles_adjust(
+        self,
+        step_mm: float,
+        feedrate: float | None = None,
+    ) -> None:
+        """Adjust the A axis for needle calibration without the XY safety gate."""
+
+        self._request_needles_action(
+            "adjust",
+            step_mm=float(step_mm),
+            feedrate=feedrate,
+        )
+
+    def _request_needles_action(
+        self,
+        action: str,
+        *,
+        step_mm: float | None = None,
+        feedrate: float | None = None,
+    ) -> None:
+        with self._state_lock:
+            if self._operation_lifecycle.snapshot().active:
+                if self._oscillation_active:
+                    self._queue_oscillation_needles_action_locked(
+                        action,
+                        step_mm,
+                        feedrate=feedrate,
+                    )
+                    return
+                description = (
+                    "needle adjustment"
+                    if action == "adjust"
+                    else f"needle {action} request"
+                )
+                self.status_message.emit(
+                    f"Stage is busy. Ignoring {description}."
+                )
+                return
+            self._start_needles_action_locked(
+                action,
+                step_mm,
+                feedrate=feedrate,
+            )
+
+    def run_external_needles_action(
+        self,
+        action: str,
+        feedrate: float | None = None,
+    ) -> str:
+        """Run a blocking needle action inside an external reservation."""
+
+        action_key = str(action).strip().lower()
+        self.needles_action_started.emit(action_key)
+        try:
+            self._check_cancelled()
+            message = self._perform_needles_action(action_key, feedrate)
+            self.needles_action_finished.emit(True, message, action_key)
+            return message
+        except StageControllerError as exc:
+            self.needles_action_finished.emit(False, str(exc), action_key)
+            raise
+
+    def run_external_needles_adjust(
+        self,
+        step_mm: float,
+        feedrate: float | None = None,
+    ) -> str:
+        """Run a blocking A-axis needle adjustment inside an external reservation."""
+
+        action = "adjust"
+        self.needles_action_started.emit(action)
+        try:
+            self._check_cancelled()
+            message = self._perform_needles_adjust(float(step_mm), feedrate)
+            self.needles_action_finished.emit(True, message, action)
+            return message
+        except StageControllerError as exc:
+            self.needles_action_finished.emit(False, str(exc), action)
+            raise
+
+    def run_external_needles_lower_to_depth_below_down(
+        self,
+        depth_mm: float,
+        feedrate: float | None = None,
+    ) -> str:
+        """Lower needles directly to a depth below the saved down position."""
+
+        action = "lower"
+        self.needles_action_started.emit(action)
+        try:
+            self._check_cancelled()
+            message = self._perform_needles_lower_to_depth_below_down(
+                float(depth_mm),
+                feedrate,
+            )
+            self.needles_action_finished.emit(True, message, action)
+            return message
+        except StageControllerError as exc:
+            self.needles_action_finished.emit(False, str(exc), action)
+            raise
+
     def _begin_needles_feedrate_control(
         self,
         action: str,
         feedrate: float | None,
     ) -> float:
         programmed_feedrate = self._needle_programmed_feedrate(feedrate)
-        with self._task_lock:
+        with self._state_lock:
             self._active_needles_action = action
             self._active_needles_programmed_feedrate = programmed_feedrate
         return programmed_feedrate
 
     def _end_needles_feedrate_control(self) -> None:
-        with self._task_lock:
+        with self._state_lock:
             had_active_control = self._active_needles_action is not None
             self._active_needles_action = None
             self._active_needles_programmed_feedrate = None
@@ -231,8 +346,7 @@ class StageControllerNeedleActionsMixin:
         except StageControllerError as exc:
             self.needles_action_finished.emit(False, str(exc), action)
         finally:
-            with self._task_lock:
-                self._active_thread = None
+            self._operation_lifecycle.release_current()
             self._start_next_queued_needles_action()
 
     def _perform_needles_action(
@@ -320,8 +434,7 @@ class StageControllerNeedleActionsMixin:
         except StageControllerError as exc:
             self.needles_action_finished.emit(False, str(exc), action)
         finally:
-            with self._task_lock:
-                self._active_thread = None
+            self._operation_lifecycle.release_current()
             self._start_next_queued_needles_action()
 
     def _perform_needles_adjust(
@@ -373,7 +486,7 @@ class StageControllerNeedleActionsMixin:
         """Apply queued A-axis actions inline while oscillation continues."""
 
         pending: list[tuple[str, float | None, float | None]] = []
-        with self._task_lock:
+        with self._state_lock:
             while self._oscillation_needles_actions:
                 pending.append(self._oscillation_needles_actions.popleft())
         for action, step_mm, feedrate in pending:
@@ -528,44 +641,37 @@ class StageControllerNeedleActionsMixin:
         step_mm: float | None = None,
         *,
         feedrate: float | None = None,
-    ) -> None:
-        """Start a needle action while the caller owns the task lock."""
+    ) -> bool:
+        """Start a needle action while the caller owns the state lock."""
 
-        self._cancel_event.clear()
         if action == "adjust":
             if step_mm is None:
                 step_mm = 0.0
-            thread = threading.Thread(
+            return self._start_background_task(
                 target=self._run_needles_adjust,
                 args=(float(step_mm), feedrate),
-                daemon=True,
+                busy_message="Stage is busy. Ignoring needle adjustment.",
+                before_start=lambda: self.needles_action_started.emit("adjust"),
             )
-            self._active_thread = thread
-            self.needles_action_started.emit("adjust")
-            thread.start()
-            return
-        thread = threading.Thread(
+        return self._start_background_task(
             target=self._run_needles_action,
             args=(action, feedrate),
-            daemon=True,
+            busy_message=f"Stage is busy. Ignoring needle {action} request.",
         )
-        self._active_thread = thread
-        thread.start()
 
     def _start_next_queued_needles_action(self) -> None:
         """Run the next queued needle action after oscillation yields the controller."""
 
-        with self._task_lock:
-            if self._active_thread and self._active_thread.is_alive():
-                return
+        with self._state_lock:
             if not self._queued_needles_actions:
                 return
-            action, step_mm, feedrate = self._queued_needles_actions.popleft()
-            self._start_needles_action_locked(
+            action, step_mm, feedrate = self._queued_needles_actions[0]
+            if self._start_needles_action_locked(
                 action,
                 step_mm,
                 feedrate=feedrate,
-            )
+            ):
+                self._queued_needles_actions.popleft()
 
     def _latest_known_a_position(self) -> float | None:
         """Return the best available cached A-axis coordinate."""

@@ -1163,13 +1163,15 @@ def _production_adapter_runtime(
         return frames.pop(0), counter
 
     stage = OpticalCalibrationStageAdapter(
-        begin_task=lambda label: events.append(("begin", label)),
+        reserve_task=lambda label: (
+            events.append(("begin", label))
+            or SimpleNamespace(release=lambda: events.append(("finish",)))
+        ),
         read_position=lambda: events.append(("position",)) or (10.0, 20.0, 3.0),
         raise_action=lambda action, feed: events.append(("needles", action, feed)),
         move_xy_callback=lambda x, y, *, feedrate: events.append(
             ("move", x, y, feedrate)
         ),
-        finish_task=lambda: events.append(("finish",)),
     )
     camera = OpticalCalibrationCameraAdapter(
         apply_lock=lambda settings: events.append(("lock", settings.enabled)) or "key",

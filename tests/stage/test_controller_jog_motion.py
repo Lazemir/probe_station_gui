@@ -151,10 +151,13 @@ class StageControllerJogQueueTest(unittest.TestCase):
     def test_absolute_jog_reissue_rejects_busy_stage_without_replace(self) -> None:
         controller = StageController()
         release_thread = threading.Event()
-        active_thread = threading.Thread(target=lambda: release_thread.wait(timeout=1.0))
-        active_thread.start()
         try:
-            controller._active_thread = active_thread
+            self.assertTrue(
+                controller._start_background_task(
+                    target=lambda: release_thread.wait(timeout=1.0),
+                    busy_message="busy",
+                )
+            )
 
             with self.assertRaises(StageControllerError):
                 controller.queue_absolute_axis_targets_jog(
@@ -165,7 +168,7 @@ class StageControllerJogQueueTest(unittest.TestCase):
             self.assertFalse(controller._cancel_event.is_set())
         finally:
             release_thread.set()
-            active_thread.join(timeout=1.0)
+            controller.wait_for_active_task(timeout_s=1.0)
             controller.shutdown()
 
     def test_absolute_jog_reissue_can_replace_active_coordinate_waiter(self) -> None:
@@ -180,11 +183,14 @@ class StageControllerJogQueueTest(unittest.TestCase):
                 lock_acquired.set()
                 release_thread.wait(timeout=1.0)
 
-        active_thread = threading.Thread(target=_hold_serial_lock)
-        active_thread.start()
         try:
             controller._serial = serial_connection
-            controller._active_thread = active_thread
+            self.assertTrue(
+                controller._start_background_task(
+                    target=_hold_serial_lock,
+                    busy_message="busy",
+                )
+            )
             self.assertTrue(lock_acquired.wait(timeout=1.0))
             accepted = controller.queue_absolute_axis_targets_jog(
                 {"Y": -2.0, "X": 1.5},
@@ -197,7 +203,7 @@ class StageControllerJogQueueTest(unittest.TestCase):
             self.assertEqual(serial_connection.writes, [])
 
             release_thread.set()
-            active_thread.join(timeout=1.0)
+            controller.wait_for_active_task(timeout_s=1.0)
             controller._async_write_queue.join()
 
             self.assertEqual(
@@ -206,7 +212,7 @@ class StageControllerJogQueueTest(unittest.TestCase):
             )
         finally:
             release_thread.set()
-            active_thread.join(timeout=1.0)
+            controller.wait_for_active_task(timeout_s=1.0)
             controller.shutdown()
 
     def test_superseded_jog_command_is_dropped_before_write(self) -> None:

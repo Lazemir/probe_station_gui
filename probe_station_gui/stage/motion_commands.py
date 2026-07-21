@@ -154,7 +154,7 @@ class StageControllerMotionCommandsMixin:
 
         if not self._oscillation_active:
             return
-        self._cancel_event.set()
+        self._operation_lifecycle.cancel("stop_oscillation")
         self.status_message.emit("Oscillation stop requested.")
 
     def run_external_move_to_xy(
@@ -247,16 +247,17 @@ class StageControllerMotionCommandsMixin:
     def zero_b_axis(self) -> None:
         """Set the current B coordinate as the application zero reference."""
 
-        with self._task_lock:
-            active_thread = getattr(self, "_active_thread", None)
-            if active_thread and active_thread.is_alive():
-                raise StageControllerError(
-                    "Stage is busy. Wait for the current operation to finish."
-                )
-            with self._serial_session():
-                status = self._query_current_status_with_required_coordinates(
-                    axes=("B",),
-                )
+        lease = self._operation_lifecycle.try_reserve_idle("B axis zero")
+        if lease is None:
+            raise StageControllerError(
+                "Stage is busy. Wait for the current operation to finish."
+            )
+        with lease:
+            with self._state_lock:
+                with self._serial_session():
+                    status = self._query_current_status_with_required_coordinates(
+                        axes=("B",),
+                    )
         if status is None or self._axis_value_for_configured_mode(status, "B") is None:
             raise StageControllerError("Unable to read B axis position.")
         self._set_b_axis_zero_reference(status)
@@ -288,9 +289,6 @@ class StageControllerMotionCommandsMixin:
             )
         except StageControllerError as exc:
             self.movement_finished.emit(False, str(exc))
-        finally:
-            with self._task_lock:
-                setattr(self, "_active_thread", None)
 
     def _run_manual_axis_move(
         self,
@@ -334,9 +332,6 @@ class StageControllerMotionCommandsMixin:
             )
         except StageControllerError as exc:
             self.movement_finished.emit(False, str(exc))
-        finally:
-            with self._task_lock:
-                setattr(self, "_active_thread", None)
 
     def _run_absolute_axis_targets_move(
         self,
@@ -374,9 +369,6 @@ class StageControllerMotionCommandsMixin:
             )
         except StageControllerError as exc:
             self.movement_finished.emit(False, str(exc))
-        finally:
-            with self._task_lock:
-                setattr(self, "_active_thread", None)
 
     def _manual_axis_absolute_target(
         self,
@@ -480,12 +472,12 @@ class StageControllerMotionCommandsMixin:
             try:
                 if serial_connection is not None and serial_connection.is_open:
                     with self._serial_session_lock:
-                        self._cancel_event.clear()
+                        self._operation_lifecycle.clear_cancellation()
                         self._write_command(serial_connection, "G90")
                         self._wait_for_ok(serial_connection)
             except StageControllerError:
                 pass
-            with self._task_lock:
+            with self._state_lock:
                 has_queued_needles_action = bool(self._queued_needles_actions)
             if not (
                 str(exc) == "Operation cancelled." and has_queued_needles_action
@@ -494,8 +486,6 @@ class StageControllerMotionCommandsMixin:
         finally:
             self._oscillation_active = False
             self.oscillation_state_changed.emit(False, mode)
-            with self._task_lock:
-                setattr(self, "_active_thread", None)
             self._start_next_queued_needles_action()
 
     def _send_relative_move(
@@ -632,7 +622,7 @@ class StageControllerMotionCommandsMixin:
         segment_length = max(
             0.001, amplitude_mm / float(self.LINEAR_SEGMENTS_PER_SWEEP)
         )
-        while not self._cancel_event.is_set():
+        while not self._operation_lifecycle.is_cancelled():
             self._check_cancelled()
             self._apply_pending_oscillation_needles_actions()
             remaining = target_offset - current_offset
@@ -661,7 +651,7 @@ class StageControllerMotionCommandsMixin:
         start_angle = np.pi / 2.0
         last_x = 0.0
         last_y = 0.0
-        while not self._cancel_event.is_set():
+        while not self._operation_lifecycle.is_cancelled():
             self._check_cancelled()
             self._apply_pending_oscillation_needles_actions()
             phase += phase_step

@@ -71,9 +71,6 @@ class StageControllerHomingStartupMixin:
         except StageControllerError as exc:
             self.movement_finished.emit(False, str(exc))
             self.homing_action_finished.emit(False, str(exc), axis_key)
-        finally:
-            with self._task_lock:
-                setattr(self, "_active_thread", None)
 
     def _run_startup_sync(self, auto_home_a: bool) -> None:
         success = False
@@ -147,11 +144,10 @@ class StageControllerHomingStartupMixin:
         except StageControllerError as exc:
             self.status_message.emit(str(exc))
         finally:
-            with self._task_lock:
+            with self._state_lock:
                 if success:
                     self._controller_reboot_recovery_pending = False
                     self._controller_reboot_ready_notified = False
-                setattr(self, "_active_thread", None)
 
     def _perform_home_command(self, command: str) -> None:
         """Execute a homing command using the current serial session."""

@@ -7,6 +7,7 @@ import math
 import importlib
 from collections.abc import Iterable
 from collections import deque
+from functools import partial
 from queue import PriorityQueue
 import re
 import threading
@@ -61,6 +62,11 @@ from probe_station_gui.stage.motion_execution import (
     StageMotionSafetyAdapter,
     StageMotionStatusAdapter,
 )
+from probe_station_gui.stage.operation_lifecycle import (
+    StageOperationBusyError,
+    StageOperationLease,
+    StageOperationLifecycle,
+)
 from probe_station_gui.stage.precision_motion import StageControllerPrecisionMotionMixin
 from probe_station_gui.stage.motion_timing import (
     absolute_move_distance_for_timeout as absolute_move_distance_for_timeout,
@@ -81,7 +87,6 @@ from probe_station_gui.stage.types import (
     AutofocusResult as AutofocusResult,
     MoveVector,
     StageTaskToken,
-    _ObjectiveCalibrationCandidate,
     _AutofocusContext as _AutofocusContext,
     _FocusSweepResult as _FocusSweepResult,
     _QueuedSerialWrite,
@@ -303,17 +308,11 @@ class StageController(
         self._frame_counter = 0
         self._frame_history: deque[tuple[int, float, np.ndarray]] = deque(maxlen=256)
         self._frame_condition = threading.Condition()
-        self._task_lock = threading.RLock()
-        self._active_thread: Optional[threading.Thread] = None
+        self._state_lock = threading.RLock()
+        self._operation_lifecycle = StageOperationLifecycle()
         self._clicked_point_resolution_request_id: object | None = None
-        self._stage_task_generation = 0
-        self._latest_stage_task_token: StageTaskToken | None = None
-        self._objective_calibration_candidates: dict[
-            int,
-            _ObjectiveCalibrationCandidate,
-        ] = {}
+        self._clicked_point_resolution_token: StageTaskToken | None = None
         self._status_refresh_thread: Optional[threading.Thread] = None
-        self._cancel_event = threading.Event()
         self._axis_limits: dict[str, tuple[float, float]] = {}
         self._homed_axes: set[str] = set()
         self._limit_axes: set[str] = set()
@@ -479,8 +478,7 @@ class StageController(
     def shutdown(self) -> None:
         """Stop any outstanding background task before application exit."""
 
-        with self._task_lock:
-            thread = self._active_thread
+        thread = self._operation_lifecycle.snapshot().owner_thread
         if thread and thread.is_alive():
             thread.join(timeout=2.0)
         self._async_write_shutdown.set()
@@ -512,56 +510,14 @@ class StageController(
             return
 
     def _run_status_refresh(self) -> None:
+        lease = self._operation_lifecycle.try_reserve_idle("status refresh")
         try:
-            self._poll_status_once()
+            if lease is not None:
+                with lease:
+                    self._poll_status_once()
         finally:
-            with self._task_lock:
+            with self._state_lock:
                 self._status_refresh_thread = None
-
-    def request_needles_raise(self, feedrate: float | None = None) -> None:
-        """Raise the needles by homing the A axis."""
-
-        with self._task_lock:
-            if self._active_thread and self._active_thread.is_alive():
-                if self._oscillation_active:
-                    self._queue_oscillation_needles_action_locked(
-                        "raise",
-                        feedrate=feedrate,
-                    )
-                    return
-                self.status_message.emit("Stage is busy. Ignoring needle raise request.")
-                return
-            self._start_needles_action_locked("raise", feedrate=feedrate)
-
-    def request_needles_lift(self, feedrate: float | None = None) -> None:
-        """Lift the needles out of the contact zone without fully raising A."""
-
-        with self._task_lock:
-            if self._active_thread and self._active_thread.is_alive():
-                if self._oscillation_active:
-                    self._queue_oscillation_needles_action_locked(
-                        "lift",
-                        feedrate=feedrate,
-                    )
-                    return
-                self.status_message.emit("Stage is busy. Ignoring needle lift request.")
-                return
-            self._start_needles_action_locked("lift", feedrate=feedrate)
-
-    def request_needles_lower(self, feedrate: float | None = None) -> None:
-        """Lower the needles to the calibrated down position."""
-
-        with self._task_lock:
-            if self._active_thread and self._active_thread.is_alive():
-                if self._oscillation_active:
-                    self._queue_oscillation_needles_action_locked(
-                        "lower",
-                        feedrate=feedrate,
-                    )
-                    return
-                self.status_message.emit("Stage is busy. Ignoring needle lower request.")
-                return
-            self._start_needles_action_locked("lower", feedrate=feedrate)
 
     def apply_needle_calibration(
         self,
@@ -612,13 +568,13 @@ class StageController(
     def query_axis_max_feedrates(self) -> dict[str, float]:
         """Query the live FluidNC configuration for per-axis maximum feedrates."""
 
-        with self._task_lock:
-            if self._active_thread and self._active_thread.is_alive():
-                raise StageControllerError(
-                    "Stage is busy. Cannot read controller feedrate limits."
-                )
-            with self._serial_session():
-                rates = self._query_axis_max_feedrates_locked()
+        lease = self._operation_lifecycle.try_reserve_idle("feedrate query")
+        if lease is None:
+            raise StageControllerError("Stage is busy. Cannot read controller feedrate limits.")
+        with lease:
+            with self._state_lock:
+                with self._serial_session():
+                    rates = self._query_axis_max_feedrates_locked()
         self.apply_axis_max_feedrates(rates)
         self.axis_max_feedrates_changed.emit(dict(rates))
         return rates
@@ -630,8 +586,7 @@ class StageController(
     ) -> None:
         """Apply the active objective profile to calibration and autofocus."""
 
-        with self._task_lock:
-            self._new_stage_task_token_locked("objective_configuration")
+        self._operation_lifecycle.advance_generation("objective_configuration")
         if objective is None:
             self._active_objective_name = "X5"
             self._pixels_to_mm = None
@@ -769,16 +724,20 @@ class StageController(
             raise StageControllerError(f"Unsupported {axis_key} coordinate: {value}") from exc
         if not math.isfinite(target_value):
             raise StageControllerError(f"Unsupported {axis_key} coordinate: {value}")
-        with self._task_lock:
-            if self._active_thread and self._active_thread.is_alive():
-                raise StageControllerError(
-                    "Stage is busy. Wait for the current operation to finish."
-                )
-            with self._serial_session():
-                self._set_current_axis_work_coordinate_locked(
-                    axis_key,
-                    target_value,
-                )
+        lease = self._operation_lifecycle.try_reserve_idle(
+            f"set {axis_key} work coordinate"
+        )
+        if lease is None:
+            raise StageControllerError(
+                "Stage is busy. Wait for the current operation to finish."
+            )
+        with lease:
+            with self._state_lock:
+                with self._serial_session():
+                    self._set_current_axis_work_coordinate_locked(
+                        axis_key,
+                        target_value,
+                    )
 
     def _set_current_axis_work_coordinate_locked(
         self,
@@ -830,30 +789,6 @@ class StageController(
             f"in {coordinate_system}."
         )
 
-    def request_needles_adjust(
-        self,
-        step_mm: float,
-        feedrate: float | None = None,
-    ) -> None:
-        """Adjust the A axis for needle calibration without the XY safety gate."""
-
-        with self._task_lock:
-            if self._active_thread and self._active_thread.is_alive():
-                if self._oscillation_active:
-                    self._queue_oscillation_needles_action_locked(
-                        "adjust",
-                        float(step_mm),
-                        feedrate=feedrate,
-                    )
-                    return
-                self.status_message.emit("Stage is busy. Ignoring needle adjustment.")
-                return
-            self._start_needles_action_locked(
-                "adjust",
-                float(step_mm),
-                feedrate=feedrate,
-            )
-
     def current_a_position(self) -> Optional[float]:
         """Return the current A coordinate when it can be queried safely."""
 
@@ -862,22 +797,24 @@ class StageController(
         if serial_connection is None or not serial_connection.is_open:
             self._record_a_position_read_failure("serial connection is not available")
             return None
-        with self._task_lock:
-            if self._active_thread and self._active_thread.is_alive():
-                thread_name = self._active_thread.name or "<unnamed>"
-                latest = self._last_stage_position
-                timestamp = self._last_status_timestamp
-                age_s = None if timestamp is None else max(0.0, time.monotonic() - timestamp)
-                reason = (
-                    f"stage task is active ({thread_name}); "
-                    f"latest_state={self._last_stage_state!r}, "
-                    f"latest_position={latest!r}, "
-                    f"last_status_age_s={age_s!r}"
-                )
-                self._record_a_position_read_failure(reason)
-                return None
-        with self._serial_session():
-            a_position = self._read_current_a_position()
+        lease = self._operation_lifecycle.try_reserve_idle("A position query")
+        if lease is None:
+            operation = self._operation_lifecycle.snapshot()
+            thread_name = operation.owner_thread.name if operation.owner_thread else "<unnamed>"
+            latest = self._last_stage_position
+            timestamp = self._last_status_timestamp
+            age_s = None if timestamp is None else max(0.0, time.monotonic() - timestamp)
+            reason = (
+                f"stage task is active ({thread_name}); "
+                f"latest_state={self._last_stage_state!r}, "
+                f"latest_position={latest!r}, "
+                f"last_status_age_s={age_s!r}"
+            )
+            self._record_a_position_read_failure(reason)
+            return None
+        with lease:
+            with self._serial_session():
+                a_position = self._read_current_a_position()
         if a_position is None:
             return None
         self.needle_height_changed.emit(
@@ -896,16 +833,17 @@ class StageController(
         serial_connection = self._serial
         if serial_connection is None or not serial_connection.is_open:
             return b""
-        with self._task_lock:
-            if self._active_thread and self._active_thread.is_alive():
-                return b""
-        if not self._serial_session_lock.acquire(blocking=False):
+        lease = self._operation_lifecycle.try_reserve_idle("terminal read")
+        if lease is None:
             return b""
-        try:
-            session = self._fluidnc_session_for(serial_connection)
-            return session.read_pending_output(max_bytes=max_bytes)
-        finally:
-            self._serial_session_lock.release()
+        with lease:
+            if not self._serial_session_lock.acquire(blocking=False):
+                return b""
+            try:
+                session = self._fluidnc_session_for(serial_connection)
+                return session.read_pending_output(max_bytes=max_bytes)
+            finally:
+                self._serial_session_lock.release()
 
     def invalidate_needles_state(self, reason: str = "") -> None:
         """Mark needles state unknown after manual A-axis changes."""
@@ -917,9 +855,8 @@ class StageController(
     def cancel_active_task(self, reason: str = "Operation cancelled.") -> None:
         """Signal any active task to stop without forcing a controller reset."""
 
-        self._cancel_event.set()
-        with self._task_lock:
-            self._new_stage_task_token_locked("cancel_active_task")
+        self._operation_lifecycle.cancel("cancel_active_task")
+        with self._state_lock:
             had_needles_action = (
                 self._active_needles_action is not None
                 or bool(self._queued_needles_actions)
@@ -941,11 +878,15 @@ class StageController(
     ) -> bool:
         """Cancel only the alignment task that owns the supplied request ID."""
 
-        with self._task_lock:
+        with self._state_lock:
             if self._clicked_point_resolution_request_id != request_id:
                 return False
-            self._cancel_event.set()
-            self._new_stage_task_token_locked("cancel_clicked_point_resolution")
+            token = self._clicked_point_resolution_token
+        if not self._operation_lifecycle.cancel_if_current(
+            token,
+            "cancel_clicked_point_resolution",
+        ):
+            return False
         self.status_message.emit(reason)
         self.queue_jog_stop()
         return True
@@ -953,9 +894,7 @@ class StageController(
     def cancel_active_motion(self, reason: str = "Motion cancel requested.") -> None:
         """Cancel a jog-backed motion without resetting controller state."""
 
-        self._cancel_event.set()
-        with self._task_lock:
-            self._new_stage_task_token_locked("cancel_active_motion")
+        self._operation_lifecycle.cancel("cancel_active_motion")
         self.queue_jog_stop()
         self.status_message.emit(reason)
 
@@ -967,9 +906,8 @@ class StageController(
     ) -> None:
         """Abort current work and request a FluidNC soft reset."""
 
-        self._cancel_event.set()
-        with self._task_lock:
-            self._new_stage_task_token_locked(f"reset_controller:{source}")
+        self._operation_lifecycle.cancel(f"reset_controller:{source}")
+        with self._state_lock:
             self._queued_needles_actions.clear()
             self._oscillation_needles_actions.clear()
             self._active_needles_action = None
@@ -983,32 +921,12 @@ class StageController(
     def is_busy(self) -> bool:
         """Return True when a background movement task is currently running."""
 
-        with self._task_lock:
-            return bool(self._active_thread and self._active_thread.is_alive())
+        return self._operation_lifecycle.snapshot().active
 
     def wait_for_active_task(self, *, timeout_s: float) -> bool:
         """Wait for the current stage worker without holding the task lock."""
 
-        with self._task_lock:
-            thread = self._active_thread
-        if thread is None or thread is threading.current_thread():
-            return thread is None
-        if thread.is_alive():
-            thread.join(timeout=max(0.0, float(timeout_s)))
-        return not thread.is_alive()
-
-    def _new_stage_task_token_locked(self, source: str) -> StageTaskToken:
-        for candidate in self._objective_calibration_candidates.values():
-            if not candidate.decision.is_set():
-                candidate.accepted = False
-                candidate.decision.set()
-        self._stage_task_generation += 1
-        token = StageTaskToken(
-            generation=self._stage_task_generation,
-            source=str(source),
-        )
-        self._latest_stage_task_token = token
-        return token
+        return self._operation_lifecycle.wait_for_active(timeout_s)
 
     @staticmethod
     def _calibration_matrix_candidate(value: object) -> object | None:
@@ -1031,24 +949,11 @@ class StageController(
         matrix = self._calibration_matrix_candidate(pixels_to_mm)
         if matrix is None:
             return False
-        with self._task_lock:
-            if (
-                not isinstance(token, StageTaskToken)
-                or token is not self._latest_stage_task_token
-                or self._cancel_event.is_set()
-            ):
-                return False
-            existing = self._objective_calibration_candidates.get(id(token))
-            if existing is not None and not existing.decision.is_set():
-                return False
-            self._objective_calibration_candidates[id(token)] = (
-                _ObjectiveCalibrationCandidate(
-                    token=token,
-                    objective_name=str(objective_name),
-                    pixels_to_mm=matrix,
-                )
-            )
-        return True
+        return self._operation_lifecycle.offer_calibration_candidate(
+            token,
+            objective_name,
+            matrix,
+        )
 
     def accept_objective_calibration_candidate(
         self,
@@ -1058,56 +963,26 @@ class StageController(
         matrix = self._calibration_matrix_candidate(pixels_to_mm)
         if matrix is None:
             return False
-        with self._task_lock:
-            candidate = self._objective_calibration_candidates.get(id(token))
-            if (
-                isinstance(token, StageTaskToken)
-                and candidate is not None
-                and candidate.token is token
-                and token is self._latest_stage_task_token
-                and not self._cancel_event.is_set()
-                and not candidate.decision.is_set()
-                and not candidate.accepted
-            ):
-                candidate.pixels_to_mm = matrix
-                candidate.accepted = True
-                return True
-        return False
+        return self._operation_lifecycle.accept_calibration_candidate(token, matrix)
 
     def publish_objective_calibration_candidate(self, token: object) -> bool:
-        published = False
-        with self._task_lock:
-            candidate = self._objective_calibration_candidates.get(id(token))
-            if (
-                isinstance(token, StageTaskToken)
-                and candidate is not None
-                and candidate.token is token
-                and token is self._latest_stage_task_token
-                and not self._cancel_event.is_set()
-                and candidate.accepted
-                and not candidate.decision.is_set()
-            ):
-                matrix = np.asarray(candidate.pixels_to_mm, dtype=float).copy()
-                self._pixels_to_mm = matrix
-                self._objective_matrices[candidate.objective_name] = matrix
-                self._objective_calibration_verified[candidate.objective_name] = True
-                candidate.published = True
-                candidate.decision.set()
-                published = True
+        def commit(objective_name: str, payload: object) -> None:
+            matrix = np.asarray(payload, dtype=float).copy()
+            self._pixels_to_mm = matrix
+            self._objective_matrices[objective_name] = matrix
+            self._objective_calibration_verified[objective_name] = True
+
+        published = self._operation_lifecycle.publish_calibration_candidate(
+            token,
+            commit,
+        )
         if published:
             mm_per_pixel_x, mm_per_pixel_y = self._calibration_magnitudes()
             self.calibration_changed.emit(mm_per_pixel_x, mm_per_pixel_y)
         return published
 
     def reject_objective_calibration_candidate(self, token: object) -> bool:
-        with self._task_lock:
-            candidate = self._objective_calibration_candidates.get(id(token))
-            if candidate is None or candidate.token is not token:
-                return False
-            if not candidate.decision.is_set():
-                candidate.accepted = False
-                candidate.decision.set()
-            return True
+        return self._operation_lifecycle.reject_calibration_candidate(token)
 
     def wait_for_objective_calibration_candidate(
         self,
@@ -1115,44 +990,18 @@ class StageController(
         *,
         timeout_s: float,
     ) -> bool:
-        with self._task_lock:
-            candidate = self._objective_calibration_candidates.get(id(token))
-            if candidate is None or candidate.token is not token:
-                return False
-            decision = candidate.decision
-        decided = decision.wait(timeout_s)
-        with self._task_lock:
-            candidate = self._objective_calibration_candidates.pop(id(token), None)
-            return bool(
-                decided
-                and candidate is not None
-                and candidate.token is token
-                and candidate.accepted
-                and candidate.published
-                and token is self._latest_stage_task_token
-                and not self._cancel_event.is_set()
-            )
+        return self._operation_lifecycle.wait_for_calibration_candidate(
+            token,
+            timeout_s=timeout_s,
+        )
 
     def _calibration_signal_token(self, source: str) -> StageTaskToken:
-        thread_token = getattr(
-            threading.current_thread(),
-            "_probe_station_stage_task_token",
-            None,
-        )
-        with self._task_lock:
-            if isinstance(thread_token, StageTaskToken):
-                return thread_token
-            return self._new_stage_task_token_locked(source)
+        return self._operation_lifecycle.token_for_current_thread(source)
 
     def is_calibration_task_token_current(self, token: object) -> bool:
         """Return whether a callback token still owns the latest stage generation."""
 
-        with self._task_lock:
-            return bool(
-                isinstance(token, StageTaskToken)
-                and token is self._latest_stage_task_token
-                and not self._cancel_event.is_set()
-            )
+        return self._operation_lifecycle.token_is_current(token)
 
     def _start_background_task(
         self,
@@ -1163,125 +1012,58 @@ class StageController(
         before_create: Callable[[], None] | None = None,
         before_start: Callable[[], None] | None = None,
     ) -> bool:
-        with self._task_lock:
-            active_thread = getattr(self, "_active_thread", None)
-            if active_thread and active_thread.is_alive():
-                self.status_message.emit(busy_message)
-                return False
+        def prepare() -> None:
             if before_create is not None:
                 before_create()
-            self._cancel_event.clear()
-            thread = threading.Thread(target=target, args=args, daemon=True)
-            token = self._new_stage_task_token_locked(target.__name__)
-            setattr(thread, "_probe_station_stage_task_token", token)
-            self._active_thread = thread
             if before_start is not None:
                 before_start()
-            try:
-                thread.start()
-            except Exception:
-                if self._active_thread is thread:
-                    self._active_thread = None
-                raise
-            return True
+
+        lease = self._operation_lifecycle.start_background(
+            target.__name__,
+            partial(target, *args),
+            before_start=prepare,
+        )
+        if lease is None:
+            self.status_message.emit(busy_message)
+            return False
+        return True
+
+    def reserve_external_task(self, label: str) -> StageOperationLease:
+        """Return an exception-safe reservation owned by the calling thread."""
+
+        try:
+            return self._operation_lifecycle.reserve_external(label)
+        except StageOperationBusyError as exc:
+            raise StageControllerError(str(exc)) from exc
 
     def begin_external_task(self, label: str) -> None:
         """Reserve the controller for a higher-level blocking workflow."""
 
-        with self._task_lock:
-            if self._active_thread and self._active_thread.is_alive():
-                raise StageControllerError(
-                    f"Stage is busy. Cannot start {label}."
-                )
-            self._cancel_event.clear()
-            current_thread = threading.current_thread()
-            token = self._new_stage_task_token_locked(f"external:{label}")
-            setattr(current_thread, "_probe_station_stage_task_token", token)
-            self._active_thread = current_thread
+        self.reserve_external_task(label)
 
     def finish_external_task(self) -> None:
         """Release a controller reservation created by begin_external_task."""
 
-        current_thread = threading.current_thread()
-        with self._task_lock:
-            if self._active_thread is current_thread:
-                self._active_thread = None
-
-    def run_external_needles_action(
-        self,
-        action: str,
-        feedrate: float | None = None,
-    ) -> str:
-        """Run a blocking needle action inside an external controller reservation."""
-
-        action_key = str(action).strip().lower()
-        self.needles_action_started.emit(action_key)
-        try:
-            self._check_cancelled()
-            message = self._perform_needles_action(action_key, feedrate)
-            self.needles_action_finished.emit(True, message, action_key)
-            return message
-        except StageControllerError as exc:
-            self.needles_action_finished.emit(False, str(exc), action_key)
-            raise
-
-    def run_external_needles_adjust(
-        self,
-        step_mm: float,
-        feedrate: float | None = None,
-    ) -> str:
-        """Run a blocking A-axis needle adjustment inside an external reservation."""
-
-        action = "adjust"
-        self.needles_action_started.emit(action)
-        try:
-            self._check_cancelled()
-            message = self._perform_needles_adjust(float(step_mm), feedrate)
-            self.needles_action_finished.emit(True, message, action)
-            return message
-        except StageControllerError as exc:
-            self.needles_action_finished.emit(False, str(exc), action)
-            raise
-
-    def run_external_needles_lower_to_depth_below_down(
-        self,
-        depth_mm: float,
-        feedrate: float | None = None,
-    ) -> str:
-        """Lower needles directly to a depth below the saved down position."""
-
-        action = "lower"
-        self.needles_action_started.emit(action)
-        try:
-            self._check_cancelled()
-            message = self._perform_needles_lower_to_depth_below_down(
-                float(depth_mm),
-                feedrate,
-            )
-            self.needles_action_finished.emit(True, message, action)
-            return message
-        except StageControllerError as exc:
-            self.needles_action_finished.emit(False, str(exc), action)
-            raise
+        self._operation_lifecycle.release_current()
 
     def current_stage_position(self) -> tuple[float, ...]:
         """Return the latest controller position in the active GUI coordinate space."""
 
-        with self._task_lock:
-            if self._active_thread and self._active_thread.is_alive():
-                raise StageControllerError("Stage is busy. Wait for the current operation to finish.")
+        lease = self._operation_lifecycle.try_reserve_idle("stage position query")
+        if lease is None:
+            raise StageControllerError("Stage is busy. Wait for the current operation to finish.")
+        with lease:
             status = self._query_current_stage_position_status()
-        return self._stage_position_from_status(status)
+            return self._stage_position_from_status(status)
 
     def run_external_current_stage_position(self) -> tuple[float, ...]:
         """Read stage position from the worker that owns an external reservation."""
 
-        current_thread = threading.current_thread()
-        with self._task_lock:
-            if self._active_thread is not current_thread:
-                raise StageControllerError(
-                    "Current thread does not own an external stage task."
-                )
+        operation = self._operation_lifecycle.snapshot()
+        if not operation.owned_by(threading.current_thread()):
+            raise StageControllerError(
+                "Current thread does not own an external stage task."
+            )
         status = self._query_current_stage_position_status()
         return self._stage_position_from_status(status)
 
@@ -1388,9 +1170,7 @@ class StageController(
     def request_status_refresh(self) -> None:
         """Poll controller position in a background thread when idle."""
 
-        with self._task_lock:
-            if self._active_thread and self._active_thread.is_alive():
-                return
+        with self._state_lock:
             if not self._async_write_queue.empty():
                 return
             if self._jog_motion_active:
@@ -1463,7 +1243,11 @@ class StageController(
         self._update_coordinate_confidence_from_status(status)
 
     def _check_cancelled(self) -> None:
-        if self._cancel_event.is_set():
+        if self._operation_lifecycle.is_cancelled():
             raise StageControllerError("Operation cancelled.")
+
+    @property
+    def _cancel_event(self) -> threading.Event:
+        return self._operation_lifecycle.cancellation_event
 
 __all__ = ["StageController", "MoveVector"]

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import math
 import logging
-import threading
 import time
 from typing import TYPE_CHECKING, Any, cast
 
@@ -107,23 +106,8 @@ class StageControllerClickMoveMixin:
     ) -> tuple[tuple[float, float], tuple[float, float]]:
         """Resolve the center and clicked image point to absolute FluidNC XY."""
 
-        with self._task_lock:
-            active_thread = getattr(self, "_active_thread", None)
-            if active_thread and active_thread.is_alive():
-                raise StageControllerError(
-                    "Stage is busy. Wait for the current operation to finish."
-                )
-            self._cancel_event.clear()
-            current_thread = threading.current_thread()
-            token = self._new_stage_task_token_locked("click_calibration")
-            setattr(current_thread, "_probe_station_stage_task_token", token)
-            self._active_thread = current_thread
-        try:
+        with self.reserve_external_task("click calibration"):
             return self._resolve_clicked_point_xy_work(dx_pixels, dy_pixels)
-        finally:
-            with self._task_lock:
-                if self._active_thread is current_thread:
-                    self._active_thread = None
 
     def request_clicked_point_resolution(
         self,
@@ -133,21 +117,24 @@ class StageControllerClickMoveMixin:
     ) -> bool:
         """Resolve an image point in a stage-owned background task."""
 
+        def record_request() -> None:
+            token = self._operation_lifecycle.snapshot().token
+            with self._state_lock:
+                self._clicked_point_resolution_request_id = request_id
+                self._clicked_point_resolution_token = token
+
         try:
             return self._start_background_task(
                 target=self._run_clicked_point_resolution,
                 args=(request_id, float(dx_pixels), float(dy_pixels)),
                 busy_message="Stage is busy. Alignment point capture not started.",
-                before_create=lambda: setattr(
-                    self,
-                    "_clicked_point_resolution_request_id",
-                    request_id,
-                ),
+                before_create=record_request,
             )
         except Exception:
-            with self._task_lock:
+            with self._state_lock:
                 if self._clicked_point_resolution_request_id == request_id:
                     self._clicked_point_resolution_request_id = None
+                    self._clicked_point_resolution_token = None
             raise
 
     def _run_clicked_point_resolution(
@@ -182,24 +169,21 @@ class StageControllerClickMoveMixin:
         )
 
     def _release_clicked_point_task(self, request_id: object) -> None:
-        current_thread = threading.current_thread()
-        with self._task_lock:
-            if self._active_thread is current_thread:
-                self._active_thread = None
+        self._operation_lifecycle.release_current()
+        with self._state_lock:
             if self._clicked_point_resolution_request_id == request_id:
                 self._clicked_point_resolution_request_id = None
+                self._clicked_point_resolution_token = None
 
     def _resolve_clicked_point_xy_for_active_task(
         self,
         dx_pixels: float,
         dy_pixels: float,
     ) -> tuple[tuple[float, float], tuple[float, float]]:
-        current_thread = threading.current_thread()
-        with self._task_lock:
-            if self._active_thread is not current_thread:
-                raise StageControllerError(
-                    "Current thread does not own the alignment stage task."
-                )
+        if not self._operation_lifecycle.snapshot().owned_by_current_thread:
+            raise StageControllerError(
+                "Current thread does not own the alignment stage task."
+            )
         return self._resolve_clicked_point_xy_work(dx_pixels, dy_pixels)
 
     def _resolve_clicked_point_xy_work(
@@ -257,17 +241,18 @@ class StageControllerClickMoveMixin:
     def reset_calibration(self, reason: str = "Click calibration reset.") -> None:
         """Clear the click-to-move calibration so it is rebuilt on next use."""
 
-        with self._task_lock:
-            active_thread = getattr(self, "_active_thread", None)
-            if active_thread and active_thread.is_alive():
-                raise StageControllerError(
-                    "Stage is busy. Wait for the current operation to finish."
-                )
-            self._cancel_event.clear()
-            self._pixels_to_mm = None
-            self._objective_matrices.pop(self._active_objective_name, None)
-            self._objective_calibration_verified[self._active_objective_name] = False
-            task_token = self._new_stage_task_token_locked(
+        lease = self._operation_lifecycle.try_reserve_idle("calibration reset")
+        if lease is None:
+            raise StageControllerError(
+                "Stage is busy. Wait for the current operation to finish."
+            )
+        with lease:
+            self._operation_lifecycle.clear_cancellation()
+            with self._state_lock:
+                self._pixels_to_mm = None
+                self._objective_matrices.pop(self._active_objective_name, None)
+                self._objective_calibration_verified[self._active_objective_name] = False
+            task_token = self._operation_lifecycle.advance_generation(
                 "click_calibration_reset"
             )
         self.objective_calibration_updated.emit(
@@ -295,9 +280,6 @@ class StageControllerClickMoveMixin:
             self.movement_finished.emit(success, message)
         except StageControllerError as exc:
             self.movement_finished.emit(False, str(exc))
-        finally:
-            with self._task_lock:
-                setattr(self, "_active_thread", None)
 
     def _execute_click_move(
         self,
@@ -331,9 +313,6 @@ class StageControllerClickMoveMixin:
             self.movement_finished.emit(True, message)
         except StageControllerError as exc:
             self.movement_finished.emit(False, str(exc))
-        finally:
-            with self._task_lock:
-                setattr(self, "_active_thread", None)
 
     def _run_move_to_xyz(
         self,
@@ -358,9 +337,6 @@ class StageControllerClickMoveMixin:
             self.movement_finished.emit(True, message)
         except StageControllerError as exc:
             self.movement_finished.emit(False, str(exc))
-        finally:
-            with self._task_lock:
-                setattr(self, "_active_thread", None)
 
     def _move_to_xy_locked(
         self,

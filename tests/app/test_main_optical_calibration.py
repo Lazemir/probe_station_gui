@@ -240,11 +240,10 @@ def test_runtime_composition_is_inert_and_uses_existing_camera_adapter() -> None
 
     window = Main.__new__(Main)
     window.stage_controller = SimpleNamespace(
-        begin_external_task=lambda _label: None,
+        reserve_external_task=lambda _label: SimpleNamespace(release=lambda: None),
         run_external_current_stage_position=lambda: (0.0, 0.0, 0.0),
         run_external_needles_action=lambda _action, _feed: None,
         run_external_move_to_xy=lambda _x, _y, **_kwargs: None,
-        finish_external_task=lambda: None,
     )
     window.grabber = _ForbiddenGrabber()
     window._microscope_scan_stop_requested = threading.Event()

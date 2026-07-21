@@ -37,6 +37,10 @@ class _FakeStage:
     def begin_external_task(self, label: str) -> None:
         self.events.append(("begin", label))
 
+    def reserve_external_task(self, label: str) -> SimpleNamespace:
+        self.begin_external_task(label)
+        return SimpleNamespace(release=self.finish_external_task)
+
     def run_external_current_stage_position(self) -> tuple[float, ...]:
         self.events.append(("position",))
         if self.position_error is not None:

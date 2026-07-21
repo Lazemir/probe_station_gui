@@ -33,6 +33,40 @@ from tests.app.main_coordinate_feedrate_support import (
 from probe_station_gui.views import main_window_needle_calibration as needle_calibration_ui
 from probe_station_gui.views import main_window_shutdown as shutdown_ui
 
+
+class _StageLease:
+    def __init__(
+        self,
+        label: str,
+        calls: list[tuple[object, ...]] | None,
+    ) -> None:
+        self._calls = calls
+        self._released = False
+        if calls is not None:
+            calls.append(("begin", label))
+
+    def release(self) -> None:
+        if self._released:
+            return
+        self._released = True
+        if self._calls is not None:
+            self._calls.append(("finish",))
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, _exc_type, _exc, _traceback) -> bool:
+        self.release()
+        return False
+
+
+def _stage_lease(
+    label: str,
+    calls: list[tuple[object, ...]] | None = None,
+) -> _StageLease:
+    return _StageLease(label, calls)
+
+
 class MainCoordinateFeedrateTest(unittest.TestCase):
     def test_combine_telegram_contact_photos_side_by_side(self) -> None:
         script = r"""
@@ -285,8 +319,7 @@ assert image.height() == 4
             _needles_known=True,
             _needles_up=True,
             _needles_zone="raise",
-            begin_external_task=lambda _label: None,
-            finish_external_task=lambda: None,
+            reserve_external_task=lambda label: _stage_lease(label),
             run_external_local_autofocus=lambda *, range_mm, step_mm=None: (
                 calls.append((float(range_mm), step_mm))
                 or _FocusResult()
@@ -695,14 +728,13 @@ assert image.height() == 4
             needle_2_design=(9.0, 19.0),
         )
         window.stage_controller = types.SimpleNamespace(
-            begin_external_task=lambda label: calls.append(("begin", label)),
+            reserve_external_task=lambda label: _stage_lease(label, calls),
             run_external_needles_action=lambda action, feedrate: calls.append(
                 ("needles", action, feedrate)
             ),
             run_external_move_to_xy=lambda x_mm, y_mm: calls.append(
                 ("move", x_mm, y_mm)
             ),
-            finish_external_task=lambda: calls.append(("finish",)),
         )
         window.route_measurement_status = types.SimpleNamespace(
             emit=lambda message: statuses.append(str(message))
@@ -742,14 +774,13 @@ assert image.height() == 4
         )
         window._api_route_offset_xy = (0.1, -0.2)
         window.stage_controller = types.SimpleNamespace(
-            begin_external_task=lambda label: calls.append(("begin", label)),
+            reserve_external_task=lambda label: _stage_lease(label, calls),
             run_external_needles_action=lambda action, feedrate: calls.append(
                 ("needles", action, feedrate)
             ),
             run_external_move_to_xy=lambda x_mm, y_mm: calls.append(
                 ("move", x_mm, y_mm)
             ),
-            finish_external_task=lambda: calls.append(("finish",)),
         )
         window.route_measurement_status = types.SimpleNamespace(emit=lambda _message: None)
         window.route_contact_move_finished = types.SimpleNamespace(
