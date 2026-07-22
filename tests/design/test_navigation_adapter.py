@@ -243,7 +243,7 @@ def test_design_target_move_plans_unknown_missing_registration_and_accepted(
     assert not unregistered.accepted
     assert unregistered.status_message == "Design registration is required before moving to a target."
     assert accepted.accepted
-    assert accepted.stage_xy == (21.0, 42.0)
+    assert accepted.stage_xy == (16.0, 22.0)
 
 
 def test_design_coordinate_move_plans_unloaded_busy_unregistered_and_accepted(

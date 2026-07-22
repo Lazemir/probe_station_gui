@@ -34,7 +34,7 @@ def _transform(
         [(0.0, 0.0), (10.0, 0.0), (2.0, 7.0)],
     ],
 )
-def test_similarity_fit_uses_all_pairs_and_recovers_exact_transform(source) -> None:
+def test_rigid_fit_keeps_scale_as_a_diagnostic_only(source) -> None:
     stage = _transform(
         source,
         scale=2.5,
@@ -45,13 +45,15 @@ def test_similarity_fit_uses_all_pairs_and_recovers_exact_transform(source) -> N
     registration = DesignRegistration.from_marks(source, stage)
 
     assert registration.valid
+    assert registration.distance_scale_ratio == pytest.approx(2.5)
     assert registration.scale == pytest.approx(2.5)
     assert registration.rotation_deg == pytest.approx(37.0)
-    assert registration.offset == pytest.approx(np.asarray([12.0, -4.0]))
+    assert np.linalg.det(registration.matrix) == pytest.approx(1.0)
+    assert registration.design_to_stage(source[0]) != pytest.approx(stage[0])
     assert registration.source_residual_summary.count == len(source)
-    assert registration.source_residual_summary.rms == pytest.approx(0.0, abs=1e-10)
-    assert registration.source_residual_summary.max_error == pytest.approx(
-        0.0, abs=1e-10
+    assert registration.source_residual_summary.rms > 0.0
+    assert registration.source_residual_summary.max_error >= (
+        registration.source_residual_summary.rms
     )
 
 
@@ -74,7 +76,7 @@ def test_noisy_all_point_fit_reports_visible_rms_and_max_without_rejecting() -> 
         max(registration.source_residuals)
     )
     assert registration.rotation_deg == pytest.approx(-23.0, abs=1.0)
-    assert registration.scale == pytest.approx(1.8, abs=0.05)
+    assert registration.distance_scale_ratio == pytest.approx(1.8, abs=0.05)
 
 
 def test_reflection_input_returns_best_proper_rotation_with_residuals() -> None:
@@ -106,7 +108,7 @@ def test_reflection_input_returns_best_proper_rotation_with_residuals() -> None:
         ),
     ],
 )
-def test_similarity_fit_rejects_invalid_pair_geometry(source, stage, message) -> None:
+def test_rigid_fit_rejects_invalid_pair_geometry(source, stage, message) -> None:
     with pytest.raises(DesignModelError, match=message):
         DesignRegistration.from_marks(source, stage)
 

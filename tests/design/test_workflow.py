@@ -39,19 +39,19 @@ class _FakeLibrary:
 
 
 class DesignRegistrationTest(unittest.TestCase):
-    def test_similarity_registration_roundtrip(self) -> None:
+    def test_rigid_registration_roundtrip(self) -> None:
         registration = DesignRegistration.from_marks(
             [(0.0, 0.0), (10.0, 0.0)],
             [(1.0, 2.0), (21.0, 2.0)],
             check_design_marks=[(5.0, 5.0)],
-            check_stage_marks=[(11.0, 12.0)],
+            check_stage_marks=[(11.0, 7.0)],
         )
 
         self.assertTrue(registration.valid)
         self.assertEqual(registration.residual_summary.count, 1)
         self.assertAlmostEqual(registration.residual_summary.rms, 0.0)
-        self.assertEqual(registration.design_to_stage((5.0, 5.0)), (11.0, 12.0))
-        self.assertEqual(registration.stage_to_design((11.0, 12.0)), (5.0, 5.0))
+        self.assertEqual(registration.design_to_stage((5.0, 5.0)), (11.0, 7.0))
+        self.assertEqual(registration.stage_to_design((11.0, 7.0)), (5.0, 5.0))
 
     def test_registration_requires_two_marks(self) -> None:
         with self.assertRaises(DesignModelError):

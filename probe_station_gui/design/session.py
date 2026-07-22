@@ -400,7 +400,12 @@ class DesignSession:
         if len(design_marks) < 2 or len(design_marks) != len(stage_marks):
             raise DesignModelError("At least two complete mark pairs are required.")
 
-        fitted = DesignRegistration.from_marks(design_marks, stage_marks)
+        design_unit_mm = float(self.document.dbu) * 1e3
+        fitted = DesignRegistration.from_marks(
+            design_marks,
+            stage_marks,
+            design_unit_mm=design_unit_mm,
+        )
         design_a, design_b = design_marks[:2]
         stage_a, stage_b = stage_marks[:2]
         design_dx = float(design_b[0] - design_a[0])
@@ -424,8 +429,7 @@ class DesignSession:
             self._rotate_stage_point(point, pivot_stage, rotation_deg)
             for point in stage_marks
         )
-        design_unit_mm = float(self.document.dbu) * 1e3
-        distance_ratio = fitted.scale / design_unit_mm
+        distance_ratio = fitted.distance_scale_ratio
         return AlignmentPreparation(
             design_marks=design_marks,
             stage_marks_before_rotation=stage_marks,
@@ -669,6 +673,7 @@ class DesignSession:
             stage_marks,
             check_design_marks=self.check_design_marks,
             check_stage_marks=self.check_stage_marks,
+            design_unit_mm=self._design_unit_mm(),
         )
         source_summary = self.registration.source_residual_summary
         check_summary = self.registration.residual_summary
@@ -685,6 +690,13 @@ class DesignSession:
             )
         else:
             self.registration_status = f"Registered. {source_text}"
+
+    def _design_unit_mm(self) -> float:
+        """Return the active document's design-unit conversion in millimetres."""
+
+        if self.document is None:
+            return 1.0
+        return float(self.document.dbu) * 1e3
 
     @staticmethod
     def _rotate_stage_point(

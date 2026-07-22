@@ -10,6 +10,8 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, ClassVar, Iterable, Mapping, Optional
 
+from probe_station_gui.design.rigid_registration import fit_rigid_registration
+
 
 class _LazyModule:
     def __init__(self, module_name: str) -> None:
@@ -106,7 +108,7 @@ class SnapResult:
 
 @dataclass(frozen=True)
 class DesignRegistration:
-    """Similarity transform between design coordinates and stage coordinates."""
+    """Rigid physical-mm transform between design and stage coordinates."""
 
     source_design_marks: tuple[Point2D, ...]
     source_stage_marks: tuple[Point2D, ...]
@@ -114,6 +116,8 @@ class DesignRegistration:
     check_stage_marks: tuple[Point2D, ...] = ()
     matrix: np.ndarray = field(default_factory=lambda: np.eye(2, dtype=float))
     offset: np.ndarray = field(default_factory=lambda: np.zeros(2, dtype=float))
+    design_unit_mm: float = 1.0
+    distance_scale_ratio: float = 1.0
     source_residuals: tuple[float, ...] = ()
     source_residual_summary: ResidualSummary = field(default_factory=ResidualSummary)
     residuals: tuple[float, ...] = ()
@@ -140,52 +144,36 @@ class DesignRegistration:
         *,
         check_design_marks: Iterable[Point2D] = (),
         check_stage_marks: Iterable[Point2D] = (),
+        design_unit_mm: float = 1.0,
     ) -> "DesignRegistration":
-        """Build a similarity transform from design and stage mark pairs."""
+        """Build a rigid physical-mm transform from design and stage mark pairs."""
 
         design_marks = cls._finite_points(source_design_marks, label="Design source")
         stage_marks = cls._finite_points(source_stage_marks, label="Stage source")
         check_design = cls._finite_points(check_design_marks, label="Design check")
         check_stage = cls._finite_points(check_stage_marks, label="Stage check")
-        if len(design_marks) != len(stage_marks):
-            raise DesignModelError("Design and stage source mark counts must match.")
-        if len(design_marks) < 2:
-            raise DesignModelError("At least two source mark pairs are required.")
-        if len(check_design) != len(check_stage):
-            raise DesignModelError("Design and stage check mark counts must match.")
+        try:
+            fit = fit_rigid_registration(
+                design_points=design_marks,
+                machine_points=stage_marks,
+                design_unit_mm=design_unit_mm,
+                check_design_points=check_design,
+                check_machine_points=check_stage,
+            )
+        except ValueError as exc:
+            raise DesignModelError(str(exc)) from exc
 
-        source = np.asarray(design_marks, dtype=float)
+        source = np.asarray(design_marks, dtype=float) * float(design_unit_mm)
         stage = np.asarray(stage_marks, dtype=float)
-        source_center = np.mean(source, axis=0)
-        stage_center = np.mean(stage, axis=0)
-        source_centered = source - source_center
-        stage_centered = stage - stage_center
-        source_energy = float(np.sum(np.square(source_centered)))
-        if source_energy <= 1e-18:
-            raise DesignModelError("Design source geometry is degenerate.")
-
-        covariance = stage_centered.T @ source_centered
-        u, singular_values, vt = np.linalg.svd(covariance)
-        determinant_sign = 1.0 if float(np.linalg.det(u @ vt)) >= 0.0 else -1.0
-        correction = np.diag([1.0, determinant_sign])
-        rotation = u @ correction @ vt
-        scale = float(
-            np.sum(singular_values * np.asarray([1.0, determinant_sign]))
-            / source_energy
-        )
-        if not math.isfinite(scale) or scale <= 1e-15:
-            raise DesignModelError("Stage source geometry is degenerate.")
-        matrix = scale * rotation
-        offset = stage_center - matrix @ source_center
-
-        predicted_source = (matrix @ source.T).T + offset
+        predicted_source = (fit.rotation @ source.T).T + fit.offset_machine_mm
         source_errors = np.linalg.norm(stage - predicted_source, axis=1)
         source_residuals = tuple(float(value) for value in source_errors)
         source_summary = cls._residual_summary(source_residuals)
 
         residuals: list[float] = []
         for design_point, stage_point in zip(check_design, check_stage):
-            predicted = matrix @ np.asarray(design_point, dtype=float) + offset
+            design_mm = np.asarray(design_point, dtype=float) * float(design_unit_mm)
+            predicted = fit.rotation @ design_mm + fit.offset_machine_mm
             actual = np.asarray(stage_point, dtype=float)
             residuals.append(float(np.linalg.norm(actual - predicted)))
         summary = cls._residual_summary(residuals)
@@ -195,8 +183,10 @@ class DesignRegistration:
             source_stage_marks=stage_marks,
             check_design_marks=check_design,
             check_stage_marks=check_stage,
-            matrix=matrix,
-            offset=offset,
+            matrix=fit.rotation,
+            offset=fit.offset_machine_mm,
+            design_unit_mm=float(design_unit_mm),
+            distance_scale_ratio=fit.distance_scale_ratio,
             source_residuals=source_residuals,
             source_residual_summary=source_summary,
             residuals=tuple(residuals),
@@ -206,9 +196,9 @@ class DesignRegistration:
 
     @property
     def scale(self) -> float:
-        """Return the fitted uniform design-to-stage scale."""
+        """Return the measured spacing ratio retained for compatibility."""
 
-        return float(math.sqrt(max(0.0, float(np.linalg.det(self.matrix)))))
+        return self.distance_scale_ratio
 
     @property
     def rotation_deg(self) -> float:
@@ -257,7 +247,7 @@ class DesignRegistration:
 
         if not self.valid:
             raise DesignModelError(self.stale_reason or "Registration is not valid.")
-        vec = np.asarray(point, dtype=float)
+        vec = np.asarray(point, dtype=float) * self.design_unit_mm
         result = self.matrix @ vec + self.offset
         return (float(result[0]), float(result[1]))
 
@@ -268,7 +258,7 @@ class DesignRegistration:
             raise DesignModelError(self.stale_reason or "Registration is not valid.")
         inverse = np.linalg.inv(self.matrix)
         vec = np.asarray(point, dtype=float) - self.offset
-        result = inverse @ vec
+        result = (inverse @ vec) / self.design_unit_mm
         return (float(result[0]), float(result[1]))
 
     def mark_stale(self, reason: str) -> "DesignRegistration":
