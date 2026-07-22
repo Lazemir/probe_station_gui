@@ -193,6 +193,19 @@ def test_malformed_metadata_isolated_preserved_and_stable() -> None:
     assert repeated == reconciled
 
 
+def test_overflowing_metadata_isolated_without_blocking_later_design() -> None:
+    settings = default_axis_calibrations()
+    changed = default_axis_calibrations()
+    changed["Z"] = AxisCalibrationSettings(enabled=True, controller_points=[0.0, 1.0], physical_points=[0.0, 2.0])
+    malformed = replace(_design(), metadata={"source_size": float("inf"), "future": "kept"})
+    valid = _design(fingerprints=design_calibration_fingerprints(settings))
+    records, changed_any = reconcile_design_calibrations((malformed, valid), changed)
+    assert changed_any
+    assert records[0].metadata["future"] == "kept"
+    assert all(not state.available for state in records[0].readiness.values())
+    assert records[1].readiness["Z"].status is ReadinessStatus.STALE
+
+
 def test_reconciled_design_round_trips_and_fresh_reconcile_is_noop(tmp_path) -> None:
     previous = default_axis_calibrations()
     current = default_axis_calibrations()

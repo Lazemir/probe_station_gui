@@ -92,7 +92,7 @@ class CoordinateSystemSettingsWidget(QWidget):
             field.editingFinished.connect(self._apply_fields_from_editor)
             field.textChanged.connect(self._on_editor_changed)
             self._fields[key] = field
-            form.addRow(label, field)
+            form.addRow(f"{label} ({unit.strip()})", field)
         root.addLayout(form)
 
         self._use_current_button = QPushButton("Use current position", self)

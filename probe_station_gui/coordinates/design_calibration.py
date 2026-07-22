@@ -57,7 +57,7 @@ def _reconcile_design_record(
     raw_metadata = dict(record.metadata)
     try:
         metadata = DesignFrameMetadata.from_mapping(raw_metadata)
-    except (KeyError, TypeError, ValueError, IndexError):
+    except (KeyError, TypeError, ValueError, IndexError, OverflowError):
         return _fail_closed_malformed_metadata(record, current)
     stored = dict(metadata.calibration_fingerprints)
     current_map = dict(current)

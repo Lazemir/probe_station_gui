@@ -9,7 +9,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 pytest.importorskip("PySide6")
 
 from PySide6.QtCore import QObject, Signal
-from PySide6.QtWidgets import QApplication, QDialogButtonBox
+from PySide6.QtWidgets import QApplication, QDialogButtonBox, QLabel
 
 from probe_station_gui.coordinates import PhysicalMachinePose
 from probe_station_gui.coordinates import STAGE_AXES, VISIBLE_STAGE_AXES
@@ -199,4 +199,21 @@ def test_stage_notification_refreshes_save_apply_without_polling() -> None:
     notifier.changed.emit()
     assert not dialog._apply_button.isEnabled()
     assert cancel.isEnabled()
+    dialog.deleteLater()
+
+
+def test_camera_busy_blocks_direct_apply_and_save_and_rows_show_units() -> None:
+    _qt_app()
+    dialog = SettingsDialog(Settings())
+    applied: list[Settings] = []
+    dialog.settings_applied.connect(applied.append)
+    dialog._camera_apply_busy = True
+    dialog._apply_without_closing()
+    dialog.accept()
+    assert applied == []
+    assert any("(mm)" in label.text() for label in dialog.coordinate_system_tab.findChildren(QLabel))
+    assert any("(deg)" in label.text() for label in dialog.coordinate_system_tab.findChildren(QLabel))
+    dialog._camera_apply_busy = False
+    dialog._apply_without_closing()
+    assert len(applied) == 1
     dialog.deleteLater()

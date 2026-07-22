@@ -1046,7 +1046,7 @@ class SettingsDialog(QDialog):
             self._apply_button.setEnabled(enabled)
 
     def _settings_apply_available(self) -> bool:
-        if self._calibration_imports_active:
+        if self._calibration_imports_active or self._camera_apply_busy:
             return False
         available, message = self._coordinate_system_tab.apply_availability()
         if not available:
