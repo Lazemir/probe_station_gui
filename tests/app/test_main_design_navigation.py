@@ -38,6 +38,14 @@ from probe_station_gui.design.frame_registration import (
 )
 from probe_station_gui.route.model import MeasurementRoute
 from probe_station_gui.stage import position_update
+from probe_station_gui.stage.axis_calibration import StageAxisCalibrationMapper
+from probe_station_gui.stage.machine_coordinates import MachineCoordinateSnapshot
+from probe_station_gui.stage.types import _Status
+from probe_station_gui.settings.axis_calibration_config import (
+    AxisCalibrationSettings,
+    default_axis_calibrations,
+)
+from probe_station_gui.settings.software_coordinates import RotationPivotSettings
 
 DesignDocument = main_module.DesignDocument
 
@@ -250,6 +258,51 @@ def test_on_design_document_loaded_success_refreshes_persists_and_restores_route
     assert window.settings_manager.last_design_directory == tmp_path
 
 
+def _machine_snapshot(
+    raw_machine: tuple[float, ...],
+    *,
+    work_offset: tuple[float, ...] | None = None,
+    calibrations: dict[str, AxisCalibrationSettings] | None = None,
+) -> MachineCoordinateSnapshot:
+    offset = work_offset or tuple(0.0 for _ in raw_machine)
+    work_position = tuple(
+        raw_machine[index] - offset[index] for index in range(len(raw_machine))
+    )
+    axis_index = {"X": 0, "Y": 1, "Z": 2, "A": 3, "B": 4, "C": 5}
+    mapper = StageAxisCalibrationMapper(
+        calibrations=calibrations or default_axis_calibrations(),
+        position_reporting_mode="work",
+        active_work_coordinate_system="G54",
+        controller_coordinate_offsets={"G54": offset},
+        axis_index=axis_index,
+    )
+    return MachineCoordinateSnapshot.from_status(
+        _Status(
+            state="Idle",
+            synchronized_machine_position=raw_machine,
+            display_position=work_position,
+            work_position=work_position,
+            work_offset=offset,
+            coordinate_system="G54",
+        ),
+        mapper,
+        axis_index,
+    )
+
+
+def _set_rotation_settings(
+    window: object,
+    pivot: tuple[float, float] = (0.0, 0.0),
+) -> None:
+    window.settings_manager = types.SimpleNamespace(
+        settings=types.SimpleNamespace(
+            software_coordinates=types.SimpleNamespace(
+                pivot=RotationPivotSettings(x_mm=pivot[0], y_mm=pivot[1])
+            )
+        )
+    )
+
+
 def test_design_load_worker_carries_precomputed_frame_metadata(
     monkeypatch,
     tmp_path: Path,
@@ -327,34 +380,34 @@ def test_restored_top_cell_reconciles_worker_frame_metadata(tmp_path: Path) -> N
     assert captured[0][1].top_cell_name == "ALT"
 
 
-def test_legacy_migration_reports_b_calibration_failure_without_adding_frame(
+def test_legacy_migration_without_synchronized_provenance_preserves_legacy_payload(
     tmp_path: Path,
 ) -> None:
     document = _make_document(tmp_path)
     session = DesignSession(document=document)
     session.source_design_marks = ((0.0, 0.0), (1000.0, 0.0))
     session.source_stage_marks = ((3.0, 4.0), (4.0, 4.0))
+    persisted_before = session.export_persisted_state()
     registry = CoordinateFrameRegistry()
     statuses: list[str] = []
     window = Main.__new__(Main)
     window._design_session = session
     window._coordinate_frame_registry = registry
+    _set_rotation_settings(window)
     window._coordinate_frames_loaded = True
     window._active_design_frame_metadata = main_module.DesignFrameMetadata.from_document(
         document
     )
     window.stage_controller = types.SimpleNamespace(
-        latest_stage_position=lambda: (0.0, 0.0, 0.0, 0.0, 12.0),
-        calibrated_axis_display_value=lambda _axis, _value: (_ for _ in ()).throw(
-            RuntimeError("B calibration unavailable")
-        ),
+        latest_machine_coordinate_snapshot=lambda: None,
     )
     window._show_status = lambda message, _timeout: statuses.append(message)
 
     Main._activate_loaded_design_frame(window)
 
     assert registry.snapshot().records == ()
-    assert statuses == ["B calibration unavailable"]
+    assert session.export_persisted_state() == persisted_before
+    assert statuses == []
 
 
 def test_legacy_migration_waiting_for_b_is_runtime_invalid_but_persisted(
@@ -371,11 +424,14 @@ def test_legacy_migration_waiting_for_b_is_runtime_invalid_but_persisted(
     window = Main.__new__(Main)
     window._design_session = session
     window._coordinate_frame_registry = registry
+    _set_rotation_settings(window)
     window._coordinate_frames_loaded = True
     window._active_design_frame_metadata = main_module.DesignFrameMetadata.from_document(
         document
     )
-    window.stage_controller = types.SimpleNamespace(latest_stage_position=lambda: None)
+    window.stage_controller = types.SimpleNamespace(
+        latest_machine_coordinate_snapshot=lambda: None
+    )
 
     Main._activate_loaded_design_frame(window)
 
@@ -401,7 +457,7 @@ def test_first_fresh_b_status_retries_legacy_migration_once(
     session.source_stage_marks = ((3.0, 4.0), (4.0, 4.0))
     session._rebuild_registration()
     registry = CoordinateFrameRegistry()
-    position: dict[str, tuple[float, ...] | None] = {"value": None}
+    snapshot: dict[str, MachineCoordinateSnapshot | None] = {"value": None}
     publish_calls: list[bool] = []
     window = Main.__new__(Main)
     window._design_session = session
@@ -414,11 +470,10 @@ def test_first_fresh_b_status_retries_legacy_migration_once(
     window._raw_stage_xy_from_camera_stage_xy = lambda point: point
     window._design_navigation_xy_from_physical_machine_xy = lambda point: point
     window._show_status = lambda *_args: None
+    _set_rotation_settings(window)
     window.stage_controller = types.SimpleNamespace(
-        latest_stage_position=lambda: position["value"],
-        last_status_timestamp=lambda: 100.0,
+        latest_machine_coordinate_snapshot=lambda: snapshot["value"],
         axes_are_homed=lambda axes: axes.issubset({"X", "Y"}),
-        calibrated_axis_display_value=lambda _axis, value: float(value),
     )
     monkeypatch.setattr(
         main_module.connection_flow,
@@ -432,7 +487,7 @@ def test_first_fresh_b_status_retries_legacy_migration_once(
     assert session.active_frame_id is None
 
     fresh_position = (0.0, 0.0, 0.0, 0.0, 12.0)
-    position["value"] = fresh_position
+    snapshot["value"] = _machine_snapshot(fresh_position)
     signal_plan = types.SimpleNamespace(
         b_axis=types.SimpleNamespace(current_b=12.0),
     )
@@ -464,9 +519,24 @@ def test_legacy_migration_converts_camera_configured_marks_to_physical_machine(
         point[0] + 100.0,
         point[1] - 200.0,
     )
+    calibrations = default_axis_calibrations()
+    calibrations["X"] = AxisCalibrationSettings(
+        enabled=True,
+        controller_points=[0.0, 10.0, 20.0],
+        physical_points=[0.0, 12.0, 30.0],
+    )
+    calibrations["Y"] = AxisCalibrationSettings(
+        enabled=True,
+        controller_points=[0.0, 10.0, 20.0],
+        physical_points=[0.0, 8.0, 25.0],
+    )
+    snapshot = _machine_snapshot(
+        (15.0, 16.0, 0.0, 0.0, 0.0),
+        work_offset=(4.0, 5.0, 0.0, 0.0, 0.0),
+        calibrations=calibrations,
+    )
     window.stage_controller = types.SimpleNamespace(
-        calibrated_axis_display_value=lambda axis, value: float(value)
-        + {"X": 10.0, "Y": 20.0}[axis],
+        latest_machine_coordinate_snapshot=lambda: snapshot,
     )
     legacy = {
         "source_design_marks": [[0.0, 0.0], [1000.0, 0.0]],
@@ -477,8 +547,12 @@ def test_legacy_migration_converts_camera_configured_marks_to_physical_machine(
 
     converted = Main._legacy_design_state_for_frame_migration(window, legacy)
 
-    assert converted["source_stage_marks"] == [[13.0, 24.0], [14.0, 24.0]]
-    assert converted["check_stage_marks"] == [[13.5, 24.0]]
+    assert np.asarray(converted["source_stage_marks"]) == pytest.approx(
+        np.asarray([[8.4, 7.2], [9.6, 7.2]])
+    )
+    assert np.asarray(converted["check_stage_marks"]) == pytest.approx(
+        np.asarray([[9.0, 7.2]])
+    )
 
 
 def test_stage_mark_capture_commits_active_frame_without_motion(
@@ -495,22 +569,35 @@ def test_stage_mark_capture_commits_active_frame_without_motion(
     session.source_design_marks = tuple(
         base_document.rotate_point(point, 1) for point in canonical_design_marks
     )
-    positions = iter(
+    snapshots = iter(
         (
-            (3.0, 4.0, 0.0, 0.0, 12.0),
-            (4.0, 4.0, 0.0, 0.0, 12.0),
+            _machine_snapshot(
+                (13.0, 24.0, 0.0, 0.0, 42.0),
+                work_offset=(10.0, 20.0, 0.0, 0.0, 30.0),
+            ),
+            _machine_snapshot(
+                (14.0, 24.0, 0.0, 0.0, 42.0),
+                work_offset=(10.0, 20.0, 0.0, 0.0, 30.0),
+            ),
         )
     )
+    requests: list[tuple[object, tuple[str, ...]]] = []
     events: list[object] = []
     window = Main.__new__(Main)
     window._design_session = session
     window._coordinate_frame_registry = registry
+    window.settings_manager = types.SimpleNamespace(
+        settings=types.SimpleNamespace(
+            software_coordinates=types.SimpleNamespace(
+                pivot=RotationPivotSettings()
+            )
+        )
+    )
     window.stage_controller = types.SimpleNamespace(
-        current_stage_position=lambda: next(positions),
-        calibrated_axis_display_value=lambda axis, value: float(value)
-        + {"X": 10.0, "Y": 20.0, "B": 30.0}[axis],
-        calibrated_axis_raw_value=lambda axis, value: float(value)
-        - {"X": 10.0, "Y": 20.0}[axis],
+        request_machine_coordinate_snapshot=lambda token, *, axes: (
+            requests.append((token, tuple(axes))) or True
+        ),
+        current_stage_position=lambda: pytest.fail("synchronous GUI hardware read"),
     )
     window._camera_stage_xy_from_raw_stage_xy = lambda point: (
         point[0] - 100.0,
@@ -526,7 +613,28 @@ def test_stage_mark_capture_commits_active_frame_without_motion(
     )
 
     Main._capture_stage_source_mark(window)
+    first_token, first_axes = requests.pop()
+    assert first_axes == ("X", "Y", "B")
+    first_snapshot = next(snapshots)
+    window.stage_controller.latest_machine_coordinate_snapshot = lambda: first_snapshot
+    Main._on_registration_machine_coordinate_snapshot_finished(
+        window,
+        first_token,
+        True,
+        first_snapshot,
+        "",
+    )
     Main._capture_stage_source_mark(window)
+    second_token, _second_axes = requests.pop()
+    second_snapshot = next(snapshots)
+    window.stage_controller.latest_machine_coordinate_snapshot = lambda: second_snapshot
+    Main._on_registration_machine_coordinate_snapshot_finished(
+        window,
+        second_token,
+        True,
+        second_snapshot,
+        "",
+    )
 
     committed = registry.get(draft.frame_id)
     assert committed is not None
@@ -549,21 +657,133 @@ def test_stage_mark_capture_rejects_calibration_failure_before_mutating_session(
     statuses: list[str] = []
     window = Main.__new__(Main)
     window._design_session = session
+    requests: list[object] = []
     window.stage_controller = types.SimpleNamespace(
-        current_stage_position=lambda: (3.0, 4.0, 0.0, 0.0, 12.0),
-        calibrated_axis_display_value=lambda _axis, _value: (_ for _ in ()).throw(
-            RuntimeError("calibration unavailable")
+        request_machine_coordinate_snapshot=lambda token, *, axes: (
+            requests.append(token) or True
         ),
+        current_stage_position=lambda: pytest.fail("synchronous GUI hardware read"),
     )
     window._refresh_design_panel = lambda: None
     window._refresh_design_position = lambda: None
     window._show_status = lambda message, _timeout: statuses.append(message)
 
     Main._capture_stage_source_mark(window)
+    Main._on_registration_machine_coordinate_snapshot_finished(
+        window,
+        requests.pop(),
+        False,
+        None,
+        "calibration unavailable",
+    )
 
     assert not session.source_stage_marks_compact()
     assert statuses == ["calibration unavailable"]
 
+
+def test_stage_mark_capture_busy_and_stale_callbacks_do_not_mutate_session(
+    tmp_path: Path,
+) -> None:
+    document = _make_document(tmp_path)
+    registry = CoordinateFrameRegistry()
+    draft = registry.add(new_design_frame_draft(document, existing_names=()))
+    session = DesignSession(document=document)
+    session.link_active_frame(draft)
+    session.source_design_marks = ((0.0, 0.0),)
+    statuses: list[str] = []
+    window = Main.__new__(Main)
+    window._design_session = session
+    window._coordinate_frame_registry = registry
+    window._refresh_design_panel = lambda: None
+    window._refresh_design_position = lambda: None
+    window._show_status = lambda message, _timeout: statuses.append(str(message))
+    window.stage_controller = types.SimpleNamespace(
+        request_machine_coordinate_snapshot=lambda _token, *, axes: False,
+        current_stage_position=lambda: pytest.fail("synchronous GUI hardware read"),
+    )
+
+    Main._capture_stage_source_mark(window)
+    assert session.source_stage_marks_compact() == []
+
+    requests: list[object] = []
+    window.stage_controller.request_machine_coordinate_snapshot = (
+        lambda token, *, axes: requests.append(token) or True
+    )
+    Main._capture_stage_source_mark(window)
+    stale_token = requests.pop()
+    session.active_frame_id = "00000000-0000-0000-0000-000000000001"
+    snapshot = _machine_snapshot((1.0, 2.0, 0.0, 0.0, 3.0))
+    Main._on_registration_machine_coordinate_snapshot_finished(
+        window,
+        stale_token,
+        True,
+        snapshot,
+        "",
+    )
+
+    assert session.source_stage_marks_compact() == []
+
+
+def test_design_navigation_inverts_universal_calibration_and_current_wco(
+    tmp_path: Path,
+) -> None:
+    document = _make_document(tmp_path)
+    pivot = (10.0, -2.0)
+    registry = CoordinateFrameRegistry()
+    committed = registry.add(
+        commit_xyb_registration(
+            new_design_frame_draft(document, existing_names=()),
+            design_points=((0.0, 0.0), (1000.0, 0.0)),
+            physical_machine_points=((12.0, 8.0), (13.0, 8.0)),
+            physical_b_deg=10.0,
+            pivot_machine_xy=pivot,
+        )
+    )
+    session = DesignSession(document=document)
+    session.link_active_frame(committed)
+    calibrations = default_axis_calibrations()
+    calibrations["X"] = AxisCalibrationSettings(
+        enabled=True,
+        controller_points=[0.0, 10.0, 20.0],
+        physical_points=[0.0, 12.0, 30.0],
+    )
+    calibrations["Y"] = AxisCalibrationSettings(
+        enabled=True,
+        controller_points=[0.0, 10.0, 20.0],
+        physical_points=[0.0, 8.0, 25.0],
+    )
+    snapshot = _machine_snapshot(
+        (15.0, 16.0, 0.0, 0.0, 20.0),
+        work_offset=(4.0, 5.0, 0.0, 0.0, 6.0),
+        calibrations=calibrations,
+    )
+    window = Main.__new__(Main)
+    window._design_session = session
+    window._coordinate_frame_registry = registry
+    window.stage_controller = types.SimpleNamespace(
+        latest_machine_coordinate_snapshot=lambda: snapshot,
+    )
+    window.settings_manager = types.SimpleNamespace(
+        settings=types.SimpleNamespace(
+            software_coordinates=types.SimpleNamespace(
+                pivot=RotationPivotSettings(x_mm=pivot[0], y_mm=pivot[1])
+            )
+        )
+    )
+
+    physical_target = committed.transform.frame_xy_to_machine(
+        (0.5, 0.25),
+        machine_b_deg=snapshot.physical_machine_pose.require("B"),
+        pivot_machine_xy=pivot,
+    )
+    expected = (
+        snapshot.physical_machine_to_configured_controller("X", physical_target[0]),
+        snapshot.physical_machine_to_configured_controller("Y", physical_target[1]),
+    )
+
+    assert Main._raw_stage_xy_from_design_xy(window, (500.0, 250.0)) == pytest.approx(
+        expected
+    )
 
 def test_authority_uses_xy_homing_and_tracked_calibrated_b_without_b_homing(
     tmp_path: Path,
@@ -593,13 +813,11 @@ def test_authority_uses_xy_homing_and_tracked_calibrated_b_without_b_homing(
     window._design_session = session
     window._coordinate_frame_registry = registry
     window._design_navigation_xy_from_physical_machine_xy = lambda point: point
+    _set_rotation_settings(window)
+    b_snapshot = _machine_snapshot((0.0, 0.0, 0.0, 0.0, 42.0))
     window.stage_controller = types.SimpleNamespace(
         axes_are_homed=axes_are_homed,
-        latest_stage_position=lambda: (0.0, 0.0, 0.0, 0.0, 42.0),
-        last_status_timestamp=lambda: 100.0,
-        calibrated_axis_display_value=lambda axis, value: (
-            float(value) if axis == "B" else pytest.fail(f"unexpected axis {axis}")
-        ),
+        latest_machine_coordinate_snapshot=lambda: b_snapshot,
     )
 
     Main._apply_coordinate_frame_authority_blocks(window)
@@ -640,10 +858,10 @@ def test_authority_temporarily_blocks_b_when_tracked_position_is_unknown(
     window._design_session = session
     window._coordinate_frame_registry = registry
     window._design_navigation_xy_from_physical_machine_xy = lambda point: point
+    _set_rotation_settings(window)
     window.stage_controller = types.SimpleNamespace(
         axes_are_homed=lambda axes: axes.issubset({"X", "Y"}),
-        latest_stage_position=lambda: None,
-        last_status_timestamp=lambda: None,
+        latest_machine_coordinate_snapshot=lambda: None,
     )
 
     Main._apply_coordinate_frame_authority_blocks(window)
@@ -689,22 +907,27 @@ def test_check_capture_at_changed_b_preserves_transform_and_normalizes_metadata(
     window = Main.__new__(Main)
     window._design_session = session
     window._coordinate_frame_registry = registry
-    window.stage_controller = types.SimpleNamespace(
-        current_stage_position=lambda: (
+    _set_rotation_settings(window, pivot)
+    capture_snapshot = _machine_snapshot(
+        (
             current_check_machine[0],
             current_check_machine[1],
             0.0,
             0.0,
             current_b,
+        )
+    )
+    requests: list[object] = []
+    window.stage_controller = types.SimpleNamespace(
+        request_machine_coordinate_snapshot=lambda token, *, axes: (
+            requests.append(token) or True
         ),
-        calibrated_axis_display_value=lambda _axis, value: float(value),
-        calibrated_axis_raw_value=lambda _axis, value: float(value),
+        latest_machine_coordinate_snapshot=lambda: capture_snapshot,
     )
     window._camera_stage_xy_from_raw_stage_xy = lambda point: point
     window._refresh_design_panel = lambda: None
     window._refresh_design_position = lambda: None
     window._show_status = lambda *_args: None
-    monkeypatch.setattr(main_module, "DEFAULT_B_AXIS_ROTATION_PIVOT_STAGE", pivot)
     monkeypatch.setattr(
         main_module.connection_flow,
         "publish_coordinate_frames",
@@ -712,6 +935,13 @@ def test_check_capture_at_changed_b_preserves_transform_and_normalizes_metadata(
     )
 
     Main._capture_stage_check_mark(window)
+    Main._on_registration_machine_coordinate_snapshot_finished(
+        window,
+        requests.pop(),
+        True,
+        capture_snapshot,
+        "",
+    )
 
     updated = registry.get(committed.frame_id)
     assert updated is not None
@@ -769,9 +999,12 @@ def test_source_capture_at_changed_b_retains_existing_check_evidence(
     window = Main.__new__(Main)
     window._design_session = session
     window._coordinate_frame_registry = registry
+    _set_rotation_settings(window, pivot)
+    window._pending_registration_physical_marks = {
+        committed.frame_id: {"source": [third_machine], "check": []}
+    }
     window._design_navigation_xy_from_physical_machine_xy = lambda point: point
     window._show_status = lambda message, _timeout: statuses.append(str(message))
-    monkeypatch.setattr(main_module, "DEFAULT_B_AXIS_ROTATION_PIVOT_STAGE", pivot)
     monkeypatch.setattr(
         main_module.connection_flow,
         "publish_coordinate_frames",
@@ -815,12 +1048,13 @@ def test_legacy_migration_projection_failure_leaves_registry_and_link_unchanged(
     )
     window._raw_stage_xy_from_camera_stage_xy = lambda point: point
     window._camera_stage_xy_from_raw_stage_xy = lambda point: point
+    _set_rotation_settings(window)
+    snapshot = _machine_snapshot((0.0, 0.0, 0.0, 0.0, 12.0))
     window.stage_controller = types.SimpleNamespace(
-        latest_stage_position=lambda: (0.0, 0.0, 0.0, 0.0, 12.0),
-        calibrated_axis_display_value=lambda _axis, value: float(value),
-        calibrated_axis_raw_value=lambda _axis, _value: (_ for _ in ()).throw(
-            RuntimeError("inverse calibration unavailable")
-        ),
+        latest_machine_coordinate_snapshot=lambda: snapshot,
+    )
+    window._design_navigation_xy_from_physical_machine_xy = lambda _point: (
+        (_ for _ in ()).throw(RuntimeError("inverse calibration unavailable"))
     )
     window._show_status = lambda message, _timeout: statuses.append(str(message))
 
@@ -849,6 +1083,12 @@ def test_reset_design_registration_creates_an_independent_persistent_draft(
     window._coordinate_frames_loaded = True
     window._active_design_frame_metadata = main_module.DesignFrameMetadata.from_mapping(
         first.metadata
+    )
+    _set_rotation_settings(window)
+    window.stage_controller = types.SimpleNamespace(
+        latest_machine_coordinate_snapshot=lambda: _machine_snapshot(
+            (0.0, 0.0, 0.0, 0.0, 0.0)
+        )
     )
     window._pending_alignment_preparation = object()
     window._last_selected_design_point = (1.0, 2.0)
@@ -1313,15 +1553,18 @@ def test_replacing_committed_source_marks_starts_fresh_draft_before_capture(
     )
     session = DesignSession(document=document)
     session.link_active_frame(committed)
-    positions = iter(
+    snapshots = iter(
         (
-            (10.0, 20.0, 0.0, 0.0, 5.0),
-            (11.0, 20.0, 0.0, 0.0, 5.0),
+            _machine_snapshot((10.0, 20.0, 0.0, 0.0, 5.0)),
+            _machine_snapshot((11.0, 20.0, 0.0, 0.0, 5.0)),
         )
     )
+    requests: list[object] = []
+    current_snapshot = {"value": _machine_snapshot((0.0, 0.0, 0.0, 0.0, 5.0))}
     window = Main.__new__(Main)
     window._design_session = session
     window._coordinate_frame_registry = registry
+    _set_rotation_settings(window)
     window._coordinate_frames_loaded = True
     window._active_design_frame_metadata = main_module.DesignFrameMetadata.from_mapping(
         committed.metadata
@@ -1331,9 +1574,10 @@ def test_replacing_committed_source_marks_starts_fresh_draft_before_capture(
     window._pending_alignment_preparation = None
     window._last_selected_design_point = None
     window.stage_controller = types.SimpleNamespace(
-        current_stage_position=lambda: next(positions),
-        calibrated_axis_display_value=lambda _axis, value: float(value),
-        calibrated_axis_raw_value=lambda _axis, value: float(value),
+        request_machine_coordinate_snapshot=lambda token, *, axes: (
+            requests.append(token) or True
+        ),
+        latest_machine_coordinate_snapshot=lambda: current_snapshot["value"],
     )
     window._camera_stage_xy_from_raw_stage_xy = lambda point: point
     window._set_design_snap_enabled = lambda _enabled: None
@@ -1352,6 +1596,15 @@ def test_replacing_committed_source_marks_starts_fresh_draft_before_capture(
     Main._on_design_layout_point_selected(window, 1, 1100.0, 200.0)
     replacement_id = session.active_frame_id
     Main._capture_stage_source_mark(window)
+    first_snapshot = next(snapshots)
+    current_snapshot["value"] = first_snapshot
+    Main._on_registration_machine_coordinate_snapshot_finished(
+        window,
+        requests.pop(),
+        True,
+        first_snapshot,
+        "",
+    )
 
     first_capture = registry.get(replacement_id)
     assert replacement_id != committed.frame_id
@@ -1359,6 +1612,15 @@ def test_replacing_committed_source_marks_starts_fresh_draft_before_capture(
     assert not first_capture.readiness["X"].available
 
     Main._capture_stage_source_mark(window)
+    second_snapshot = next(snapshots)
+    current_snapshot["value"] = second_snapshot
+    Main._on_registration_machine_coordinate_snapshot_finished(
+        window,
+        requests.pop(),
+        True,
+        second_snapshot,
+        "",
+    )
 
     replacement = registry.get(replacement_id)
     assert replacement is not None
@@ -1407,6 +1669,12 @@ def test_top_cell_switch_links_the_matching_persistent_frame(
     window._coordinate_frame_registry = registry
     window._coordinate_frames_loaded = True
     window._active_design_frame_metadata = top_metadata
+    _set_rotation_settings(window)
+    window.stage_controller = types.SimpleNamespace(
+        latest_machine_coordinate_snapshot=lambda: _machine_snapshot(
+            (0.0, 0.0, 0.0, 0.0, 0.0)
+        )
+    )
     window._pending_alignment_preparation = None
     window._last_selected_design_point = None
     window._design_load_pending = False

@@ -20,7 +20,10 @@ from probe_station_gui.design.model import (
     MeasurementTarget,
     Point2D,
 )
-from probe_station_gui.design.session import DesignSession
+from probe_station_gui.design.session import (
+    DEFAULT_B_AXIS_ROTATION_PIVOT_STAGE,
+    DesignSession,
+)
 from probe_station_gui.design.selection_model import (
     MixedArrayPlan,
     MixedDeletePlan,
@@ -232,6 +235,8 @@ def activate_design_frame_for_document(
     create_new: bool = False,
     current_metadata: DesignFrameMetadata | None = None,
     machine_point_for_navigation: Callable[[Point2D], Point2D] | None = None,
+    machine_b_deg: float | None = None,
+    pivot_machine_xy: Point2D = DEFAULT_B_AXIS_ROTATION_PIVOT_STAGE,
 ) -> DesignFrameActivation:
     """Select a durable frame for a loaded design or create another draft."""
 
@@ -247,6 +252,8 @@ def activate_design_frame_for_document(
         projection = session.prepare_active_frame_link(
             candidate,
             machine_point_for_navigation=machine_point_for_navigation,
+            machine_b_deg=machine_b_deg,
+            pivot_machine_xy=pivot_machine_xy,
         )
         record = registry.add(candidate)
         session.apply_active_frame_link(record, projection)
@@ -288,6 +295,8 @@ def activate_design_frame_for_document(
         projection = session.prepare_active_frame_link(
             candidate,
             machine_point_for_navigation=machine_point_for_navigation,
+            machine_b_deg=machine_b_deg,
+            pivot_machine_xy=pivot_machine_xy,
         )
         selected = registry.add(candidate)
         session.apply_active_frame_link(selected, projection)
@@ -302,6 +311,8 @@ def activate_design_frame_for_document(
     projection = session.prepare_active_frame_link(
         reconciled,
         machine_point_for_navigation=machine_point_for_navigation,
+        machine_b_deg=machine_b_deg,
+        pivot_machine_xy=pivot_machine_xy,
     )
     if updated:
         reconciled = registry.replace(reconciled, expected_version=selected.version)

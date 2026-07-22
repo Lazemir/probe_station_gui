@@ -9,6 +9,7 @@ except ImportError:
 
 from probe_station_gui.settings.axis_calibration_config import default_axis_calibrations
 from probe_station_gui.stage.errors import StageControllerError
+from probe_station_gui.stage.machine_coordinates import MachineCoordinateSnapshot
 from probe_station_gui.stage.types import _Status
 
 
@@ -303,6 +304,127 @@ def test_physical_machine_coordinates_reject_missing_or_out_of_domain_mpos() -> 
                 outside,
                 axes=("Z",),
             )
+    finally:
+        controller.shutdown()
+
+
+def test_cached_machine_coordinate_snapshot_uses_same_status_generation() -> None:
+    controller = StageController()
+    try:
+        controller._position_reporting_mode = "work"
+        controller._active_work_coordinate_system = "G54"
+        controller._controller_coordinate_offsets["G54"] = (
+            4.0,
+            5.0,
+            0.0,
+            0.0,
+            6.0,
+        )
+        controller._update_cached_positions(
+            _Status(
+                state="Idle",
+                synchronized_machine_position=(15.0, 16.0, 0.0, 0.0, 17.0),
+                display_position=(11.0, 11.0, 0.0, 0.0, 11.0),
+                work_position=(11.0, 11.0, 0.0, 0.0, 11.0),
+                work_offset=(4.0, 5.0, 0.0, 0.0, 6.0),
+                coordinate_system="G54",
+            )
+        )
+
+        snapshot = controller.latest_machine_coordinate_snapshot()
+        assert isinstance(snapshot, MachineCoordinateSnapshot)
+        assert snapshot.physical_machine_pose.require("X") == 15.0
+
+        controller._update_cached_positions(
+            _Status(
+                state="Idle",
+                synchronized_machine_position=None,
+                display_position=(12.0, 11.0, 0.0, 0.0, 11.0),
+                work_position=(12.0, 11.0, 0.0, 0.0, 11.0),
+                work_offset=(4.0, 5.0, 0.0, 0.0, 6.0),
+                coordinate_system="G54",
+            )
+        )
+        assert controller.latest_machine_coordinate_snapshot() is None
+    finally:
+        controller.shutdown()
+
+
+def test_machine_coordinate_snapshot_request_runs_query_only_in_background_target() -> None:
+    controller = StageController()
+    started: dict[str, object] = {}
+    emitted: list[tuple[object, ...]] = []
+    try:
+        controller.machine_coordinate_snapshot_finished = SimpleNamespace(
+            emit=lambda *args: emitted.append(args)
+        )
+        controller._query_current_stage_position_status = lambda: _Status(
+            state="Idle",
+            synchronized_machine_position=(1.0, 2.0, 3.0, 4.0, 5.0),
+            display_position=(1.0, 2.0, 3.0, 4.0, 5.0),
+            work_position=(1.0, 2.0, 3.0, 4.0, 5.0),
+            work_offset=(0.0, 0.0, 0.0, 0.0, 0.0),
+            coordinate_system="G54",
+        )
+
+        def capture_start(**kwargs):
+            started.update(kwargs)
+            return True
+
+        controller._start_background_task = capture_start
+
+        assert controller.request_machine_coordinate_snapshot(
+            "registration-1",
+            axes=("X", "Y", "B"),
+        )
+        assert emitted == []
+
+        started["target"](*started["args"])
+        request_id, success, snapshot, message = emitted.pop()
+        assert request_id == "registration-1"
+        assert success is True
+        assert snapshot.physical_machine_pose.to_dict() == {
+            "X": 1.0,
+            "Y": 2.0,
+            "Z": 3.0,
+            "A": 4.0,
+            "B": 5.0,
+        }
+        assert message == ""
+    finally:
+        controller.shutdown()
+
+
+def test_machine_coordinate_snapshot_worker_reports_failure_without_cached_fallback() -> None:
+    controller = StageController()
+    emitted: list[tuple[object, ...]] = []
+    try:
+        controller.machine_coordinate_snapshot_finished = SimpleNamespace(
+            emit=lambda *args: emitted.append(args)
+        )
+        controller._last_machine_coordinate_snapshot = object()
+        controller._query_current_stage_position_status = lambda: _Status(
+            state="Idle",
+            synchronized_machine_position=None,
+            display_position=(1.0, 2.0, 3.0),
+            work_position=(1.0, 2.0, 3.0),
+            work_offset=None,
+            coordinate_system="G54",
+        )
+
+        controller._run_machine_coordinate_snapshot_request(
+            "registration-2",
+            ("X", "Y", "B"),
+        )
+
+        assert emitted == [
+            (
+                "registration-2",
+                False,
+                None,
+                "Synchronized Machine coordinates are unavailable.",
+            )
+        ]
     finally:
         controller.shutdown()
 

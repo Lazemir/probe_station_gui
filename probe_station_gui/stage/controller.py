@@ -54,6 +54,10 @@ from probe_station_gui.stage.jog_commands import (
 from probe_station_gui.stage.homing_startup import StageControllerHomingStartupMixin
 from probe_station_gui.stage.jog_queue import StageControllerJogQueueMixin
 from probe_station_gui.stage.motion_commands import StageControllerMotionCommandsMixin
+from probe_station_gui.stage.machine_coordinates import (
+    MachineCoordinateSnapshot,
+    MachineCoordinateSnapshotUnavailable,
+)
 from probe_station_gui.stage.motion_execution import (
     FluidNCMotionSerialAdapter,
     MotionTiming,
@@ -205,6 +209,12 @@ class StageController(
     controller_reboot_detected: Signal = Signal()
     controller_reboot_ready: Signal = Signal()
     coordinate_confidence_changed: Signal = Signal(object)
+    machine_coordinate_snapshot_finished: Signal = Signal(
+        object,
+        bool,
+        object,
+        str,
+    )
 
     CALIBRATION_PIXEL_TARGET = 120.0
     CALIBRATION_MIN_VERIFY_PIXELS = 15.0
@@ -306,6 +316,7 @@ class StageController(
         self._last_stage_position: Optional[tuple[float, ...]] = None
         self._last_machine_position: Optional[tuple[float, ...]] = None
         self._last_synchronized_machine_position: Optional[tuple[float, ...]] = None
+        self._last_machine_coordinate_snapshot: MachineCoordinateSnapshot | None = None
         self._latest_frame: Optional[np.ndarray] = None
         self._frame_counter = 0
         self._frame_history: deque[tuple[int, float, np.ndarray]] = deque(maxlen=256)
@@ -1083,6 +1094,50 @@ class StageController(
         with self._serial_session():
             return self._current_physical_machine_coordinates_locked(axes)
 
+    def request_machine_coordinate_snapshot(
+        self,
+        request_id: object,
+        *,
+        axes: Iterable[str],
+    ) -> bool:
+        """Capture one calibrated, provenance-checked status off the GUI thread."""
+
+        normalized_axes = tuple(str(axis).strip().upper() for axis in axes)
+        return self._start_background_task(
+            target=self._run_machine_coordinate_snapshot_request,
+            args=(request_id, normalized_axes),
+            busy_message="Stage is busy. Wait before capturing a reference.",
+        )
+
+    def _run_machine_coordinate_snapshot_request(
+        self,
+        request_id: object,
+        axes: tuple[str, ...],
+    ) -> None:
+        try:
+            status = self._query_current_stage_position_status()
+            snapshot = MachineCoordinateSnapshot.from_status(
+                status,
+                self._axis_calibration_mapper(),
+                self.AXIS_INDEX,
+            )
+            for axis in axes:
+                snapshot.physical_machine_pose.require(axis)
+        except Exception as exc:
+            self.machine_coordinate_snapshot_finished.emit(
+                request_id,
+                False,
+                None,
+                str(exc),
+            )
+            return
+        self.machine_coordinate_snapshot_finished.emit(
+            request_id,
+            True,
+            snapshot,
+            "",
+        )
+
     def _current_physical_machine_coordinates_locked(
         self,
         axes: Iterable[str],
@@ -1210,6 +1265,13 @@ class StageController(
             return None
         return tuple(self._last_synchronized_machine_position)
 
+    def latest_machine_coordinate_snapshot(
+        self,
+    ) -> MachineCoordinateSnapshot | None:
+        """Return the latest immutable same-generation coordinate snapshot."""
+
+        return self._last_machine_coordinate_snapshot
+
     def axis_calibration_preview_position(
         self,
         axis: str,
@@ -1328,6 +1390,16 @@ class StageController(
             if synchronized_machine is not None
             else None
         )
+        try:
+            self._last_machine_coordinate_snapshot = (
+                MachineCoordinateSnapshot.from_status(
+                    status,
+                    self._axis_calibration_mapper(),
+                    self.AXIS_INDEX,
+                )
+            )
+        except MachineCoordinateSnapshotUnavailable:
+            self._last_machine_coordinate_snapshot = None
         synchronized_machine_changed = (
             previous_synchronized_machine != self._last_synchronized_machine_position
         )

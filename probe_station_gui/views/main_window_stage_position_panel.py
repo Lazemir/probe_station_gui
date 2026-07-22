@@ -18,6 +18,7 @@ from probe_station_gui.coordinates.presentation import (
     build_coordinate_display_plan,
     decide_pending_frame_restore,
 )
+from probe_station_gui.coordinates.rotation_geometry import rotation_geometry_snapshot
 from probe_station_gui.stage.position_presenter import (
     coordinate_confidence_role,
     stage_position_display_plan,
@@ -111,11 +112,7 @@ def _persist_gui_coordinate_selection(owner: object, frame_id: str) -> None:
 
 def _coordinate_pivot(owner: object) -> tuple[float, float]:
     settings = getattr(getattr(owner, "settings_manager", None), "settings", None)
-    pivot = getattr(getattr(settings, "software_coordinates", None), "pivot", None)
-    try:
-        return (float(pivot.x_mm), float(pivot.y_mm))
-    except (AttributeError, TypeError, ValueError):
-        return (0.0, 0.0)
+    return rotation_geometry_snapshot(settings.software_coordinates).pivot_machine_xy
 
 
 def _coerce_physical_machine_pose(value: object) -> PhysicalMachinePose:
@@ -173,11 +170,20 @@ def update_software_coordinate_display(
         getattr(owner, "_selected_coordinate_frame_id", MACHINE_FRAME_ID)
         or MACHINE_FRAME_ID
     )
+    try:
+        pivot = _coordinate_pivot(owner)
+    except (AttributeError, TypeError, ValueError) as exc:
+        selected = MACHINE_FRAME_ID
+        owner._selected_coordinate_frame_id = MACHINE_FRAME_ID
+        pivot = (float("nan"), float("nan"))
+        show_status = getattr(owner, "_show_status", None)
+        if callable(show_status):
+            show_status(str(exc), 6000)
     plan = build_coordinate_display_plan(
         snapshot,
         selected_frame_id=selected,
         physical_pose=physical_pose,
-        pivot_machine_xy=_coordinate_pivot(owner),
+        pivot_machine_xy=pivot,
         homed_axes=homed_axes,
         authority_axes=authority_axes,
     )
@@ -223,11 +229,19 @@ def select_gui_coordinate_frame(
             requested = MACHINE_FRAME_ID
         else:
             homed_getter = getattr(owner.stage_controller, "homed_axes", None)
+            try:
+                pivot = _coordinate_pivot(owner)
+            except (AttributeError, TypeError, ValueError) as exc:
+                show_status = getattr(owner, "_show_status", None)
+                if callable(show_status):
+                    show_status(str(exc), 6000)
+                requested = MACHINE_FRAME_ID
+                pivot = (float("nan"), float("nan"))
             plan = build_coordinate_display_plan(
                 registry.snapshot(),
                 selected_frame_id=requested,
                 physical_pose=pose,
-                pivot_machine_xy=_coordinate_pivot(owner),
+                pivot_machine_xy=pivot,
                 homed_axes=homed_getter() if callable(homed_getter) else set(),
                 authority_axes=set(pose.values),
             )

@@ -44,6 +44,28 @@ class _Stage:
         return {"X", "Y", "Z", "A", "B"}
 
 
+class _PivotSession:
+    def __init__(self, frame_id: str) -> None:
+        self.active_frame_id = frame_id
+        self.prepared: list[tuple[object, float, tuple[float, float]]] = []
+        self.applied: list[tuple[object, object]] = []
+
+    def prepare_active_frame_link(
+        self,
+        record: object,
+        *,
+        machine_point_for_navigation: object,
+        machine_b_deg: float,
+        pivot_machine_xy: tuple[float, float],
+    ) -> object:
+        projection = object()
+        self.prepared.append((record, machine_b_deg, pivot_machine_xy))
+        return projection
+
+    def apply_active_frame_link(self, record: object, projection: object) -> None:
+        self.applied.append((record, projection))
+
+
 def _owner(*, busy: bool = False) -> SimpleNamespace:
     settings = Settings()
     frame_id = str(uuid4())
@@ -132,6 +154,32 @@ def test_same_pivot_reapply_is_registry_noop_and_busy_pivot_is_rejected() -> Non
     Main._apply_settings_from_dialog(owner, changed)
 
     assert owner.settings_manager.settings.software_coordinates.pivot.x_mm == 0.0
+    assert owner._coordinate_frame_registry.snapshot() == before
+
+
+def test_idle_pivot_change_prepares_then_atomically_relinks_active_design_session() -> None:
+    owner = _owner()
+    design = next(
+        record
+        for record in owner._coordinate_frame_registry.snapshot().records
+        if record.kind is FrameKind.DESIGN
+    )
+    session = _PivotSession(design.frame_id)
+    owner._design_session = session
+    owner._design_navigation_xy_from_physical_machine_xy = lambda point: point
+    owner.stage_controller.latest_machine_coordinate_snapshot = lambda: SimpleNamespace(
+        physical_machine_pose=PhysicalMachinePose({"B": 37.0})
+    )
+    before = owner._coordinate_frame_registry.snapshot()
+    changed = owner.settings_manager.settings.clone()
+    changed.software_coordinates.pivot.x_mm = 4.0
+    changed.software_coordinates.pivot.y_mm = -3.0
+
+    Main._apply_settings_from_dialog(owner, changed)
+
+    assert session.prepared == [(design, 37.0, (4.0, -3.0))]
+    assert len(session.applied) == 1
+    assert session.applied[0][0] is design
     assert owner._coordinate_frame_registry.snapshot() == before
 
 
