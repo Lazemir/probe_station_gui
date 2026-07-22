@@ -135,6 +135,7 @@ class _DesignPlotPane(QWidget):
     hover_snap_changed = Signal(object)
     tool_hover_snap_changed = Signal(object, bool, bool)
     snap_geometry_ready = Signal(int, object, object, object)
+    selected_focus_point_changed = Signal(object)
     HOVER_SNAP_LOG_INTERVAL_S = 1.0
     HOVER_SNAP_SLOW_MS = 8.0
     SNAP_RADIUS_PX = 14.0
@@ -1308,6 +1309,7 @@ class _DesignPlotPane(QWidget):
             None if point is None else (float(point[0]), float(point[1]))
         )
         self._redraw_focus_reference_overlays()
+        self.selected_focus_point_changed.emit(self._selected_focus_point)
 
     @property
     def selected_focus_point(self) -> Point2D | None:
@@ -2105,6 +2107,7 @@ class _DesignPlotPane(QWidget):
             self._selected_focus_point = raw_point
             if hasattr(self, "_selected_focus_item"):
                 _DesignPlotPane._redraw_focus_reference_overlays(self)
+            self.selected_focus_point_changed.emit(raw_point)
             self._emit_click_selection(raw_point, modifiers)
             return
         if bool(getattr(self._document, "file_backed", False)):

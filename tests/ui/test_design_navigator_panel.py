@@ -95,13 +95,52 @@ def test_focus_reference_controls_use_finished_product_copy_and_readiness(
     assert panel._use_selected_focus_button.text() == "Use selected point"
     assert panel._reset_focus_reference_button.text() == "Reset focus reference"
     assert panel._find_focus_reference_button.isEnabled()
+    assert not panel._use_selected_focus_button.isEnabled()
     assert not panel._reset_focus_reference_button.isEnabled()
+
+    panel.set_focus_selection_available(True)
+    assert panel._use_selected_focus_button.isEnabled()
 
     panel.set_focus_reference_state(z_ready=True, a_ready=True)
 
     assert not panel._find_focus_reference_button.isEnabled()
     assert panel._reset_focus_reference_button.isEnabled()
     assert panel._focus_reference_status_label.text() == "Focus and contact references ready."
+    panel.deleteLater()
+
+
+def test_registration_instance_selector_uses_uuid_and_obeys_edit_guard(
+    qt_app: QApplication,
+) -> None:
+    panel = DesignNavigatorPanel()
+    panel._document = object()
+    selected: list[str] = []
+    created: list[bool] = []
+    panel.registration_instance_selected.connect(selected.append)
+    panel.new_registration_requested.connect(lambda: created.append(True))
+
+    panel.set_registration_instances(
+        (
+            ("11111111-1111-4111-8111-111111111111", "loaded"),
+            ("22222222-2222-4222-8222-222222222222", "loaded (2)"),
+        ),
+        selected_frame_id="11111111-1111-4111-8111-111111111111",
+    )
+
+    assert panel._registration_instance_combo.itemData(0) == (
+        "11111111-1111-4111-8111-111111111111"
+    )
+    assert panel._registration_instance_combo.itemData(1) == (
+        "22222222-2222-4222-8222-222222222222"
+    )
+    panel._registration_instance_combo.setCurrentIndex(1)
+    assert selected == ["22222222-2222-4222-8222-222222222222"]
+    panel._new_registration_button.click()
+    assert created == [True]
+
+    panel.set_route_measurement_running(True)
+    assert not panel._registration_instance_combo.isEnabled()
+    assert not panel._new_registration_button.isEnabled()
     panel.deleteLater()
 
 

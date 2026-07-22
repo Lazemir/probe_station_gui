@@ -143,6 +143,8 @@ class DesignNavigatorPanel(QWidget):
     find_focus_reference_requested = Signal()
     use_selected_focus_requested = Signal()
     reset_focus_reference_requested = Signal()
+    registration_instance_selected = Signal(str)
+    new_registration_requested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -159,6 +161,9 @@ class DesignNavigatorPanel(QWidget):
         self._design_registration_active = False
         self._focus_z_ready = False
         self._contact_a_ready = False
+        self._focus_selection_available = False
+        self._registration_instances: tuple[tuple[str, str], ...] = ()
+        self._updating_registration_instances = False
         self._current_design_position: Point2D | None = None
         self._active_design_tool = "select"
         self._selection = SelectionModel()
@@ -218,6 +223,24 @@ class DesignNavigatorPanel(QWidget):
 
         registration_group = QGroupBox("Registration", self)
         registration_layout = QVBoxLayout(registration_group)
+        registration_instance_row = QHBoxLayout()
+        self._registration_instance_combo = QComboBox(registration_group)
+        self._registration_instance_combo.setToolTip(
+            "Select a saved registration for this design and top cell."
+        )
+        self._new_registration_button = QPushButton(
+            "New registration",
+            registration_group,
+        )
+        registration_instance_row.addWidget(self._registration_instance_combo, 1)
+        registration_instance_row.addWidget(self._new_registration_button)
+        registration_layout.addLayout(registration_instance_row)
+        self._registration_instance_combo.currentIndexChanged.connect(
+            self._on_registration_instance_changed
+        )
+        self._new_registration_button.clicked.connect(
+            self.new_registration_requested.emit
+        )
         self._registration_hint_label = QLabel(
             "Use left click for design point 1 and right click for design point 2 in the layout view.",
             registration_group,
@@ -1021,6 +1044,42 @@ class DesignNavigatorPanel(QWidget):
         self._design_registration_active = bool(active)
         self._update_enabled_state()
 
+    def set_registration_instances(
+        self,
+        instances: object,
+        *,
+        selected_frame_id: str | None,
+    ) -> None:
+        normalized = tuple(
+            (str(frame_id), str(name))
+            for frame_id, name in instances
+            if str(frame_id).strip()
+        )
+        self._registration_instances = normalized
+        self._updating_registration_instances = True
+        try:
+            self._registration_instance_combo.clear()
+            selected_index = -1
+            for index, (frame_id, name) in enumerate(normalized):
+                self._registration_instance_combo.addItem(name, frame_id)
+                if frame_id == selected_frame_id:
+                    selected_index = index
+            self._registration_instance_combo.setCurrentIndex(selected_index)
+        finally:
+            self._updating_registration_instances = False
+        self._update_enabled_state()
+
+    def _on_registration_instance_changed(self, index: int) -> None:
+        if self._updating_registration_instances or index < 0:
+            return
+        frame_id = self._registration_instance_combo.itemData(index)
+        if frame_id:
+            self.registration_instance_selected.emit(str(frame_id))
+
+    def set_focus_selection_available(self, available: bool) -> None:
+        self._focus_selection_available = bool(available)
+        self._update_enabled_state()
+
     def set_focus_reference_state(self, *, z_ready: bool, a_ready: bool) -> None:
         self._focus_z_ready = bool(z_ready)
         self._contact_a_ready = bool(a_ready) and self._focus_z_ready
@@ -1187,11 +1246,17 @@ class DesignNavigatorPanel(QWidget):
         self._layer_list.setEnabled(state.can_use_document_controls)
         self._snap_checkbox.setEnabled(state.can_use_document_controls)
         can_set_focus = state.can_edit_design and self._design_registration_active
+        self._registration_instance_combo.setEnabled(
+            state.can_edit_design and bool(self._registration_instances)
+        )
+        self._new_registration_button.setEnabled(state.can_edit_design)
         self._find_focus_reference_button.setEnabled(
             can_set_focus and not self._focus_z_ready
         )
         self._use_selected_focus_button.setEnabled(
-            can_set_focus and not self._focus_z_ready
+            can_set_focus
+            and not self._focus_z_ready
+            and self._focus_selection_available
         )
         self._reset_focus_reference_button.setEnabled(
             can_set_focus and self._focus_z_ready
@@ -2121,6 +2186,8 @@ class DesignLayoutWindow(QWidget):
     find_focus_reference_requested = Signal()
     focus_reference_requested = Signal(float, float)
     reset_focus_reference_requested = Signal()
+    registration_instance_selected = Signal(str)
+    new_registration_requested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         _ = parent
@@ -2174,6 +2241,11 @@ class DesignLayoutWindow(QWidget):
             self.navigator_panel.set_tool_hover_snap
         )
         self._main_view.hover_snap_changed.connect(self.hover_snap_changed.emit)
+        self._main_view.selected_focus_point_changed.connect(
+            lambda point: self.navigator_panel.set_focus_selection_available(
+                point is not None
+            )
+        )
         self.navigator_panel.route_pick_mode_changed.connect(
             self._main_view.set_route_pick_mode
         )
@@ -2227,6 +2299,12 @@ class DesignLayoutWindow(QWidget):
         )
         self.navigator_panel.reset_focus_reference_requested.connect(
             self.reset_focus_reference_requested.emit
+        )
+        self.navigator_panel.registration_instance_selected.connect(
+            self.registration_instance_selected.emit
+        )
+        self.navigator_panel.new_registration_requested.connect(
+            self.new_registration_requested.emit
         )
         self._escape_shortcut = QShortcut(QKeySequence("Esc"), self)
         self._escape_shortcut.setContext(Qt.WindowShortcut)
@@ -2405,6 +2483,17 @@ class DesignLayoutWindow(QWidget):
 
     def set_registration_status(self, text: str) -> None:
         self.navigator_panel.set_registration_status(text)
+
+    def set_registration_instances(
+        self,
+        instances: object,
+        *,
+        selected_frame_id: str | None,
+    ) -> None:
+        self.navigator_panel.set_registration_instances(
+            instances,
+            selected_frame_id=selected_frame_id,
+        )
 
     def set_focus_candidate(self, candidate: FocusCandidate | None) -> None:
         self._main_view.set_focus_candidate(candidate)

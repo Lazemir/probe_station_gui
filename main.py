@@ -9858,6 +9858,92 @@ class Main(QMainWindow):
         self._refresh_design_position()
         self._show_status("Design calibration restarted.", 4000)
 
+    def _design_registration_instances(self) -> tuple[tuple[str, str], ...]:
+        document = getattr(self._design_session, "document", None)
+        registry = getattr(self, "_coordinate_frame_registry", None)
+        if document is None or registry is None:
+            return ()
+        try:
+            source_path = document.path.expanduser().resolve()
+        except OSError:
+            return ()
+        instances: list[tuple[str, str]] = []
+        for record in registry.snapshot().records:
+            try:
+                metadata = DesignFrameMetadata.from_mapping(record.metadata)
+                matches = (
+                    Path(metadata.source_path).expanduser().resolve() == source_path
+                    and metadata.top_cell_name == document.top_cell_name
+                )
+            except (KeyError, TypeError, ValueError, OSError):
+                matches = False
+            if matches:
+                instances.append((record.frame_id, record.name))
+        return tuple(instances)
+
+    def _reconcile_missing_design_registration_instance(self) -> None:
+        frame_id = getattr(self._design_session, "active_frame_id", None)
+        registry = getattr(self, "_coordinate_frame_registry", None)
+        if frame_id is None or registry is None or registry.get(frame_id) is not None:
+            return
+        self._design_session.clear_registration()
+        self._pending_alignment_preparation = None
+        self._last_selected_design_point = None
+        self._clear_design_focus_overlay_state()
+
+    def _select_design_registration_instance(self, frame_id: str) -> None:
+        if not self._design_edit_safe():
+            self._show_status("Design editing is locked.", 4000)
+            return
+        document = self._design_session.document
+        registry = getattr(self, "_coordinate_frame_registry", None)
+        metadata = getattr(self, "_active_design_frame_metadata", None)
+        if document is None or registry is None or metadata is None:
+            return
+        selected_id = str(frame_id).strip()
+        if selected_id == self._design_session.active_frame_id:
+            return
+        physical_b = self._tracked_physical_b_for_design_frame()
+        if physical_b is None:
+            self._show_status(
+                "Current Machine B position is unavailable.",
+                5000,
+            )
+            return
+        try:
+            activation = design_navigation.activate_design_frame_for_document(
+                self._design_session,
+                registry,
+                document,
+                requested_frame_id=selected_id,
+                current_metadata=self._design_metadata_with_calibration_fingerprints(
+                    metadata
+                ),
+                machine_point_for_navigation=(
+                    self._design_navigation_xy_from_physical_machine_xy
+                ),
+                machine_b_deg=physical_b,
+                pivot_machine_xy=self._rotation_geometry_snapshot().pivot_machine_xy,
+            )
+        except DesignModelError as exc:
+            self._show_status(str(exc), 6000)
+            return
+        self._pending_alignment_preparation = None
+        self._last_selected_design_point = None
+        self._clear_design_focus_overlay_state()
+        if activation.updated:
+            connection_flow.publish_coordinate_frames(self)
+        self._apply_coordinate_frame_authority_blocks()
+        self._refresh_design_panel()
+        self._refresh_design_position()
+        self._show_status(f"Selected registration {activation.record.name}.", 4000)
+
+    def _new_design_registration_instance(self) -> None:
+        if not self._design_edit_safe():
+            self._show_status("Design editing is locked.", 4000)
+            return
+        self._clear_design_registration()
+
     def _invalidate_design_registration(self, reason: str) -> None:
         self._pending_alignment_preparation = None
         self._design_session.invalidate_registration(reason)
@@ -10061,11 +10147,12 @@ class Main(QMainWindow):
             self._show_status("No focus structure fits the current field of view.", 5000)
             return
         self._focus_candidate = candidate
+        self._focus_candidate_context = pending_context
         window = getattr(self, "design_layout_window", None)
         if window is not None:
             window.set_focus_candidate(candidate)
             window.set_selected_focus_point(candidate.center)
-        self._start_design_focus_reference(candidate.center)
+        self._show_status("Focus reference found. Review and use the selected point.", 5000)
 
     def _on_focus_structure_bounds_failed(
         self,
@@ -10083,6 +10170,8 @@ class Main(QMainWindow):
         if document is None:
             return None
         record = self._active_design_frame_record()
+        fov_size = self._resolve_design_fov_size()
+        objective_name, optical_identity = self._design_focus_optical_context_key()
         return (
             str(Path(document.path).expanduser().resolve()),
             document.source_load_id,
@@ -10091,10 +10180,30 @@ class Main(QMainWindow):
             int(document.rotation_quarter_turns) % 4,
             getattr(self._design_session, "active_frame_id", None),
             None if record is None else record.version,
+            None if fov_size is None else tuple(float(value) for value in fov_size),
+            objective_name,
+            optical_identity,
         )
+
+    def _design_focus_optical_context_key(self) -> tuple[str, str]:
+        try:
+            objectives = self.settings_manager.objectives_configuration()
+            objective_name = normalize_objective_name(objectives.active_name)
+            profile = objectives.objectives.get(objective_name)
+            payload = None if profile is None else profile.to_dict()
+            identity = json.dumps(
+                payload,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+            )
+        except (AttributeError, TypeError, ValueError):
+            return "", ""
+        return objective_name, identity
 
     def _clear_design_focus_overlay_state(self) -> None:
         self._focus_candidate = None
+        self._focus_candidate_context = None
         self._pending_focus_structure_request_id = None
         self._pending_focus_structure_context = None
         self._pending_focus_structure_fov = None
@@ -10103,6 +10212,25 @@ class Main(QMainWindow):
         if window is not None:
             window.set_focus_candidate(None)
             window.set_selected_focus_point(None)
+
+    def _use_selected_design_focus_reference(
+        self,
+        design_point: tuple[float, float],
+    ) -> None:
+        current_context = self._design_focus_overlay_context_key()
+        candidate = getattr(self, "_focus_candidate", None)
+        candidate_context = getattr(self, "_focus_candidate_context", None)
+        if candidate is None or candidate_context != current_context:
+            self._clear_design_focus_overlay_state()
+            self._design_focus_overlay_context = current_context
+            self._show_status(
+                "Find a new focus reference for the current view.",
+                5000,
+            )
+            return
+        self._start_design_focus_reference(
+            (float(design_point[0]), float(design_point[1]))
+        )
 
     def _synchronize_design_focus_overlay_context(self) -> None:
         context = self._design_focus_overlay_context_key()
@@ -10243,7 +10371,7 @@ class Main(QMainWindow):
         if record is None:
             return
         try:
-            reset = self._coordinate_frame_registry.replace(
+            self._coordinate_frame_registry.replace(
                 reset_focus_reference(
                     record,
                     reason="Focus reference reset.",
@@ -10268,16 +10396,23 @@ class Main(QMainWindow):
             self._find_design_focus_reference
         )
         window.focus_reference_requested.connect(
-            lambda x_value, y_value: self._start_design_focus_reference(
+            lambda x_value, y_value: self._use_selected_design_focus_reference(
                 (x_value, y_value)
             )
         )
         window.reset_focus_reference_requested.connect(
             self._reset_design_focus_reference
         )
+        window.registration_instance_selected.connect(
+            self._select_design_registration_instance
+        )
+        window.new_registration_requested.connect(
+            self._new_design_registration_instance
+        )
         self._design_focus_signals_connected = True
 
     def _refresh_design_panel(self) -> None:
+        self._reconcile_missing_design_registration_instance()
         self._synchronize_design_focus_overlay_context()
         panel = self.design_navigator_panel
         self._connect_design_focus_signals()
@@ -10288,6 +10423,8 @@ class Main(QMainWindow):
             pending_alignment_preparation=self._pending_alignment_preparation is not None,
             design_snap_enabled=self._design_snap_enabled,
         )
+        registration_instances = self._design_registration_instances()
+        active_frame_id = self._design_session.active_frame_id
         if panel is not None:
             panel.set_document(p.document)
             panel.set_design_registration_active(p.registration_valid)
@@ -10296,6 +10433,11 @@ class Main(QMainWindow):
             panel.set_route_measurement_running(p.route_measurement_running)
             panel.set_calibration_prompt(p.calibration_prompt)
             panel.set_registration_status(p.registration_status)
+            if hasattr(panel, "set_registration_instances"):
+                panel.set_registration_instances(
+                    registration_instances,
+                    selected_frame_id=active_frame_id,
+                )
             panel.set_registration_marks(p.source_design_marks, p.check_design_marks)
             panel.set_stage_registration_marks(p.source_stage_marks)
             record = self._active_design_frame_record()
@@ -10321,6 +10463,10 @@ class Main(QMainWindow):
             self.design_layout_window.set_navigation_enabled(p.registration_valid)
             self.design_layout_window.set_registration_marks(p.source_design_marks, p.check_design_marks)
             self.design_layout_window.set_stage_registration_marks(p.source_stage_marks)
+            self.design_layout_window.set_registration_instances(
+                registration_instances,
+                selected_frame_id=active_frame_id,
+            )
             self.design_layout_window.set_focus_candidate(
                 getattr(self, "_focus_candidate", None)
             )

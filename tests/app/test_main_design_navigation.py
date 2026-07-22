@@ -1467,7 +1467,91 @@ def test_find_focus_submits_visible_fixture_geometry_and_waits_for_worker(
         ),
     )
 
-    assert started == [(5.0, 5.0)]
+    assert started == []
+    assert window._focus_candidate.center == (5.0, 5.0)
+
+
+@pytest.mark.parametrize("changed_part", ["fov", "objective", "calibration"])
+def test_focus_candidate_acceptance_rejects_stale_optical_context(
+    changed_part: str,
+) -> None:
+    started: list[tuple[float, float]] = []
+    statuses: list[str] = []
+    context = {
+        "value": ("document", (20.0, 20.0), "X5", "optical-a"),
+    }
+    window = Main.__new__(Main)
+    window._focus_candidate = types.SimpleNamespace(center=(5.0, 5.0))
+    window._focus_candidate_context = context["value"]
+    window._design_focus_overlay_context_key = lambda: context["value"]
+    window._start_design_focus_reference = started.append
+    window._show_status = lambda message, _timeout: statuses.append(str(message))
+    window.design_layout_window = None
+
+    replacements = {
+        "fov": ("document", (30.0, 20.0), "X5", "optical-a"),
+        "objective": ("document", (20.0, 20.0), "X20", "optical-b"),
+        "calibration": ("document", (20.0, 20.0), "X5", "optical-b"),
+    }
+    context["value"] = replacements[changed_part]
+
+    Main._use_selected_design_focus_reference(window, (5.0, 5.0))
+
+    assert started == []
+    assert window._focus_candidate is None
+    assert statuses == ["Find a new focus reference for the current view."]
+
+
+def test_focus_candidate_moves_only_after_explicit_current_context_acceptance() -> None:
+    started: list[tuple[float, float]] = []
+    context = ("document", (20.0, 20.0), "X5", "optical-a")
+    window = Main.__new__(Main)
+    window._focus_candidate = types.SimpleNamespace(center=(5.0, 5.0))
+    window._focus_candidate_context = context
+    window._design_focus_overlay_context_key = lambda: context
+    window._start_design_focus_reference = started.append
+
+    Main._use_selected_design_focus_reference(window, (6.0, 7.0))
+
+    assert started == [(6.0, 7.0)]
+
+
+def test_focus_context_key_tracks_fov_objective_and_optical_calibration(
+    tmp_path: Path,
+) -> None:
+    document = _make_document(tmp_path)
+    fov = {"value": (20.0, 30.0)}
+    profile_payload = {"pixels_to_mm": [[1.0, 0.0], [0.0, 1.0]]}
+    objectives = types.SimpleNamespace(
+        active_name="X5",
+        objectives={
+            "X5": types.SimpleNamespace(to_dict=lambda: dict(profile_payload)),
+            "X20": types.SimpleNamespace(to_dict=lambda: {"pixels_to_mm": [[2.0]]}),
+        },
+    )
+    window = Main.__new__(Main)
+    window._design_session = types.SimpleNamespace(
+        document=document,
+        active_frame_id=None,
+    )
+    window._coordinate_frame_registry = types.SimpleNamespace(get=lambda _frame_id: None)
+    window._resolve_design_fov_size = lambda: fov["value"]
+    window.settings_manager = types.SimpleNamespace(
+        objectives_configuration=lambda: objectives
+    )
+
+    initial = Main._design_focus_overlay_context_key(window)
+    fov["value"] = (21.0, 30.0)
+    changed_fov = Main._design_focus_overlay_context_key(window)
+    objectives.active_name = "X20"
+    changed_objective = Main._design_focus_overlay_context_key(window)
+    objectives.active_name = "X5"
+    profile_payload["pixels_to_mm"] = [[3.0, 0.0], [0.0, 3.0]]
+    changed_calibration = Main._design_focus_overlay_context_key(window)
+
+    assert changed_fov != initial
+    assert changed_objective != changed_fov
+    assert changed_calibration != initial
 
 
 def test_stale_focus_structure_result_is_ignored_after_document_context_change(
@@ -1697,6 +1781,123 @@ def test_top_cell_switch_links_the_matching_persistent_frame(
     assert session.document.top_cell_name == "ALT"
     assert session.active_frame_id == alt_frame.frame_id
     assert window._active_design_frame_metadata.top_cell_name == "ALT"
+
+
+def test_registration_instance_switch_new_and_route_lineage_preserve_records(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    document = _make_document(tmp_path)
+    registry = CoordinateFrameRegistry()
+    first = registry.add(
+        commit_xyb_registration(
+            new_design_frame_draft(document, existing_names=()),
+            design_points=((0.0, 0.0), (1000.0, 0.0)),
+            physical_machine_points=((1.0, 2.0), (2.0, 2.0)),
+            physical_b_deg=0.0,
+            pivot_machine_xy=(0.0, 0.0),
+        )
+    )
+    second = registry.add(
+        commit_xyb_registration(
+            new_design_frame_draft(document, existing_names=(first.name,)),
+            design_points=((0.0, 0.0), (1000.0, 0.0)),
+            physical_machine_points=((10.0, 20.0), (11.0, 20.0)),
+            physical_b_deg=0.0,
+            pivot_machine_xy=(0.0, 0.0),
+        )
+    )
+    session = DesignSession(document=document)
+    session.link_active_frame(first)
+    window = Main.__new__(Main)
+    window._design_session = session
+    window._coordinate_frame_registry = registry
+    window._coordinate_frames_loaded = True
+    window._active_design_frame_metadata = main_module.DesignFrameMetadata.from_document(
+        document
+    )
+    window._design_load_pending = False
+    window._route_measurement_thread = None
+    window._pending_alignment_preparation = None
+    window._last_selected_design_point = None
+    window._pending_registration_physical_marks = {}
+    window._design_focus_overlay_context = object()
+    window._focus_candidate = object()
+    window.design_layout_window = None
+    _set_rotation_settings(window)
+    window.stage_controller = types.SimpleNamespace(
+        latest_machine_coordinate_snapshot=lambda: _machine_snapshot(
+            (0.0, 0.0, 0.0, 0.0, 0.0)
+        )
+    )
+    window._design_navigation_xy_from_physical_machine_xy = lambda point: point
+    window._refresh_design_panel = lambda: None
+    window._refresh_design_position = lambda: None
+    window._show_status = lambda *_args: None
+    window._apply_coordinate_frame_authority_blocks = lambda: None
+    window._set_design_snap_enabled = lambda _enabled: None
+    monkeypatch.setattr(
+        main_module.connection_flow,
+        "publish_coordinate_frames",
+        lambda _owner: None,
+    )
+    original_records = registry.snapshot().records
+
+    window._route_measurement_thread = types.SimpleNamespace(is_alive=lambda: True)
+    Main._select_design_registration_instance(window, second.frame_id)
+    Main._new_design_registration_instance(window)
+    assert session.active_frame_id == first.frame_id
+    assert registry.snapshot().records == original_records
+    window._route_measurement_thread = None
+
+    Main._select_design_registration_instance(window, second.frame_id)
+
+    assert session.active_frame_id == second.frame_id
+    assert np.allclose(session.source_stage_marks, ((10.0, 20.0), (11.0, 20.0)))
+    assert Main._snapshot_active_route_design_frame(window) == (
+        main_module.snapshot_route_design_frame(
+            frame_id=second.frame_id,
+            frame_version=second.version,
+        )
+    )
+    assert registry.snapshot().records == original_records
+    assert window._focus_candidate is None
+
+    Main._select_design_registration_instance(window, first.frame_id)
+
+    assert session.active_frame_id == first.frame_id
+    assert np.allclose(session.source_stage_marks, ((1.0, 2.0), (2.0, 2.0)))
+    assert registry.snapshot().records == original_records
+
+    Main._new_design_registration_instance(window)
+
+    assert len(registry.snapshot().records) == 3
+    assert session.active_frame_id not in {first.frame_id, second.frame_id}
+
+
+def test_missing_selected_registration_clears_session_without_deleting_others(
+    tmp_path: Path,
+) -> None:
+    document = _make_document(tmp_path)
+    registry = CoordinateFrameRegistry()
+    first = registry.add(new_design_frame_draft(document, existing_names=()))
+    second = registry.add(
+        new_design_frame_draft(document, existing_names=(first.name,))
+    )
+    session = DesignSession(document=document)
+    session.link_active_frame(first)
+    window = Main.__new__(Main)
+    window._design_session = session
+    window._coordinate_frame_registry = registry
+    window.design_layout_window = None
+    window._focus_candidate = object()
+    registry.reset((second,))
+
+    Main._reconcile_missing_design_registration_instance(window)
+
+    assert session.active_frame_id is None
+    assert registry.snapshot().records == (second,)
+    assert window._focus_candidate is None
 
 
 def _make_mixed_edit_window(tmp_path: Path) -> tuple[Main, list[str]]:
