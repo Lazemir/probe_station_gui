@@ -4648,12 +4648,16 @@ class Main(QMainWindow):
         coordinates_changed = (
             settings_to_apply.software_coordinates != existing_coordinates
         )
+        custom_frames_changed = (
+            settings_to_apply.software_coordinates.custom_frames
+            != existing_coordinates.custom_frames
+        )
         prepared_coordinate_records = None
         if coordinates_changed and self.stage_controller.is_busy():
             settings_to_apply.software_coordinates = existing_coordinates.clone()
             self._show_status("Stage is busy; coordinate settings not changed.", 4000)
             coordinates_changed = False
-        elif coordinates_changed and bool(
+        elif custom_frames_changed and bool(
             getattr(self, "_coordinate_frames_loaded", False)
         ):
             try:
@@ -4701,7 +4705,7 @@ class Main(QMainWindow):
         if prepared_coordinate_records is not None:
             self._coordinate_frame_registry.reset(prepared_coordinate_records)
         self._invalidate_coordinate_frames_for_calibration_change(changed_calibrations)
-        if prepared_coordinate_records is not None or changed_calibrations:
+        if coordinates_changed or changed_calibrations:
             stage_position_panel_adapter.refresh_coordinate_frame_display(self)
         if objective_mutation_busy:
             self._apply_settings(apply_objective_runtime=False)

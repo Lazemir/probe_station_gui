@@ -112,17 +112,15 @@ def test_to_settings_updates_only_software_coordinate_settings() -> None:
 def test_ordinary_controls_hide_c_without_removing_backend_axis_configuration() -> None:
     _qt_app()
     panel = StagePositionPanel(VISIBLE_STAGE_AXES)
-    widget = JoystickWindow()
     settings = Settings()
 
     assert tuple(panel.axis_fields) == ("X", "Y", "Z", "A", "B")
-    assert widget.visible_axis_names() == ("X", "Y", "Z", "A", "B")
-    assert "C" not in widget.visible_axis_names()
+    assert JoystickWindow.MANUAL_JOG_AXES == ("X", "Y", "Z", "A", "B")
+    assert "C" not in JoystickWindow.MANUAL_JOG_AXES
     assert STAGE_AXES == ("X", "Y", "Z", "A", "B", "C")
     assert "C" in settings.axis_calibrations
 
     panel.deleteLater()
-    widget.deleteLater()
 
 
 def test_settings_dialog_exposes_software_coordinates_tab() -> None:
