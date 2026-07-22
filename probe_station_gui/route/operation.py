@@ -162,6 +162,11 @@ def route_measurement_start_decision(
             message="Design registration is required before measuring a route.",
             timeout_ms=6000,
         )
+    if design_frame_snapshot is None:
+        return RouteMeasurementStartDecision(
+            message="Design coordinate frame is required before measuring a route.",
+            timeout_ms=6000,
+        )
     try:
         points = list(points_factory(route))
     except DesignModelError as exc:

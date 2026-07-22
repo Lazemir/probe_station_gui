@@ -7181,6 +7181,7 @@ class Main(QMainWindow):
         self,
         *,
         frame_metadata: DesignFrameMetadata | None = None,
+        stage_position: tuple[float, ...] | None = None,
     ) -> None:
         registry = getattr(self, "_coordinate_frame_registry", None)
         if (
@@ -7205,8 +7206,15 @@ class Main(QMainWindow):
             and len(self._design_session.source_stage_marks_compact()) >= 2
         )
         if is_legacy_registration:
-            latest = self.stage_controller.latest_stage_position()
+            latest = (
+                stage_position
+                if stage_position is not None
+                else self.stage_controller.latest_stage_position()
+            )
             if latest is None or len(latest) <= self.STAGE_AXIS_NAMES.index("B"):
+                self._design_session.block_legacy_registration_until_b(
+                    "Design registration requires a current B position."
+                )
                 return
             b_index = self.STAGE_AXIS_NAMES.index("B")
             try:
@@ -7214,6 +7222,13 @@ class Main(QMainWindow):
                     "B",
                     float(latest[b_index]),
                 )
+            except Exception as exc:
+                self._design_session.block_legacy_registration_until_b(
+                    "Design registration requires a current B position."
+                )
+                self._show_status(str(exc), 6000)
+                return
+            try:
                 migration_state = self._legacy_design_state_for_frame_migration(
                     legacy_state
                 )
@@ -7298,6 +7313,11 @@ class Main(QMainWindow):
             unavailable.add("B")
         self._coordinate_frame_authority_blocked_axes = unavailable
         if session.active_frame_id is None:
+            if (
+                physical_b is not None
+                and session.legacy_registration_waiting_for_b
+            ):
+                self._activate_loaded_design_frame(stage_position=stage_position)
             return
         record = registry.get(session.active_frame_id)
         if record is None:

@@ -806,6 +806,12 @@ def _make_route_start_main(
         route=types.SimpleNamespace(points=[object()], name="route"),
         registration=types.SimpleNamespace(valid=True),
     )
+    window._snapshot_active_route_design_frame = lambda: (
+        main_module.snapshot_route_design_frame(
+            frame_id="design-a",
+            frame_version=4,
+        )
+    )
     window._route_measurement_points = lambda _route: [point]
     window._set_route_measurement_resume_point = lambda _point: None
     window._route_measurement_session_active = False

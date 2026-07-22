@@ -152,6 +152,11 @@ def api_route_session_start_decision(
             message="Design registration is required before using contacts.",
             status_code=409,
         )
+    if design_frame_snapshot is None:
+        return ApiRouteSessionStartDecision(
+            message="Design coordinate frame is required before using contacts.",
+            status_code=409,
+        )
     try:
         points = list(points_factory(route))
     except DesignModelError as exc:

@@ -29,6 +29,7 @@ from probe_station_gui.design.session import DesignSession
 from probe_station_gui.coordinates.registry import CoordinateFrameRegistry
 from probe_station_gui.design.frame_registration import new_design_frame_draft
 from probe_station_gui.route.model import MeasurementRoute
+from probe_station_gui.stage import position_update
 
 DesignDocument = main_module.DesignDocument
 
@@ -346,6 +347,103 @@ def test_legacy_migration_reports_b_calibration_failure_without_adding_frame(
 
     assert registry.snapshot().records == ()
     assert statuses == ["B calibration unavailable"]
+
+
+def test_legacy_migration_waiting_for_b_is_runtime_invalid_but_persisted(
+    tmp_path: Path,
+) -> None:
+    document = _make_document(tmp_path)
+    session = DesignSession(document=document)
+    session.source_design_marks = ((0.0, 0.0), (1000.0, 0.0))
+    session.source_stage_marks = ((3.0, 4.0), (4.0, 4.0))
+    session._rebuild_registration()
+    assert session.registration is not None and session.registration.valid
+    persisted_before = session.export_persisted_state()
+    registry = CoordinateFrameRegistry()
+    window = Main.__new__(Main)
+    window._design_session = session
+    window._coordinate_frame_registry = registry
+    window._coordinate_frames_loaded = True
+    window._active_design_frame_metadata = main_module.DesignFrameMetadata.from_document(
+        document
+    )
+    window.stage_controller = types.SimpleNamespace(latest_stage_position=lambda: None)
+
+    Main._activate_loaded_design_frame(window)
+
+    assert session.active_frame_id is None
+    assert session.registration is not None
+    assert session.registration.valid is False
+    assert session.registration_status == (
+        "Design registration requires a current B position."
+    )
+    assert session.source_design_marks == ((0.0, 0.0), (1000.0, 0.0))
+    assert session.source_stage_marks == ((3.0, 4.0), (4.0, 4.0))
+    assert session.export_persisted_state() == persisted_before
+    assert registry.snapshot().records == ()
+
+
+def test_first_fresh_b_status_retries_legacy_migration_once(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    document = _make_document(tmp_path)
+    session = DesignSession(document=document)
+    session.source_design_marks = ((0.0, 0.0), (1000.0, 0.0))
+    session.source_stage_marks = ((3.0, 4.0), (4.0, 4.0))
+    session._rebuild_registration()
+    registry = CoordinateFrameRegistry()
+    position: dict[str, tuple[float, ...] | None] = {"value": None}
+    publish_calls: list[bool] = []
+    window = Main.__new__(Main)
+    window._design_session = session
+    window._coordinate_frame_registry = registry
+    window._coordinate_frames_loaded = True
+    window._active_design_frame_metadata = main_module.DesignFrameMetadata.from_document(
+        document
+    )
+    window._last_reported_b_position = None
+    window._raw_stage_xy_from_camera_stage_xy = lambda point: point
+    window._design_navigation_xy_from_physical_machine_xy = lambda point: point
+    window._show_status = lambda *_args: None
+    window.stage_controller = types.SimpleNamespace(
+        latest_stage_position=lambda: position["value"],
+        last_status_timestamp=lambda: 100.0,
+        axes_are_homed=lambda axes: axes.issubset({"X", "Y"}),
+        calibrated_axis_display_value=lambda _axis, value: float(value),
+    )
+    monkeypatch.setattr(
+        main_module.connection_flow,
+        "publish_coordinate_frames",
+        lambda _owner, *, legacy_migration=False: publish_calls.append(
+            bool(legacy_migration)
+        ),
+    )
+
+    Main._activate_loaded_design_frame(window)
+    assert session.active_frame_id is None
+
+    fresh_position = (0.0, 0.0, 0.0, 0.0, 12.0)
+    position["value"] = fresh_position
+    signal_plan = types.SimpleNamespace(
+        b_axis=types.SimpleNamespace(current_b=12.0),
+    )
+    position_update._apply_b_axis_registration(
+        window,
+        signal_plan,
+        fresh_position,
+    )
+    position_update._apply_b_axis_registration(
+        window,
+        signal_plan,
+        fresh_position,
+    )
+
+    assert session.active_frame_id is not None
+    assert session.registration is not None and session.registration.valid
+    assert len(registry.snapshot().records) == 1
+    assert registry.snapshot().generation == 1
+    assert publish_calls == [True]
 
 
 def test_legacy_migration_converts_camera_configured_marks_to_physical_machine(

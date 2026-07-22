@@ -18,6 +18,12 @@ from probe_station_gui.route.session_start import (
 from probe_station_gui.route.measurement_records import RouteMeasurementPoint
 
 
+DURABLE_FRAME_SNAPSHOT = snapshot_route_design_frame(
+    frame_id="design-a",
+    frame_version=4,
+)
+
+
 def _new_helper(name: str):
     helper = getattr(session_start_module, name, None)
     assert helper is not None
@@ -175,6 +181,7 @@ def test_api_route_session_start_decision_builds_points_settings_and_contact_sel
         default_contact_seek_range_mm=0.05,
         default_contact_seek_step_mm=0.002,
         default_contact_settle_s=0.4,
+        design_frame_snapshot=DURABLE_FRAME_SNAPSHOT,
     )
 
     assert decision.accepted is True
@@ -222,6 +229,29 @@ def test_route_start_snapshots_active_design_frame_identity_and_version() -> Non
     assert result.plan.design_frame_snapshot is frame
     assert result.plan.design_frame_snapshot.frame_id == "design-a"
     assert result.plan.design_frame_snapshot.frame_version == 4
+
+
+def test_api_route_start_rejects_missing_durable_frame_snapshot() -> None:
+    decision = api_route_session_start_decision(
+        route=types.SimpleNamespace(points=[object()]),
+        registration_valid=True,
+        payload={},
+        current_point=1,
+        points_factory=lambda _route: pytest.fail(
+            "points must not resolve without a durable frame"
+        ),
+        default_contact_seek_range_mm=0.05,
+        default_contact_seek_step_mm=0.002,
+        default_contact_settle_s=0.4,
+        design_frame_snapshot=None,
+    )
+
+    assert decision.accepted is False
+    assert decision.plan is None
+    assert decision.status_code == 409
+    assert decision.message == (
+        "Design coordinate frame is required before using contacts."
+    )
 
 
 @pytest.mark.parametrize(
@@ -277,6 +307,7 @@ def test_api_route_session_start_decision_rejects_points_factory_model_error() -
         default_contact_seek_range_mm=0.05,
         default_contact_seek_step_mm=0.002,
         default_contact_settle_s=0.4,
+        design_frame_snapshot=DURABLE_FRAME_SNAPSHOT,
     )
 
     assert decision.accepted is False
@@ -298,6 +329,7 @@ def test_api_route_session_start_decision_rejects_empty_resolved_points() -> Non
         default_contact_seek_range_mm=0.05,
         default_contact_seek_step_mm=0.002,
         default_contact_settle_s=0.4,
+        design_frame_snapshot=DURABLE_FRAME_SNAPSHOT,
     )
 
     assert decision.accepted is False
@@ -328,6 +360,7 @@ def test_api_route_session_start_decision_rejects_invalid_payload_with_400() -> 
         default_contact_seek_range_mm=0.05,
         default_contact_seek_step_mm=0.002,
         default_contact_settle_s=0.4,
+        design_frame_snapshot=DURABLE_FRAME_SNAPSHOT,
     )
 
     assert decision.accepted is False
@@ -358,6 +391,7 @@ def test_api_route_session_start_decision_rejects_filtered_out_selected_contact(
         default_contact_seek_range_mm=0.05,
         default_contact_seek_step_mm=0.002,
         default_contact_settle_s=0.4,
+        design_frame_snapshot=DURABLE_FRAME_SNAPSHOT,
     )
 
     assert decision.accepted is False

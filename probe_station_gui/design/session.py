@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -79,12 +80,23 @@ class DesignSession:
     selected_route_point_index: int = -1
     registration_status: str = "No design registration."
     active_frame_id: str | None = None
+    _runtime_blocked_persisted_state: dict[str, object] | None = field(
+        default=None,
+        init=False,
+        repr=False,
+        compare=False,
+    )
 
     def export_persisted_state(self) -> dict[str, object] | None:
         """Return design state tied to the current controller coordinate session."""
 
         if self.document is None:
             return None
+        if (
+            self.active_frame_id is None
+            and self._runtime_blocked_persisted_state is not None
+        ):
+            return deepcopy(self._runtime_blocked_persisted_state)
         state: dict[str, object] = {
             "version": 3 if self.active_frame_id is not None else 2,
             "document_path": str(self.document.path),
@@ -258,6 +270,7 @@ class DesignSession:
     def load_document(self, document: DesignDocument) -> None:
         """Attach a new design document and clear derived state."""
 
+        self._runtime_blocked_persisted_state = None
         self.document = document
         self.active_frame_id = None
         self.clear_targets()
@@ -344,6 +357,25 @@ class DesignSession:
         self.registration = None
         self.registration_status = "No design registration."
         self.active_frame_id = None
+        self._runtime_blocked_persisted_state = None
+
+    @property
+    def legacy_registration_waiting_for_b(self) -> bool:
+        return bool(
+            self.active_frame_id is None
+            and self._runtime_blocked_persisted_state is not None
+        )
+
+    def block_legacy_registration_until_b(self, reason: str) -> None:
+        """Block legacy runtime use without changing its persisted payload."""
+
+        if self.active_frame_id is not None:
+            return
+        if self._runtime_blocked_persisted_state is None:
+            persisted = self.export_persisted_state()
+            if persisted is not None:
+                self._runtime_blocked_persisted_state = deepcopy(persisted)
+        self.invalidate_registration(reason)
 
     def link_active_frame(
         self,
@@ -441,6 +473,7 @@ class DesignSession:
 
         if projection.frame_id != frame.frame_id:
             raise DesignModelError("Design frame projection no longer matches the frame.")
+        self._runtime_blocked_persisted_state = None
         self.active_frame_id = frame.frame_id
         self.source_design_marks = projection.source_design_marks
         self.source_stage_marks = projection.source_stage_marks

@@ -278,6 +278,12 @@ class MainRouteMeasurementSessionTest(unittest.TestCase):
             route=types.SimpleNamespace(points=[object()], name="route"),
             registration=types.SimpleNamespace(valid=True),
         )
+        window._snapshot_active_route_design_frame = lambda: (
+            main_module.snapshot_route_design_frame(
+                frame_id="design-a",
+                frame_version=4,
+            )
+        )
         window._route_measurement_points = lambda _route: [point]
         window._api_route_meter_configuration = (
             lambda _payload, voltages_v=None: RouteMeterConfiguration()
@@ -955,6 +961,12 @@ class MainRouteMeasurementSessionTest(unittest.TestCase):
             route=types.SimpleNamespace(points=[object()], name="route"),
             registration=types.SimpleNamespace(valid=True),
         )
+        window._snapshot_active_route_design_frame = lambda: (
+            main_module.snapshot_route_design_frame(
+                frame_id="design-a",
+                frame_version=4,
+            )
+        )
         window.serial_connection = types.SimpleNamespace(is_open=True)
         window.stage_controller = stage
         window.lcr_controller = lcr
@@ -1410,6 +1422,12 @@ class MainRouteMeasurementSessionTest(unittest.TestCase):
         window._design_session = types.SimpleNamespace(
             route=types.SimpleNamespace(points=[object()], name="route"),
             registration=types.SimpleNamespace(valid=True),
+        )
+        window._snapshot_active_route_design_frame = lambda: (
+            main_module.snapshot_route_design_frame(
+                frame_id="design-a",
+                frame_version=4,
+            )
         )
         window._route_measurement_points = lambda _route: [point]
         window._set_route_measurement_resume_point = lambda _point: None

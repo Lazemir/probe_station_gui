@@ -14,6 +14,12 @@ from probe_station_gui.route.operation import (
 from probe_station_gui.route.session_start import snapshot_route_design_frame
 
 
+DURABLE_FRAME_SNAPSHOT = snapshot_route_design_frame(
+    frame_id="design-a",
+    frame_version=4,
+)
+
+
 def _point(index: int, label: str | None = None) -> RouteMeasurementPoint:
     return RouteMeasurementPoint(
         index=index,
@@ -45,6 +51,7 @@ def test_route_measurement_start_decision_filters_previous_ok_points(tmp_path) -
         current_point=3,
         previous_ok_only=True,
         previous_csv_path=previous_csv,
+        design_frame_snapshot=DURABLE_FRAME_SNAPSHOT,
     )
 
     assert decision.accepted is True
@@ -78,6 +85,26 @@ def test_gui_route_plan_retains_design_frame_identity_when_active_link_changes(
     assert decision.plan.points[0].stage_xy == (11.0, 21.0)
 
 
+def test_route_measurement_start_decision_rejects_missing_durable_frame(
+    tmp_path,
+) -> None:
+    decision = route_measurement_start_decision(
+        route=SimpleNamespace(points=[object()]),
+        registration_valid=True,
+        points_factory=lambda _route: [_point(1)],
+        current_point=1,
+        previous_ok_only=False,
+        previous_csv_path=tmp_path / "unused.csv",
+        design_frame_snapshot=None,
+    )
+
+    assert decision.accepted is False
+    assert decision.plan is None
+    assert decision.message == (
+        "Design coordinate frame is required before measuring a route."
+    )
+
+
 def test_route_measurement_start_decision_rejects_current_point_filtered_out(
     tmp_path,
 ) -> None:
@@ -97,6 +124,7 @@ def test_route_measurement_start_decision_rejects_current_point_filtered_out(
         current_point=2,
         previous_ok_only=True,
         previous_csv_path=previous_csv,
+        design_frame_snapshot=DURABLE_FRAME_SNAPSHOT,
     )
 
     assert decision.accepted is False
