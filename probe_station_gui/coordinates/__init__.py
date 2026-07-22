@@ -16,6 +16,12 @@ from .registry import (
     RegistrySnapshot,
     invalidate_axes,
 )
+from .persistence import (
+    CoordinateFrameDocument,
+    CoordinateFrameStoreWorker,
+    FilesystemCoordinateFrameBackend,
+    FrameLoadDiagnostic,
+)
 from .transforms import BFrameTransform, rotate_xy
 
 __all__ = [
@@ -23,9 +29,13 @@ __all__ = [
     "VISIBLE_STAGE_AXES",
     "AxisReadiness",
     "BFrameTransform",
+    "CoordinateFrameDocument",
     "CoordinateFrameRecord",
     "CoordinateFrameRegistry",
+    "CoordinateFrameStoreWorker",
+    "FilesystemCoordinateFrameBackend",
     "FrameKind",
+    "FrameLoadDiagnostic",
     "FrameVersionConflict",
     "PhysicalMachinePose",
     "ReadinessStatus",
