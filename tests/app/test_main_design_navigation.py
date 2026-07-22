@@ -25,9 +25,16 @@ from probe_station_gui.design.selection_model import (
     markup_entity_id,
     route_entity_id,
 )
+from probe_station_gui.design.model import DesignRegistration
 from probe_station_gui.design.session import DesignSession
 from probe_station_gui.coordinates.registry import CoordinateFrameRegistry
-from probe_station_gui.design.frame_registration import new_design_frame_draft
+from probe_station_gui.design.frame_registration import (
+    ContactReferenceToken,
+    RegistrationFocusToken,
+    commit_xyb_registration,
+    new_design_frame_draft,
+    set_focus_reference,
+)
 from probe_station_gui.route.model import MeasurementRoute
 from probe_station_gui.stage import position_update
 
@@ -868,6 +875,191 @@ def test_reset_design_registration_creates_an_independent_persistent_draft(
     assert new_metadata.source_design_marks == ()
     assert new_metadata.source_machine_marks == ()
     assert ("publish",) in events
+
+
+def test_registration_focus_completion_publishes_only_after_matching_replace(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    document = _make_document(tmp_path)
+    registry = CoordinateFrameRegistry()
+    registered = registry.add(
+        commit_xyb_registration(
+            new_design_frame_draft(document, existing_names=()),
+            design_points=((0.0, 0.0), (1000.0, 0.0)),
+            physical_machine_points=((1.0, 2.0), (2.0, 2.0)),
+            physical_b_deg=0.0,
+            pivot_machine_xy=(0.0, 0.0),
+        )
+    )
+    token = RegistrationFocusToken(registered.frame_id, registered.version)
+    events: list[object] = []
+    window = Main.__new__(Main)
+    window._coordinate_frame_registry = registry
+    window._design_session = types.SimpleNamespace(active_frame_id=registered.frame_id)
+    window._pending_registration_focus_token = token
+    window._refresh_design_panel = lambda: events.append("refresh")
+    window._show_status = lambda message, _timeout: events.append(("status", message))
+    monkeypatch.setattr(
+        main_module.connection_flow,
+        "publish_coordinate_frames",
+        lambda _owner: events.append("publish"),
+    )
+
+    Main._on_registration_focus_autofocus_finished(
+        window,
+        token,
+        True,
+        6.0,
+        "Focused.",
+    )
+
+    focused = registry.get(registered.frame_id)
+    assert focused is not None and focused.readiness["Z"].available
+    assert focused.transform.z_zero_machine_mm == 6.0
+    assert events.index("publish") < events.index("refresh")
+
+
+def test_registration_focus_completion_ignores_inactive_frame(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    document = _make_document(tmp_path)
+    registry = CoordinateFrameRegistry()
+    registered = registry.add(
+        commit_xyb_registration(
+            new_design_frame_draft(document, existing_names=()),
+            design_points=((0.0, 0.0), (1000.0, 0.0)),
+            physical_machine_points=((1.0, 2.0), (2.0, 2.0)),
+            physical_b_deg=0.0,
+            pivot_machine_xy=(0.0, 0.0),
+        )
+    )
+    token = RegistrationFocusToken(registered.frame_id, registered.version)
+    events: list[str] = []
+    window = Main.__new__(Main)
+    window._coordinate_frame_registry = registry
+    window._design_session = types.SimpleNamespace(active_frame_id="another-frame")
+    window._pending_registration_focus_token = token
+    window._refresh_design_panel = lambda: events.append("refresh")
+    window._show_status = lambda *_args: events.append("status")
+    monkeypatch.setattr(
+        main_module.connection_flow,
+        "publish_coordinate_frames",
+        lambda _owner: events.append("publish"),
+    )
+
+    Main._on_registration_focus_autofocus_finished(
+        window,
+        token,
+        True,
+        6.0,
+        "Focused.",
+    )
+
+    current = registry.get(registered.frame_id)
+    assert current is not None
+    assert current.transform.z_zero_machine_mm is None
+    assert events == []
+
+
+def test_stale_contact_completion_never_publishes_or_captures_a(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    document = _make_document(tmp_path)
+    registry = CoordinateFrameRegistry()
+    focused = registry.add(
+        set_focus_reference(
+            commit_xyb_registration(
+                new_design_frame_draft(document, existing_names=()),
+                design_points=((0.0, 0.0), (1000.0, 0.0)),
+                physical_machine_points=((1.0, 2.0), (2.0, 2.0)),
+                physical_b_deg=0.0,
+                pivot_machine_xy=(0.0, 0.0),
+            ),
+            physical_machine_z_mm=6.0,
+        )
+    )
+    events: list[str] = []
+    window = Main.__new__(Main)
+    window._coordinate_frame_registry = registry
+    window._refresh_design_panel = lambda: events.append("refresh")
+    monkeypatch.setattr(
+        main_module.connection_flow,
+        "publish_coordinate_frames",
+        lambda _owner: events.append("publish"),
+    )
+
+    Main._on_design_contact_reference_ready(
+        window,
+        ContactReferenceToken(focused.frame_id, focused.version + 1),
+        8.0,
+    )
+
+    current = registry.get(focused.frame_id)
+    assert current is not None
+    assert current.transform.a_zero_machine_mm is None
+    assert events == []
+
+
+def test_contact_callback_never_captures_after_active_frame_switch(
+    tmp_path: Path,
+) -> None:
+    document = _make_document(tmp_path)
+    registry = CoordinateFrameRegistry()
+    focused = registry.add(
+        set_focus_reference(
+            commit_xyb_registration(
+                new_design_frame_draft(document, existing_names=()),
+                design_points=((0.0, 0.0), (1000.0, 0.0)),
+                physical_machine_points=((1.0, 2.0), (2.0, 2.0)),
+                physical_b_deg=0.0,
+                pivot_machine_xy=(0.0, 0.0),
+            ),
+            physical_machine_z_mm=6.0,
+        )
+    )
+    emitted: list[tuple[object, float]] = []
+    window = Main.__new__(Main)
+    window._coordinate_frame_registry = registry
+    window._design_session = types.SimpleNamespace(active_frame_id=focused.frame_id)
+    window.stage_controller = types.SimpleNamespace(
+        latest_stage_position=lambda: (0.0, 0.0, 0.0, 8.0),
+        calibrated_axis_display_value=lambda _axis, value: float(value),
+    )
+    window.design_contact_reference_ready = types.SimpleNamespace(
+        emit=lambda token, value: emitted.append((token, value))
+    )
+    callback = Main._design_contact_success_callback(
+        window,
+        main_module.snapshot_route_design_frame(
+            frame_id=focused.frame_id,
+            frame_version=focused.version,
+        ),
+    )
+    assert callback is not None
+
+    window._design_session.active_frame_id = "another-design-frame"
+    callback(object())
+
+    assert emitted == []
+
+
+def test_design_fov_size_is_returned_in_design_units() -> None:
+    window = Main.__new__(Main)
+    window._design_session = types.SimpleNamespace(
+        registration=DesignRegistration.from_marks(
+            ((0.0, 0.0), (1000.0, 0.0)),
+            ((0.0, 0.0), (1.0, 0.0)),
+            design_unit_mm=0.001,
+        )
+    )
+    window.stage_controller = types.SimpleNamespace(
+        current_fov_size_mm=lambda: (2.0, 3.0)
+    )
+
+    assert Main._resolve_design_fov_size(window) == pytest.approx((2000.0, 3000.0))
 
 
 def test_replacing_committed_source_marks_starts_fresh_draft_before_capture(

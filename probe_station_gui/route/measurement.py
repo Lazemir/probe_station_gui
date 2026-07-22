@@ -10,7 +10,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Collection
+from typing import Any, Callable, Collection
 
 from probe_station_gui.route.contact_quality import (
     RouteContactQuality,
@@ -161,6 +161,7 @@ class RouteMeasurementRunner:
         photo_output_dir: str = "",
         wait_before_first_point: bool = False,
         design_frame_snapshot: object | None = None,
+        post_success_contact: Callable[[RouteContactPlacementResult], None] | None = None,
     ) -> None:
         self._points = list(points)
         self._csv_writer = RouteMeasurementCsvWriter(csv_path)
@@ -252,7 +253,9 @@ class RouteMeasurementRunner:
             set_seek_enabled=self._set_auto_contact_seek_enabled,
             status=self._status,
         )
-        self._contact_flow = self._legacy_contact.build_flow()
+        self._contact_flow = self._legacy_contact.build_flow(
+            post_success_contact=post_success_contact,
+        )
 
     @property
     def csv_path(self) -> Path:

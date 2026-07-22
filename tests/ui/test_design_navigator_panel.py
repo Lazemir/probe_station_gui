@@ -82,6 +82,29 @@ def test_design_navigator_disables_document_and_route_controls_without_design(
     panel.deleteLater()
 
 
+def test_focus_reference_controls_use_finished_product_copy_and_readiness(
+    qt_app: QApplication,
+) -> None:
+    panel = DesignNavigatorPanel()
+    panel._document = object()
+    panel.set_design_registration_active(True)
+
+    panel.set_focus_reference_state(z_ready=False, a_ready=False)
+
+    assert panel._find_focus_reference_button.text() == "Find focus reference"
+    assert panel._use_selected_focus_button.text() == "Use selected point"
+    assert panel._reset_focus_reference_button.text() == "Reset focus reference"
+    assert panel._find_focus_reference_button.isEnabled()
+    assert not panel._reset_focus_reference_button.isEnabled()
+
+    panel.set_focus_reference_state(z_ready=True, a_ready=True)
+
+    assert not panel._find_focus_reference_button.isEnabled()
+    assert panel._reset_focus_reference_button.isEnabled()
+    assert panel._focus_reference_status_label.text() == "Focus and contact references ready."
+    panel.deleteLater()
+
+
 def test_design_navigator_enables_idle_route_controls_with_route_selection(
     qt_app: QApplication,
 ) -> None:

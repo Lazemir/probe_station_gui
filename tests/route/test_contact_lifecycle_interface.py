@@ -330,6 +330,51 @@ def test_interrupt_after_autofocus_skips_lower_check_and_external_measurement() 
     assert interrupt.requested() is True
 
 
+def test_contact_success_callback_runs_after_quality_and_interrupt_checkpoint() -> None:
+    events: list[str] = []
+    flow = RouteContactFlow(
+        stage=_StageAdapter(events),
+        meter=_MeterAdapter(events),
+        quality=_QualityAdapter(events),
+        interrupt=_InterruptAdapter(),
+        events=_EventAdapter(events),
+        post_success_contact=lambda _placement: events.append("reference:capture"),
+    )
+
+    result = flow.place_contact(_contact_request())
+
+    assert result.interrupted is False
+    assert result.require_placement().success is True
+    assert events.index("quality:record") < events.index("reference:capture")
+    assert events.index("contact:check") < events.index("reference:capture")
+
+
+def test_interrupt_at_quality_checkpoint_never_runs_contact_success_callback() -> None:
+    events: list[str] = []
+    interrupt = _InterruptAdapter()
+
+    class _InterruptingQuality(_QualityAdapter):
+        def placement_success(self, record: RouteMeasurementRecord) -> bool:
+            success = super().placement_success(record)
+            interrupt.request()
+            return success
+
+    flow = RouteContactFlow(
+        stage=_StageAdapter(events),
+        meter=_MeterAdapter(events),
+        quality=_InterruptingQuality(events),
+        interrupt=interrupt,
+        events=_EventAdapter(events),
+        post_success_contact=lambda _placement: events.append("reference:capture"),
+    )
+
+    result = flow.place_contact(_contact_request())
+
+    assert result.interrupted is True
+    assert interrupt.requested() is True
+    assert "reference:capture" not in events
+
+
 @pytest.mark.parametrize("boundary", ["autofocus", "photo", "contact_move"])
 def test_interrupt_boundaries_stop_before_contact_or_external_wait(
     boundary: str,

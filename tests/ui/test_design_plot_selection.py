@@ -29,6 +29,7 @@ from probe_station_gui.route.model import (
     RoutePoint,
 )
 from probe_station_gui.views.design_navigator_panel import DesignLayoutWindow
+from probe_station_gui.design.focus_candidate import FocusCandidate
 from probe_station_gui.views.design_plot_pane import _DesignPlotPane
 
 
@@ -512,3 +513,24 @@ def test_layout_window_forwards_modifier_snapshots_to_ruler(
     ]
     window.close()
     window.deleteLater()
+
+
+def test_focus_candidate_and_selected_point_have_distinct_overlays(
+    pane: _DesignPlotPane,
+) -> None:
+    candidate = FocusCandidate(
+        center=(5.0, 6.0),
+        bounds=(4.0, 5.0, 6.0, 7.0),
+        distance_from_design_center=1.0,
+    )
+
+    pane.set_focus_candidate(candidate)
+    pane.set_selected_focus_point((8.0, 9.0))
+
+    candidate_x, candidate_y = pane._focus_candidate_item.getData()
+    selected_x, selected_y = pane._selected_focus_item.getData()
+    assert list(candidate_x) == [4.0, 6.0, 6.0, 4.0, 4.0]
+    assert list(candidate_y) == [5.0, 5.0, 7.0, 7.0, 5.0]
+    assert list(selected_x) == [8.0]
+    assert list(selected_y) == [9.0]
+    assert pane.selected_focus_point == (8.0, 9.0)

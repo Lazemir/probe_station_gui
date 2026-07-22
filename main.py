@@ -106,13 +106,23 @@ from probe_station_gui import (
 from probe_station_gui.coordinates import (
     CoordinateFrameRegistry,
     CoordinateFrameStoreWorker,
+    PhysicalMachinePose,
     rotate_xy,
 )
+from probe_station_gui.design.focus_candidate import (
+    FocusCandidate,
+    select_central_focus_candidate,
+)
 from probe_station_gui.design.frame_registration import (
+    ContactReferenceToken,
     DesignFrameMetadata,
+    RegistrationFocusToken,
+    commit_contact_reference,
+    commit_focus_reference,
     commit_xyb_registration,
     find_equivalent_migrated_frame,
     migrate_legacy_design_state,
+    reset_focus_reference,
     update_check_registration,
 )
 from probe_station_gui.design.model import DesignDocument, DesignModelError
@@ -633,6 +643,13 @@ class Main(QMainWindow):
     contact_seek_finished: Signal = Signal(bool, str)
     sample_handling_status: Signal = Signal(str)
     sample_handling_finished: Signal = Signal(bool, str, bool, object)
+    design_registration_autofocus_finished: Signal = Signal(
+        object,
+        bool,
+        object,
+        str,
+    )
+    design_contact_reference_ready: Signal = Signal(object, float)
 
     ALIGNMENT_CAPTURE_SHORTCUT = "Space"
     ALIGNMENT_TARGET_ANGLES = (-180.0, -90.0, 0.0, 90.0, 180.0)
@@ -978,6 +995,9 @@ class Main(QMainWindow):
         self._active_design_frame_metadata: DesignFrameMetadata | None = None
         self._coordinate_frame_authority_blocked_axes: set[str] = set()
         self._active_route_design_frame_snapshot = None
+        self._pending_registration_focus_token: RegistrationFocusToken | None = None
+        self._focus_candidate: FocusCandidate | None = None
+        self._design_focus_signals_connected = False
         self._coordinate_frame_store.loaded.connect(
             self._on_coordinate_frames_loaded
         )
@@ -1112,6 +1132,9 @@ class Main(QMainWindow):
                 message,
             )
         )
+        self.stage_controller.movement_finished.connect(
+            self._on_registration_focus_move_finished
+        )
         self.stage_controller.b_rotation_started.connect(
             self._on_alignment_b_rotation_started
         )
@@ -1133,6 +1156,12 @@ class Main(QMainWindow):
             Qt.ConnectionType.QueuedConnection,
         )
         self.stage_controller.autofocus_finished.connect(self.on_autofocus_finished)
+        self.design_registration_autofocus_finished.connect(
+            self._on_registration_focus_autofocus_finished
+        )
+        self.design_contact_reference_ready.connect(
+            self._on_design_contact_reference_ready
+        )
         self.stage_controller.stage_position_changed.connect(
             lambda position: stage_position_update.on_stage_position_changed(
                 self,
@@ -2638,6 +2667,7 @@ class Main(QMainWindow):
             )
 
         needle_feedrate = self._api_needle_feedrate(payload)
+        design_frame_snapshot = self._snapshot_active_route_design_frame()
         runner = RouteMeasurementRunner(
             points=[point],
             csv_path=Path(os.devnull),
@@ -2656,6 +2686,10 @@ class Main(QMainWindow):
             operation_mode=ROUTE_OPERATION_MEASURE,
             events=RouteMeasurementEvents(
                 status=self.route_measurement_status.emit,
+            ),
+            design_frame_snapshot=design_frame_snapshot,
+            post_success_contact=self._design_contact_success_callback(
+                design_frame_snapshot
             ),
         )
         try:
@@ -3147,6 +3181,9 @@ class Main(QMainWindow):
             photo_settle_s=start_settings.photo_settle_s,
             wait_before_first_point=True,
             design_frame_snapshot=design_frame_snapshot,
+            post_success_contact=self._design_contact_success_callback(
+                design_frame_snapshot
+            ),
         )
 
     def _cleanup_failed_api_route_session_start(
@@ -8072,6 +8109,9 @@ class Main(QMainWindow):
             wait_before_first_point=wait_before_first_point,
             events=callbacks,
             design_frame_snapshot=design_frame_snapshot,
+            post_success_contact=self._design_contact_success_callback(
+                design_frame_snapshot
+            ),
         )
 
     def _start_route_measurement_runner(
@@ -8144,12 +8184,85 @@ class Main(QMainWindow):
 
     def _snapshot_active_route_design_frame(self):
         registry = getattr(self, "_coordinate_frame_registry", None)
-        frame_id = getattr(self._design_session, "active_frame_id", None)
+        session = getattr(self, "_design_session", None)
+        frame_id = getattr(session, "active_frame_id", None)
         record = registry.get(frame_id) if registry is not None and frame_id else None
         return snapshot_route_design_frame(
             frame_id=(record.frame_id if record is not None else None),
             frame_version=(record.version if record is not None else None),
         )
+
+    def _design_contact_success_callback(self, frame_snapshot: object | None):
+        frame_id = getattr(frame_snapshot, "frame_id", None)
+        frame_version = getattr(frame_snapshot, "frame_version", None)
+        if frame_id is None or frame_version is None:
+            return None
+        token = ContactReferenceToken(str(frame_id), int(frame_version))
+        if self._active_design_contact_record(token) is None:
+            return None
+
+        def capture(_placement: object) -> None:
+            if self._active_design_contact_record(token) is None:
+                return
+            latest = self.stage_controller.latest_stage_position()
+            a_index = self.STAGE_AXIS_NAMES.index("A")
+            if latest is None or len(latest) <= a_index:
+                return
+            try:
+                physical_a = self.stage_controller.calibrated_axis_display_value(
+                    "A",
+                    float(latest[a_index]),
+                )
+                pose = PhysicalMachinePose.from_mapping({"A": physical_a})
+            except (TypeError, ValueError, RuntimeError):
+                logger.exception("Unable to read physical A for Design contact reference")
+                return
+            self.design_contact_reference_ready.emit(token, pose.require("A"))
+
+        return capture
+
+    def _active_design_contact_record(self, token: ContactReferenceToken):
+        session = getattr(self, "_design_session", None)
+        if getattr(session, "active_frame_id", None) != token.frame_id:
+            return None
+        registry = getattr(self, "_coordinate_frame_registry", None)
+        if registry is None:
+            return None
+        current = registry.get(token.frame_id)
+        if (
+            current is None
+            or current.version != token.frame_version
+            or current.transform is None
+            or current.transform.z_zero_machine_mm is None
+            or not current.readiness["Z"].available
+        ):
+            return None
+        return current
+
+    def _on_design_contact_reference_ready(
+        self,
+        token: object,
+        physical_a_mm: float,
+    ) -> None:
+        if not isinstance(token, ContactReferenceToken):
+            return
+        if self._active_design_contact_record(token) is None:
+            return
+        try:
+            contacted = commit_contact_reference(
+                self._coordinate_frame_registry,
+                token,
+                success=True,
+                physical_machine_a_mm=float(physical_a_mm),
+            )
+        except (KeyError, RuntimeError, TypeError, ValueError):
+            logger.exception("Unable to store Design contact reference")
+            contacted = None
+        if contacted is None:
+            return
+        connection_flow.publish_coordinate_frames(self)
+        self._refresh_design_panel()
+        self._show_status("Contact reference ready.", 5000)
 
     def _route_measurement_points(
         self,
@@ -9457,8 +9570,167 @@ class Main(QMainWindow):
         )
         return True
 
+    def _active_design_frame_record(self):
+        registry = getattr(self, "_coordinate_frame_registry", None)
+        frame_id = getattr(self._design_session, "active_frame_id", None)
+        if registry is None or frame_id is None:
+            return None
+        return registry.get(frame_id)
+
+    def _find_design_focus_reference(self) -> None:
+        document = self._design_session.document
+        fov_size = self._resolve_design_fov_size()
+        if document is None or fov_size is None:
+            self._show_status("Current field of view is unavailable.", 5000)
+            return
+        structure_bounds = tuple(document.cell_bounds.values()) or (document.bounds,)
+        try:
+            candidate = select_central_focus_candidate(
+                design_bounds=document.bounds,
+                structure_bounds=structure_bounds,
+                fov_size=fov_size,
+            )
+        except ValueError as exc:
+            self._show_status(str(exc), 5000)
+            return
+        if candidate is None:
+            self._show_status("No focus structure fits the current field of view.", 5000)
+            return
+        self._focus_candidate = candidate
+        window = getattr(self, "design_layout_window", None)
+        if window is not None:
+            window.set_focus_candidate(candidate)
+            window.set_selected_focus_point(candidate.center)
+        self._start_design_focus_reference(candidate.center)
+
+    def _start_design_focus_reference(self, design_point: tuple[float, float]) -> None:
+        record = self._active_design_frame_record()
+        if record is None or not all(
+            record.readiness[axis].available for axis in ("X", "Y", "B")
+        ):
+            self._show_status("Complete design alignment before setting focus.", 5000)
+            return
+        if record.readiness["Z"].available:
+            self._show_status("Reset focus reference before replacing it.", 5000)
+            return
+        token = RegistrationFocusToken(record.frame_id, record.version)
+        self._pending_registration_focus_token = token
+        if not self._move_to_design_coordinate(
+            (float(design_point[0]), float(design_point[1])),
+            source_label="focus reference",
+        ):
+            self._pending_registration_focus_token = None
+            return
+        window = getattr(self, "design_layout_window", None)
+        if window is not None:
+            window.set_selected_focus_point(design_point)
+        self._show_status("Moving to focus reference.", 4000)
+
+    def _on_registration_focus_move_finished(
+        self,
+        success: bool,
+        message: str,
+    ) -> None:
+        token = getattr(self, "_pending_registration_focus_token", None)
+        if token is None:
+            return
+        current = self._active_design_frame_record()
+        if (
+            not success
+            or current is None
+            or current.frame_id != token.frame_id
+            or current.version != token.frame_version
+        ):
+            self._pending_registration_focus_token = None
+            if not success and message:
+                self._show_status(message, 5000)
+            return
+        accepted = self.stage_controller.request_registration_autofocus(
+            token,
+            self.design_registration_autofocus_finished.emit,
+        )
+        if not accepted:
+            self._pending_registration_focus_token = None
+
+    def _on_registration_focus_autofocus_finished(
+        self,
+        token: object,
+        success: bool,
+        physical_z_mm: object,
+        message: str,
+    ) -> None:
+        pending = getattr(self, "_pending_registration_focus_token", None)
+        if token != pending or not isinstance(token, RegistrationFocusToken):
+            return
+        self._pending_registration_focus_token = None
+        active = self._active_design_frame_record()
+        if (
+            active is None
+            or active.frame_id != token.frame_id
+            or active.version != token.frame_version
+        ):
+            return
+        try:
+            physical_z = None if physical_z_mm is None else float(physical_z_mm)
+            focused = commit_focus_reference(
+                self._coordinate_frame_registry,
+                token,
+                success=bool(success),
+                physical_machine_z_mm=physical_z,
+            )
+        except (KeyError, RuntimeError, TypeError, ValueError):
+            logger.exception("Unable to store Design focus reference")
+            focused = None
+        if focused is None:
+            return
+        connection_flow.publish_coordinate_frames(self)
+        self._refresh_design_panel()
+        self._show_status("Focus reference ready.", 5000)
+
+    def _reset_design_focus_reference(self) -> None:
+        record = self._active_design_frame_record()
+        if record is None:
+            return
+        try:
+            reset = self._coordinate_frame_registry.replace(
+                reset_focus_reference(
+                    record,
+                    reason="Focus reference reset.",
+                ),
+                expected_version=record.version,
+            )
+        except (KeyError, RuntimeError, ValueError) as exc:
+            self._show_status(str(exc), 5000)
+            return
+        self._pending_registration_focus_token = None
+        self._focus_candidate = None
+        connection_flow.publish_coordinate_frames(self)
+        window = getattr(self, "design_layout_window", None)
+        if window is not None:
+            window.set_focus_candidate(None)
+        self._refresh_design_panel()
+        self._show_status("Focus reference reset.", 4000)
+
+    def _connect_design_focus_signals(self) -> None:
+        window = getattr(self, "design_layout_window", None)
+        if window is None or bool(getattr(self, "_design_focus_signals_connected", False)):
+            return
+        window.find_focus_reference_requested.connect(
+            self._find_design_focus_reference
+        )
+        window.focus_reference_requested.connect(
+            lambda x_value, y_value: self._start_design_focus_reference(
+                (x_value, y_value)
+            )
+        )
+        window.reset_focus_reference_requested.connect(
+            self._reset_design_focus_reference
+        )
+        self._design_focus_signals_connected = True
+
     def _refresh_design_panel(self) -> None:
         panel = self.design_navigator_panel
+        self._connect_design_focus_signals()
         route_measurement_thread = getattr(self, "_route_measurement_thread", None)
         p = design_navigation.design_panel_presentation(
             self._design_session,
@@ -9476,6 +9748,12 @@ class Main(QMainWindow):
             panel.set_registration_status(p.registration_status)
             panel.set_registration_marks(p.source_design_marks, p.check_design_marks)
             panel.set_stage_registration_marks(p.source_stage_marks)
+            record = self._active_design_frame_record()
+            if hasattr(panel, "set_focus_reference_state"):
+                panel.set_focus_reference_state(
+                    z_ready=bool(record is not None and record.readiness["Z"].available),
+                    a_ready=bool(record is not None and record.readiness["A"].available),
+                )
         if self.design_layout_window is not None:
             self.design_layout_window.set_snap_enabled(p.design_snap_enabled)
             self.design_layout_window.set_document(p.document)
@@ -9493,6 +9771,9 @@ class Main(QMainWindow):
             self.design_layout_window.set_navigation_enabled(p.registration_valid)
             self.design_layout_window.set_registration_marks(p.source_design_marks, p.check_design_marks)
             self.design_layout_window.set_stage_registration_marks(p.source_stage_marks)
+            self.design_layout_window.set_focus_candidate(
+                getattr(self, "_focus_candidate", None)
+            )
         self._refresh_manual_alignment_ui()
         self._update_design_position(self._current_design_stage_xy)
         connection_flow.persist_controller_state_if_available(self)
@@ -9882,7 +10163,13 @@ class Main(QMainWindow):
             return None
         width_vec = inverse @ np.asarray([float(stage_fov[0]), 0.0], dtype=float)
         height_vec = inverse @ np.asarray([0.0, float(stage_fov[1])], dtype=float)
-        return (float(np.linalg.norm(width_vec)), float(np.linalg.norm(height_vec)))
+        design_unit_mm = abs(float(registration.design_unit_mm))
+        if not math.isfinite(design_unit_mm) or design_unit_mm <= 0.0:
+            return None
+        return (
+            float(np.linalg.norm(width_vec)) / design_unit_mm,
+            float(np.linalg.norm(height_vec)) / design_unit_mm,
+        )
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
         self._clear_exact_step_targets()

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from probe_station_gui.settings.precision_approach import (
@@ -46,6 +47,44 @@ class StageControllerAutofocusMixin:
             busy_message="Stage is busy. Ignoring autofocus request.",
         )
 
+    def request_registration_autofocus(
+        self,
+        token: object,
+        completion: Callable[[object, bool, float | None, str], None],
+    ) -> bool:
+        """Begin token-bound autofocus used only to establish a Design Z origin."""
+
+        return self._start_background_task(
+            target=self._run_registration_autofocus,
+            args=(token, completion),
+            busy_message="Stage is busy. Focus reference was not started.",
+        )
+
+    def _run_registration_autofocus(
+        self,
+        token: object,
+        completion: Callable[[object, bool, float | None, str], None],
+    ) -> None:
+        physical_z: float | None = None
+
+        def capture_focus_z(configured_z: float) -> None:
+            nonlocal physical_z
+            physical_z = float(self.calibrated_axis_display_value("Z", configured_z))
+
+        try:
+            with self._open_optical_session("autofocus"):
+                self.movement_started.emit()
+                with self._serial_session():
+                    message = self._run_autofocus_locked(
+                        focus_z_callback=capture_focus_z,
+                    )
+            self.autofocus_finished.emit(True, message)
+            completion(token, True, physical_z, message)
+        except StageControllerError as exc:
+            message = str(exc)
+            self.autofocus_finished.emit(False, message)
+            completion(token, False, None, message)
+
     def run_external_local_autofocus(
         self,
         *,
@@ -87,7 +126,11 @@ class StageControllerAutofocusMixin:
         except StageControllerError as exc:
             self.autofocus_finished.emit(False, str(exc))
 
-    def _run_autofocus_locked(self) -> str:
+    def _run_autofocus_locked(
+        self,
+        *,
+        focus_z_callback: Callable[[float], None] | None = None,
+    ) -> str:
         """Run autofocus while the caller owns serial access."""
 
         context = self._prepare_autofocus_context_locked(
@@ -143,6 +186,8 @@ class StageControllerAutofocusMixin:
             step_mm=fine_step,
         )
         self._move_to_autofocus_final_z_locked(best.best_z)
+        if focus_z_callback is not None:
+            focus_z_callback(float(best.best_z))
         message = (
             f"Autofocus {objective_name} complete. "
             f"Best score {best.best_score:.2f} at Z={best.best_z:.4f} mm "

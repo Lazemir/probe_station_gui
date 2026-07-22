@@ -172,3 +172,59 @@ def test_cancelled_near_limit_autofocus_restores_start_and_stops_flow() -> None:
     ]
     assert controller._cancel_event.is_set()
     controller.shutdown()
+
+
+def test_registration_autofocus_returns_its_token_and_physical_z_only_on_success() -> None:
+    controller = StageController()
+    token = object()
+    results: list[tuple[object, bool, float | None, str]] = []
+    controller._open_optical_session = lambda *_args, **_kwargs: _NullContext()
+    controller._serial_session = lambda: _NullContext()
+    controller.movement_started = SimpleNamespace(emit=lambda: None)
+    controller.autofocus_finished = SimpleNamespace(emit=lambda *_args: None)
+    controller.calibrated_axis_display_value = (
+        lambda axis, value: float(value) + (10.0 if axis == "Z" else 0.0)
+    )
+
+    def run_locked(*, focus_z_callback) -> str:
+        focus_z_callback(2.5)
+        return "Focused."
+
+    controller._run_autofocus_locked = run_locked
+
+    controller._run_registration_autofocus(
+        token,
+        lambda *args: results.append(args),
+    )
+
+    assert results == [(token, True, 12.5, "Focused.")]
+    controller.shutdown()
+
+
+def test_registration_autofocus_failure_carries_no_z_reference() -> None:
+    controller = StageController()
+    token = object()
+    results: list[tuple[object, bool, float | None, str]] = []
+    controller._open_optical_session = lambda *_args, **_kwargs: _NullContext()
+    controller._serial_session = lambda: _NullContext()
+    controller.movement_started = SimpleNamespace(emit=lambda: None)
+    controller.autofocus_finished = SimpleNamespace(emit=lambda *_args: None)
+    controller._run_autofocus_locked = (
+        lambda **_kwargs: (_ for _ in ()).throw(StageControllerError("focus failed"))
+    )
+
+    controller._run_registration_autofocus(
+        token,
+        lambda *args: results.append(args),
+    )
+
+    assert results == [(token, False, None, "focus failed")]
+    controller.shutdown()
+
+
+class _NullContext:
+    def __enter__(self) -> None:
+        return None
+
+    def __exit__(self, *_args: object) -> None:
+        return None

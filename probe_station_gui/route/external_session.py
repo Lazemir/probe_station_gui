@@ -22,6 +22,7 @@ from probe_station_gui.route.measurement_payloads import (
 )
 from probe_station_gui.route.measurement_records import (
     Point2D,
+    RouteContactPlacementResult,
     RouteExternalContactPreparation,
     RouteMeasurementPoint,
     RouteMeasurementRecord,
@@ -100,6 +101,7 @@ class RouteExternalMeasurementSessionRunner:
         photo_settle_s: float = 0.2,
         wait_before_first_point: bool = False,
         design_frame_snapshot: object | None = None,
+        post_success_contact: Callable[[RouteContactPlacementResult], None] | None = None,
     ) -> None:
         self.session_id = str(session_id)
         self._points = list(points)
@@ -166,6 +168,7 @@ class RouteExternalMeasurementSessionRunner:
             photo_settle_s=photo_settle_s,
             photo_focus_enabled=self._photo_focus_enabled,
             design_frame_snapshot=design_frame_snapshot,
+            post_success_contact=post_success_contact,
         )
 
     @property

@@ -1193,6 +1193,11 @@ class MainMeterContactActionsTest(unittest.TestCase):
         window._api_ensure_measurement_instrument_connected = lambda: None
         window._api_needle_feedrate = lambda _payload: 7.0
         window._api_timestamp_utc = lambda: "2026-06-26T10:00:00+00:00"
+        contact_callback = object()
+        window._snapshot_active_route_design_frame = lambda: "frame-snapshot"
+        window._design_contact_success_callback = (
+            lambda snapshot: contact_callback if snapshot == "frame-snapshot" else None
+        )
 
         with mock.patch.object(main_module, "RouteMeasurementRunner", _FakeRunner):
             check_response = Main._api_check_contact(
@@ -1234,6 +1239,8 @@ class MainMeterContactActionsTest(unittest.TestCase):
         self.assertEqual(created[0]["auto_contact_seek_step_mm"], 0.003)
         self.assertEqual(created[0]["auto_contact_seek_max_total_mm"], 0.07)
         self.assertEqual(created[0]["contact_settle_s"], 0.2)
+        self.assertEqual(created[0]["design_frame_snapshot"], "frame-snapshot")
+        self.assertIs(created[0]["post_success_contact"], contact_callback)
         self.assertEqual(created[1]["measurement_count"], 5)
         self.assertEqual(created[1]["initial_measurement_count"], 4)
         self.assertEqual(created[1]["max_relative_rms"], 0.02)

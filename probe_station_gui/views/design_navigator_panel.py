@@ -41,6 +41,7 @@ from PySide6.QtWidgets import (
 )
 
 from probe_station_gui.route.run_ui import RouteRunControlState
+from probe_station_gui.design.focus_candidate import FocusCandidate
 from probe_station_gui.design.navigation_geometry import (
     format_bounds,
     format_mark_label,
@@ -139,6 +140,9 @@ class DesignNavigatorPanel(QWidget):
         bool,
         object,
     )
+    find_focus_reference_requested = Signal()
+    use_selected_focus_requested = Signal()
+    reset_focus_reference_requested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -153,6 +157,8 @@ class DesignNavigatorPanel(QWidget):
         self._selected_route_point_index = -1
         self._route_run_control_state = RouteRunControlState()
         self._design_registration_active = False
+        self._focus_z_ready = False
+        self._contact_a_ready = False
         self._current_design_position: Point2D | None = None
         self._active_design_tool = "select"
         self._selection = SelectionModel()
@@ -240,6 +246,38 @@ class DesignNavigatorPanel(QWidget):
         self._registration_status_label = QLabel("No design registration.", registration_group)
         self._registration_status_label.setWordWrap(True)
         registration_layout.addWidget(self._registration_status_label)
+        focus_buttons = QHBoxLayout()
+        self._find_focus_reference_button = QPushButton(
+            "Find focus reference",
+            registration_group,
+        )
+        self._use_selected_focus_button = QPushButton(
+            "Use selected point",
+            registration_group,
+        )
+        self._reset_focus_reference_button = QPushButton(
+            "Reset focus reference",
+            registration_group,
+        )
+        focus_buttons.addWidget(self._find_focus_reference_button)
+        focus_buttons.addWidget(self._use_selected_focus_button)
+        focus_buttons.addWidget(self._reset_focus_reference_button)
+        registration_layout.addLayout(focus_buttons)
+        self._focus_reference_status_label = QLabel(
+            "Focus reference not set.",
+            registration_group,
+        )
+        self._focus_reference_status_label.setWordWrap(True)
+        registration_layout.addWidget(self._focus_reference_status_label)
+        self._find_focus_reference_button.clicked.connect(
+            self.find_focus_reference_requested.emit
+        )
+        self._use_selected_focus_button.clicked.connect(
+            self.use_selected_focus_requested.emit
+        )
+        self._reset_focus_reference_button.clicked.connect(
+            self.reset_focus_reference_requested.emit
+        )
         root_layout.addWidget(registration_group)
 
         route_group = QGroupBox("Probe Route", self)
@@ -983,6 +1021,18 @@ class DesignNavigatorPanel(QWidget):
         self._design_registration_active = bool(active)
         self._update_enabled_state()
 
+    def set_focus_reference_state(self, *, z_ready: bool, a_ready: bool) -> None:
+        self._focus_z_ready = bool(z_ready)
+        self._contact_a_ready = bool(a_ready) and self._focus_z_ready
+        if self._contact_a_ready:
+            text = "Focus and contact references ready."
+        elif self._focus_z_ready:
+            text = "Focus reference ready. Contact reference not set."
+        else:
+            text = "Focus reference not set."
+        self._focus_reference_status_label.setText(text)
+        self._update_enabled_state()
+
     def set_calibration_prompt(self, text: str) -> None:
         self._calibration_prompt_label.setText(text)
 
@@ -1136,6 +1186,16 @@ class DesignNavigatorPanel(QWidget):
         self._top_cell_combo.setEnabled(state.can_use_document_controls)
         self._layer_list.setEnabled(state.can_use_document_controls)
         self._snap_checkbox.setEnabled(state.can_use_document_controls)
+        can_set_focus = state.can_edit_design and self._design_registration_active
+        self._find_focus_reference_button.setEnabled(
+            can_set_focus and not self._focus_z_ready
+        )
+        self._use_selected_focus_button.setEnabled(
+            can_set_focus and not self._focus_z_ready
+        )
+        self._reset_focus_reference_button.setEnabled(
+            can_set_focus and self._focus_z_ready
+        )
         self._route_new_button.setEnabled(state.can_edit_design)
         self._route_open_button.setEnabled(state.can_edit_design)
         self._route_save_button.setEnabled(state.can_save_route)
@@ -2058,6 +2118,9 @@ class DesignLayoutWindow(QWidget):
     mixed_array_requested = Signal(object)
     hover_snap_changed = Signal(object)
     visibility_changed = Signal(bool)
+    find_focus_reference_requested = Signal()
+    focus_reference_requested = Signal(float, float)
+    reset_focus_reference_requested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         _ = parent
@@ -2155,6 +2218,15 @@ class DesignLayoutWindow(QWidget):
         )
         self.navigator_panel.mixed_array_preview_changed.connect(
             self._main_view.set_mixed_array_preview
+        )
+        self.navigator_panel.find_focus_reference_requested.connect(
+            self.find_focus_reference_requested.emit
+        )
+        self.navigator_panel.use_selected_focus_requested.connect(
+            self._emit_selected_focus_reference
+        )
+        self.navigator_panel.reset_focus_reference_requested.connect(
+            self.reset_focus_reference_requested.emit
         )
         self._escape_shortcut = QShortcut(QKeySequence("Esc"), self)
         self._escape_shortcut.setContext(Qt.WindowShortcut)
@@ -2333,6 +2405,23 @@ class DesignLayoutWindow(QWidget):
 
     def set_registration_status(self, text: str) -> None:
         self.navigator_panel.set_registration_status(text)
+
+    def set_focus_candidate(self, candidate: FocusCandidate | None) -> None:
+        self._main_view.set_focus_candidate(candidate)
+
+    def set_selected_focus_point(self, point: Point2D | None) -> None:
+        self._main_view.set_selected_focus_point(point)
+
+    def set_focus_reference_state(self, *, z_ready: bool, a_ready: bool) -> None:
+        self.navigator_panel.set_focus_reference_state(
+            z_ready=z_ready,
+            a_ready=a_ready,
+        )
+
+    def _emit_selected_focus_reference(self) -> None:
+        point = self._main_view.selected_focus_point
+        if point is not None:
+            self.focus_reference_requested.emit(point[0], point[1])
 
     def set_status_message(self, text: str) -> None:
         self._main_view.set_status_message(text)

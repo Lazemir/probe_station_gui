@@ -14,6 +14,7 @@ from PySide6.QtCore import QEvent, QPointF, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import QApplication, QLabel, QVBoxLayout, QWidget
 
+from probe_station_gui.design.focus_candidate import FocusCandidate
 from probe_station_gui.design.markup import MarkupDocument
 from probe_station_gui.design.navigation_bounds import (
     Box2D,
@@ -186,6 +187,8 @@ class _DesignPlotPane(QWidget):
         self._current_design_position: Point2D | None = None
         self._fov_design_size: Point2D | None = None
         self._check_design_marks: list[Point2D] = []
+        self._focus_candidate: FocusCandidate | None = None
+        self._selected_focus_point: Point2D | None = None
         self._navigation_enabled = False
         self._route_edit_enabled = False
         self._route_pick_mode: str | None = None
@@ -455,6 +458,17 @@ class _DesignPlotPane(QWidget):
             symbol="x",
         )
         self._fov_item = self._plot.plot([], [], pen=pg.mkPen("#81c784", width=1))
+        self._focus_candidate_item = self._plot.plot(
+            [],
+            [],
+            pen=pg.mkPen("#ffee58", width=2, style=Qt.DashLine),
+        )
+        self._selected_focus_item = pg.ScatterPlotItem(
+            pen=pg.mkPen("#ffca28", width=2),
+            brush=pg.mkBrush(255, 202, 40, 100),
+            size=14,
+            symbol="+",
+        )
         self._hover_timer = QTimer(self)
         self._hover_timer.setSingleShot(True)
         self._hover_timer.setInterval(16)
@@ -488,6 +502,7 @@ class _DesignPlotPane(QWidget):
         self._plot.addItem(self._source_mark_2_item)
         self._plot.addItem(self._alignment_draft_item)
         self._plot.addItem(self._check_mark_item)
+        self._plot.addItem(self._selected_focus_item)
         self._preview_overlay_items = tuple(
             item
             for name, item in vars(self).items()
@@ -708,6 +723,9 @@ class _DesignPlotPane(QWidget):
         )
         if not same_document and self._snap_worker is not None:
             self._snap_worker.cancel_pending()
+        if not same_document:
+            self._focus_candidate = None
+            self._selected_focus_point = None
         self._document = document
         if document is None:
             self._snap_generation += 1
@@ -1281,6 +1299,20 @@ class _DesignPlotPane(QWidget):
         self._check_design_marks = list(check_design_marks)
         self._redraw_overlays()
 
+    def set_focus_candidate(self, candidate: FocusCandidate | None) -> None:
+        self._focus_candidate = candidate
+        self._redraw_focus_reference_overlays()
+
+    def set_selected_focus_point(self, point: Point2D | None) -> None:
+        self._selected_focus_point = (
+            None if point is None else (float(point[0]), float(point[1]))
+        )
+        self._redraw_focus_reference_overlays()
+
+    @property
+    def selected_focus_point(self) -> Point2D | None:
+        return self._selected_focus_point
+
     def set_navigation_enabled(self, enabled: bool) -> None:
         """Enable click-to-move on the layout plot once registration is valid."""
 
@@ -1420,6 +1452,7 @@ class _DesignPlotPane(QWidget):
         self._redraw_tool_measure()
         self._redraw_axis_triad()
         self._redraw_alignment_draft()
+        self._redraw_focus_reference_overlays()
 
         selected_target = next(
             (target for target in self._targets if target.id == self._selected_target_id),
@@ -1445,6 +1478,26 @@ class _DesignPlotPane(QWidget):
         else:
             self._check_mark_item.setData([], [])
         self._redraw_hover()
+
+    def _redraw_focus_reference_overlays(self) -> None:
+        if self._plot is None:
+            return
+        candidate = self._focus_candidate
+        if candidate is None:
+            self._focus_candidate_item.setData([], [])
+        else:
+            left, bottom, right, top = candidate.bounds
+            self._focus_candidate_item.setData(
+                [left, right, right, left, left],
+                [bottom, bottom, top, top, bottom],
+            )
+        if self._selected_focus_point is None:
+            self._selected_focus_item.setData([], [])
+        else:
+            self._selected_focus_item.setData(
+                [self._selected_focus_point[0]],
+                [self._selected_focus_point[1]],
+            )
 
     def _redraw_alignment_draft(self) -> None:
         if self._plot is None or not hasattr(self, "_alignment_draft_item"):
@@ -2049,6 +2102,9 @@ class _DesignPlotPane(QWidget):
         view_point = self._plot.getViewBox().mapSceneToView(position)
         raw_point = (float(view_point.x()), float(view_point.y()))
         if action == "select":
+            self._selected_focus_point = raw_point
+            if hasattr(self, "_selected_focus_item"):
+                _DesignPlotPane._redraw_focus_reference_overlays(self)
             self._emit_click_selection(raw_point, modifiers)
             return
         if bool(getattr(self._document, "file_backed", False)):

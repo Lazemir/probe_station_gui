@@ -28,6 +28,7 @@ from probe_station_gui.route.contact_quality import (
 )
 from probe_station_gui.route.measurement_records import (
     Point2D,
+    RouteContactPlacementResult,
     RouteContactHeightRecord,
     RouteMeasurementPoint,
     RouteMeasurementRecord,
@@ -184,7 +185,12 @@ class LegacyContactBindings:
             result=self.adapters.events.emit_result,
         )
 
-    def build_flow(self) -> RouteContactFlow:
+    def build_flow(
+        self,
+        *,
+        post_success_contact: Callable[[RouteContactPlacementResult], None]
+        | None = None,
+    ) -> RouteContactFlow:
         control = contact_lifecycle_adapter.ContactControlBindings(
             clear=self.clear_interrupt,
             requested=self.adapters.control.interrupted,
@@ -222,6 +228,7 @@ class LegacyContactBindings:
             ),
             interrupt=control,
             events=control,
+            post_success_contact=post_success_contact,
         )
 
     def _measure(

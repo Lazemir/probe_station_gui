@@ -15,13 +15,25 @@ from probe_station_gui.coordinates.model import (
     ReadinessStatus,
     VISIBLE_STAGE_AXES,
 )
-from probe_station_gui.coordinates.registry import invalidate_axes
+from probe_station_gui.coordinates.registry import CoordinateFrameRegistry, invalidate_axes
 from probe_station_gui.coordinates.transforms import BFrameTransform, rotate_xy
 from probe_station_gui.design.model import DesignDocument, Point2D
 from probe_station_gui.design.rigid_registration import fit_rigid_registration
 
 
 DesignFrameDraft = CoordinateFrameRecord
+
+
+@dataclass(frozen=True)
+class RegistrationFocusToken:
+    frame_id: str
+    frame_version: int
+
+
+@dataclass(frozen=True)
+class ContactReferenceToken:
+    frame_id: str
+    frame_version: int
 
 
 @dataclass(frozen=True)
@@ -187,6 +199,129 @@ def commit_xyb_registration(
         readiness=readiness,
         metadata=updated_metadata.to_dict(),
     )
+
+
+def set_focus_reference(
+    record: CoordinateFrameRecord,
+    *,
+    physical_machine_z_mm: float,
+) -> CoordinateFrameRecord:
+    """Set Design Z=0 and unconditionally clear the dependent A reference."""
+
+    transform = _required_transform(record)
+    if not all(record.readiness[axis].available for axis in ("X", "Y", "B")):
+        raise ValueError("Design X/Y/B registration is required before focus.")
+    readiness = dict(record.readiness)
+    readiness["Z"] = AxisReadiness(ReadinessStatus.READY)
+    readiness["A"] = AxisReadiness(
+        ReadinessStatus.MISSING,
+        "Design A reference requires contact after focus.",
+    )
+    return replace(
+        record,
+        transform=replace(
+            transform,
+            z_zero_machine_mm=_finite_float(physical_machine_z_mm, "Physical Machine Z"),
+            a_zero_machine_mm=None,
+        ),
+        readiness=readiness,
+    )
+
+
+def set_contact_reference(
+    record: CoordinateFrameRecord,
+    *,
+    physical_machine_a_mm: float,
+) -> CoordinateFrameRecord:
+    """Set Design A=0 only for a record with a valid Z focus reference."""
+
+    transform = _required_transform(record)
+    if not record.readiness["Z"].available or transform.z_zero_machine_mm is None:
+        raise ValueError("A valid Design focus reference is required before contact.")
+    readiness = dict(record.readiness)
+    readiness["A"] = AxisReadiness(ReadinessStatus.READY)
+    return replace(
+        record,
+        transform=replace(
+            transform,
+            a_zero_machine_mm=_finite_float(physical_machine_a_mm, "Physical Machine A"),
+        ),
+        readiness=readiness,
+    )
+
+
+def reset_focus_reference(
+    record: CoordinateFrameRecord,
+    *,
+    reason: str,
+) -> CoordinateFrameRecord:
+    """Clear Design Z and its dependent A reference in one cascade."""
+
+    transform = _required_transform(record)
+    message = str(reason).strip() or "Design focus reference was reset."
+    readiness = dict(record.readiness)
+    readiness["Z"] = AxisReadiness(ReadinessStatus.STALE, message)
+    readiness["A"] = AxisReadiness(ReadinessStatus.STALE, message)
+    return replace(
+        record,
+        transform=replace(
+            transform,
+            z_zero_machine_mm=None,
+            a_zero_machine_mm=None,
+        ),
+        readiness=readiness,
+    )
+
+
+def commit_focus_reference(
+    registry: CoordinateFrameRegistry,
+    token: RegistrationFocusToken,
+    *,
+    success: bool,
+    physical_machine_z_mm: float | None,
+) -> CoordinateFrameRecord | None:
+    """Version-check and install Z only for a successful explicit focus token."""
+
+    if not success or physical_machine_z_mm is None:
+        return None
+    current = registry.get(token.frame_id)
+    if current is None or current.version != token.frame_version:
+        return None
+    updated = set_focus_reference(
+        current,
+        physical_machine_z_mm=physical_machine_z_mm,
+    )
+    return registry.replace(updated, expected_version=token.frame_version)
+
+
+def commit_contact_reference(
+    registry: CoordinateFrameRegistry,
+    token: ContactReferenceToken,
+    *,
+    success: bool,
+    physical_machine_a_mm: float | None,
+) -> CoordinateFrameRecord | None:
+    """Version-check and install A only after a successful guarded contact."""
+
+    if not success or physical_machine_a_mm is None:
+        return None
+    current = registry.get(token.frame_id)
+    if current is None or current.version != token.frame_version:
+        return None
+    try:
+        updated = set_contact_reference(
+            current,
+            physical_machine_a_mm=physical_machine_a_mm,
+        )
+    except ValueError:
+        return None
+    return registry.replace(updated, expected_version=token.frame_version)
+
+
+def _required_transform(record: CoordinateFrameRecord) -> BFrameTransform:
+    if record.transform is None:
+        raise ValueError("Design frame transform is unavailable.")
+    return record.transform
 
 
 def update_check_registration(
@@ -383,12 +518,19 @@ def _optional_float(value: object) -> float | None:
 
 
 __all__ = [
+    "ContactReferenceToken",
     "DesignFrameDraft",
     "DesignFrameMetadata",
+    "RegistrationFocusToken",
+    "commit_contact_reference",
+    "commit_focus_reference",
     "commit_xyb_registration",
     "design_frame_for_loaded_document",
     "find_equivalent_migrated_frame",
     "migrate_legacy_design_state",
     "new_design_frame_draft",
+    "reset_focus_reference",
+    "set_contact_reference",
+    "set_focus_reference",
     "update_check_registration",
 ]

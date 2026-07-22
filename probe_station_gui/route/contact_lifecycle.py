@@ -233,12 +233,14 @@ class RouteContactFlow:
         quality: RouteContactQualityPort,
         interrupt: RouteContactInterruptPort,
         events: RouteContactEventPort,
+        post_success_contact: Callable[[RouteContactPlacementResult], None] | None = None,
     ) -> None:
         self._stage = stage
         self._meter = meter
         self._quality = quality
         self._interrupt = interrupt
         self._events = events
+        self._post_success_contact = post_success_contact
 
     def place_contact(self, request: RouteContactRequest) -> RouteContactFlowResult:
         try:
@@ -345,6 +347,8 @@ class RouteContactFlow:
                 failure_label=f"{action_label} failed",
                 include_seek=auto_contact_seek,
             )
+            self._raise_if_interrupted()
+            self._notify_successful_contact(placement)
             self._events.status(placement.message)
             return RouteContactFlowResult(placement=placement)
         except _ContactInterrupted as exc:
@@ -487,10 +491,12 @@ class RouteContactFlow:
                 action_label="Contact ready",
                 failure_label="Contact check failed",
             )
+            self._raise_if_interrupted()
             if not placement.success and request.lift_on_failure:
                 self._lift_failed_contact()
                 needles_lowered = False
             placement_succeeded = placement.success
+            self._notify_successful_contact(placement)
             self._events.contact_photo(
                 request.point,
                 placement.record,
@@ -511,6 +517,18 @@ class RouteContactFlow:
                 self._stage.wait_for_background_tasks()
             finally:
                 self._stage.finish()
+
+    def _notify_successful_contact(
+        self,
+        placement: RouteContactPlacementResult,
+    ) -> None:
+        callback = self._post_success_contact
+        if callback is None or not placement.success:
+            return
+        try:
+            callback(placement)
+        except Exception:
+            logger.exception("Post-contact success callback failed.")
 
     def _prepare_interrupt(self, clear_interrupt: bool) -> None:
         if clear_interrupt:
