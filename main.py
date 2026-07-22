@@ -107,11 +107,12 @@ from probe_station_gui.coordinates import (
     CoordinateFrameRegistry,
     CoordinateFrameStoreWorker,
     PhysicalMachinePose,
-    VISIBLE_STAGE_AXES,
-    invalidate_axes,
     rotate_xy,
 )
-from probe_station_gui.coordinates.calibration import changed_calibration_axes
+from probe_station_gui.coordinates.design_calibration import (
+    design_calibration_fingerprints,
+    reconcile_design_calibrations,
+)
 from probe_station_gui.coordinates.software_frames import materialize_custom_frames
 from probe_station_gui.design.focus_candidate import (
     FocusCandidate,
@@ -4506,7 +4507,9 @@ class Main(QMainWindow):
                 registry,
                 document,
                 create_new=True,
-                current_metadata=metadata,
+                current_metadata=self._design_metadata_with_calibration_fingerprints(
+                    metadata
+                ),
                 machine_point_for_navigation=(
                     self._design_navigation_xy_from_physical_machine_xy
                 ),
@@ -4639,11 +4642,11 @@ class Main(QMainWindow):
     def _apply_settings_from_dialog(self, new_settings: object) -> None:
         if not isinstance(new_settings, Settings):
             return
+        stage_controller = getattr(self, "stage_controller", None)
+        if stage_controller is not None and stage_controller.is_busy():
+            self._show_status("Stage is busy; settings not changed.", 4000)
+            return
         settings_to_apply = new_settings.clone()
-        changed_calibrations = changed_calibration_axes(
-            self.settings_manager.settings.axis_calibrations,
-            settings_to_apply.axis_calibrations,
-        )
         existing_coordinates = self.settings_manager.settings.software_coordinates
         coordinates_changed = (
             settings_to_apply.software_coordinates != existing_coordinates
@@ -4653,11 +4656,7 @@ class Main(QMainWindow):
             != existing_coordinates.custom_frames
         )
         prepared_coordinate_records = None
-        if coordinates_changed and self.stage_controller.is_busy():
-            settings_to_apply.software_coordinates = existing_coordinates.clone()
-            self._show_status("Stage is busy; coordinate settings not changed.", 4000)
-            coordinates_changed = False
-        elif custom_frames_changed and bool(
+        if custom_frames_changed and bool(
             getattr(self, "_coordinate_frames_loaded", False)
         ):
             try:
@@ -4704,8 +4703,15 @@ class Main(QMainWindow):
         )
         if prepared_coordinate_records is not None:
             self._coordinate_frame_registry.reset(prepared_coordinate_records)
-        self._invalidate_coordinate_frames_for_calibration_change(changed_calibrations)
-        if coordinates_changed or changed_calibrations:
+        reconcile_calibrations = getattr(
+            self,
+            "_reconcile_design_calibration_fingerprints",
+            None,
+        )
+        calibration_records_changed = bool(
+            reconcile_calibrations() if callable(reconcile_calibrations) else False
+        )
+        if coordinates_changed or calibration_records_changed:
             stage_position_panel_adapter.refresh_coordinate_frame_display(self)
         if objective_mutation_busy:
             self._apply_settings(apply_objective_runtime=False)
@@ -4734,24 +4740,38 @@ class Main(QMainWindow):
             return
         registry.reset(records)
 
-    def _invalidate_coordinate_frames_for_calibration_change(
-        self,
-        changed_axes: set[str],
-    ) -> None:
-        """Invalidate only coordinate dependencies affected by physical calibration."""
+    def _reconcile_design_calibration_fingerprints(self) -> bool:
+        """Fail closed when stored Design registration used different curves."""
 
-        visible_changed = set(changed_axes).intersection(VISIBLE_STAGE_AXES)
         registry = getattr(self, "_coordinate_frame_registry", None)
-        if not visible_changed or registry is None:
-            return
-        for record in registry.snapshot().records:
-            stale = invalidate_axes(
-                record,
-                visible_changed,
-                "Axis calibration changed.",
-            )
-            if stale != record:
-                registry.replace(stale, expected_version=record.version)
+        if registry is None or not bool(getattr(self, "_coordinate_frames_loaded", False)):
+            return False
+        records, changed = reconcile_design_calibrations(
+            registry.snapshot().records,
+            self.settings_manager.settings.axis_calibrations,
+        )
+        if not changed:
+            return False
+        registry.reset(records)
+        # The registry is made unavailable before this asynchronous write.  If
+        # persistence fails, the next startup re-runs this reconciliation.
+        connection_flow.publish_coordinate_frames(self)
+        return True
+
+    def _design_metadata_with_calibration_fingerprints(
+        self,
+        metadata: DesignFrameMetadata | None,
+    ) -> DesignFrameMetadata | None:
+        if metadata is None:
+            return None
+        settings = getattr(getattr(self, "settings_manager", None), "settings", None)
+        calibrations = getattr(settings, "axis_calibrations", None)
+        if not isinstance(calibrations, dict):
+            return metadata
+        return replace(
+            metadata,
+            calibration_fingerprints=design_calibration_fingerprints(calibrations),
+        )
 
     def _send_telegram_alert(
         self,
@@ -7081,8 +7101,12 @@ class Main(QMainWindow):
         markup: MarkupDocument,
     ) -> None:
         self._design_session = context.session
-        self._active_design_frame_metadata = context.frame_metadata
-        self._activate_loaded_design_frame(frame_metadata=context.frame_metadata)
+        self._active_design_frame_metadata = self._design_metadata_with_calibration_fingerprints(
+            context.frame_metadata
+        )
+        self._activate_loaded_design_frame(
+            frame_metadata=self._active_design_frame_metadata
+        )
         self._design_markup = markup
         self._design_markup_direct_guide_ids = []
         self._design_markup_pending_visibility = None
@@ -7406,7 +7430,9 @@ class Main(QMainWindow):
                     existing_names=(
                         record.name for record in registry.snapshot().records
                     ),
-                    metadata=metadata,
+                    metadata=self._design_metadata_with_calibration_fingerprints(
+                        metadata
+                    ),
                 )
             except (DesignModelError, ValueError) as exc:
                 self._show_status(str(exc), 6000)
@@ -7445,7 +7471,9 @@ class Main(QMainWindow):
                 registry,
                 self._design_session.document,
                 requested_frame_id=self._design_session.active_frame_id,
-                current_metadata=metadata,
+                current_metadata=self._design_metadata_with_calibration_fingerprints(
+                    metadata
+                ),
                 machine_point_for_navigation=(
                     self._design_navigation_xy_from_physical_machine_xy
                 ),
@@ -9574,7 +9602,9 @@ class Main(QMainWindow):
                     registry,
                     self._design_session.document,
                     create_new=True,
-                    current_metadata=metadata,
+                    current_metadata=self._design_metadata_with_calibration_fingerprints(
+                        metadata
+                    ),
                     machine_point_for_navigation=(
                         self._design_navigation_xy_from_physical_machine_xy
                     ),

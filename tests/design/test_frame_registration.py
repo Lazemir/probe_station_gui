@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -44,7 +45,6 @@ def test_same_design_can_have_two_independent_registration_ids(tmp_path: Path) -
     second = registry.add(
         new_design_frame_draft(document, existing_names=(first.name,))
     )
-
     assert first.frame_id != second.frame_id
     assert first.name == document.path.stem
     assert second.name == f"{document.path.stem} (2)"
@@ -52,6 +52,34 @@ def test_same_design_can_have_two_independent_registration_ids(tmp_path: Path) -
         state.status is ReadinessStatus.MISSING
         for state in first.readiness.values()
     )
+
+
+def test_new_and_legacy_design_records_keep_supplied_calibration_fingerprints(
+    tmp_path: Path,
+) -> None:
+    document = _document(tmp_path)
+    fingerprints = (("X", "curve-x"), ("Y", "curve-y"), ("Z", "curve-z"), ("A", "curve-a"), ("B", "curve-b"))
+    metadata = DesignFrameMetadata.from_document(document)
+    metadata = replace(metadata, calibration_fingerprints=fingerprints)
+
+    draft = new_design_frame_draft(
+        document,
+        existing_names=(),
+        metadata=metadata,
+    )
+    migrated = migrate_legacy_design_state(
+        {
+            "source_design_marks": ((0.0, 0.0), (1000.0, 0.0)),
+            "source_stage_marks": ((3.0, 4.0), (3.0, 5.0)),
+        },
+        design_document=document,
+        physical_b_deg=0.0,
+        metadata=metadata,
+    )
+
+    assert DesignFrameMetadata.from_mapping(draft.metadata).calibration_fingerprints == fingerprints
+    assert migrated is not None
+    assert DesignFrameMetadata.from_mapping(migrated.metadata).calibration_fingerprints == fingerprints
 
 
 def test_mark_commit_makes_only_xyb_ready_and_anchors_physical_b(

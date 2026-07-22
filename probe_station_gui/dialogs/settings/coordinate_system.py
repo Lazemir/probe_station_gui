@@ -6,6 +6,7 @@ from collections.abc import Callable
 from dataclasses import replace
 from uuid import uuid4
 
+from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
     QFormLayout,
     QFrame,
@@ -28,6 +29,8 @@ from probe_station_gui.shared.wheel_guard import GuardedComboBox as QComboBox
 
 class CoordinateSystemSettingsWidget(QWidget):
     """Edit user-managed software frames without touching controller WCS state."""
+
+    availability_changed = Signal()
 
     def __init__(
         self,
@@ -71,6 +74,7 @@ class CoordinateSystemSettingsWidget(QWidget):
         form = QFormLayout()
         self._name_edit = QLineEdit(self)
         self._name_edit.editingFinished.connect(self._rename_from_field)
+        self._name_edit.textChanged.connect(self._on_editor_changed)
         form.addRow("Name", self._name_edit)
         self._fields: dict[str, QLineEdit] = {}
         for key, label, unit in (
@@ -86,6 +90,7 @@ class CoordinateSystemSettingsWidget(QWidget):
             field.setPlaceholderText("Unset" if key in {"z_zero_mm", "a_zero_mm"} else "0")
             field.setToolTip(f"{label}{unit}")
             field.editingFinished.connect(self._apply_fields_from_editor)
+            field.textChanged.connect(self._on_editor_changed)
             self._fields[key] = field
             form.addRow(label, field)
         root.addLayout(form)
@@ -105,12 +110,26 @@ class CoordinateSystemSettingsWidget(QWidget):
     def settings(self) -> SoftwareCoordinateSettings:
         """Return an independent copy of the edited coordinate settings."""
 
-        return self._settings.clone()
+        return self._settings_from_editor()
 
     def to_settings(self, settings: Settings) -> None:
         """Persist only software-frame configuration into application settings."""
 
+        available, message = self.apply_availability()
+        if not available:
+            raise ValueError(message)
         settings.software_coordinates = self.settings()
+
+    def apply_availability(self) -> tuple[bool, str]:
+        """Return whether the current visible coordinate draft can be saved."""
+
+        if not self._stage_is_idle(show_status=False):
+            return False, "Stage is busy."
+        try:
+            self._settings_from_editor()
+        except (TypeError, ValueError) as exc:
+            return False, str(exc)
+        return True, ""
 
     def current_frame(self) -> CustomFrameSettings:
         """Return the selected frame, failing clearly when the list is empty."""
@@ -124,6 +143,9 @@ class CoordinateSystemSettingsWidget(QWidget):
 
     def status_message(self) -> str:
         return self._status_label.text()
+
+    def show_validation_message(self, message: str) -> None:
+        self._set_status(message)
 
     def add_custom_frame(self) -> bool:
         frame = CustomFrameSettings(
@@ -162,9 +184,14 @@ class CoordinateSystemSettingsWidget(QWidget):
         try:
             current = self.current_frame()
             replacement = replace(current, name=str(name))
+            if any(
+                frame.frame_id != replacement.frame_id
+                and frame.name.casefold() == replacement.name.casefold()
+                for frame in self._settings.custom_frames
+            ):
+                raise ValueError("Custom frame names must be unique.")
         except (TypeError, ValueError) as exc:
             self._set_status(str(exc))
-            self._refresh_editor()
             return False
         self._replace_current(replacement)
         self._set_status("")
@@ -229,23 +256,42 @@ class CoordinateSystemSettingsWidget(QWidget):
             replacement = self.current_frame().apply_geometry_edit(**values)
         except (TypeError, ValueError) as exc:
             self._set_status(str(exc))
-            self._refresh_editor()
             return False
         self._replace_current(replacement)
         self._set_status("")
         self._refresh_editor()
         return True
 
-    def _stage_is_idle(self) -> bool:
+    def _stage_is_idle(self, *, show_status: bool = True) -> bool:
         if self._stage_idle_source is None:
             return True
         try:
             idle = bool(self._stage_idle_source())
         except Exception:
             idle = False
-        if not idle:
+        if not idle and show_status:
             self._set_status("Stage is busy.")
         return idle
+
+    def _settings_from_editor(self) -> SoftwareCoordinateSettings:
+        settings = self._settings.clone()
+        if self._current_frame_id is None:
+            return settings
+        current = self.current_frame()
+        values: dict[str, object] = {}
+        for key, field in self._fields.items():
+            raw = field.text().strip()
+            values[key] = None if key in {"z_zero_mm", "a_zero_mm"} and not raw else raw
+        replacement = replace(current, name=self._name_edit.text())
+        replacement = replacement.apply_geometry_edit(**values)
+        frames = tuple(
+            replacement if frame.frame_id == replacement.frame_id else frame
+            for frame in settings.custom_frames
+        )
+        names = [frame.name.casefold() for frame in frames]
+        if len(names) != len(set(names)):
+            raise ValueError("Custom frame names must be unique.")
+        return replace(settings, custom_frames=frames)
 
     def _replace_current(self, replacement: CustomFrameSettings) -> None:
         self._settings.custom_frames = tuple(
@@ -276,6 +322,10 @@ class CoordinateSystemSettingsWidget(QWidget):
         frame_id = self._frame_combo.currentData()
         self._current_frame_id = str(frame_id) if isinstance(frame_id, str) else None
         self._refresh_editor()
+
+    def _on_editor_changed(self, _text: str) -> None:
+        if not self._updating:
+            self.availability_changed.emit()
 
     def _rename_from_field(self) -> None:
         if not self._updating:
@@ -323,6 +373,7 @@ class CoordinateSystemSettingsWidget(QWidget):
                 field.setText("" if value is None else str(value))
         finally:
             self._updating = False
+        self.availability_changed.emit()
 
     def _set_status(self, message: str) -> None:
         self._status_label.setText(message)

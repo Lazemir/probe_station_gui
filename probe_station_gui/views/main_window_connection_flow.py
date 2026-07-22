@@ -40,6 +40,13 @@ def handle_coordinate_frame_loaded(owner: object, result: object) -> None:
     materialize_custom = getattr(owner, "_materialize_software_coordinate_frames", None)
     if callable(materialize_custom):
         materialize_custom()
+    reconcile_calibrations = getattr(
+        owner,
+        "_reconcile_design_calibration_fingerprints",
+        None,
+    )
+    if callable(reconcile_calibrations):
+        reconcile_calibrations()
     apply_authority = getattr(owner, "_apply_coordinate_frame_authority_blocks", None)
     if callable(apply_authority):
         apply_authority()

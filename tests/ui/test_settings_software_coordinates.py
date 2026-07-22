@@ -132,3 +132,44 @@ def test_settings_dialog_exposes_software_coordinates_tab() -> None:
 
     assert len(dialog.result_settings().software_coordinates.custom_frames) == 1
     dialog.deleteLater()
+
+
+def test_settings_dialog_blocks_busy_or_invalid_coordinate_drafts() -> None:
+    _qt_app()
+    stage = {"idle": False}
+    dialog = SettingsDialog(
+        Settings(),
+        stage_idle_source=lambda: stage["idle"],
+    )
+    applied: list[Settings] = []
+    dialog.settings_applied.connect(applied.append)
+
+    assert not dialog._save_button.isEnabled()
+    assert not dialog._apply_button.isEnabled()
+    stage["idle"] = True
+    dialog.refresh_coordinate_availability()
+    assert dialog._save_button.isEnabled()
+    dialog.coordinate_system_tab.add_custom_frame()
+    dialog.coordinate_system_tab._fields["origin_x_mm"].setText("not-a-number")
+    assert not dialog._save_button.isEnabled()
+    dialog._apply_without_closing()
+
+    assert applied == []
+    assert "finite" in dialog.coordinate_system_tab.status_message()
+    dialog.deleteLater()
+
+
+def test_settings_dialog_rechecks_stage_busy_when_apply_is_invoked() -> None:
+    _qt_app()
+    stage = {"idle": True}
+    dialog = SettingsDialog(Settings(), stage_idle_source=lambda: stage["idle"])
+    applied: list[Settings] = []
+    dialog.settings_applied.connect(applied.append)
+    assert dialog._apply_button.isEnabled()
+
+    stage["idle"] = False
+    dialog._apply_without_closing()
+
+    assert applied == []
+    assert "Stage is busy" in dialog.coordinate_system_tab.status_message()
+    dialog.deleteLater()

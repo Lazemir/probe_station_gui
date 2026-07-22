@@ -477,6 +477,9 @@ def test_coordinate_frame_document_load_is_independent_from_serial_controller_st
         ),
         _activate_loaded_design_frame=lambda: events.append(("activate_design",)),
         _materialize_software_coordinate_frames=lambda: events.append(("custom_frames",)),
+        _reconcile_design_calibration_fingerprints=lambda: events.append(
+            ("reconcile_calibrations",)
+        ),
     )
 
     request_id = connection_flow.request_coordinate_frame_load(owner)
@@ -488,6 +491,7 @@ def test_coordinate_frame_document_load_is_independent_from_serial_controller_st
     assert events == [
         ("frame_load", request_id),
         ("custom_frames",),
+        ("reconcile_calibrations",),
         ("authority_blocks",),
         ("activate_design",),
     ]

@@ -89,9 +89,6 @@ def _owner(*, busy: bool = False) -> SimpleNamespace:
         _apply_settings=lambda **_kwargs: None,
         _show_status=lambda *_args: None,
     )
-    owner._invalidate_coordinate_frames_for_calibration_change = (
-        lambda axes: Main._invalidate_coordinate_frames_for_calibration_change(owner, axes)
-    )
     return owner
 
 
@@ -132,3 +129,18 @@ def test_same_pivot_reapply_is_registry_noop_and_busy_pivot_is_rejected() -> Non
 
     assert owner.settings_manager.settings.software_coordinates.pivot.x_mm == 0.0
     assert owner._coordinate_frame_registry.snapshot() == before
+
+
+def test_busy_stage_rejects_programmatic_settings_submission_without_side_effects() -> None:
+    owner = _owner(busy=True)
+    before_settings = owner.settings_manager.settings.clone()
+    before_frames = owner._coordinate_frame_registry.snapshot()
+    submitted = before_settings.clone()
+    submitted.design_last_directory = "C:/programmatic-bypass"
+    submitted.software_coordinates.pivot.x_mm = 2.0
+
+    Main._apply_settings_from_dialog(owner, submitted)
+
+    assert owner.settings_manager.settings == before_settings
+    assert owner.settings_manager.saved == []
+    assert owner._coordinate_frame_registry.snapshot() == before_frames

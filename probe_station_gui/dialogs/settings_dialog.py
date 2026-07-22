@@ -977,7 +977,11 @@ class SettingsDialog(QDialog):
         self._axes_tab.calibration_imports_active_changed.connect(
             self._set_calibration_imports_active
         )
+        self._coordinate_system_tab.availability_changed.connect(
+            self.refresh_coordinate_availability
+        )
         root_layout.addWidget(self._button_box)
+        self.refresh_coordinate_availability()
 
     def _on_tab_changed(self, _index: int) -> None:
         self._refresh_camera_tab_if_current()
@@ -991,7 +995,7 @@ class SettingsDialog(QDialog):
             self._camera_tab.refresh()
 
     def accept(self) -> None:  # type: ignore[override]
-        if self._calibration_imports_active:
+        if not self._settings_apply_available():
             return
         self._accept_after_camera_apply = True
         camera_started = self._collect_settings()
@@ -1006,7 +1010,7 @@ class SettingsDialog(QDialog):
         super().accept()
 
     def _apply_without_closing(self) -> None:
-        if self._calibration_imports_active:
+        if not self._settings_apply_available():
             return
         self._accept_after_camera_apply = False
         camera_started = self._collect_settings()
@@ -1018,10 +1022,27 @@ class SettingsDialog(QDialog):
 
     def _set_calibration_imports_active(self, active: bool) -> None:
         self._calibration_imports_active = active
+        self.refresh_coordinate_availability()
+
+    def refresh_coordinate_availability(self) -> None:
+        """Refresh the buttons after a local draft or stage-state change."""
+
+        available, _message = self._coordinate_system_tab.apply_availability()
+        enabled = not self._calibration_imports_active and available
         if self._save_button is not None:
-            self._save_button.setEnabled(not active)
+            self._save_button.setEnabled(enabled)
         if self._apply_button is not None:
-            self._apply_button.setEnabled(not active)
+            self._apply_button.setEnabled(enabled)
+
+    def _settings_apply_available(self) -> bool:
+        if self._calibration_imports_active:
+            return False
+        available, message = self._coordinate_system_tab.apply_availability()
+        if not available:
+            self._coordinate_system_tab.show_validation_message(message)
+            self.refresh_coordinate_availability()
+            return False
+        return True
 
     def _collect_settings(self) -> bool:
         self._collecting_settings = True

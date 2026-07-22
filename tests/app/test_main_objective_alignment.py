@@ -305,8 +305,8 @@ def test_settings_objective_change_is_rejected_for_alive_microscope_scan() -> No
     assert statuses == ["Stage is busy; active objective settings not changed."]
 
 
-def test_settings_apply_during_click_calibration_keeps_computed_runtime_matrix() -> None:
-    window, stage, manager, _statuses = _window()
+def test_settings_apply_during_click_calibration_rejects_entire_submission() -> None:
+    window, stage, manager, statuses = _window()
     stage.busy = True
     computed_matrix = [[0.025, 0.0], [0.0, 0.025]]
     submitted = manager.settings.clone()
@@ -325,11 +325,12 @@ def test_settings_apply_during_click_calibration_keeps_computed_runtime_matrix()
 
     Main._apply_settings_from_dialog(window, submitted)
 
-    assert manager.settings.design_last_directory == "C:/updated-designs"
-    assert manager.settings.objectives.objectives["X20"].magnification == 25.0
-    assert unrelated_applies == [True]
+    assert manager.settings.design_last_directory == ""
+    assert manager.settings.objectives.objectives["X20"].magnification != 25.0
+    assert unrelated_applies == []
     assert objective_runtime_applies == []
     assert stage.runtime_matrix == computed_matrix
+    assert statuses == ["Stage is busy; settings not changed."]
 
 
 def test_add_objective_rechecks_busy_after_name_dialog_returns(monkeypatch) -> None:
