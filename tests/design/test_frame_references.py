@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from uuid import uuid4
 
+import pytest
+
 from probe_station_gui.coordinates.model import (
     AxisReadiness,
     CoordinateFrameRecord,
@@ -137,3 +139,37 @@ def test_only_matching_explicit_focus_token_can_capture_z() -> None:
         is None
     )
     assert registry.get(initial.frame_id).transform.z_zero_machine_mm is None
+
+
+def test_contact_reference_is_first_write_wins_without_version_churn() -> None:
+    registry = CoordinateFrameRegistry()
+    focused = set_focus_reference(_registered_xyb(), physical_machine_z_mm=6.0)
+    contacted = registry.add(
+        set_contact_reference(focused, physical_machine_a_mm=8.0)
+    )
+    token = ContactReferenceToken(contacted.frame_id, contacted.version)
+
+    with pytest.raises(ValueError, match="already"):
+        set_contact_reference(contacted, physical_machine_a_mm=9.0)
+    result = commit_contact_reference(
+        registry,
+        token,
+        success=True,
+        physical_machine_a_mm=9.0,
+    )
+
+    assert result is None
+    assert registry.get(contacted.frame_id) == contacted
+
+
+def test_focus_reset_allows_one_new_contact_reference() -> None:
+    focused = set_focus_reference(_registered_xyb(), physical_machine_z_mm=6.0)
+    contacted = set_contact_reference(focused, physical_machine_a_mm=8.0)
+    reset = reset_focus_reference(contacted, reason="New sample.")
+    refocused = set_focus_reference(reset, physical_machine_z_mm=7.0)
+
+    recontacted = set_contact_reference(refocused, physical_machine_a_mm=9.0)
+
+    assert recontacted.transform is not None
+    assert recontacted.transform.a_zero_machine_mm == 9.0
+    assert recontacted.readiness["A"].available

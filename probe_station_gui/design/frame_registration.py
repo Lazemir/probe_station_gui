@@ -238,6 +238,8 @@ def set_contact_reference(
     transform = _required_transform(record)
     if not record.readiness["Z"].available or transform.z_zero_machine_mm is None:
         raise ValueError("A valid Design focus reference is required before contact.")
+    if record.readiness["A"].available or transform.a_zero_machine_mm is not None:
+        raise ValueError("Design contact reference is already established.")
     readiness = dict(record.readiness)
     readiness["A"] = AxisReadiness(ReadinessStatus.READY)
     return replace(

@@ -8511,6 +8511,8 @@ class Main(QMainWindow):
             or current.transform is None
             or current.transform.z_zero_machine_mm is None
             or not current.readiness["Z"].available
+            or current.transform.a_zero_machine_mm is not None
+            or current.readiness["A"].available
         ):
             return None
         return current

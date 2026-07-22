@@ -1418,6 +1418,74 @@ def test_contact_callback_captures_synchronized_physical_machine_a(
     assert emitted == [(ContactReferenceToken(focused.frame_id, focused.version), 9.25)]
 
 
+def test_later_route_does_not_recapture_established_contact_reference(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    document = _make_document(tmp_path)
+    registry = CoordinateFrameRegistry()
+    focused = registry.add(
+        set_focus_reference(
+            commit_xyb_registration(
+                new_design_frame_draft(document, existing_names=()),
+                design_points=((0.0, 0.0), (1000.0, 0.0)),
+                physical_machine_points=((1.0, 2.0), (2.0, 2.0)),
+                physical_b_deg=0.0,
+                pivot_machine_xy=(0.0, 0.0),
+            ),
+            physical_machine_z_mm=6.0,
+        )
+    )
+    reads: list[tuple[str, ...]] = []
+    window = Main.__new__(Main)
+    window._coordinate_frame_registry = registry
+    window._design_session = types.SimpleNamespace(active_frame_id=focused.frame_id)
+    window.stage_controller = types.SimpleNamespace(
+        run_external_current_physical_machine_coordinates=lambda axes: (
+            reads.append(tuple(axes)) or {"A": 8.0}
+        )
+    )
+    window._refresh_design_panel = lambda: None
+    window._show_status = lambda *_args: None
+    window.design_contact_reference_ready = types.SimpleNamespace(
+        emit=lambda token, value: Main._on_design_contact_reference_ready(
+            window,
+            token,
+            value,
+        )
+    )
+    monkeypatch.setattr(
+        main_module.connection_flow,
+        "publish_coordinate_frames",
+        lambda _owner: None,
+    )
+    first_route_callback = Main._design_contact_success_callback(
+        window,
+        main_module.snapshot_route_design_frame(
+            frame_id=focused.frame_id,
+            frame_version=focused.version,
+        ),
+    )
+    assert first_route_callback is not None
+
+    first_route_callback(object())
+    established = registry.get(focused.frame_id)
+    assert established is not None
+    later_route_callback = Main._design_contact_success_callback(
+        window,
+        main_module.snapshot_route_design_frame(
+            frame_id=established.frame_id,
+            frame_version=established.version,
+        ),
+    )
+
+    assert later_route_callback is None
+    assert registry.get(focused.frame_id) == established
+    assert established.transform is not None
+    assert established.transform.a_zero_machine_mm == 8.0
+    assert reads == [("A",)]
+
+
 def test_design_fov_size_is_returned_in_design_units() -> None:
     window = Main.__new__(Main)
     window._design_session = types.SimpleNamespace(
