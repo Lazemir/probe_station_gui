@@ -31,6 +31,24 @@ class RigidRegistrationFit:
     source_residual: ResidualMetrics
     check_residual: ResidualMetrics
 
+    def __post_init__(self) -> None:
+        """Defensively copy immutable transform arrays for this frozen result."""
+
+        object.__setattr__(
+            self,
+            "rotation",
+            _immutable_array(self.rotation, shape=(2, 2), label="Rotation"),
+        )
+        object.__setattr__(
+            self,
+            "offset_machine_mm",
+            _immutable_array(
+                self.offset_machine_mm,
+                shape=(2,),
+                label="Machine offset",
+            ),
+        )
+
     def design_mm_to_machine_xy(self, point: Point2D) -> Point2D:
         """Map a physical design coordinate into machine millimetres."""
 
@@ -77,6 +95,9 @@ def fit_rigid_registration(
     design_energy = float(np.sum(np.square(design_centered)))
     if design_energy <= 1e-18:
         raise ValueError("Design source geometry is degenerate.")
+    machine_energy = float(np.sum(np.square(machine_centered)))
+    if machine_energy <= 1e-18:
+        raise ValueError("Machine source geometry is degenerate.")
 
     covariance = machine_centered.T @ design_centered
     u, singular_values, vt = np.linalg.svd(covariance)
@@ -87,8 +108,8 @@ def fit_rigid_registration(
     scale_ratio = float(
         np.sum(singular_values * np.asarray([1.0, determinant_sign])) / design_energy
     )
-    if not math.isfinite(scale_ratio) or scale_ratio <= 1e-15:
-        raise ValueError("Machine source geometry is degenerate.")
+    if not math.isfinite(scale_ratio):
+        raise ValueError("Measured source spacing ratio is not finite.")
 
     predicted_source = (rotation @ design_mm.T).T + offset
     source_residual = _residual_metrics(machine - predicted_source)
@@ -112,6 +133,19 @@ def _point_array(points: Iterable[Point2D], label: str) -> np.ndarray:
     if values.ndim != 2 or values.shape[1] != 2 or not np.all(np.isfinite(values)):
         raise ValueError(f"{label} marks must be finite 2D points.")
     return values
+
+
+def _immutable_array(
+    value: np.ndarray,
+    *,
+    shape: tuple[int, ...],
+    label: str,
+) -> np.ndarray:
+    array = np.array(value, dtype=float, copy=True)
+    if array.shape != shape or not np.all(np.isfinite(array)):
+        raise ValueError(f"{label} must be a finite array with shape {shape}.")
+    array.setflags(write=False)
+    return array
 
 
 def _residual_metrics(vectors: np.ndarray) -> ResidualMetrics:

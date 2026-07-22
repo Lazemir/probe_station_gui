@@ -1,6 +1,11 @@
+import numpy as np
 import pytest
 
-from probe_station_gui.design.rigid_registration import fit_rigid_registration
+from probe_station_gui.design.rigid_registration import (
+    ResidualMetrics,
+    RigidRegistrationFit,
+    fit_rigid_registration,
+)
 
 
 def test_rigid_fit_does_not_apply_measured_scale_difference() -> None:
@@ -38,3 +43,37 @@ def test_design_unit_conversion_happens_before_fit() -> None:
     )
 
     assert fit.distance_scale_ratio == pytest.approx(1.0)
+
+
+def test_reflected_unit_square_keeps_zero_scale_ratio_as_a_diagnostic() -> None:
+    fit = fit_rigid_registration(
+        design_points=((0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)),
+        machine_points=((0.0, 0.0), (-1.0, 0.0), (-1.0, 1.0), (0.0, 1.0)),
+        design_unit_mm=1.0,
+    )
+
+    assert fit.distance_scale_ratio == pytest.approx(0.0, abs=1e-12)
+    assert fit.source_residual.rms_mm > 0.0
+
+
+def test_fit_arrays_are_immutable_and_detached_from_constructor_inputs() -> None:
+    rotation = np.eye(2, dtype=float)
+    offset = np.asarray((1.0, 2.0), dtype=float)
+    fit = RigidRegistrationFit(
+        rotation=rotation,
+        offset_machine_mm=offset,
+        rotation_deg=0.0,
+        distance_scale_ratio=1.0,
+        source_residual=ResidualMetrics(),
+        check_residual=ResidualMetrics(),
+    )
+
+    rotation[0, 0] = 99.0
+    offset[0] = 99.0
+
+    assert fit.rotation[0, 0] == pytest.approx(1.0)
+    assert fit.offset_machine_mm[0] == pytest.approx(1.0)
+    with pytest.raises(ValueError):
+        fit.rotation[0, 0] = 2.0
+    with pytest.raises(ValueError):
+        fit.offset_machine_mm[0] = 2.0
