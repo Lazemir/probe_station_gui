@@ -41,6 +41,7 @@ def handle_coordinate_frame_loaded(owner: object, result: object) -> None:
     if callable(apply_authority):
         apply_authority()
     owner._activate_loaded_design_frame()
+    stage_position_panel.refresh_coordinate_frame_display(owner)
 
 
 def publish_coordinate_frames(
@@ -48,6 +49,7 @@ def publish_coordinate_frames(
     *,
     legacy_migration: bool = False,
 ) -> int:
+    stage_position_panel.refresh_coordinate_frame_display(owner)
     request_id = _next_coordinate_frame_request_id(owner)
     document = CoordinateFrameDocument(
         records=owner._coordinate_frame_registry.snapshot().records

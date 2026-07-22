@@ -96,6 +96,10 @@ def parse_fluidnc_status_line(
     return _Status(
         state=frame.state,
         position=fields.machine_position,
+        synchronized_machine_position=_synchronized_machine_position(
+            fields,
+            position_reporting_mode=position_reporting_mode,
+        ),
         display_position=(
             fields.machine_position
             if position_reporting_mode == "machine"
@@ -105,6 +109,25 @@ def parse_fluidnc_status_line(
         work_offset=work_offset,
         coordinate_system=coordinate_system,
         pins=fields.pins,
+    )
+
+
+def _synchronized_machine_position(
+    fields: _StatusFields,
+    *,
+    position_reporting_mode: str,
+) -> tuple[float, ...] | None:
+    if position_reporting_mode == "machine":
+        return fields.machine_position
+    work_position = fields.work_position
+    same_frame_offset = fields.work_offset
+    if work_position is None or same_frame_offset is None:
+        return None
+    if len(work_position) != len(same_frame_offset):
+        return None
+    return tuple(
+        float(position + offset)
+        for position, offset in zip(work_position, same_frame_offset)
     )
 
 

@@ -184,6 +184,38 @@ def test_preview_reports_none_when_cached_coordinate_is_outside_curve() -> None:
         controller.shutdown()
 
 
+def test_synchronized_machine_snapshot_never_reuses_previous_status_generation() -> None:
+    controller = StageController()
+    try:
+        controller._update_cached_positions(
+            _Status(
+                state="Idle",
+                display_position=(5.0, 2.0, 3.0),
+                work_position=(5.0, 2.0, 3.0),
+                work_offset=(10.0, 20.0, 0.0),
+                synchronized_machine_position=(15.0, 22.0, 3.0),
+            )
+        )
+        assert controller.latest_synchronized_machine_position() == (
+            15.0,
+            22.0,
+            3.0,
+        )
+
+        controller._update_cached_positions(
+            _Status(
+                state="Idle",
+                display_position=(6.0, 2.0, 3.0),
+                work_position=(6.0, 2.0, 3.0),
+                work_offset=(10.0, 20.0, 0.0),
+            )
+        )
+
+        assert controller.latest_synchronized_machine_position() is None
+    finally:
+        controller.shutdown()
+
+
 def test_physical_machine_coordinates_use_raw_mpos_not_work_display_or_wco() -> None:
     controller = StageController()
     try:

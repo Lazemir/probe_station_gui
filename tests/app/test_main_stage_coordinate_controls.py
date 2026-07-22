@@ -23,6 +23,16 @@ from probe_station_gui.settings.axis_calibration_config import (
     default_axis_calibrations,
 )
 from probe_station_gui.stage.controller import StageController
+from probe_station_gui.coordinates.model import (
+    AxisReadiness,
+    CoordinateFrameRecord,
+    FrameKind,
+    PhysicalMachinePose,
+    ReadinessStatus,
+)
+from probe_station_gui.coordinates.registry import CoordinateFrameRegistry
+from probe_station_gui.coordinates.transforms import BFrameTransform
+from probe_station_gui.settings.manager import Settings
 from probe_station_gui.stage.exact_step import ExactStepAccumulator
 from probe_station_gui.views import main_window_homing as homing_ui
 from probe_station_gui.views import main_window_needle_calibration as needle_calibration_ui
@@ -103,6 +113,97 @@ class MainStageCoordinateControlsTest(unittest.TestCase):
         Main._on_manual_terminal_command(window, "G1 X1")
 
         self.assertEqual([event[0] for event in events], ["needles", "coordinates"])
+
+    @staticmethod
+    def _software_frame(frame_id: str, *, version: int = 0) -> CoordinateFrameRecord:
+        return CoordinateFrameRecord(
+            frame_id=frame_id,
+            kind=FrameKind.DESIGN,
+            name="chip-a",
+            version=version,
+            transform=BFrameTransform(
+                origin_xy_at_reference_b=(0.0, 0.0),
+                reference_b_deg=0.0,
+                xy_angle_at_reference_b_deg=0.0,
+                b_zero_machine_deg=0.0,
+                z_zero_machine_mm=1.0,
+            ),
+            readiness={
+                axis: AxisReadiness(
+                    ReadinessStatus.READY
+                    if axis in {"X", "Y", "Z", "B"}
+                    else ReadinessStatus.MISSING,
+                    "" if axis in {"X", "Y", "Z", "B"} else "Find contact.",
+                )
+                for axis in ("X", "Y", "Z", "A", "B")
+            },
+            metadata={},
+        )
+
+    def test_main_coordinate_selection_seam_cancels_pending_restore(self) -> None:
+        frame_id = "11111111-1111-4111-8111-111111111111"
+        settings = Settings()
+        settings.software_coordinates.last_selected_frame_id = frame_id
+        saved: list[str] = []
+        window = Main.__new__(Main)
+        window._selected_coordinate_frame_id = "machine"
+        window._pending_coordinate_frame_restore_id = frame_id
+        window._latest_physical_machine_pose = PhysicalMachinePose(
+            {"X": 0.0, "Y": 0.0, "Z": 1.0, "A": 2.0, "B": 0.0}
+        )
+        window._coordinate_frame_registry = CoordinateFrameRegistry()
+        window._coordinate_frames_loaded = True
+        window._stage_position_panel = None
+        window.stage_controller = types.SimpleNamespace(homed_axes=lambda: {"X", "Y"})
+        window.settings_manager = types.SimpleNamespace(
+            settings=settings,
+            update_and_save=lambda mutation, **_kwargs: (
+                mutation(settings),
+                saved.append(settings.software_coordinates.last_selected_frame_id),
+            ),
+        )
+
+        Main._on_software_coordinate_system_changed(window, "machine")
+
+        self.assertEqual(window._selected_coordinate_frame_id, "machine")
+        self.assertIsNone(window._pending_coordinate_frame_restore_id)
+        self.assertEqual(saved, ["machine"])
+
+    def test_main_refresh_preserves_frame_id_across_version_then_falls_back_on_delete(self) -> None:
+        frame_id = "11111111-1111-4111-8111-111111111111"
+        registry = CoordinateFrameRegistry()
+        original = registry.add(self._software_frame(frame_id))
+        plans: list[object] = []
+        window = Main.__new__(Main)
+        window._selected_coordinate_frame_id = frame_id
+        window._pending_coordinate_frame_restore_id = None
+        window._latest_physical_machine_pose = PhysicalMachinePose(
+            {"X": 0.0, "Y": 0.0, "Z": 1.0, "A": 2.0, "B": 0.0}
+        )
+        window._coordinate_frame_registry = registry
+        window._coordinate_frames_loaded = True
+        window._stage_axis_display_values = {}
+        window._stage_position_panel = types.SimpleNamespace(
+            set_coordinate_display_plan=plans.append
+        )
+        window.stage_controller = types.SimpleNamespace(homed_axes=lambda: {"X", "Y"})
+        window.settings_manager = types.SimpleNamespace(settings=Settings())
+
+        registry.replace(
+            self._software_frame(frame_id, version=original.version),
+            expected_version=original.version,
+        )
+        Main._refresh_software_coordinate_display(window)
+
+        self.assertEqual(window._selected_coordinate_frame_id, frame_id)
+        self.assertEqual(plans[-1].selected_frame_id, frame_id)
+
+        registry.reset(())
+        Main._refresh_software_coordinate_display(window)
+
+        self.assertEqual(window._selected_coordinate_frame_id, "machine")
+        self.assertEqual(plans[-1].selected_frame_id, "machine")
+        self.assertIsNone(window._pending_coordinate_frame_restore_id)
 
     def test_stage_position_display_updates_caches_while_panel_applies_ui_state(
         self,

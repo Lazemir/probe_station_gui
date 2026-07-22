@@ -61,6 +61,7 @@ class MoveVector:
 class _Status:
     state: str
     position: Optional[tuple[float, ...]] = None
+    synchronized_machine_position: Optional[tuple[float, ...]] = None
     display_position: Optional[tuple[float, ...]] = None
     work_position: Optional[tuple[float, ...]] = None
     work_offset: Optional[tuple[float, ...]] = None

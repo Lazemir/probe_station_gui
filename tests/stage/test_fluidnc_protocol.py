@@ -55,6 +55,32 @@ def test_parse_fluidnc_status_line_uses_native_work_position() -> None:
     assert status.position is None
     assert status.work_offset[:2] == (32.0, 32.0)
     assert status.work_position[:2] == (-6.894, -6.599)
+    assert status.synchronized_machine_position is None
+
+
+def test_work_position_and_wco_from_one_frame_form_synchronized_machine_snapshot() -> None:
+    status = parse_fluidnc_status_line(
+        "<Idle|WPos:5.000,2.000,3.000,4.000,5.000|WCO:10.000,20.000,0.000,0.000,0.000>",
+        position_reporting_mode="work",
+        active_work_coordinate_system="G54",
+        controller_coordinate_offsets={"G54": (99.0, 99.0, 99.0, 99.0, 99.0)},
+    )
+
+    assert status is not None
+    assert status.synchronized_machine_position == (15.0, 22.0, 3.0, 4.0, 5.0)
+
+
+def test_cached_wco_never_creates_a_mixed_generation_machine_snapshot() -> None:
+    status = parse_fluidnc_status_line(
+        "<Idle|WPos:5.000,2.000,3.000,4.000,5.000>",
+        position_reporting_mode="work",
+        active_work_coordinate_system="G54",
+        controller_coordinate_offsets={"G54": (10.0, 20.0, 0.0, 0.0, 0.0)},
+    )
+
+    assert status is not None
+    assert status.work_offset == (10.0, 20.0, 0.0, 0.0, 0.0)
+    assert status.synchronized_machine_position is None
 
 
 def test_parse_fluidnc_status_line_captures_limit_pins() -> None:

@@ -305,6 +305,7 @@ class StageController(
         self._pixels_to_mm: Optional[np.ndarray] = None
         self._last_stage_position: Optional[tuple[float, ...]] = None
         self._last_machine_position: Optional[tuple[float, ...]] = None
+        self._last_synchronized_machine_position: Optional[tuple[float, ...]] = None
         self._latest_frame: Optional[np.ndarray] = None
         self._frame_counter = 0
         self._frame_history: deque[tuple[int, float, np.ndarray]] = deque(maxlen=256)
@@ -1202,6 +1203,13 @@ class StageController(
             return None
         return tuple(self._last_machine_position)
 
+    def latest_synchronized_machine_position(self) -> tuple[float, ...] | None:
+        """Return Machine coordinates produced by one controller status frame."""
+
+        if self._last_synchronized_machine_position is None:
+            return None
+        return tuple(self._last_synchronized_machine_position)
+
     def axis_calibration_preview_position(
         self,
         axis: str,
@@ -1313,6 +1321,12 @@ class StageController(
             self._active_work_coordinate_system = status.coordinate_system
         if status.position is not None:
             self._last_machine_position = tuple(float(v) for v in status.position)
+        synchronized_machine = getattr(status, "synchronized_machine_position", None)
+        self._last_synchronized_machine_position = (
+            tuple(float(value) for value in synchronized_machine)
+            if synchronized_machine is not None
+            else None
+        )
         if status.display_position is not None:
             previous_position = self._last_stage_position
             coords = tuple(float(v) for v in status.display_position)

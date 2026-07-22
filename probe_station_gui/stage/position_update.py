@@ -9,6 +9,7 @@ from typing import Any, Protocol
 
 from PySide6.QtCore import QTimer
 
+from probe_station_gui.coordinates.model import PhysicalMachinePose
 from probe_station_gui.design import navigation_adapter as design_navigation
 from probe_station_gui.stage import move_lifecycle as stage_move_lifecycle
 from probe_station_gui.stage.position_presenter import stage_position_signal_plan
@@ -51,6 +52,39 @@ class StagePositionUpdateOwner(Protocol):
         actual_stage_xy: tuple[float, float],
     ) -> None: ...
     def _format_optional_point(self, point: tuple[float, float] | None) -> str: ...
+
+
+def physical_machine_pose_from_controller(
+    controller: object,
+    axis_names: tuple[str, ...] | list[str],
+) -> PhysicalMachinePose | None:
+    """Map one cached raw Machine-position snapshot through universal curves."""
+
+    machine_position_getter = getattr(
+        controller,
+        "latest_synchronized_machine_position",
+        None,
+    )
+    mapper_getter = getattr(controller, "_axis_calibration_mapper", None)
+    if not callable(machine_position_getter) or not callable(mapper_getter):
+        return None
+    machine_position = machine_position_getter()
+    if not isinstance(machine_position, (tuple, list)):
+        return None
+    mapper = mapper_getter()
+    values: dict[str, float] = {}
+    for index, raw_axis in enumerate(axis_names):
+        axis = str(raw_axis).strip().upper()
+        if index >= len(machine_position):
+            continue
+        try:
+            raw_value = float(machine_position[index])
+            physical_value = float(mapper.controller_to_physical(axis, raw_value))
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if math.isfinite(physical_value):
+            values[axis] = physical_value
+    return PhysicalMachinePose(values) if values else None
 
 
 def stage_xy_from_position(position: object | None) -> tuple[float, float] | None:
@@ -186,8 +220,16 @@ def on_stage_position_changed(
     position: object,
 ) -> None:
     if not isinstance(position, tuple) or len(position) < 2:
+        owner._latest_physical_machine_pose = None
         stage_position_panel.update_stage_position_display(owner, position)
         return
+    owner._latest_physical_machine_pose = (
+        physical_machine_pose_from_controller(
+            owner.stage_controller,
+            owner.STAGE_AXIS_NAMES,
+        )
+        or PhysicalMachinePose({})
+    )
     logger.debug("TIMING stage_position_changed position=%s", position)
     current_position = design_navigation.coerce_position_tuple(position)
     if current_position is not None:
@@ -444,6 +486,7 @@ def _learn_manual_stop_tail(
 
 __all__ = [
     "on_stage_position_changed",
+    "physical_machine_pose_from_controller",
     "position_with_stage_xy",
     "preferred_design_display_stage_xy",
     "preferred_design_stage_xy",

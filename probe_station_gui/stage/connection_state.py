@@ -273,6 +273,7 @@ class StageControllerConnectionMixin:
 
         self._last_stage_position = None
         self._last_machine_position = None
+        self._last_synchronized_machine_position = None
         self._last_stage_state = None
         self._last_status_timestamp = None
         self._last_jog_write_timestamp = None

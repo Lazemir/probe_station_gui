@@ -910,6 +910,9 @@ class Main(QMainWindow):
         self._exact_step_pending_axes: set[str] = set()
         self._exact_step_window_elapsed = False
         self._stage_position_panel: StagePositionPanel | None = None
+        self._latest_physical_machine_pose: PhysicalMachinePose | None = None
+        self._selected_coordinate_frame_id = "machine"
+        self._pending_coordinate_frame_restore_id: str | None = None
         self._design_snap_enabled = True
         self._last_reported_b_position: float | None = None
         self._last_camera_frame_ui_timestamp: float | None = None
@@ -4310,6 +4313,12 @@ class Main(QMainWindow):
             )
             self._show_status("Cleared pending coordinate edits after input mode change.", 2000)
         self._update_stage_coordinate_apply_state()
+
+    def _on_software_coordinate_system_changed(self, frame_id: str) -> None:
+        stage_position_panel_adapter.select_gui_coordinate_frame(self, frame_id)
+
+    def _refresh_software_coordinate_display(self) -> None:
+        stage_position_panel_adapter.refresh_coordinate_frame_display(self)
 
     def _surface_map_capture_running(self) -> bool:
         window = self.surface_map_window

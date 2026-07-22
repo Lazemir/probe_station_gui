@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
 )
 
 from probe_station_gui.shared.wheel_guard import GuardedComboBox as QComboBox
+from probe_station_gui.coordinates.presentation import CoordinateDisplayPlan
 from probe_station_gui.stage.api_moves import normalize_api_coordinate_input_mode
 from probe_station_gui.stage.position_presenter import StagePositionDisplayPlan
 
@@ -58,6 +59,7 @@ class StagePositionPanel(QWidget):
     axis_editing_finished = Signal(str)
     axis_text_edited = Signal(str)
     input_mode_changed = Signal()
+    coordinate_system_changed = Signal(str)
     apply_requested = Signal()
     cancel_requested = Signal()
 
@@ -77,6 +79,7 @@ class StagePositionPanel(QWidget):
         self._motion_axes: set[str] = set()
         self._motion_blink_dimmed = False
         self._programmatic_update_depth = 0
+        self._coordinate_selector_signature: tuple[tuple[object, ...], ...] = ()
 
         outer_layout = QVBoxLayout(self)
         outer_layout.setContentsMargins(0, 0, 0, 0)
@@ -89,6 +92,14 @@ class StagePositionPanel(QWidget):
         label = QLabel("Position:", self)
         label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         layout.addWidget(label)
+
+        self._coordinate_system_combo = QComboBox(self)
+        self._coordinate_system_combo.setMinimumContentsLength(10)
+        self._coordinate_system_combo.setToolTip("Displayed coordinate system.")
+        self._coordinate_system_combo.activated.connect(
+            self._on_coordinate_system_activated
+        )
+        layout.addWidget(self._coordinate_system_combo)
 
         for axis_name in self._axis_names:
             axis_label = QLabel(axis_name, self)
@@ -225,6 +236,10 @@ class StagePositionPanel(QWidget):
     @property
     def input_mode_combo(self) -> QComboBox:
         return self._input_mode_combo
+
+    @property
+    def coordinate_system_combo(self) -> QComboBox:
+        return self._coordinate_system_combo
 
     @property
     def axis_escape_shortcuts(self) -> dict[str, QShortcut]:
@@ -369,6 +384,84 @@ class StagePositionPanel(QWidget):
             self.set_fields_available(False)
             return
         self.refresh_axis_styles(self._motion_axes, self._motion_blink_dimmed)
+
+    def set_coordinate_display_plan(self, plan: CoordinateDisplayPlan) -> None:
+        """Apply software-frame values without reconstructing position fields."""
+
+        self._sync_coordinate_selector(plan)
+        with self._programmatic_update():
+            for axis_plan in plan.axis_updates:
+                field = self._axis_fields.get(axis_plan.axis)
+                if field is None:
+                    continue
+                available = axis_plan.color_role == "available"
+                background, foreground = (
+                    ("#1565c0", "#f5f5f5")
+                    if available
+                    else ("#f0b429", "#1f1f1f")
+                )
+                self._axis_base_styles[axis_plan.axis] = (background, foreground)
+                self._axis_confidence_roles.pop(axis_plan.axis, None)
+                if not available:
+                    self._pending_targets.pop(axis_plan.axis, None)
+                    self._return_commits.discard(axis_plan.axis)
+                field.blockSignals(True)
+                field.setEnabled(available)
+                if not field.hasFocus() or not available:
+                    if axis_plan.value is None:
+                        field.clear()
+                    else:
+                        field.setText(format_stage_axis_value(axis_plan.value))
+                    field.setModified(False)
+                field.setPlaceholderText("---")
+                field.setToolTip(axis_plan.tooltip)
+                field.blockSignals(False)
+                self._apply_axis_style(axis_plan.axis, field)
+
+    def _sync_coordinate_selector(self, plan: CoordinateDisplayPlan) -> None:
+        signature = tuple(
+            (
+                entry.frame_id,
+                entry.name,
+                entry.group,
+                entry.enabled,
+                entry.reason,
+            )
+            for entry in plan.selector_entries
+        )
+        if signature != self._coordinate_selector_signature:
+            combo = self._coordinate_system_combo
+            combo.blockSignals(True)
+            combo.clear()
+            current_group: str | None = None
+            for entry in plan.selector_entries:
+                if entry.group != current_group:
+                    combo.addItem(entry.group, None)
+                    heading = combo.model().item(combo.count() - 1)
+                    heading.setEnabled(False)
+                    heading.setSelectable(False)
+                    current_group = entry.group
+                combo.addItem(entry.name, entry.frame_id)
+                index = combo.count() - 1
+                item = combo.model().item(index)
+                item.setEnabled(entry.enabled)
+                item.setSelectable(entry.enabled)
+                if entry.reason:
+                    combo.setItemData(index, entry.reason, Qt.ToolTipRole)
+            combo.blockSignals(False)
+            self._coordinate_selector_signature = signature
+        selected_index = self._coordinate_system_combo.findData(
+            plan.selected_frame_id
+        )
+        if selected_index >= 0:
+            self._coordinate_system_combo.blockSignals(True)
+            self._coordinate_system_combo.setCurrentIndex(selected_index)
+            self._coordinate_system_combo.blockSignals(False)
+
+    def _on_coordinate_system_activated(self, index: int) -> None:
+        frame_id = self._coordinate_system_combo.itemData(int(index))
+        if isinstance(frame_id, str) and frame_id:
+            self.coordinate_system_changed.emit(frame_id)
 
     def reset_axis_field(self, axis_name: str, display_value: float | None) -> None:
         axis = self._normalize_axis(axis_name)

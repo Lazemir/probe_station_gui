@@ -2,6 +2,14 @@ from __future__ import annotations
 
 import types
 
+import pytest
+
+from probe_station_gui.settings.axis_calibration_config import (
+    AxisCalibrationSettings,
+    default_axis_calibrations,
+)
+from probe_station_gui.stage.axis_calibration import StageAxisCalibrationMapper
+
 from probe_station_gui.stage.coordinate_targets import (
     CoordinateTargetConfig,
     CoordinateTargetMoveState,
@@ -23,6 +31,14 @@ class _StageController:
         self.last_status_time = 10.0
         self.last_jog_write_time = None
         self.homed = {"X", "Y", "Z"}
+        self.machine_position = self.position
+        self.mapper = StageAxisCalibrationMapper(
+            calibrations=default_axis_calibrations(),
+            position_reporting_mode="work",
+            active_work_coordinate_system="G54",
+            controller_coordinate_offsets={"G54": (0.0,) * 6},
+            axis_index={axis: index for index, axis in enumerate(("X", "Y", "Z", "A", "B", "C"))},
+        )
 
     def latest_stage_state(self) -> str:
         return self.state
@@ -32,6 +48,12 @@ class _StageController:
 
     def latest_stage_position(self) -> tuple[float, ...]:
         return self.position
+
+    def latest_synchronized_machine_position(self) -> tuple[float, ...]:
+        return self.machine_position
+
+    def _axis_calibration_mapper(self) -> StageAxisCalibrationMapper:
+        return self.mapper
 
     def last_status_timestamp(self) -> float:
         return self.last_status_time
@@ -253,3 +275,108 @@ def test_fresh_status_without_b_temporarily_refreshes_frame_authority() -> None:
     )
 
     assert ("frame_authority", (1.0, 2.0, 3.0)) in owner.calls
+
+
+def test_actual_position_update_maps_cached_machine_mpos_once_not_work_or_wco(
+    monkeypatch,
+) -> None:
+    owner = _Owner()
+    calibrations = default_axis_calibrations()
+    calibrations["X"] = AxisCalibrationSettings(
+        enabled=True,
+        calibration_file="x.npz",
+        controller_points=[0.0, 10.0, 20.0],
+        physical_points=[0.0, 12.0, 30.0],
+    )
+    owner.stage_controller.mapper = StageAxisCalibrationMapper(
+        calibrations=calibrations,
+        position_reporting_mode="work",
+        active_work_coordinate_system="G54",
+        controller_coordinate_offsets={"G54": (10.0, 20.0, 0.0, 0.0, 0.0, 0.0)},
+        axis_index={axis: index for index, axis in enumerate(("X", "Y", "Z", "A", "B", "C"))},
+    )
+    owner.stage_controller.machine_position = (15.0, 22.0, 3.0, 4.0, 5.0)
+    captured: list[tuple[object, object]] = []
+    monkeypatch.setattr(
+        position_update.connection_flow,
+        "maybe_restore_persisted_design",
+        lambda _owner, _position: None,
+    )
+    monkeypatch.setattr(
+        position_update.stage_position_panel,
+        "update_stage_position_display",
+        lambda actual_owner, position: captured.append(
+            (position, actual_owner._latest_physical_machine_pose)
+        ),
+    )
+    monkeypatch.setattr(
+        position_update.stage_move_lifecycle,
+        "finish_coordinate_move_if_idle",
+        lambda *_args, **_kwargs: None,
+    )
+
+    position_update.on_stage_position_changed(owner, (5.0, 2.0, 3.0, 4.0, 5.0))
+
+    assert captured
+    emitted_work_position, pose = captured[-1]
+    assert emitted_work_position[0] == pytest.approx(5.0)
+    assert pose.values["X"] == pytest.approx(21.0)
+    assert pose.values["Y"] == pytest.approx(22.0)
+
+
+def test_out_of_domain_machine_axis_is_unavailable_without_breaking_other_axes() -> None:
+    owner = _Owner()
+    calibrations = default_axis_calibrations()
+    calibrations["X"] = AxisCalibrationSettings(
+        enabled=True,
+        calibration_file="x.npz",
+        controller_points=[0.0, 1.0],
+        physical_points=[0.0, 2.0],
+    )
+    owner.stage_controller.mapper = StageAxisCalibrationMapper(
+        calibrations=calibrations,
+        position_reporting_mode="machine",
+        active_work_coordinate_system=None,
+        controller_coordinate_offsets={},
+        axis_index={axis: index for index, axis in enumerate(("X", "Y", "Z", "A", "B", "C"))},
+    )
+    owner.stage_controller.machine_position = (2.0, 3.0, 4.0, 5.0, 6.0)
+
+    pose = position_update.physical_machine_pose_from_controller(
+        owner.stage_controller,
+        AXES,
+    )
+
+    assert pose is not None
+    assert "X" not in pose.values
+    assert pose.values["Y"] == pytest.approx(3.0)
+
+
+def test_status_without_synchronized_machine_snapshot_publishes_empty_physical_pose(
+    monkeypatch,
+) -> None:
+    owner = _Owner()
+    owner.stage_controller.latest_synchronized_machine_position = lambda: None
+    captured: list[object] = []
+    monkeypatch.setattr(
+        position_update.connection_flow,
+        "maybe_restore_persisted_design",
+        lambda _owner, _position: None,
+    )
+    monkeypatch.setattr(
+        position_update.stage_position_panel,
+        "update_stage_position_display",
+        lambda actual_owner, _position: captured.append(
+            actual_owner._latest_physical_machine_pose
+        ),
+    )
+    monkeypatch.setattr(
+        position_update.stage_move_lifecycle,
+        "finish_coordinate_move_if_idle",
+        lambda *_args, **_kwargs: None,
+    )
+
+    position_update.on_stage_position_changed(owner, (5.0, 2.0, 3.0, 4.0, 5.0))
+
+    assert captured
+    assert captured[-1].values == {}
