@@ -3,11 +3,16 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+import logging
 from typing import Any, Protocol
 
 from PySide6.QtCore import Qt
 
-from probe_station_gui.coordinates.model import PhysicalMachinePose
+from probe_station_gui.coordinates.model import (
+    PhysicalMachinePose,
+    STAGE_AXES,
+    VISIBLE_STAGE_AXES,
+)
 from probe_station_gui.coordinates.presentation import (
     MACHINE_FRAME_ID,
     build_coordinate_display_plan,
@@ -18,6 +23,9 @@ from probe_station_gui.stage.position_presenter import (
     stage_position_display_plan,
 )
 from probe_station_gui.views.stage_position_panel import StagePositionPanel
+
+
+logger = logging.getLogger(__name__)
 
 
 class MainWindowStagePositionPanelOwner(Protocol):
@@ -85,14 +93,19 @@ def initialize_gui_coordinate_selection(owner: MainWindowStagePositionPanelOwner
 
 def _persist_gui_coordinate_selection(owner: object, frame_id: str) -> None:
     manager = getattr(owner, "settings_manager", None)
-    update = getattr(manager, "update_and_save", None)
-    if not callable(update):
-        return
-
-    def mutation(settings: object) -> None:
-        settings.software_coordinates.last_selected_frame_id = frame_id
-
-    update(mutation, apply_runtime=False)
+    update_in_memory = getattr(manager, "set_software_coordinate_selection", None)
+    store = getattr(owner, "_software_coordinate_selection_store", None)
+    publish = getattr(store, "publish", None)
+    try:
+        if callable(update_in_memory):
+            update_in_memory(frame_id)
+        if callable(publish):
+            publish(frame_id)
+    except Exception:
+        logger.exception("Software coordinate selection submission failed")
+        show_status = getattr(owner, "_show_status", None)
+        if callable(show_status):
+            show_status("Coordinate selection could not be saved.", 6000)
 
 
 def _coordinate_pivot(owner: object) -> tuple[float, float]:
@@ -104,21 +117,25 @@ def _coordinate_pivot(owner: object) -> tuple[float, float]:
         return (0.0, 0.0)
 
 
-def _coerce_physical_machine_pose(value: object) -> PhysicalMachinePose | None:
+def _coerce_physical_machine_pose(value: object) -> PhysicalMachinePose:
     if isinstance(value, PhysicalMachinePose):
         return value
-    value_type = type(value)
-    if (
-        value_type.__name__ != "PhysicalMachinePose"
-        or value_type.__module__ != "probe_station_gui.coordinates.model"
-    ):
-        return None
-    values = getattr(value, "values", None)
-    if not isinstance(values, Mapping):
-        return PhysicalMachinePose({})
     try:
-        return PhysicalMachinePose.from_mapping(values)
-    except (TypeError, ValueError, OverflowError):
+        value_type = type(value)
+        if (
+            value_type.__name__ != "PhysicalMachinePose"
+            or value_type.__module__ != "probe_station_gui.coordinates.model"
+        ):
+            return PhysicalMachinePose({})
+        values = getattr(value, "values")
+        if not isinstance(values, Mapping):
+            return PhysicalMachinePose({})
+        copied_values = dict(values)
+        axes = set(copied_values)
+        if axes not in (set(VISIBLE_STAGE_AXES), set(STAGE_AXES)):
+            return PhysicalMachinePose({})
+        return PhysicalMachinePose.from_mapping(copied_values)
+    except Exception:
         return PhysicalMachinePose({})
 
 
@@ -214,9 +231,9 @@ def select_gui_coordinate_frame(
             )
             requested = plan.selected_frame_id
     owner._selected_coordinate_frame_id = requested
-    _persist_gui_coordinate_selection(owner, requested)
     if pose is not None:
         update_software_coordinate_display(owner, pose)
+    _persist_gui_coordinate_selection(owner, requested)
 
 
 def display_axis_value_from_raw(

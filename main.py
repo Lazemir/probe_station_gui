@@ -427,6 +427,9 @@ from probe_station_gui.settings.manager import (
     SettingsManager,
     ordered_objective_names,
 )
+from probe_station_gui.settings.software_coordinate_selection_store import (
+    SoftwareCoordinateSelectionStoreWorker,
+)
 from probe_station_gui.settings.objective_config import (
     normalize_objective_name,
     parse_pixels_to_mm_matrix,
@@ -756,6 +759,15 @@ class Main(QMainWindow):
         self.menuBar().setNativeMenuBar(False)
 
         self.settings_manager: SettingsManager = SettingsManager()
+        self._software_coordinate_selection_store = (
+            SoftwareCoordinateSelectionStoreWorker(
+                self.settings_manager.persist_software_coordinate_selection,
+                self,
+            )
+        )
+        self._software_coordinate_selection_store.failed.connect(
+            self._on_software_coordinate_selection_store_failed
+        )
         _startup_trace("SettingsManager created; logging configured")
         _flush_startup_trace()
         self.view = MicroscopeView(
@@ -7230,6 +7242,16 @@ class Main(QMainWindow):
         store = getattr(self, "_coordinate_frame_store", None)
         if store is not None:
             store.stop(timeout_s=0.0)
+
+    def _stop_software_coordinate_selection_store(self) -> None:
+        store = getattr(self, "_software_coordinate_selection_store", None)
+        if store is not None:
+            store.stop(timeout_s=2.0)
+
+    def _on_software_coordinate_selection_store_failed(self, failure: object) -> None:
+        message = str(getattr(failure, "message", "Unknown persistence error."))
+        logger.warning("Software coordinate selection save failed: %s", message)
+        self._show_status("Coordinate selection could not be saved.", 6000)
 
     def _on_coordinate_frames_loaded(self, result: object) -> None:
         connection_flow.handle_coordinate_frame_loaded(self, result)

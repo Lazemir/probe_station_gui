@@ -216,6 +216,46 @@ def test_synchronized_machine_snapshot_never_reuses_previous_status_generation()
         controller.shutdown()
 
 
+@pytest.mark.parametrize(
+    ("first_snapshot", "second_snapshot"),
+    [
+        ((15.0, 22.0, 3.0), None),
+        (None, (15.0, 22.0, 3.0)),
+        ((15.0, 22.0, 3.0), (16.0, 22.0, 3.0)),
+    ],
+)
+def test_synchronized_snapshot_change_refreshes_unchanged_legacy_position(
+    first_snapshot: tuple[float, ...] | None,
+    second_snapshot: tuple[float, ...] | None,
+) -> None:
+    controller = StageController()
+    positions: list[object] = []
+    controller.stage_position_changed = SimpleNamespace(emit=positions.append)
+    display_position = (5.0, 2.0, 3.0)
+    try:
+        controller._update_cached_positions(
+            _Status(
+                state="Idle",
+                display_position=display_position,
+                work_position=display_position,
+                synchronized_machine_position=first_snapshot,
+            )
+        )
+        controller._update_cached_positions(
+            _Status(
+                state="Idle",
+                display_position=display_position,
+                work_position=display_position,
+                synchronized_machine_position=second_snapshot,
+            )
+        )
+
+        assert positions == [display_position, display_position]
+        assert controller.latest_synchronized_machine_position() == second_snapshot
+    finally:
+        controller.shutdown()
+
+
 def test_physical_machine_coordinates_use_raw_mpos_not_work_display_or_wco() -> None:
     controller = StageController()
     try:

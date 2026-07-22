@@ -144,7 +144,8 @@ class MainStageCoordinateControlsTest(unittest.TestCase):
         frame_id = "11111111-1111-4111-8111-111111111111"
         settings = Settings()
         settings.software_coordinates.last_selected_frame_id = frame_id
-        saved: list[str] = []
+        in_memory: list[str] = []
+        published: list[str] = []
         window = Main.__new__(Main)
         window._selected_coordinate_frame_id = "machine"
         window._pending_coordinate_frame_restore_id = frame_id
@@ -155,19 +156,51 @@ class MainStageCoordinateControlsTest(unittest.TestCase):
         window._coordinate_frames_loaded = True
         window._stage_position_panel = None
         window.stage_controller = types.SimpleNamespace(homed_axes=lambda: {"X", "Y"})
+
+        def set_selection(selected: str) -> None:
+            settings.software_coordinates.last_selected_frame_id = selected
+            in_memory.append(selected)
+
         window.settings_manager = types.SimpleNamespace(
             settings=settings,
-            update_and_save=lambda mutation, **_kwargs: (
-                mutation(settings),
-                saved.append(settings.software_coordinates.last_selected_frame_id),
+            set_software_coordinate_selection=set_selection,
+            update_and_save=lambda *_args, **_kwargs: self.fail(
+                "selector callback used synchronous settings persistence"
             ),
+        )
+        window._software_coordinate_selection_store = types.SimpleNamespace(
+            publish=published.append
         )
 
         Main._on_software_coordinate_system_changed(window, "machine")
 
         self.assertEqual(window._selected_coordinate_frame_id, "machine")
         self.assertIsNone(window._pending_coordinate_frame_restore_id)
-        self.assertEqual(saved, ["machine"])
+        self.assertEqual(in_memory, ["machine"])
+        self.assertEqual(published, ["machine"])
+
+    def test_selection_persistence_failure_reports_without_reverting_ui(self) -> None:
+        frame_id = "11111111-1111-4111-8111-111111111111"
+        statuses: list[tuple[str, int]] = []
+        window = Main.__new__(Main)
+        window._selected_coordinate_frame_id = frame_id
+        window._show_status = lambda message, timeout: statuses.append(
+            (message, timeout)
+        )
+
+        Main._on_software_coordinate_selection_store_failed(
+            window,
+            types.SimpleNamespace(
+                frame_id=frame_id,
+                message="OSError: disk unavailable",
+            ),
+        )
+
+        self.assertEqual(window._selected_coordinate_frame_id, frame_id)
+        self.assertEqual(
+            statuses,
+            [("Coordinate selection could not be saved.", 6000)],
+        )
 
     def test_main_refresh_preserves_frame_id_across_version_then_falls_back_on_delete(self) -> None:
         frame_id = "11111111-1111-4111-8111-111111111111"

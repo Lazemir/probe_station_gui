@@ -46,6 +46,7 @@ class MainWindowShutdownOwner(Protocol):
     def _save_pending_linear_feedrate_default(self) -> None: ...
     def _stop_design_markup_store(self) -> None: ...
     def _stop_coordinate_frame_store(self) -> None: ...
+    def _stop_software_coordinate_selection_store(self) -> None: ...
     def _route_runtime_presenter(self) -> Any: ...
     def _show_status(self, message: str, timeout: int) -> None: ...
 
@@ -110,6 +111,13 @@ def _stop_services_and_timers(owner: MainWindowShutdownOwner) -> None:
     stop_coordinate_frames = getattr(owner, "_stop_coordinate_frame_store", None)
     if callable(stop_coordinate_frames):
         stop_coordinate_frames()
+    stop_coordinate_selection = getattr(
+        owner,
+        "_stop_software_coordinate_selection_store",
+        None,
+    )
+    if callable(stop_coordinate_selection):
+        stop_coordinate_selection()
 
 
 def _stop_route_worker(owner: MainWindowShutdownOwner) -> None:

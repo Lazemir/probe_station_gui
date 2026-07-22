@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from importlib import resources
 from pathlib import Path
 from typing import Callable, Dict, Iterable, List
+from uuid import UUID
 
 from probe_station_gui.settings.axis_calibration_config import (
     AxisCalibrationSettings,
@@ -208,6 +209,7 @@ class SettingsManager:
 
     CONFIG_FILENAME = "settings.json"
     COORDINATE_FRAMES_FILENAME = "coordinate-frames.json"
+    SOFTWARE_COORDINATE_SELECTION_FILENAME = "software-coordinate-selection.json"
     CONTROLLER_STATE_FILENAME = "controller-state.json"
     SERIAL_CONNECTION_STATE_FILENAME = "serial-connection-state.json"
     METER_CONNECTION_STATE_FILENAME = "meter-connection-state.json"
@@ -314,6 +316,90 @@ class SettingsManager:
         """Return the separate measured Design-frame document path."""
 
         return self._config_dir / self.COORDINATE_FRAMES_FILENAME
+
+    def set_software_coordinate_selection(self, frame_id: str) -> None:
+        """Update the GUI selection in memory without performing filesystem I/O."""
+
+        selected = self._normalize_software_coordinate_selection(frame_id)
+        with self._settings_lock:
+            updated = self._settings.clone()
+            updated.software_coordinates.last_selected_frame_id = selected
+            self._replace_locked(updated, apply_runtime=False)
+
+    def persist_software_coordinate_selection(self, frame_id: str) -> bool:
+        """Persist one still-current immutable selection on a worker thread."""
+
+        selected = self._normalize_software_coordinate_selection(frame_id)
+        with self._settings_lock:
+            current = self._settings.software_coordinates.last_selected_frame_id
+            if current != selected:
+                return False
+        self._write_software_coordinate_selection_atomic(selected)
+        return True
+
+    @staticmethod
+    def _normalize_software_coordinate_selection(frame_id: str) -> str:
+        message = "Software coordinate selection must be Machine or a coordinate-frame UUID."
+        if not isinstance(frame_id, str) or not frame_id.strip():
+            raise ValueError(message)
+        selected = frame_id.strip()
+        if selected == "machine":
+            return selected
+        try:
+            UUID(selected)
+        except (ValueError, AttributeError) as exc:
+            raise ValueError(message) from exc
+        return selected
+
+    def _software_coordinate_selection_path(self) -> Path:
+        config_dir = getattr(self, "_config_dir", None)
+        if config_dir is None:
+            config_dir = Path(self._config_path).parent
+        return Path(config_dir) / self.SOFTWARE_COORDINATE_SELECTION_FILENAME
+
+    def _write_software_coordinate_selection_atomic(self, frame_id: str) -> None:
+        self._config_dir.mkdir(parents=True, exist_ok=True)
+        path = self._software_coordinate_selection_path()
+        temporary_path = path.with_name(
+            f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+        )
+        try:
+            with temporary_path.open("w", encoding="utf-8") as handle:
+                json.dump(
+                    {"last_selected_frame_id": frame_id},
+                    handle,
+                    indent=2,
+                    ensure_ascii=False,
+                )
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary_path, path)
+        finally:
+            try:
+                temporary_path.unlink()
+            except FileNotFoundError:
+                pass
+
+    def _restore_software_coordinate_selection(self, settings: Settings) -> None:
+        path = self._software_coordinate_selection_path()
+        if not path.exists():
+            return
+        try:
+            with path.open("r", encoding="utf-8-sig") as handle:
+                data = json.load(handle)
+            if not isinstance(data, dict):
+                raise ValueError("Selection document must be an object.")
+            selected = self._normalize_software_coordinate_selection(
+                data.get("last_selected_frame_id")
+            )
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            self._logger.warning(
+                "Failed to load software coordinate selection from %s: %s",
+                path,
+                exc,
+            )
+            return
+        settings.software_coordinates.last_selected_frame_id = selected
 
     def replace(self, settings: Settings) -> None:
         """Replace the stored settings with the provided instance."""
@@ -651,7 +737,9 @@ class SettingsManager:
         with self._config_path.open("r", encoding="utf-8-sig") as handle:
             raw = json.load(handle)
         self._logger.debug("Loaded settings from %s", self._config_path)
-        return self._settings_from_raw(raw)
+        settings = self._settings_from_raw(raw)
+        self._restore_software_coordinate_selection(settings)
+        return settings
 
     def _settings_from_raw(self, raw: object) -> Settings:
         controls = self._load_controls(raw)

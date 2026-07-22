@@ -47,7 +47,7 @@ def test_shutdown_delegates_calibration_drain_to_runtime() -> None:
     assert events == [("shutdown", 2.0)]
 
 
-def test_service_shutdown_stops_coordinate_frame_store() -> None:
+def test_service_shutdown_stops_coordinate_and_selection_stores() -> None:
     events: list[object] = []
     owner = SimpleNamespace(
         _api_bridge=None,
@@ -60,11 +60,14 @@ def test_service_shutdown_stops_coordinate_frame_store() -> None:
         _save_pending_linear_feedrate_default=lambda: None,
         _stop_design_markup_store=lambda: events.append(("markup_stop",)),
         _stop_coordinate_frame_store=lambda: events.append(("frame_stop",)),
+        _stop_software_coordinate_selection_store=lambda: events.append(
+            ("selection_stop",)
+        ),
     )
 
     shutdown_ui._stop_services_and_timers(owner)
 
-    assert events == [("markup_stop",), ("frame_stop",)]
+    assert events == [("markup_stop",), ("frame_stop",), ("selection_stop",)]
 
 
 def test_shutdown_fails_closed_when_runtime_does_not_drain() -> None:

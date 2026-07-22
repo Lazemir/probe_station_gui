@@ -32,6 +32,12 @@ from probe_station_gui.stage.position_presenter import (
     AxisFieldPresentation,
     StagePositionDisplayPlan,
 )
+from probe_station_gui.settings.axis_calibration_config import (
+    default_axis_calibrations,
+)
+from probe_station_gui.stage.controller import StageController
+from probe_station_gui.stage.position_update import physical_machine_pose_from_controller
+from probe_station_gui.stage.types import _Status
 from probe_station_gui.views.stage_position_panel import (
     StagePositionPanel,
     format_stage_axis_value,
@@ -256,12 +262,14 @@ class _SelectionSettingsManager:
                 pivot=SimpleNamespace(x_mm=0.0, y_mm=0.0),
             )
         )
-        self.saved: list[str] = []
+        self.in_memory_updates: list[str] = []
 
-    def update_and_save(self, mutation, *, apply_runtime: bool = False) -> None:
-        assert apply_runtime is False
-        mutation(self.settings)
-        self.saved.append(self.settings.software_coordinates.last_selected_frame_id)
+    def set_software_coordinate_selection(self, frame_id: str) -> None:
+        self.settings.software_coordinates.last_selected_frame_id = frame_id
+        self.in_memory_updates.append(frame_id)
+
+    def update_and_save(self, *_args, **_kwargs) -> None:
+        raise AssertionError("selector callback must not synchronously save settings")
 
 
 def test_gui_restore_selects_ready_through_z_even_when_a_is_missing(
@@ -297,6 +305,7 @@ def test_explicit_gui_selection_cancels_pending_restore_and_persists_locally() -
     registry = CoordinateFrameRegistry()
     registry.add(_ready_frame_without_a(frame_id))
     manager = _SelectionSettingsManager(frame_id)
+    published: list[str] = []
     owner = SimpleNamespace(
         _coordinate_frame_registry=registry,
         _coordinate_frames_loaded=True,
@@ -306,6 +315,7 @@ def test_explicit_gui_selection_cancels_pending_restore_and_persists_locally() -
             {"X": 0.0, "Y": 0.0, "Z": 1.0, "A": 2.0, "B": 0.0}
         ),
         _stage_position_panel=None,
+        _software_coordinate_selection_store=SimpleNamespace(publish=published.append),
         settings_manager=manager,
         stage_controller=SimpleNamespace(homed_axes=lambda: {"X", "Y"}),
     )
@@ -314,7 +324,8 @@ def test_explicit_gui_selection_cancels_pending_restore_and_persists_locally() -
 
     assert owner._selected_coordinate_frame_id == "machine"
     assert owner._pending_coordinate_frame_restore_id is None
-    assert manager.saved == ["machine"]
+    assert manager.in_memory_updates == ["machine"]
+    assert published == ["machine"]
 
 
 def test_deleted_selected_frame_falls_back_safely_without_rearming_restore() -> None:
@@ -371,6 +382,134 @@ def test_missing_fresh_machine_axis_clears_stale_value_and_shows_exact_yellow_re
     panel.deleteLater()
 
 
+def _connect_synchronized_snapshot_presentation(
+    owner: SimpleNamespace,
+    controller: StageController,
+) -> None:
+    def refresh(_legacy_position: object) -> None:
+        pose = physical_machine_pose_from_controller(
+            controller,
+            ("X", "Y", "Z", "A", "B"),
+        ) or PhysicalMachinePose({})
+        owner._latest_physical_machine_pose = pose
+        panel_adapter.update_software_coordinate_display(owner, pose)
+
+    controller.stage_position_changed = SimpleNamespace(emit=refresh)
+
+
+def _status_with_synchronized_machine(
+    synchronized_machine_position: tuple[float, ...] | None,
+) -> _Status:
+    display = (5.0, 2.0, 3.0, 4.0, 5.0)
+    return _Status(
+        state="Idle",
+        display_position=display,
+        work_position=display,
+        synchronized_machine_position=synchronized_machine_position,
+    )
+
+
+def test_same_wpos_missing_wco_clears_previous_blue_machine_values(
+    qt_app: QApplication,
+) -> None:
+    controller = StageController()
+    panel = StagePositionPanel(("X", "Y", "Z", "A", "B"))
+    owner = SimpleNamespace(
+        _stage_position_panel=panel,
+        _coordinate_frame_registry=CoordinateFrameRegistry(),
+        _coordinate_frames_loaded=True,
+        _selected_coordinate_frame_id="machine",
+        _pending_coordinate_frame_restore_id=None,
+        _stage_axis_display_values={},
+        settings_manager=_SelectionSettingsManager("machine"),
+        stage_controller=controller,
+    )
+    controller.apply_axis_calibrations(default_axis_calibrations())
+    controller._homed_axes = {"X", "Y", "Z", "A"}
+    _connect_synchronized_snapshot_presentation(owner, controller)
+    try:
+        controller._update_cached_positions(
+            _status_with_synchronized_machine((15.0, 22.0, 3.0, 4.0, 5.0))
+        )
+        assert panel.axis_fields["X"].text() == "15"
+        assert "background-color: #1565c0" in panel.axis_fields["X"].styleSheet()
+
+        controller._update_cached_positions(_status_with_synchronized_machine(None))
+
+        assert panel.axis_fields["X"].text() == ""
+        assert "background-color: #f0b429" in panel.axis_fields["X"].styleSheet()
+    finally:
+        panel.deleteLater()
+        controller.shutdown()
+
+
+def test_same_wpos_new_synchronized_snapshot_completes_pending_restore() -> None:
+    frame_id = "11111111-1111-4111-8111-111111111111"
+    registry = CoordinateFrameRegistry()
+    registry.add(_ready_frame_without_a(frame_id))
+    controller = StageController()
+    plans: list[CoordinateDisplayPlan] = []
+    owner = SimpleNamespace(
+        _stage_position_panel=SimpleNamespace(set_coordinate_display_plan=plans.append),
+        _coordinate_frame_registry=registry,
+        _coordinate_frames_loaded=True,
+        _selected_coordinate_frame_id="machine",
+        _pending_coordinate_frame_restore_id=frame_id,
+        _stage_axis_display_values={},
+        settings_manager=_SelectionSettingsManager(frame_id),
+        stage_controller=controller,
+    )
+    controller.apply_axis_calibrations(default_axis_calibrations())
+    controller._homed_axes = {"X", "Y", "Z", "A"}
+    _connect_synchronized_snapshot_presentation(owner, controller)
+    try:
+        controller._update_cached_positions(_status_with_synchronized_machine(None))
+        assert owner._pending_coordinate_frame_restore_id == frame_id
+        assert owner._selected_coordinate_frame_id == "machine"
+
+        controller._update_cached_positions(
+            _status_with_synchronized_machine((0.0, 0.0, 1.0, 2.0, 0.0))
+        )
+
+        assert owner._pending_coordinate_frame_restore_id is None
+        assert owner._selected_coordinate_frame_id == frame_id
+        assert plans[-1].selected_frame_id == frame_id
+    finally:
+        controller.shutdown()
+
+
+def test_same_wpos_changed_machine_snapshot_refreshes_displayed_value(
+    qt_app: QApplication,
+) -> None:
+    controller = StageController()
+    panel = StagePositionPanel(("X", "Y", "Z", "A", "B"))
+    owner = SimpleNamespace(
+        _stage_position_panel=panel,
+        _coordinate_frame_registry=CoordinateFrameRegistry(),
+        _coordinate_frames_loaded=True,
+        _selected_coordinate_frame_id="machine",
+        _pending_coordinate_frame_restore_id=None,
+        _stage_axis_display_values={},
+        settings_manager=_SelectionSettingsManager("machine"),
+        stage_controller=controller,
+    )
+    controller.apply_axis_calibrations(default_axis_calibrations())
+    controller._homed_axes = {"X", "Y", "Z", "A"}
+    _connect_synchronized_snapshot_presentation(owner, controller)
+    try:
+        controller._update_cached_positions(
+            _status_with_synchronized_machine((15.0, 22.0, 3.0, 4.0, 5.0))
+        )
+        controller._update_cached_positions(
+            _status_with_synchronized_machine((16.0, 22.0, 3.0, 4.0, 5.0))
+        )
+
+        assert panel.axis_fields["X"].text() == "16"
+    finally:
+        panel.deleteLater()
+        controller.shutdown()
+
+
 def test_refresh_accepts_valid_pose_value_across_module_reload_boundary(
     qt_app: QApplication,
 ) -> None:
@@ -399,33 +538,95 @@ def test_refresh_accepts_valid_pose_value_across_module_reload_boundary(
     assert plans[-1].selected_frame_id == "machine"
 
 
-def test_malformed_reloaded_pose_clears_stale_values_to_unavailable_plan() -> None:
-    plans: list[object] = []
-    reloaded_pose_type = type(
+def _reloaded_pose(values: object) -> object:
+    pose_type = type(
         "PhysicalMachinePose",
         (),
         {"__module__": "probe_station_gui.coordinates.model"},
     )
-    reloaded_pose = reloaded_pose_type()
-    reloaded_pose.values = {"X": float("nan")}
+    pose = pose_type()
+    pose.values = values
+    return pose
+
+
+def _reloaded_pose_without_values() -> object:
+    pose_type = type(
+        "PhysicalMachinePose",
+        (),
+        {"__module__": "probe_station_gui.coordinates.model"},
+    )
+    return pose_type()
+
+
+def _reloaded_pose_with_raising_values() -> object:
+    def raise_values(_self) -> object:
+        raise RuntimeError("broken reload value")
+
+    pose_type = type(
+        "PhysicalMachinePose",
+        (),
+        {
+            "__module__": "probe_station_gui.coordinates.model",
+            "values": property(raise_values),
+        },
+    )
+    return pose_type()
+
+
+@pytest.mark.parametrize(
+    "pose_factory",
+    [
+        pytest.param(object, id="unexpected-type"),
+        pytest.param(_reloaded_pose_without_values, id="missing-values"),
+        pytest.param(_reloaded_pose_with_raising_values, id="raising-values"),
+        pytest.param(lambda: _reloaded_pose([]), id="non-mapping-values"),
+        pytest.param(lambda: _reloaded_pose({"X": 1.0}), id="partial-values"),
+        pytest.param(
+            lambda: _reloaded_pose(
+                {"X": float("nan"), "Y": 2.0, "Z": 3.0, "A": 4.0, "B": 5.0}
+            ),
+            id="nonfinite-values",
+        ),
+        pytest.param(
+            lambda: _reloaded_pose(
+                {"X": 1.0, "Y": 2.0, "Z": 3.0, "A": 4.0, "Q": 5.0}
+            ),
+            id="unexpected-axis",
+        ),
+    ],
+)
+def test_malformed_reloaded_pose_clears_stale_blue_values_without_raising(
+    qt_app: QApplication,
+    pose_factory,
+) -> None:
+    panel = StagePositionPanel(("X", "Y", "Z", "A", "B"))
     owner = SimpleNamespace(
-        _stage_position_panel=SimpleNamespace(set_coordinate_display_plan=plans.append),
+        _stage_position_panel=panel,
         _coordinate_frame_registry=CoordinateFrameRegistry(),
         _coordinate_frames_loaded=True,
         _selected_coordinate_frame_id="machine",
         _pending_coordinate_frame_restore_id=None,
-        _stage_axis_display_values={"X": 99.0},
-        _latest_physical_machine_pose=reloaded_pose,
+        _stage_axis_display_values={},
+        _latest_physical_machine_pose=None,
         settings_manager=_SelectionSettingsManager("machine"),
         stage_controller=SimpleNamespace(homed_axes=lambda: {"X", "Y", "Z", "A"}),
     )
+    panel_adapter.update_software_coordinate_display(
+        owner,
+        PhysicalMachinePose({"X": 99.0, "Y": 2.0, "Z": 3.0, "A": 4.0, "B": 5.0}),
+    )
+    assert panel.axis_fields["X"].text() == "99"
+    assert "background-color: #1565c0" in panel.axis_fields["X"].styleSheet()
+    owner._latest_physical_machine_pose = pose_factory()
 
     panel_adapter.refresh_coordinate_frame_display(owner)
 
-    axes = {item.axis: item for item in plans[-1].axis_updates}
     assert owner._stage_axis_display_values == {}
-    assert axes["X"].value is None
-    assert axes["X"].tooltip == "Physical Machine X coordinate is unavailable."
+    for axis, field in panel.axis_fields.items():
+        assert field.text() == ""
+        assert "background-color: #f0b429" in field.styleSheet()
+        assert field.toolTip() == f"Physical Machine {axis} coordinate is unavailable."
+    panel.deleteLater()
 
 
 @pytest.mark.parametrize(
