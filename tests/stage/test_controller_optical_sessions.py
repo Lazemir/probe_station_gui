@@ -132,6 +132,38 @@ def test_reserved_position_read_is_available_only_to_external_task_owner(
         controller.finish_external_task()
 
 
+def test_reserved_physical_machine_read_is_owner_only_and_uses_raw_mpos(
+    controller,
+) -> None:
+    masks: list[int] = []
+    controller._serial = _FakeSerial()
+    controller._position_reporting_mode = "work"
+    controller._current_status_report_mask = 2
+    controller._ensure_status_report_mask = lambda mask, **_kwargs: masks.append(mask)
+    controller._read_status_frame = lambda _serial, **kwargs: kwargs[
+        "parse_status_line"
+    ]("<Idle|MPos:10.0,20.0,2.0,3.0|WCO:100.0,100.0,100.0,100.0>")
+    controller._axis_calibration_mapper = lambda: SimpleNamespace(
+        controller_to_physical=lambda axis, value: (
+            float(value) * 2.0 if axis == "Z" else float(value) + 1.0
+        )
+    )
+
+    with pytest.raises(StageControllerError, match="external stage task"):
+        controller.run_external_current_physical_machine_coordinates(("Z", "A"))
+
+    controller.begin_external_task("contact")
+    try:
+        coordinates = controller.run_external_current_physical_machine_coordinates(
+            ("Z", "A")
+        )
+    finally:
+        controller.finish_external_task()
+
+    assert coordinates == {"Z": 4.0, "A": 4.0}
+    assert masks == [3, 2]
+
+
 def test_blocked_external_position_query_does_not_hold_task_lock(
     controller,
 ) -> None:

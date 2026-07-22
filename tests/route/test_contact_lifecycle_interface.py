@@ -339,6 +339,7 @@ def test_contact_success_callback_runs_after_quality_and_interrupt_checkpoint() 
         interrupt=_InterruptAdapter(),
         events=_EventAdapter(events),
         post_success_contact=lambda _placement: events.append("reference:capture"),
+        post_success_contact_eligible=lambda: True,
     )
 
     result = flow.place_contact(_contact_request())
@@ -366,6 +367,7 @@ def test_interrupt_at_quality_checkpoint_never_runs_contact_success_callback() -
         interrupt=interrupt,
         events=_EventAdapter(events),
         post_success_contact=lambda _placement: events.append("reference:capture"),
+        post_success_contact_eligible=lambda: True,
     )
 
     result = flow.place_contact(_contact_request())
@@ -373,6 +375,46 @@ def test_interrupt_at_quality_checkpoint_never_runs_contact_success_callback() -
     assert result.interrupted is True
     assert interrupt.requested() is True
     assert "reference:capture" not in events
+
+
+def test_late_stop_eligibility_blocks_success_callback_at_last_checkpoint() -> None:
+    events: list[str] = []
+    eligible = True
+
+    class _StoppingQuality(_QualityAdapter):
+        def placement_success(self, record: RouteMeasurementRecord) -> bool:
+            nonlocal eligible
+            success = super().placement_success(record)
+            eligible = False
+            return success
+
+    flow = RouteContactFlow(
+        stage=_StageAdapter(events),
+        meter=_MeterAdapter(events),
+        quality=_StoppingQuality(events),
+        interrupt=_InterruptAdapter(),
+        events=_EventAdapter(events),
+        post_success_contact=lambda _placement: events.append("reference:capture"),
+        post_success_contact_eligible=lambda: eligible,
+    )
+
+    result = flow.place_contact(_contact_request())
+
+    assert result.require_placement().success is True
+    assert "reference:capture" not in events
+
+
+def test_success_callback_requires_explicit_eligibility_predicate() -> None:
+    events: list[str] = []
+    with pytest.raises(ValueError, match="eligibility"):
+        RouteContactFlow(
+            stage=_StageAdapter(events),
+            meter=_MeterAdapter(events),
+            quality=_QualityAdapter(events),
+            interrupt=_InterruptAdapter(),
+            events=_EventAdapter(events),
+            post_success_contact=lambda _placement: None,
+        )
 
 
 @pytest.mark.parametrize("boundary", ["autofocus", "photo", "contact_move"])

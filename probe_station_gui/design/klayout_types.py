@@ -137,6 +137,32 @@ class SnapFailure:
 
 
 @dataclass(frozen=True)
+class StructureBoundsRequest:
+    """Newest-only request for visible, recursively transformed structure bounds."""
+
+    request_id: int
+    generation: int
+    config: KLayoutConfig | None = None
+    fixture_polygons: tuple[object, ...] = ()
+
+
+@dataclass(frozen=True)
+class StructureBoundsResult:
+    """Per-structure bounds in displayed design coordinates."""
+
+    request_id: int
+    generation: int
+    structure_bounds: tuple[Box2D, ...]
+
+
+@dataclass(frozen=True)
+class StructureBoundsFailure:
+    request_id: int
+    generation: int
+    message: str
+
+
+@dataclass(frozen=True)
 class PendingClick:
     """A click action waiting for its exact snap response."""
 
@@ -213,6 +239,9 @@ __all__ = [
     "SnapResponse",
     "SnapFailure",
     "SnapWorkBudget",
+    "StructureBoundsFailure",
+    "StructureBoundsRequest",
+    "StructureBoundsResult",
     "SNAP_UNAVAILABLE_CANCELLED",
     "SNAP_UNAVAILABLE_CANDIDATE_BUDGET",
     "SNAP_UNAVAILABLE_EXCESSIVE_COVERAGE",

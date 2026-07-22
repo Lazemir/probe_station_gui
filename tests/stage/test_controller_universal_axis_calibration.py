@@ -9,6 +9,7 @@ except ImportError:
 
 from probe_station_gui.settings.axis_calibration_config import default_axis_calibrations
 from probe_station_gui.stage.errors import StageControllerError
+from probe_station_gui.stage.types import _Status
 
 
 def _curve(axis: str) -> dict[str, AxisCalibrationSettings]:
@@ -179,6 +180,57 @@ def test_preview_reports_none_when_cached_coordinate_is_outside_curve() -> None:
         controller._last_machine_position = (4.0, 0.0, 0.0, 0.0, 0.0, 0.0)
 
         assert controller.axis_calibration_preview_position("X") is None
+    finally:
+        controller.shutdown()
+
+
+def test_physical_machine_coordinates_use_raw_mpos_not_work_display_or_wco() -> None:
+    controller = StageController()
+    try:
+        settings = default_axis_calibrations()
+        settings["Z"] = AxisCalibrationSettings(
+            enabled=True,
+            controller_points=[0.0, 2.0, 4.0],
+            physical_points=[0.0, 3.0, 10.0],
+        )
+        controller.apply_axis_calibrations(settings)
+        controller._position_reporting_mode = "work"
+        controller._active_work_coordinate_system = "G54"
+        controller._controller_coordinate_offsets["G54"] = (10.0, 20.0, 30.0)
+        status = _Status(
+            state="Idle",
+            position=(11.0, 22.0, 2.0),
+            display_position=(1.0, 2.0, -28.0),
+            work_position=(1.0, 2.0, -28.0),
+            work_offset=(10.0, 20.0, 30.0),
+            coordinate_system="G54",
+        )
+
+        assert controller._physical_machine_coordinates_from_status(
+            status,
+            axes=("Z",),
+        ) == {"Z": pytest.approx(3.0)}
+    finally:
+        controller.shutdown()
+
+
+def test_physical_machine_coordinates_reject_missing_or_out_of_domain_mpos() -> None:
+    controller = StageController()
+    try:
+        controller.apply_axis_calibrations(_curve("Z"))
+        missing = _Status(state="Idle", position=(1.0, 2.0))
+        outside = _Status(state="Idle", position=(1.0, 2.0, 4.0))
+
+        with pytest.raises(StageControllerError, match="complete.*Z"):
+            controller._physical_machine_coordinates_from_status(
+                missing,
+                axes=("Z",),
+            )
+        with pytest.raises(StageControllerError, match="outside.*calibration"):
+            controller._physical_machine_coordinates_from_status(
+                outside,
+                axes=("Z",),
+            )
     finally:
         controller.shutdown()
 

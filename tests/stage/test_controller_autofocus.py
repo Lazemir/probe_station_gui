@@ -182,12 +182,12 @@ def test_registration_autofocus_returns_its_token_and_physical_z_only_on_success
     controller._serial_session = lambda: _NullContext()
     controller.movement_started = SimpleNamespace(emit=lambda: None)
     controller.autofocus_finished = SimpleNamespace(emit=lambda *_args: None)
-    controller.calibrated_axis_display_value = (
-        lambda axis, value: float(value) + (10.0 if axis == "Z" else 0.0)
+    captured: list[tuple[str, ...]] = []
+    controller._current_physical_machine_coordinates_locked = lambda axes: (
+        captured.append(tuple(axes)) or {"Z": 12.5}
     )
 
-    def run_locked(*, focus_z_callback) -> str:
-        focus_z_callback(2.5)
+    def run_locked(**_kwargs) -> str:
         return "Focused."
 
     controller._run_autofocus_locked = run_locked
@@ -198,6 +198,7 @@ def test_registration_autofocus_returns_its_token_and_physical_z_only_on_success
     )
 
     assert results == [(token, True, 12.5, "Focused.")]
+    assert captured == [("Z",)]
     controller.shutdown()
 
 

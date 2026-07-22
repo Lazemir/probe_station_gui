@@ -113,6 +113,13 @@ from probe_station_gui.design.focus_candidate import (
     FocusCandidate,
     select_central_focus_candidate,
 )
+from probe_station_gui.design.klayout_types import (
+    KLayoutConfig,
+    StructureBoundsFailure,
+    StructureBoundsRequest,
+    StructureBoundsResult,
+)
+from probe_station_gui.design.klayout_workers import KLayoutStructureBoundsWorker
 from probe_station_gui.design.frame_registration import (
     ContactReferenceToken,
     DesignFrameMetadata,
@@ -649,6 +656,12 @@ class Main(QMainWindow):
         object,
         str,
     )
+    design_registration_focus_move_finished: Signal = Signal(
+        object,
+        object,
+        bool,
+        str,
+    )
     design_contact_reference_ready: Signal = Signal(object, float)
 
     ALIGNMENT_CAPTURE_SHORTCUT = "Space"
@@ -996,7 +1009,15 @@ class Main(QMainWindow):
         self._coordinate_frame_authority_blocked_axes: set[str] = set()
         self._active_route_design_frame_snapshot = None
         self._pending_registration_focus_token: RegistrationFocusToken | None = None
+        self._pending_registration_focus_target_xy: tuple[float, float] | None = None
         self._focus_candidate: FocusCandidate | None = None
+        self._focus_structure_bounds_worker: KLayoutStructureBoundsWorker | None = None
+        self._focus_structure_request_id = 0
+        self._pending_focus_structure_request_id: int | None = None
+        self._pending_focus_structure_context: object | None = None
+        self._pending_focus_structure_fov: tuple[float, float] | None = None
+        self._pending_focus_structure_design_bounds: tuple[float, float, float, float] | None = None
+        self._design_focus_overlay_context: object | None = None
         self._design_focus_signals_connected = False
         self._coordinate_frame_store.loaded.connect(
             self._on_coordinate_frames_loaded
@@ -1132,9 +1153,6 @@ class Main(QMainWindow):
                 message,
             )
         )
-        self.stage_controller.movement_finished.connect(
-            self._on_registration_focus_move_finished
-        )
         self.stage_controller.b_rotation_started.connect(
             self._on_alignment_b_rotation_started
         )
@@ -1158,6 +1176,9 @@ class Main(QMainWindow):
         self.stage_controller.autofocus_finished.connect(self.on_autofocus_finished)
         self.design_registration_autofocus_finished.connect(
             self._on_registration_focus_autofocus_finished
+        )
+        self.design_registration_focus_move_finished.connect(
+            self._on_registration_focus_move_signal
         )
         self.design_contact_reference_ready.connect(
             self._on_design_contact_reference_ready
@@ -8204,17 +8225,15 @@ class Main(QMainWindow):
         def capture(_placement: object) -> None:
             if self._active_design_contact_record(token) is None:
                 return
-            latest = self.stage_controller.latest_stage_position()
-            a_index = self.STAGE_AXIS_NAMES.index("A")
-            if latest is None or len(latest) <= a_index:
-                return
             try:
-                physical_a = self.stage_controller.calibrated_axis_display_value(
-                    "A",
-                    float(latest[a_index]),
+                coordinates = (
+                    self.stage_controller.run_external_current_physical_machine_coordinates(
+                        ("A",)
+                    )
                 )
+                physical_a = float(coordinates["A"])
                 pose = PhysicalMachinePose.from_mapping({"A": physical_a})
-            except (TypeError, ValueError, RuntimeError):
+            except (KeyError, TypeError, ValueError, RuntimeError):
                 logger.exception("Unable to read physical A for Design contact reference")
                 return
             self.design_contact_reference_ready.emit(token, pose.require("A"))
@@ -9534,7 +9553,11 @@ class Main(QMainWindow):
         toggle_design_layout_window(self, True)
 
     def _move_to_design_coordinate(
-        self, design_xy: tuple[float, float], *, source_label: str
+        self,
+        design_xy: tuple[float, float],
+        *,
+        source_label: str,
+        move_request: object | None = None,
     ) -> bool:
         document = self._design_session.document
         stage_xy = (
@@ -9559,7 +9582,12 @@ class Main(QMainWindow):
         self._pending_planned_move_target_xy = plan.pending_planned_move_target_xy
         self._pending_planned_move_source_label = plan.source_label
         assert plan.stage_xy is not None and plan.design_xy is not None
-        self.stage_controller.request_move_to_xy(plan.stage_xy[0], plan.stage_xy[1])
+        request = move_request or self.stage_controller.request_move_to_xy
+        started = request(plan.stage_xy[0], plan.stage_xy[1])
+        if started is False:
+            self._pending_planned_move_target_xy = None
+            self._pending_planned_move_source_label = None
+            return False
         logger.debug(
             "DESIGN MOVE source=%s design=(%.3f, %.3f) stage=(%.3f, %.3f)",
             plan.source_label,
@@ -9583,11 +9611,76 @@ class Main(QMainWindow):
         if document is None or fov_size is None:
             self._show_status("Current field of view is unavailable.", 5000)
             return
-        structure_bounds = tuple(document.cell_bounds.values()) or (document.bounds,)
+        self._synchronize_design_focus_overlay_context()
+        self._focus_structure_request_id = int(
+            getattr(self, "_focus_structure_request_id", 0)
+        ) + 1
+        request_id = self._focus_structure_request_id
+        context = self._design_focus_overlay_context_key()
+        if document.file_backed:
+            config = KLayoutConfig(
+                path=Path(document.path).expanduser().resolve(),
+                top_cell_name=document.top_cell_name,
+                visible_layers=frozenset(document.visible_layers),
+                source_bounds=tuple(document.cell_bounds[document.top_cell_name]),
+                display_bounds=tuple(document.bounds),
+                rotation_quarter_turns=document.rotation_quarter_turns,
+                generation=request_id,
+                source_load_id=document.source_load_id,
+            )
+            fixture_polygons: tuple[object, ...] = ()
+        else:
+            config = None
+            fixture_polygons = tuple(
+                polygon
+                for layer in sorted(document.visible_layers)
+                for polygon in document.polygons_by_layer.get(layer, ())
+            )
+        request = StructureBoundsRequest(
+            request_id=request_id,
+            generation=request_id,
+            config=config,
+            fixture_polygons=fixture_polygons,
+        )
+        self._pending_focus_structure_request_id = request_id
+        self._pending_focus_structure_context = context
+        self._pending_focus_structure_fov = tuple(fov_size)
+        self._pending_focus_structure_design_bounds = tuple(document.bounds)
+        worker = self._ensure_focus_structure_bounds_worker()
+        worker.submit(request)
+        self._show_status("Finding focus reference.", 3000)
+
+    def _ensure_focus_structure_bounds_worker(self):
+        worker = getattr(self, "_focus_structure_bounds_worker", None)
+        if worker is not None:
+            return worker
+        worker = KLayoutStructureBoundsWorker(self)
+        worker.ready.connect(self._on_focus_structure_bounds_ready)
+        worker.failed.connect(self._on_focus_structure_bounds_failed)
+        self._focus_structure_bounds_worker = worker
+        return worker
+
+    def _on_focus_structure_bounds_ready(
+        self,
+        result: StructureBoundsResult,
+    ) -> None:
+        pending_id = getattr(self, "_pending_focus_structure_request_id", None)
+        pending_context = getattr(self, "_pending_focus_structure_context", None)
+        if (
+            result.request_id != pending_id
+            or result.generation != pending_id
+            or pending_context != self._design_focus_overlay_context_key()
+        ):
+            return
+        self._pending_focus_structure_request_id = None
+        fov_size = getattr(self, "_pending_focus_structure_fov", None)
+        design_bounds = getattr(self, "_pending_focus_structure_design_bounds", None)
+        if fov_size is None or design_bounds is None:
+            return
         try:
             candidate = select_central_focus_candidate(
-                design_bounds=document.bounds,
-                structure_bounds=structure_bounds,
+                design_bounds=design_bounds,
+                structure_bounds=result.structure_bounds,
                 fov_size=fov_size,
             )
         except ValueError as exc:
@@ -9603,6 +9696,50 @@ class Main(QMainWindow):
             window.set_selected_focus_point(candidate.center)
         self._start_design_focus_reference(candidate.center)
 
+    def _on_focus_structure_bounds_failed(
+        self,
+        failure: StructureBoundsFailure,
+    ) -> None:
+        if failure.request_id != getattr(
+            self, "_pending_focus_structure_request_id", None
+        ):
+            return
+        self._pending_focus_structure_request_id = None
+        self._show_status("Unable to inspect visible design structures.", 5000)
+
+    def _design_focus_overlay_context_key(self):
+        document = getattr(self._design_session, "document", None)
+        if document is None:
+            return None
+        record = self._active_design_frame_record()
+        return (
+            str(Path(document.path).expanduser().resolve()),
+            document.source_load_id,
+            document.top_cell_name,
+            tuple(sorted(document.visible_layers)),
+            int(document.rotation_quarter_turns) % 4,
+            getattr(self._design_session, "active_frame_id", None),
+            None if record is None else record.version,
+        )
+
+    def _clear_design_focus_overlay_state(self) -> None:
+        self._focus_candidate = None
+        self._pending_focus_structure_request_id = None
+        self._pending_focus_structure_context = None
+        self._pending_focus_structure_fov = None
+        self._pending_focus_structure_design_bounds = None
+        window = getattr(self, "design_layout_window", None)
+        if window is not None:
+            window.set_focus_candidate(None)
+            window.set_selected_focus_point(None)
+
+    def _synchronize_design_focus_overlay_context(self) -> None:
+        context = self._design_focus_overlay_context_key()
+        if context == getattr(self, "_design_focus_overlay_context", None):
+            return
+        self._clear_design_focus_overlay_state()
+        self._design_focus_overlay_context = context
+
     def _start_design_focus_reference(self, design_point: tuple[float, float]) -> None:
         record = self._active_design_frame_record()
         if record is None or not all(
@@ -9615,11 +9752,24 @@ class Main(QMainWindow):
             return
         token = RegistrationFocusToken(record.frame_id, record.version)
         self._pending_registration_focus_token = token
+
+        def request_move(target_x: float, target_y: float) -> bool:
+            target = (float(target_x), float(target_y))
+            self._pending_registration_focus_target_xy = target
+            return self.stage_controller.request_token_bound_move_to_xy(
+                token,
+                target[0],
+                target[1],
+                self.design_registration_focus_move_finished.emit,
+            )
+
         if not self._move_to_design_coordinate(
             (float(design_point[0]), float(design_point[1])),
             source_label="focus reference",
+            move_request=request_move,
         ):
             self._pending_registration_focus_token = None
+            self._pending_registration_focus_target_xy = None
             return
         window = getattr(self, "design_layout_window", None)
         if window is not None:
@@ -9628,11 +9778,23 @@ class Main(QMainWindow):
 
     def _on_registration_focus_move_finished(
         self,
+        completed_token: object,
+        completed_target_xy: object,
         success: bool,
         message: str,
     ) -> None:
         token = getattr(self, "_pending_registration_focus_token", None)
-        if token is None:
+        target = getattr(self, "_pending_registration_focus_target_xy", None)
+        try:
+            completed_target = tuple(float(value) for value in completed_target_xy)
+        except (TypeError, ValueError):
+            return
+        if (
+            token is None
+            or completed_token != token
+            or target is None
+            or completed_target != tuple(target)
+        ):
             return
         current = self._active_design_frame_record()
         if (
@@ -9642,6 +9804,7 @@ class Main(QMainWindow):
             or current.version != token.frame_version
         ):
             self._pending_registration_focus_token = None
+            self._pending_registration_focus_target_xy = None
             if not success and message:
                 self._show_status(message, 5000)
             return
@@ -9651,6 +9814,22 @@ class Main(QMainWindow):
         )
         if not accepted:
             self._pending_registration_focus_token = None
+            self._pending_registration_focus_target_xy = None
+
+    def _on_registration_focus_move_signal(
+        self,
+        completed_token: object,
+        completed_target_xy: object,
+        success: bool,
+        message: str,
+    ) -> None:
+        stage_move_lifecycle.on_move_finished(self, success, message)
+        self._on_registration_focus_move_finished(
+            completed_token,
+            completed_target_xy,
+            success,
+            message,
+        )
 
     def _on_registration_focus_autofocus_finished(
         self,
@@ -9663,6 +9842,7 @@ class Main(QMainWindow):
         if token != pending or not isinstance(token, RegistrationFocusToken):
             return
         self._pending_registration_focus_token = None
+        self._pending_registration_focus_target_xy = None
         active = self._active_design_frame_record()
         if (
             active is None
@@ -9703,11 +9883,9 @@ class Main(QMainWindow):
             self._show_status(str(exc), 5000)
             return
         self._pending_registration_focus_token = None
-        self._focus_candidate = None
+        self._pending_registration_focus_target_xy = None
+        self._clear_design_focus_overlay_state()
         connection_flow.publish_coordinate_frames(self)
-        window = getattr(self, "design_layout_window", None)
-        if window is not None:
-            window.set_focus_candidate(None)
         self._refresh_design_panel()
         self._show_status("Focus reference reset.", 4000)
 
@@ -9729,6 +9907,7 @@ class Main(QMainWindow):
         self._design_focus_signals_connected = True
 
     def _refresh_design_panel(self) -> None:
+        self._synchronize_design_focus_overlay_context()
         panel = self.design_navigator_panel
         self._connect_design_focus_signals()
         route_measurement_thread = getattr(self, "_route_measurement_thread", None)
@@ -10173,6 +10352,9 @@ class Main(QMainWindow):
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
         self._clear_exact_step_targets()
+        worker = getattr(self, "_focus_structure_bounds_worker", None)
+        if worker is not None:
+            worker.stop(timeout_s=0.0)
         shutdown_ui.close_event(self, event)
 
     def _clear_microscope_scan_dialog(self) -> None:

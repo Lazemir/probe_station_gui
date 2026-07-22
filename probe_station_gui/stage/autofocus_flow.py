@@ -67,17 +67,14 @@ class StageControllerAutofocusMixin:
     ) -> None:
         physical_z: float | None = None
 
-        def capture_focus_z(configured_z: float) -> None:
-            nonlocal physical_z
-            physical_z = float(self.calibrated_axis_display_value("Z", configured_z))
-
         try:
             with self._open_optical_session("autofocus"):
                 self.movement_started.emit()
                 with self._serial_session():
-                    message = self._run_autofocus_locked(
-                        focus_z_callback=capture_focus_z,
-                    )
+                    message = self._run_autofocus_locked()
+                    physical_z = self._current_physical_machine_coordinates_locked(
+                        ("Z",)
+                    )["Z"]
             self.autofocus_finished.emit(True, message)
             completion(token, True, physical_z, message)
         except StageControllerError as exc:

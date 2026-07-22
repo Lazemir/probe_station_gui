@@ -152,6 +152,7 @@ class RouteApiControlTest(unittest.TestCase):
     ) -> None:
         point = _point(1)
         runner_holder: dict[str, RouteExternalMeasurementSessionRunner] = {}
+        references: list[object] = []
 
         class _PauseOnFirstLowerStage(_FakeStage):
             def __init__(self) -> None:
@@ -187,6 +188,7 @@ class RouteApiControlTest(unittest.TestCase):
             contact_settle_s=0.0,
             photo_enabled=False,
             photo_focus_enabled=False,
+            post_success_contact=references.append,
         )
         runner_holder["runner"] = runner
         finished: list[tuple[bool, str]] = []
@@ -200,6 +202,7 @@ class RouteApiControlTest(unittest.TestCase):
         pending_status = runner.status_payload()
         self.assertEqual(pending_status["state"], "waiting_external_measurement")
         self.assertNotEqual(pending_status["waiting_reason"], "paused")
+        self.assertEqual(len(references), 1)
 
         runner.request_current_point_correction()
         self.assertTrue(self._wait_for_external_request(runner, 2))
@@ -223,6 +226,86 @@ class RouteApiControlTest(unittest.TestCase):
 
         self.assertFalse(thread.is_alive())
         self.assertEqual(finished, [(True, "Route API session complete.")])
+
+    def test_pending_pause_plus_interrupt_suppresses_contact_reference(self) -> None:
+        point = _point(1)
+        runner_holder: dict[str, RouteExternalMeasurementSessionRunner] = {}
+        references: list[object] = []
+
+        class _PauseAndInterruptOnLowerStage(_FakeStage):
+            def run_external_needles_action(
+                self,
+                action: str,
+                feedrate: float | None = None,
+            ) -> str:
+                result = super().run_external_needles_action(action, feedrate)
+                if action == "lower":
+                    runner_holder["runner"].request_pause_after_current_point()
+                    runner_holder["runner"].request_current_point_correction()
+                return result
+
+        runner = RouteExternalMeasurementSessionRunner(
+            session_id="session-pause-interrupt",
+            points=[point],
+            stage_controller=_PauseAndInterruptOnLowerStage(),
+            lcr_controller=_FakeBatchRouteLCR(
+                [{"differential_resistance_ohm": 100.0} for _ in range(10)]
+            ),
+            needle_feedrate=75.0,
+            measurement_count=5,
+            initial_measurement_count=2,
+            contact_settle_s=0.0,
+            photo_enabled=False,
+            photo_focus_enabled=False,
+            post_success_contact=references.append,
+        )
+        runner_holder["runner"] = runner
+        thread = threading.Thread(target=runner.run, daemon=True)
+
+        thread.start()
+        self.assertTrue(self._wait_for_state(runner, "waiting_interrupted"))
+
+        self.assertEqual(references, [])
+        runner.stop()
+        thread.join(timeout=2.0)
+
+    def test_stop_during_contact_suppresses_contact_reference(self) -> None:
+        point = _point(1)
+        runner_holder: dict[str, RouteExternalMeasurementSessionRunner] = {}
+        references: list[object] = []
+
+        class _StopOnLowerStage(_FakeStage):
+            def run_external_needles_action(
+                self,
+                action: str,
+                feedrate: float | None = None,
+            ) -> str:
+                result = super().run_external_needles_action(action, feedrate)
+                if action == "lower":
+                    runner_holder["runner"].stop()
+                return result
+
+        runner = RouteExternalMeasurementSessionRunner(
+            session_id="session-stop",
+            points=[point],
+            stage_controller=_StopOnLowerStage(),
+            lcr_controller=_FakeBatchRouteLCR(
+                [{"differential_resistance_ohm": 100.0} for _ in range(10)]
+            ),
+            needle_feedrate=75.0,
+            measurement_count=5,
+            initial_measurement_count=2,
+            contact_settle_s=0.0,
+            photo_enabled=False,
+            photo_focus_enabled=False,
+            post_success_contact=references.append,
+        )
+        runner_holder["runner"] = runner
+
+        success, _message = runner.run()
+
+        self.assertFalse(success)
+        self.assertEqual(references, [])
 
     def test_external_session_short_skips_external_wait_and_followup(self) -> None:
         point = _point(1)

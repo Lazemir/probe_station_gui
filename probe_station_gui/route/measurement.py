@@ -255,6 +255,7 @@ class RouteMeasurementRunner:
         )
         self._contact_flow = self._legacy_contact.build_flow(
             post_success_contact=post_success_contact,
+            post_success_contact_eligible=self._route_point_reference_capture_eligible,
         )
 
     @property
@@ -529,6 +530,11 @@ class RouteMeasurementRunner:
             self._stop_requested.is_set()
             or self._point_interrupt_requested.is_set()
         )
+
+    def _route_point_reference_capture_eligible(self) -> bool:
+        """Allow capture during a pause request, but never after stop/interrupt."""
+
+        return not self._route_point_stop_requested()
 
     def _set_auto_contact_seek_enabled(self, enabled: bool) -> None:
         self._auto_contact_seek_on_bad_contact = bool(enabled)

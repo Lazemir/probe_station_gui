@@ -190,6 +190,7 @@ class LegacyContactBindings:
         *,
         post_success_contact: Callable[[RouteContactPlacementResult], None]
         | None = None,
+        post_success_contact_eligible: Callable[[], bool] | None = None,
     ) -> RouteContactFlow:
         control = contact_lifecycle_adapter.ContactControlBindings(
             clear=self.clear_interrupt,
@@ -229,6 +230,7 @@ class LegacyContactBindings:
             interrupt=control,
             events=control,
             post_success_contact=post_success_contact,
+            post_success_contact_eligible=post_success_contact_eligible,
         )
 
     def _measure(

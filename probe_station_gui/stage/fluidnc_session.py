@@ -127,6 +127,7 @@ class FluidNCSession:
         *,
         timeout: float,
         check_cancelled: bool = True,
+        parse_status_line: Callable[[str], _Status | None] | None = None,
     ) -> _Status | None:
         try:
             self.discard_pending_input(reason="before status query")
@@ -150,7 +151,8 @@ class FluidNCSession:
             if self.callbacks.handle_homing_message_line(line):
                 continue
             self.callbacks.handle_coordinate_state_line(line)
-            status = self.callbacks.parse_status_line(line)
+            parser = parse_status_line or self.callbacks.parse_status_line
+            status = parser(line)
             if status is None:
                 continue
             homed_axes = self.callbacks.extract_status_homed_axes(line)

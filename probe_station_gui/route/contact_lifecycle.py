@@ -234,13 +234,19 @@ class RouteContactFlow:
         interrupt: RouteContactInterruptPort,
         events: RouteContactEventPort,
         post_success_contact: Callable[[RouteContactPlacementResult], None] | None = None,
+        post_success_contact_eligible: Callable[[], bool] | None = None,
     ) -> None:
+        if post_success_contact is not None and post_success_contact_eligible is None:
+            raise ValueError(
+                "A post-success contact callback requires an eligibility predicate."
+            )
         self._stage = stage
         self._meter = meter
         self._quality = quality
         self._interrupt = interrupt
         self._events = events
         self._post_success_contact = post_success_contact
+        self._post_success_contact_eligible = post_success_contact_eligible
 
     def place_contact(self, request: RouteContactRequest) -> RouteContactFlowResult:
         try:
@@ -524,6 +530,9 @@ class RouteContactFlow:
     ) -> None:
         callback = self._post_success_contact
         if callback is None or not placement.success:
+            return
+        eligible = self._post_success_contact_eligible
+        if eligible is None or not eligible():
             return
         try:
             callback(placement)

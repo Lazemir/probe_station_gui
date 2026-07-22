@@ -63,6 +63,26 @@ class StageControllerClickMoveMixin:
             busy_message="Stage is busy. Ignoring absolute move request.",
         )
 
+    def request_token_bound_move_to_xy(
+        self,
+        token: object,
+        target_x_mm: float,
+        target_y_mm: float,
+        completion,
+    ) -> bool:
+        """Start an absolute XY move whose completion carries its exact token."""
+
+        return self._start_background_task(
+            target=self._run_token_bound_move_to_xy,
+            args=(
+                token,
+                float(target_x_mm),
+                float(target_y_mm),
+                completion,
+            ),
+            busy_message="Stage is busy. Focus reference was not started.",
+        )
+
     def request_move_to_xyz(
         self,
         target_x_mm: float,
@@ -313,6 +333,24 @@ class StageControllerClickMoveMixin:
             self.movement_finished.emit(True, message)
         except StageControllerError as exc:
             self.movement_finished.emit(False, str(exc))
+
+    def _run_token_bound_move_to_xy(
+        self,
+        token: object,
+        target_x_mm: float,
+        target_y_mm: float,
+        completion,
+    ) -> None:
+        target = (float(target_x_mm), float(target_y_mm))
+        self.movement_started.emit()
+        try:
+            self._check_cancelled()
+            with self._serial_session():
+                self._move_safety_check()
+                message = self._move_to_xy_locked(*target)
+            completion(token, target, True, message)
+        except StageControllerError as exc:
+            completion(token, target, False, str(exc))
 
     def _run_move_to_xyz(
         self,

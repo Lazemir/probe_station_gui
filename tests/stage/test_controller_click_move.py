@@ -111,6 +111,37 @@ def test_move_to_xy_uses_shared_precision_executor() -> None:
     controller.shutdown()
 
 
+def test_token_bound_xy_move_reports_only_its_own_target_and_result() -> None:
+    controller = StageController()
+    events: list[object] = []
+    token = object()
+    controller.movement_started = SimpleNamespace(emit=lambda: events.append("started"))
+    controller.movement_finished = SimpleNamespace(
+        emit=lambda *_args: events.append("global-finished")
+    )
+    controller._serial_session = lambda: _NullContext()
+    controller._move_safety_check = lambda: None
+    controller._move_to_xy_locked = lambda x, y: f"arrived:{x}:{y}"
+
+    controller._run_token_bound_move_to_xy(
+        token,
+        4.0,
+        5.0,
+        lambda *args: events.append(args),
+    )
+
+    assert events == ["started", (token, (4.0, 5.0), True, "arrived:4.0:5.0")]
+    controller.shutdown()
+
+
+class _NullContext:
+    def __enter__(self) -> None:
+        return None
+
+    def __exit__(self, *_args: object) -> None:
+        return None
+
+
 def test_external_route_move_at_target_executes_approximate_precision_axis() -> None:
     controller = StageController()
     controller._serial = _FakeSerial()

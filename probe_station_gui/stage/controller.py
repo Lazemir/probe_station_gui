@@ -45,6 +45,7 @@ from probe_station_gui.stage.feedrate_limits import (
 from probe_station_gui.stage.fluidnc_config_io import (
     StageControllerFluidNCConfigIOMixin,
 )
+from probe_station_gui.stage.fluidnc_protocol import parse_fluidnc_status_line
 from probe_station_gui.stage.jog_commands import (
     JOG_AXIS_WORD_PATTERN,
     JOG_FEEDRATE_WORD_PATTERN,
@@ -1066,6 +1067,92 @@ class StageController(
             )
         status = self._query_current_stage_position_status()
         return self._stage_position_from_status(status)
+
+    def run_external_current_physical_machine_coordinates(
+        self,
+        axes: Iterable[str],
+    ) -> dict[str, float]:
+        """Read synchronized physical Machine coordinates inside an external task."""
+
+        operation = self._operation_lifecycle.snapshot()
+        if not operation.owned_by(threading.current_thread()):
+            raise StageControllerError(
+                "Current thread does not own an external stage task."
+            )
+        with self._serial_session():
+            return self._current_physical_machine_coordinates_locked(axes)
+
+    def _current_physical_machine_coordinates_locked(
+        self,
+        axes: Iterable[str],
+    ) -> dict[str, float]:
+        normalized_axes = tuple(str(axis).strip().upper() for axis in axes)
+        serial_connection = self._current_serial()
+        restore_mask = self._desired_status_report_mask_for_mode(
+            self._position_reporting_mode
+        )
+        machine_mask = self._desired_status_report_mask_for_mode("machine")
+        try:
+            self._ensure_status_report_mask(machine_mask)
+            required_count = self._required_coordinate_axis_count(normalized_axes)
+            status = None
+            for attempt in range(max(1, int(self.COORDINATE_STATUS_READ_ATTEMPTS))):
+                status = self._read_status_frame(
+                    serial_connection,
+                    timeout=1.5,
+                    parse_status_line=self._parse_raw_machine_status_line,
+                )
+                if status is not None and status.position is not None and len(status.position) >= required_count:
+                    break
+                if attempt + 1 < int(self.COORDINATE_STATUS_READ_ATTEMPTS):
+                    time.sleep(self.COORDINATE_STATUS_RETRY_DELAY_S)
+            return self._physical_machine_coordinates_from_status(
+                status,
+                axes=normalized_axes,
+            )
+        finally:
+            self._ensure_status_report_mask(restore_mask, check_cancelled=False)
+
+    def _parse_raw_machine_status_line(self, line: str) -> _Status | None:
+        return parse_fluidnc_status_line(
+            line,
+            position_reporting_mode="machine",
+            active_work_coordinate_system=self._active_work_coordinate_system,
+            controller_coordinate_offsets=self._controller_coordinate_offsets,
+            axis_index=self.AXIS_INDEX,
+        )
+
+    def _physical_machine_coordinates_from_status(
+        self,
+        status: _Status | None,
+        *,
+        axes: Iterable[str],
+    ) -> dict[str, float]:
+        normalized_axes = tuple(str(axis).strip().upper() for axis in axes)
+        if status is None or status.position is None:
+            raise StageControllerError("Unable to read physical Machine coordinates.")
+        if status.state.lower() in {"jog", "run"}:
+            raise StageControllerError(
+                "Wait for the stage to stop before capturing a reference."
+            )
+        mapper = self._axis_calibration_mapper()
+        result: dict[str, float] = {}
+        for axis in normalized_axes:
+            index = self.AXIS_INDEX.get(axis)
+            if index is None:
+                raise StageControllerError(f"Unsupported axis: {axis}")
+            if index >= len(status.position):
+                raise StageControllerError(
+                    f"Controller did not report complete Machine coordinates for {axis}."
+                )
+            raw_value = float(status.position[index])
+            try:
+                result[axis] = float(mapper.controller_to_physical(axis, raw_value))
+            except CalibrationOutOfDomain as exc:
+                raise StageControllerError(
+                    f"Machine {axis}={raw_value:.6f} is outside the axis calibration domain."
+                ) from exc
+        return result
 
     def _query_current_stage_position_status(self) -> _Status | None:
         with self._serial_session():

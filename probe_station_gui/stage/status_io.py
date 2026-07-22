@@ -292,10 +292,12 @@ class StageControllerStatusIOMixin:
         *,
         timeout: float,
         check_cancelled: bool = True,
+        parse_status_line=None,
     ) -> Optional[_Status]:
         return self._fluidnc_session_for(serial_connection).read_status_frame(
             timeout=timeout,
             check_cancelled=check_cancelled,
+            parse_status_line=parse_status_line,
         )
 
     def _handle_homing_message_line(self, line: str) -> bool:
