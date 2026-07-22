@@ -235,7 +235,7 @@ def test_contact_calibration_position_requires_xyz_homing_and_three_axes() -> No
     assert short_position.contact_calibration_position is None
 
 
-def test_b_axis_invalidation_requires_tolerance_no_pending_alignment_and_valid_registration() -> None:
+def test_b_axis_status_preserves_durable_registration_across_motion() -> None:
     plan = b_axis_registration_plan(
         (1.0, 2.0, 3.0, 4.0, 5.5),
         last_reported_b_position=5.0,
@@ -246,8 +246,8 @@ def test_b_axis_invalidation_requires_tolerance_no_pending_alignment_and_valid_r
 
     assert plan == BAxisRegistrationPlan(
         current_b=5.5,
-        invalidate_registration=True,
-        invalidate_reason="Design registration cleared after B-axis motion.",
+        invalidate_registration=False,
+        invalidate_reason=None,
     )
 
     below_tolerance = b_axis_registration_plan(

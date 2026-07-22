@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from probe_station_gui.coordinates.model import CoordinateFrameRecord
+from probe_station_gui.coordinates.transforms import rotate_xy
 from probe_station_gui.design.frame_registration import DesignFrameMetadata
 from probe_station_gui.design.model import (
     DesignDocument,
@@ -21,6 +22,18 @@ from probe_station_gui.route.model import MeasurementRoute, RoutePoint
 
 
 DEFAULT_B_AXIS_ROTATION_PIVOT_STAGE: Point2D = (0.0, 0.0)
+
+
+def _rotate_machine_point_about_pivot(
+    point: Point2D,
+    pivot: Point2D,
+    angle_deg: float,
+) -> Point2D:
+    rotated = rotate_xy(
+        (float(point[0]) - float(pivot[0]), float(point[1]) - float(pivot[1])),
+        angle_deg,
+    )
+    return (float(pivot[0]) + rotated[0], float(pivot[1]) + rotated[1])
 
 
 @dataclass(frozen=True)
@@ -37,6 +50,17 @@ class AlignmentPreparation:
     distance_ratio: float
     rms_residual_mm: float = 0.0
     max_residual_mm: float = 0.0
+
+
+@dataclass(frozen=True)
+class DesignFrameLinkProjection:
+    """Validated, side-effect-free projection of one durable Design frame."""
+
+    frame_id: str
+    source_design_marks: tuple[Point2D, ...]
+    source_stage_marks: tuple[Point2D, ...]
+    check_design_marks: tuple[Point2D, ...]
+    check_stage_marks: tuple[Point2D, ...]
 
 
 @dataclass
@@ -326,40 +350,102 @@ class DesignSession:
         frame: CoordinateFrameRecord,
         *,
         machine_point_for_navigation: Callable[[Point2D], Point2D] | None = None,
+        machine_b_deg: float | None = None,
+        pivot_machine_xy: Point2D = DEFAULT_B_AXIS_ROTATION_PIVOT_STAGE,
     ) -> None:
         """Link one durable frame and project it into legacy navigation state."""
+
+        projection = self.prepare_active_frame_link(
+            frame,
+            machine_point_for_navigation=machine_point_for_navigation,
+            machine_b_deg=machine_b_deg,
+            pivot_machine_xy=pivot_machine_xy,
+        )
+        self.apply_active_frame_link(frame, projection)
+
+    def prepare_active_frame_link(
+        self,
+        frame: CoordinateFrameRecord,
+        *,
+        machine_point_for_navigation: Callable[[Point2D], Point2D] | None = None,
+        machine_b_deg: float | None = None,
+        pivot_machine_xy: Point2D = DEFAULT_B_AXIS_ROTATION_PIVOT_STAGE,
+    ) -> DesignFrameLinkProjection:
+        """Validate and project a frame without mutating session state."""
 
         metadata = DesignFrameMetadata.from_mapping(frame.metadata)
         if self.document is None:
             raise DesignModelError("Load a design before selecting its coordinate frame.")
         if Path(metadata.source_path).resolve() != self.document.path.resolve():
             raise DesignModelError("Coordinate frame belongs to a different design file.")
+        if metadata.top_cell_name != self.document.top_cell_name:
+            raise DesignModelError(
+                "Coordinate frame belongs to a different design top cell."
+            )
         turns = int(self.document.rotation_quarter_turns) % 4
         project_machine = machine_point_for_navigation or (
             lambda point: (float(point[0]), float(point[1]))
         )
+        source_physical_marks = metadata.source_machine_marks
+        check_physical_marks = metadata.check_machine_marks
+        if machine_b_deg is not None and frame.transform is not None:
+            current_b = float(machine_b_deg)
+            pivot = (float(pivot_machine_xy[0]), float(pivot_machine_xy[1]))
+            source_physical_marks = tuple(
+                frame.transform.frame_xy_to_machine(
+                    (
+                        float(point[0]) * metadata.design_unit_mm,
+                        float(point[1]) * metadata.design_unit_mm,
+                    ),
+                    machine_b_deg=current_b,
+                    pivot_machine_xy=pivot,
+                )
+                for point in metadata.source_design_marks
+            )
+            delta_b = current_b - frame.transform.reference_b_deg
+            check_physical_marks = tuple(
+                _rotate_machine_point_about_pivot(point, pivot, delta_b)
+                for point in metadata.check_machine_marks
+            )
         try:
             source_machine_marks = tuple(
-                project_machine(point) for point in metadata.source_machine_marks
+                project_machine(point) for point in source_physical_marks
             )
             check_machine_marks = tuple(
-                project_machine(point) for point in metadata.check_machine_marks
+                project_machine(point) for point in check_physical_marks
             )
         except Exception as exc:
             raise DesignModelError(
                 f"Design frame coordinates are unavailable: {exc}"
             ) from exc
-        self.active_frame_id = frame.frame_id
-        self.source_design_marks = tuple(
-            self.document.rotate_point(point, turns)
-            for point in metadata.source_design_marks
+        return DesignFrameLinkProjection(
+            frame_id=frame.frame_id,
+            source_design_marks=tuple(
+                self.document.rotate_point(point, turns)
+                for point in metadata.source_design_marks
+            ),
+            source_stage_marks=source_machine_marks,
+            check_design_marks=tuple(
+                self.document.rotate_point(point, turns)
+                for point in metadata.check_design_marks
+            ),
+            check_stage_marks=check_machine_marks,
         )
-        self.source_stage_marks = source_machine_marks
-        self.check_design_marks = [
-            self.document.rotate_point(point, turns)
-            for point in metadata.check_design_marks
-        ]
-        self.check_stage_marks = list(check_machine_marks)
+
+    def apply_active_frame_link(
+        self,
+        frame: CoordinateFrameRecord,
+        projection: DesignFrameLinkProjection,
+    ) -> None:
+        """Apply a previously validated frame projection to this session."""
+
+        if projection.frame_id != frame.frame_id:
+            raise DesignModelError("Design frame projection no longer matches the frame.")
+        self.active_frame_id = frame.frame_id
+        self.source_design_marks = projection.source_design_marks
+        self.source_stage_marks = projection.source_stage_marks
+        self.check_design_marks = list(projection.check_design_marks)
+        self.check_stage_marks = list(projection.check_stage_marks)
         self.registration = None
         if len(self.source_design_marks) >= 2:
             try:

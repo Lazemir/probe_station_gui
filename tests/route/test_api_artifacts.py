@@ -32,6 +32,9 @@ class _RunnerForResult:
         self.submitted.append(dict(payload))
         return self.accepted
 
+    def design_frame_payload(self) -> dict[str, object]:
+        return {"frame_id": "design-a", "frame_version": 4}
+
 
 class _RunnerForSeek:
     def __init__(self, accepted: bool) -> None:
@@ -198,6 +201,7 @@ def test_api_route_session_result_response_accepts_external_result() -> None:
             "message": "done",
             "timestamp_utc": "2026-06-26T20:01:00Z",
             "external_measurement_request_id": "req-1",
+            "design_frame": {"frame_id": "design-a", "frame_version": 4},
         },
     }
     assert runner.submitted == [response["result"]]

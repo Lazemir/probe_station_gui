@@ -3,6 +3,7 @@ import time
 import unittest
 
 from probe_station_gui.route.measurement import RouteExternalMeasurementSessionRunner
+from probe_station_gui.route.session_start import snapshot_route_design_frame
 
 try:
     from .measurement_test_support import (
@@ -45,6 +46,10 @@ class RouteApiControlTest(unittest.TestCase):
             contact_settle_s=0.0,
             photo_enabled=False,
             photo_focus_enabled=False,
+            design_frame_snapshot=snapshot_route_design_frame(
+                frame_id="design-a",
+                frame_version=4,
+            ),
             result_callback=lambda record, position, total, saved: records.append(
                 (record, position, total, saved)
             ),
@@ -81,6 +86,14 @@ class RouteApiControlTest(unittest.TestCase):
         self.assertTrue(records[0][3])
         self.assertIn(("needles", "lift", 75.0), stage.calls)
         final_status = runner.status_payload()
+        self.assertEqual(
+            final_status["design_frame"],
+            {"frame_id": "design-a", "frame_version": 4},
+        )
+        self.assertEqual(
+            final_status["history"][0]["design_frame"],
+            {"frame_id": "design-a", "frame_version": 4},
+        )
         self.assertEqual(final_status["history"][0]["external_result"]["summary"], {"iv_points": 31})
 
     def test_external_session_uses_contact_runner_output_lifecycle(self) -> None:

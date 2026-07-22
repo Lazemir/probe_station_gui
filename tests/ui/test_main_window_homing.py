@@ -69,6 +69,9 @@ def _owner(events: list[object]) -> SimpleNamespace:
         _invalidate_design_registration=lambda message: events.append(
             ("invalidate", message)
         ),
+        _apply_coordinate_frame_authority_blocks=lambda: events.append(
+            ("authority",)
+        ),
     )
     stage_controller.owner = owner
     return owner
@@ -169,7 +172,7 @@ def test_failed_homing_finish_clears_queue_without_scheduling_next(monkeypatch) 
     assert timer_calls == []
 
 
-def test_successful_homing_finish_invalidates_registration_and_schedules_next(
+def test_successful_homing_finish_refreshes_authority_without_staling_registration(
     monkeypatch,
 ) -> None:
     events: list[object] = []
@@ -189,10 +192,8 @@ def test_successful_homing_finish_invalidates_registration_and_schedules_next(
     homing_ui.on_homing_action_finished(owner, True, "ok", "X")
 
     assert owner._homing_active_key is None
-    assert (
-        "invalidate",
-        "Design registration cleared after homing X.",
-    ) in events
+    assert not any(event[0] == "invalidate" for event in events)
+    assert ("authority",) in events
     assert owner._stage_motion_axes == set()
     assert len(timer_calls) == 1
     assert timer_calls[0][0] == 0

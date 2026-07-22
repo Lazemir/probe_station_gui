@@ -16,7 +16,7 @@ from probe_station_gui.coordinates.model import (
     VISIBLE_STAGE_AXES,
 )
 from probe_station_gui.coordinates.registry import invalidate_axes
-from probe_station_gui.coordinates.transforms import BFrameTransform
+from probe_station_gui.coordinates.transforms import BFrameTransform, rotate_xy
 from probe_station_gui.design.model import DesignDocument, Point2D
 from probe_station_gui.design.rigid_registration import fit_rigid_registration
 
@@ -189,6 +189,51 @@ def commit_xyb_registration(
     )
 
 
+def update_check_registration(
+    record: CoordinateFrameRecord,
+    *,
+    check_design_points: Iterable[Point2D],
+    physical_check_machine_points: Iterable[Point2D],
+    physical_b_deg: float,
+    pivot_machine_xy: Point2D,
+) -> CoordinateFrameRecord:
+    """Update check evidence without changing the registered frame transform."""
+
+    metadata = DesignFrameMetadata.from_mapping(record.metadata)
+    transform = record.transform
+    if transform is None:
+        raise ValueError("Design frame transform is unavailable.")
+    check_design = _points(check_design_points)
+    physical_checks = _points(physical_check_machine_points)
+    if len(check_design) != len(physical_checks):
+        raise ValueError("Design and machine check mark counts must match.")
+    current_b = _finite_float(physical_b_deg, "Physical B")
+    pivot = _finite_point(pivot_machine_xy, "B pivot")
+    reference_checks = tuple(
+        _rotate_about_pivot(
+            point,
+            pivot,
+            transform.reference_b_deg - current_b,
+        )
+        for point in physical_checks
+    )
+    fit = fit_rigid_registration(
+        design_points=metadata.source_design_marks,
+        machine_points=metadata.source_machine_marks,
+        design_unit_mm=metadata.design_unit_mm,
+        check_design_points=check_design,
+        check_machine_points=reference_checks,
+    )
+    updated_metadata = replace(
+        metadata,
+        check_design_marks=check_design,
+        check_machine_marks=reference_checks,
+        rms_residual_mm=float(fit.check_residual.rms_mm),
+        max_residual_mm=float(fit.check_residual.max_mm),
+    )
+    return replace(record, metadata=updated_metadata.to_dict())
+
+
 def migrate_legacy_design_state(
     legacy_state: Mapping[str, object],
     *,
@@ -315,6 +360,18 @@ def _finite_point(value: object, label: str) -> Point2D:
     )
 
 
+def _rotate_about_pivot(
+    point: Point2D,
+    pivot: Point2D,
+    angle_deg: float,
+) -> Point2D:
+    rotated = rotate_xy(
+        (float(point[0]) - float(pivot[0]), float(point[1]) - float(pivot[1])),
+        angle_deg,
+    )
+    return (float(pivot[0]) + rotated[0], float(pivot[1]) + rotated[1])
+
+
 def _points(value: object) -> tuple[Point2D, ...]:
     if value is None:
         return ()
@@ -333,4 +390,5 @@ __all__ = [
     "find_equivalent_migrated_frame",
     "migrate_legacy_design_state",
     "new_design_frame_draft",
+    "update_check_registration",
 ]

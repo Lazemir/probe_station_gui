@@ -197,6 +197,20 @@ def _make_design_restore_main(
 
 
 class MainPlannedMovePredictionTest(unittest.TestCase):
+    def test_manual_b_motion_marks_activity_without_staling_registration(self) -> None:
+        window = Main.__new__(Main)
+        invalidations: list[str] = []
+        window._invalidate_design_registration = invalidations.append
+
+        with mock.patch.object(
+            main_module.stage_position_panel_adapter,
+            "set_stage_motion_axes",
+        ) as set_motion_axes:
+            Main._on_manual_motion_axis(window, "b")
+
+        set_motion_axes.assert_called_once_with(window, {"B"})
+        self.assertEqual(invalidations, [])
+
     def test_invalid_stage_position_only_updates_display(self) -> None:
         window, published, _reconciles, _smooth_calls = _make_main(state="idle")
         display_updates: list[object] = []
@@ -380,23 +394,25 @@ class MainPlannedMovePredictionTest(unittest.TestCase):
         self.assertEqual(cleared, ["clear"])
         self.assertEqual(published, [])
 
-    def test_b_axis_motion_invalidates_registration_only_when_conditions_match(self) -> None:
+    def test_b_axis_motion_reprojects_registration_without_invalidating_it(self) -> None:
         window, _published, _reconciles, _smooth_calls = _make_main(state="run")
         invalidations: list[str] = []
+        authority_updates: list[tuple[float, ...] | None] = []
         window._design_session = types.SimpleNamespace(
             registration=types.SimpleNamespace(valid=True)
         )
         window._invalidate_design_registration = lambda reason: invalidations.append(
             reason
         )
+        window._apply_coordinate_frame_authority_blocks = (
+            lambda position=None: authority_updates.append(position)
+        )
         window._last_reported_b_position = 5.0
 
         position_update.on_stage_position_changed(window, (0.0, 0.0, 4.0, 0.0, 5.5))
 
-        self.assertEqual(
-            invalidations,
-            ["Design registration cleared after B-axis motion."],
-        )
+        self.assertEqual(invalidations, [])
+        self.assertEqual(authority_updates, [(0.0, 0.0, 4.0, 0.0, 5.5)])
         self.assertEqual(window._last_reported_b_position, 5.5)
 
         below_tolerance, _published, _reconciles, _smooth_calls = _make_main(state="run")
@@ -406,6 +422,7 @@ class MainPlannedMovePredictionTest(unittest.TestCase):
         below_tolerance._invalidate_design_registration = (
             lambda reason: invalidations.append(f"unexpected:{reason}")
         )
+        below_tolerance._apply_coordinate_frame_authority_blocks = lambda *_args: None
         below_tolerance._last_reported_b_position = 5.0
 
         position_update.on_stage_position_changed(below_tolerance, (0.0, 0.0, 4.0, 0.0, 5.0))
@@ -420,6 +437,7 @@ class MainPlannedMovePredictionTest(unittest.TestCase):
         pending_alignment._invalidate_design_registration = (
             lambda reason: invalidations.append(f"unexpected:{reason}")
         )
+        pending_alignment._apply_coordinate_frame_authority_blocks = lambda *_args: None
         pending_alignment._last_reported_b_position = 5.0
 
         position_update.on_stage_position_changed(pending_alignment, (0.0, 0.0, 4.0, 0.0, 5.5))
@@ -433,14 +451,12 @@ class MainPlannedMovePredictionTest(unittest.TestCase):
         invalid_registration._invalidate_design_registration = (
             lambda reason: invalidations.append(f"unexpected:{reason}")
         )
+        invalid_registration._apply_coordinate_frame_authority_blocks = lambda *_args: None
         invalid_registration._last_reported_b_position = 5.0
 
         position_update.on_stage_position_changed(invalid_registration, (0.0, 0.0, 4.0, 0.0, 5.5))
 
-        self.assertEqual(
-            invalidations,
-            ["Design registration cleared after B-axis motion."],
-        )
+        self.assertEqual(invalidations, [])
 
     def test_publish_happens_before_idle_finish_and_motion_clear(self) -> None:
         window, _published, _reconciles, _smooth_calls = _make_main(state="idle")

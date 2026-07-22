@@ -21,6 +21,7 @@ from probe_station_gui.route.measurement import (
 from probe_station_gui.route.measurement_csv import RouteMeasurementCsvWriter
 from tests.stage.controller_test_support import StageController, _LineFakeSerial
 from probe_station_gui.route.point_execution_adapters import RouteMeasurementEvents
+from probe_station_gui.route.session_start import snapshot_route_design_frame
 
 try:
     from .measurement_test_support import (
@@ -55,6 +56,30 @@ class _PermissionThenAppendWriter(RouteMeasurementCsvWriter):
 
 
 class RouteMeasurementRunnerTest(unittest.TestCase):
+    def test_runner_status_and_result_keep_immutable_design_frame_lineage(self) -> None:
+        snapshot = snapshot_route_design_frame(
+            frame_id="design-a",
+            frame_version=4,
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runner = RouteMeasurementRunner(
+                points=[_point(1)],
+                csv_path=Path(tmpdir) / "route.csv",
+                stage_controller=_FakeStage(),
+                lcr_controller=_FakeLCR([1000.0]),
+                needle_feedrate=75.0,
+                contact_settle_s=0.0,
+                design_frame_snapshot=snapshot,
+            )
+
+            status = runner.status_payload()
+            result = runner.result_payload(success=True, message="complete")
+
+        expected = {"frame_id": "design-a", "frame_version": 4}
+        self.assertEqual(status["design_frame"], expected)
+        self.assertEqual(result["design_frame"], expected)
+        self.assertIs(runner.design_frame_snapshot, snapshot)
+
     def test_interrupted_lower_cleanup_failure_never_enters_correction_wait(self) -> None:
         class _InterruptedLowerStage(_FakeStage):
             def __init__(self) -> None:

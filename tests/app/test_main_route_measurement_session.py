@@ -1333,6 +1333,34 @@ class MainRouteMeasurementSessionTest(unittest.TestCase):
         self.assertEqual(len(_FakeThread.instances), 1)
         self.assertTrue(_FakeThread.instances[0].started)
 
+    def test_gui_runner_keeps_start_frame_lineage_after_design_window_switch(self) -> None:
+        window, _statuses, _telegrams, _dialog, _lcr, _camera_calls = (
+            _make_route_start_main()
+        )
+        start_frame = main_module.snapshot_route_design_frame(
+            frame_id="design-a",
+            frame_version=4,
+        )
+        switched_frame = main_module.snapshot_route_design_frame(
+            frame_id="design-b",
+            frame_version=9,
+        )
+        captured: list[RouteMeasurementRunner] = []
+        window._snapshot_active_route_design_frame = lambda: start_frame
+        window._start_route_measurement_runner = (
+            lambda runner, *_args, **_kwargs: captured.append(runner)
+        )
+
+        Main._start_route_measurement(window, _route_start_configuration())
+        window._active_route_design_frame_snapshot = switched_frame
+
+        self.assertEqual(len(captured), 1)
+        self.assertEqual(
+            captured[0].status_payload()["design_frame"],
+            {"frame_id": "design-a", "frame_version": 4},
+        )
+        self.assertIs(captured[0].design_frame_snapshot, start_frame)
+
     def test_route_start_meter_setup_failure_clears_dialog_running_state(self) -> None:
         lcr = _RouteStartLcr(error=main_module.LCRMeterError("meter offline"))
         window, statuses, _telegrams, dialog, _lcr, _camera_calls = (

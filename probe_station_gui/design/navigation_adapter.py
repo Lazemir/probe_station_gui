@@ -16,6 +16,7 @@ from probe_station_gui.design.frame_registration import (
 )
 from probe_station_gui.design.model import (
     DesignDocument,
+    DesignModelError,
     MeasurementTarget,
     Point2D,
 )
@@ -238,22 +239,35 @@ def activate_design_frame_for_document(
     records = snapshot.records
     existing_names = tuple(record.name for record in records)
     if create_new:
-        record = registry.add(
-            new_design_frame_draft(
-                document,
-                existing_names=existing_names,
-                metadata=current_metadata,
-            )
+        candidate = new_design_frame_draft(
+            document,
+            existing_names=existing_names,
+            metadata=current_metadata,
         )
-        session.link_active_frame(
-            record,
+        projection = session.prepare_active_frame_link(
+            candidate,
             machine_point_for_navigation=machine_point_for_navigation,
         )
+        record = registry.add(candidate)
+        session.apply_active_frame_link(record, projection)
         return DesignFrameActivation(record=record, created=True)
 
     selected = registry.get(requested_frame_id) if requested_frame_id else None
     if requested_frame_id and selected is None:
         raise DesignModelError("Selected Design coordinate frame was not found.")
+    if requested_frame_id and selected is not None:
+        resolved_path = document.path.expanduser().resolve()
+        mismatch_message = None
+        if _frame_source_path(selected) != resolved_path:
+            mismatch_message = "Coordinate frame belongs to a different design file."
+        elif _frame_top_cell(selected) != document.top_cell_name:
+            mismatch_message = (
+                "Coordinate frame belongs to a different design top cell."
+            )
+        if mismatch_message is not None:
+            if session.active_frame_id == requested_frame_id:
+                session.clear_registration()
+            raise DesignModelError(mismatch_message)
     if selected is None:
         resolved_path = document.path.expanduser().resolve()
         selected = next(
@@ -266,17 +280,17 @@ def activate_design_frame_for_document(
             None,
         )
     if selected is None:
-        selected = registry.add(
-            new_design_frame_draft(
-                document,
-                existing_names=existing_names,
-                metadata=current_metadata,
-            )
+        candidate = new_design_frame_draft(
+            document,
+            existing_names=existing_names,
+            metadata=current_metadata,
         )
-        session.link_active_frame(
-            selected,
+        projection = session.prepare_active_frame_link(
+            candidate,
             machine_point_for_navigation=machine_point_for_navigation,
         )
+        selected = registry.add(candidate)
+        session.apply_active_frame_link(selected, projection)
         return DesignFrameActivation(record=selected, created=True)
 
     reconciled = design_frame_for_loaded_document(
@@ -285,12 +299,13 @@ def activate_design_frame_for_document(
         current_metadata=current_metadata,
     )
     updated = reconciled != selected
-    if updated:
-        reconciled = registry.replace(reconciled, expected_version=selected.version)
-    session.link_active_frame(
+    projection = session.prepare_active_frame_link(
         reconciled,
         machine_point_for_navigation=machine_point_for_navigation,
     )
+    if updated:
+        reconciled = registry.replace(reconciled, expected_version=selected.version)
+    session.apply_active_frame_link(reconciled, projection)
     return DesignFrameActivation(record=reconciled, updated=updated)
 
 

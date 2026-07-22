@@ -84,6 +84,19 @@ from probe_station_gui.route.point_execution_adapters import (
 logger = logging.getLogger(__name__)
 
 
+def _design_frame_payload(snapshot: object | None) -> dict[str, object] | None:
+    if snapshot is None:
+        return None
+    frame_id = getattr(snapshot, "frame_id", None)
+    frame_version = getattr(snapshot, "frame_version", None)
+    if frame_id is None or frame_version is None:
+        return None
+    return {
+        "frame_id": str(frame_id),
+        "frame_version": int(frame_version),
+    }
+
+
 class _RouteMeasurementStopped(RuntimeError):
     pass
 
@@ -147,6 +160,7 @@ class RouteMeasurementRunner:
         photo_focus_range_mm: float = 0.0,
         photo_output_dir: str = "",
         wait_before_first_point: bool = False,
+        design_frame_snapshot: object | None = None,
     ) -> None:
         self._points = list(points)
         self._csv_writer = RouteMeasurementCsvWriter(csv_path)
@@ -197,6 +211,8 @@ class RouteMeasurementRunner:
         self._photo_focus_range_mm = max(0.0, float(photo_focus_range_mm))
         self._photo_output_dir = str(photo_output_dir)
         self._wait_before_first_point = bool(wait_before_first_point)
+        self._design_frame_snapshot = design_frame_snapshot
+        self._last_run_result: dict[str, object] | None = None
         self._stop_requested = threading.Event()
         self._point_interrupt_requested = threading.Event()
         self._pause_requested = threading.Event()
@@ -241,6 +257,35 @@ class RouteMeasurementRunner:
     @property
     def csv_path(self) -> Path:
         return self._csv_writer.path
+
+    @property
+    def design_frame_snapshot(self) -> object | None:
+        return self._design_frame_snapshot
+
+    def design_frame_payload(self) -> dict[str, object] | None:
+        return _design_frame_payload(self._design_frame_snapshot)
+
+    def result_payload(self, *, success: bool, message: str) -> dict[str, object]:
+        return {
+            "success": bool(success),
+            "message": str(message),
+            "design_frame": self.design_frame_payload(),
+        }
+
+    def status_payload(self) -> dict[str, object]:
+        return {
+            "accepted": True,
+            "running": (
+                self._progress_started_at is not None
+                and self._last_run_result is None
+            ),
+            "design_frame": self.design_frame_payload(),
+            "result": (
+                dict(self._last_run_result)
+                if self._last_run_result is not None
+                else None
+            ),
+        }
 
     def route_offset_xy(self) -> Point2D:
         with self._route_offset_lock:
@@ -528,6 +573,7 @@ class RouteMeasurementRunner:
         progress = _RouteRunProgress()
         success = False
         message = "Route measurement stopped."
+        self._last_run_result = None
         try:
             self._validate_route_run_configuration()
             self._open_route_meter_if_needed()
@@ -571,6 +617,10 @@ class RouteMeasurementRunner:
             message = self._finish_route_run(
                 message=message,
                 needs_final_lift=progress.needs_final_lift,
+            )
+            self._last_run_result = self.result_payload(
+                success=success,
+                message=message,
             )
         return success, message
 

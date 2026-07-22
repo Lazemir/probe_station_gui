@@ -166,20 +166,10 @@ def b_axis_registration_plan(
             invalidate_reason=None,
         )
     current_b = float(position[4])
-    should_invalidate = bool(
-        last_reported_b_position is not None
-        and pending_alignment_preparation is None
-        and abs(current_b - last_reported_b_position) > float(tolerance_deg)
-        and registration_valid
-    )
     return BAxisRegistrationPlan(
         current_b=current_b,
-        invalidate_registration=should_invalidate,
-        invalidate_reason=(
-            "Design registration cleared after B-axis motion."
-            if should_invalidate
-            else None
-        ),
+        invalidate_registration=False,
+        invalidate_reason=None,
     )
 
 

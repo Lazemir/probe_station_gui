@@ -11,7 +11,6 @@ from probe_station_gui.views import main_window_stage_position_panel as stage_po
 
 
 VALID_HOME_AXES = {"X", "Y", "Z", "A"}
-REGISTRATION_INVALIDATING_HOME_KEYS = {"X", "Y", "B", "ALL"}
 HOMING_RETRY_DELAY_MS = 200
 
 
@@ -30,7 +29,7 @@ class MainWindowHomingOwner(Protocol):
 
     def _controller_latest_state_blocks_motion(self) -> bool: ...
     def _update_stage_coordinate_apply_state(self) -> None: ...
-    def _invalidate_design_registration(self, message: str) -> None: ...
+    def _apply_coordinate_frame_authority_blocks(self) -> None: ...
 
 
 def on_limit_axes_changed(owner: MainWindowHomingOwner, axes: object) -> None:
@@ -177,10 +176,7 @@ def on_homing_action_finished(
         stage_position_panel.clear_stage_motion_axes(owner)
         owner._update_stage_coordinate_apply_state()
         return
-    if key in REGISTRATION_INVALIDATING_HOME_KEYS:
-        owner._invalidate_design_registration(
-            f"Design registration cleared after homing {key}."
-        )
+    owner._apply_coordinate_frame_authority_blocks()
     stage_position_panel.clear_stage_motion_axes(owner)
     refresh_pending_homing_ui(owner)
     owner._update_stage_coordinate_apply_state()

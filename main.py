@@ -106,12 +106,14 @@ from probe_station_gui import (
 from probe_station_gui.coordinates import (
     CoordinateFrameRegistry,
     CoordinateFrameStoreWorker,
+    rotate_xy,
 )
 from probe_station_gui.design.frame_registration import (
     DesignFrameMetadata,
     commit_xyb_registration,
     find_equivalent_migrated_frame,
     migrate_legacy_design_state,
+    update_check_registration,
 )
 from probe_station_gui.design.model import DesignDocument, DesignModelError
 from probe_station_gui.design.contact_navigation import (
@@ -3109,6 +3111,7 @@ class Main(QMainWindow):
         start_settings: RouteExternalSessionStartSettings,
         meter_configuration: RouteMeterConfiguration,
         needle_feedrate: float | None,
+        design_frame_snapshot: object | None = None,
     ) -> RouteExternalMeasurementSessionRunner:
         return RouteExternalMeasurementSessionRunner(
             session_id=session_id,
@@ -3143,6 +3146,7 @@ class Main(QMainWindow):
             photo_focus_enabled=start_settings.photo_focus_enabled,
             photo_settle_s=start_settings.photo_settle_s,
             wait_before_first_point=True,
+            design_frame_snapshot=design_frame_snapshot,
         )
 
     def _cleanup_failed_api_route_session_start(
@@ -3227,6 +3231,7 @@ class Main(QMainWindow):
             start_settings=start_settings,
             meter_configuration=meter_configuration,
             needle_feedrate=self._api_needle_feedrate(payload),
+            design_frame_snapshot=start_decision.plan.design_frame_snapshot,
         )
         runner.set_route_offset_xy(route_offset_xy)
         launch_state = api_route_session_launch_state(
@@ -6090,10 +6095,6 @@ class Main(QMainWindow):
     def _on_manual_motion_axis(self, axis: str) -> None:
         axis_name = axis.upper()
         stage_position_panel_adapter.set_stage_motion_axes(self, {axis_name})
-        if axis_name == "B":
-            self._invalidate_design_registration(
-                "Design registration cleared after manual B-axis motion."
-            )
 
     def _on_manual_jog_command_changed(
         self, commanded_distances: object, feedrate: float
@@ -7238,13 +7239,21 @@ class Main(QMainWindow):
                     registry.snapshot().records,
                     migrated,
                 )
-                migrated = existing or registry.add(migrated)
-                self._design_session.link_active_frame(
-                    migrated,
-                    machine_point_for_navigation=(
-                        self._design_navigation_xy_from_physical_machine_xy
-                    ),
-                )
+                selected = existing or migrated
+                try:
+                    projection = self._design_session.prepare_active_frame_link(
+                        selected,
+                        machine_point_for_navigation=(
+                            self._design_navigation_xy_from_physical_machine_xy
+                        ),
+                        machine_b_deg=physical_b,
+                        pivot_machine_xy=DEFAULT_B_AXIS_ROTATION_PIVOT_STAGE,
+                    )
+                except DesignModelError as exc:
+                    self._show_status(str(exc), 6000)
+                    return
+                migrated = selected if existing is not None else registry.add(selected)
+                self._design_session.apply_active_frame_link(migrated, projection)
                 self._legacy_design_migration_state = dict(legacy_state)
                 connection_flow.publish_coordinate_frames(
                     self,
@@ -7271,16 +7280,22 @@ class Main(QMainWindow):
             connection_flow.publish_coordinate_frames(self)
         self._apply_coordinate_frame_authority_blocks()
 
-    def _apply_coordinate_frame_authority_blocks(self) -> None:
+    def _apply_coordinate_frame_authority_blocks(
+        self,
+        stage_position: tuple[float, ...] | None = None,
+    ) -> None:
         registry = getattr(self, "_coordinate_frame_registry", None)
         session = getattr(self, "_design_session", None)
         if registry is None or session is None:
             return
         unavailable = {
             axis
-            for axis in ("X", "Y", "B")
+            for axis in ("X", "Y")
             if not self.stage_controller.axes_are_homed({axis})
         }
+        physical_b = self._tracked_physical_b_for_design_frame(stage_position)
+        if physical_b is None:
+            unavailable.add("B")
         self._coordinate_frame_authority_blocked_axes = unavailable
         if session.active_frame_id is None:
             return
@@ -7301,11 +7316,47 @@ class Main(QMainWindow):
                 machine_point_for_navigation=(
                     self._design_navigation_xy_from_physical_machine_xy
                 ),
+                machine_b_deg=physical_b,
+                pivot_machine_xy=DEFAULT_B_AXIS_ROTATION_PIVOT_STAGE,
             )
         except DesignModelError as exc:
+            self._coordinate_frame_authority_blocked_axes = {"X", "Y", "B"}
             session.link_active_frame(
-                effective.with_authority_block({"X", "Y", "B"}, str(exc))
+                effective.with_authority_block({"X", "Y", "B"}, str(exc)),
+                machine_b_deg=physical_b,
+                pivot_machine_xy=DEFAULT_B_AXIS_ROTATION_PIVOT_STAGE,
             )
+
+    def _tracked_physical_b_for_design_frame(
+        self,
+        stage_position: tuple[float, ...] | None = None,
+    ) -> float | None:
+        timestamp_getter = getattr(
+            getattr(self, "stage_controller", None),
+            "last_status_timestamp",
+            None,
+        )
+        if not callable(timestamp_getter) or timestamp_getter() is None:
+            return None
+        position = stage_position
+        if position is None:
+            position_getter = getattr(self.stage_controller, "latest_stage_position", None)
+            position = position_getter() if callable(position_getter) else None
+        try:
+            b_index = self.STAGE_AXIS_NAMES.index("B")
+        except (AttributeError, ValueError):
+            b_index = 4
+        if not isinstance(position, (tuple, list)) or len(position) <= b_index:
+            return None
+        try:
+            physical_b = self.stage_controller.calibrated_axis_display_value(
+                "B",
+                float(position[b_index]),
+            )
+            physical_b = float(physical_b)
+        except Exception:
+            return None
+        return physical_b if math.isfinite(physical_b) else None
 
     def _legacy_design_state_for_frame_migration(
         self,
@@ -7888,6 +7939,7 @@ class Main(QMainWindow):
             points=points,
             route_lcr_controller=route_lcr_controller,
             wait_before_first_point=wait_before_first_point,
+            design_frame_snapshot=start_plan.design_frame_snapshot,
         )
         self._start_route_measurement_runner(
             runner,
@@ -7958,6 +8010,7 @@ class Main(QMainWindow):
         points: list[RouteMeasurementPoint],
         route_lcr_controller: object,
         wait_before_first_point: bool,
+        design_frame_snapshot: object | None = None,
     ) -> RouteMeasurementRunner:
         callbacks = GuiRouteEventBindings(
             status=self.route_measurement_status.emit,
@@ -7998,6 +8051,7 @@ class Main(QMainWindow):
             photo_output_dir=configuration.photo_output_dir,
             wait_before_first_point=wait_before_first_point,
             events=callbacks,
+            design_frame_snapshot=design_frame_snapshot,
         )
 
     def _start_route_measurement_runner(
@@ -9182,32 +9236,46 @@ class Main(QMainWindow):
             self._design_session.source_stage_marks_compact()
         )
         source_prefix_count = len(current_metadata.source_machine_marks)
-        machine_marks = (
-            tuple(current_metadata.source_machine_marks)
-            + source_stage_marks[source_prefix_count:]
-            if source_prefix_count
-            else source_stage_marks
-        )
         check_stage_marks = tuple(self._design_session.check_stage_marks)
         check_prefix_count = len(current_metadata.check_machine_marks)
-        physical_check_marks = (
-            tuple(current_metadata.check_machine_marks)
-            + check_stage_marks[check_prefix_count:]
-            if check_prefix_count
-            else check_stage_marks
-        )
-        if len(design_marks) < 2 or len(design_marks) != len(machine_marks):
+        new_physical_check_marks = check_stage_marks[check_prefix_count:]
+        if len(design_marks) < 2 or len(design_marks) != len(source_stage_marks):
             return
         try:
-            committed = commit_xyb_registration(
-                current,
-                design_points=design_marks,
-                physical_machine_points=machine_marks,
-                physical_b_deg=physical_b_deg,
-                pivot_machine_xy=DEFAULT_B_AXIS_ROTATION_PIVOT_STAGE,
-                check_design_points=check_design_marks,
-                check_machine_points=physical_check_marks,
-            )
+            if source_prefix_count >= 2 and not source_stage_marks[source_prefix_count:]:
+                if current.transform is None:
+                    return
+                delta_b = physical_b_deg - current.transform.reference_b_deg
+                pivot = DEFAULT_B_AXIS_ROTATION_PIVOT_STAGE
+                existing_checks_at_current_b: list[tuple[float, float]] = []
+                for point in current_metadata.check_machine_marks:
+                    rotated = rotate_xy(
+                        (point[0] - pivot[0], point[1] - pivot[1]),
+                        delta_b,
+                    )
+                    existing_checks_at_current_b.append(
+                        (pivot[0] + rotated[0], pivot[1] + rotated[1])
+                    )
+                committed = update_check_registration(
+                    current,
+                    check_design_points=check_design_marks,
+                    physical_check_machine_points=(
+                        tuple(existing_checks_at_current_b)
+                        + new_physical_check_marks
+                    ),
+                    physical_b_deg=physical_b_deg,
+                    pivot_machine_xy=pivot,
+                )
+            else:
+                committed = commit_xyb_registration(
+                    current,
+                    design_points=design_marks,
+                    physical_machine_points=source_stage_marks,
+                    physical_b_deg=physical_b_deg,
+                    pivot_machine_xy=DEFAULT_B_AXIS_ROTATION_PIVOT_STAGE,
+                    check_design_points=check_design_marks,
+                    check_machine_points=check_stage_marks,
+                )
             committed = registry.replace(
                 committed,
                 expected_version=current.version,
@@ -9221,6 +9289,8 @@ class Main(QMainWindow):
                 machine_point_for_navigation=(
                     self._design_navigation_xy_from_physical_machine_xy
                 ),
+                machine_b_deg=physical_b_deg,
+                pivot_machine_xy=DEFAULT_B_AXIS_ROTATION_PIVOT_STAGE,
             )
         except DesignModelError as exc:
             self._design_session.link_active_frame(
@@ -9542,10 +9612,6 @@ class Main(QMainWindow):
             return False
         for axis in plan.remove_pending_axes:
             self._pending_stage_axis_targets.pop(axis, None)
-        if plan.invalidate_design_registration:
-            self._invalidate_design_registration(
-                "Design registration cleared after B-axis coordinate motion."
-            )
         self._coordinate_targets.apply_start_plan(plan)
         stage_position_panel_adapter.set_stage_motion_axes(
             self,

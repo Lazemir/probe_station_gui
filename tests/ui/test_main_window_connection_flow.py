@@ -218,6 +218,9 @@ def _owner(events: list[object]) -> SimpleNamespace:
     owner._invalidate_design_registration = lambda message: events.append(
         ("invalidate_design", message)
     )
+    owner._apply_coordinate_frame_authority_blocks = lambda: events.append(
+        ("authority_blocks",)
+    )
     owner._update_design_position = lambda value: events.append(
         ("update_design_position", value)
     )
@@ -306,10 +309,8 @@ def test_on_serial_disconnected_preserves_detach_cleanup_order() -> None:
     assert ("contact", "stage_position", None) in events
     assert ("contact", "needle_lowering", None) in events
     assert ("oscillation", False, "") in events
-    assert (
-        "invalidate_design",
-        "Design registration cleared after serial disconnect.",
-    ) in events
+    assert not any(event[0] == "invalidate_design" for event in events)
+    assert ("authority_blocks",) in events
     assert owner.serial_connection is None
     assert owner._controller_state_persistence_suspended is False
 

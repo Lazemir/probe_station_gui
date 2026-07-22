@@ -110,6 +110,11 @@ def api_route_session_result_response(
             "message": "No external route session is waiting for a result.",
         }
     result = route_external_result_payload(payload, timestamp_utc=timestamp_utc)
+    lineage = getattr(runner, "design_frame_payload", None)
+    if callable(lineage):
+        design_frame = lineage()
+        if design_frame is not None:
+            result["design_frame"] = design_frame
     if not runner.submit_external_result(result):
         return {
             "accepted": False,

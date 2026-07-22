@@ -459,6 +459,274 @@ def test_stage_mark_capture_rejects_calibration_failure_before_mutating_session(
     assert statuses == ["calibration unavailable"]
 
 
+def test_authority_uses_xy_homing_and_tracked_calibrated_b_without_b_homing(
+    tmp_path: Path,
+) -> None:
+    document = _make_document(tmp_path)
+    registry = CoordinateFrameRegistry()
+    committed = registry.add(
+        main_module.commit_xyb_registration(
+            new_design_frame_draft(document, existing_names=()),
+            design_points=((0.0, 0.0), (1000.0, 0.0)),
+            physical_machine_points=((3.0, 4.0), (4.0, 4.0)),
+            physical_b_deg=12.0,
+            pivot_machine_xy=(0.0, 0.0),
+        )
+    )
+    session = DesignSession(document=document)
+    session.link_active_frame(committed)
+    homed: set[str] = set()
+    homing_queries: list[set[str]] = []
+
+    def axes_are_homed(axes: set[str]) -> bool:
+        homing_queries.append(set(axes))
+        assert "B" not in axes
+        return axes.issubset(homed)
+
+    window = Main.__new__(Main)
+    window._design_session = session
+    window._coordinate_frame_registry = registry
+    window._design_navigation_xy_from_physical_machine_xy = lambda point: point
+    window.stage_controller = types.SimpleNamespace(
+        axes_are_homed=axes_are_homed,
+        latest_stage_position=lambda: (0.0, 0.0, 0.0, 0.0, 42.0),
+        last_status_timestamp=lambda: 100.0,
+        calibrated_axis_display_value=lambda axis, value: (
+            float(value) if axis == "B" else pytest.fail(f"unexpected axis {axis}")
+        ),
+    )
+
+    Main._apply_coordinate_frame_authority_blocks(window)
+
+    assert window._coordinate_frame_authority_blocked_axes == {"X", "Y"}
+    assert session.registration is not None
+    assert not session.registration.valid
+    assert registry.get(committed.frame_id) == committed
+
+    homed.update({"X", "Y"})
+    Main._apply_coordinate_frame_authority_blocks(window)
+
+    assert window._coordinate_frame_authority_blocked_axes == set()
+    assert session.registration is not None
+    assert session.registration.valid
+    assert homing_queries == [{"X"}, {"Y"}, {"X"}, {"Y"}]
+    assert registry.get(committed.frame_id) == committed
+    assert registry.snapshot().generation == 1
+
+
+def test_authority_temporarily_blocks_b_when_tracked_position_is_unknown(
+    tmp_path: Path,
+) -> None:
+    document = _make_document(tmp_path)
+    registry = CoordinateFrameRegistry()
+    committed = registry.add(
+        main_module.commit_xyb_registration(
+            new_design_frame_draft(document, existing_names=()),
+            design_points=((0.0, 0.0), (1000.0, 0.0)),
+            physical_machine_points=((3.0, 4.0), (4.0, 4.0)),
+            physical_b_deg=12.0,
+            pivot_machine_xy=(0.0, 0.0),
+        )
+    )
+    session = DesignSession(document=document)
+    session.link_active_frame(committed)
+    window = Main.__new__(Main)
+    window._design_session = session
+    window._coordinate_frame_registry = registry
+    window._design_navigation_xy_from_physical_machine_xy = lambda point: point
+    window.stage_controller = types.SimpleNamespace(
+        axes_are_homed=lambda axes: axes.issubset({"X", "Y"}),
+        latest_stage_position=lambda: None,
+        last_status_timestamp=lambda: None,
+    )
+
+    Main._apply_coordinate_frame_authority_blocks(window)
+
+    assert window._coordinate_frame_authority_blocked_axes == {"B"}
+    assert session.registration is not None
+    assert not session.registration.valid
+    assert registry.get(committed.frame_id) == committed
+
+
+def test_check_capture_at_changed_b_preserves_transform_and_normalizes_metadata(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    document = _make_document(tmp_path)
+    pivot = (10.0, -2.0)
+    registry = CoordinateFrameRegistry()
+    committed = registry.add(
+        main_module.commit_xyb_registration(
+            new_design_frame_draft(document, existing_names=()),
+            design_points=((0.0, 0.0), (1000.0, 0.0)),
+            physical_machine_points=((3.0, 4.0), (3.0, 5.0)),
+            physical_b_deg=12.0,
+            pivot_machine_xy=pivot,
+        )
+    )
+    assert committed.transform is not None
+    check_design = (500.0, 0.0)
+    current_b = 42.0
+    current_check_machine = committed.transform.frame_xy_to_machine(
+        (0.5, 0.0),
+        machine_b_deg=current_b,
+        pivot_machine_xy=pivot,
+    )
+    reference_check_machine = committed.transform.frame_xy_to_machine(
+        (0.5, 0.0),
+        machine_b_deg=12.0,
+        pivot_machine_xy=pivot,
+    )
+    session = DesignSession(document=document)
+    session.link_active_frame(committed)
+    session.check_design_marks = [check_design]
+    window = Main.__new__(Main)
+    window._design_session = session
+    window._coordinate_frame_registry = registry
+    window.stage_controller = types.SimpleNamespace(
+        current_stage_position=lambda: (
+            current_check_machine[0],
+            current_check_machine[1],
+            0.0,
+            0.0,
+            current_b,
+        ),
+        calibrated_axis_display_value=lambda _axis, value: float(value),
+        calibrated_axis_raw_value=lambda _axis, value: float(value),
+    )
+    window._camera_stage_xy_from_raw_stage_xy = lambda point: point
+    window._refresh_design_panel = lambda: None
+    window._refresh_design_position = lambda: None
+    window._show_status = lambda *_args: None
+    monkeypatch.setattr(main_module, "DEFAULT_B_AXIS_ROTATION_PIVOT_STAGE", pivot)
+    monkeypatch.setattr(
+        main_module.connection_flow,
+        "publish_coordinate_frames",
+        lambda _owner: None,
+    )
+
+    Main._capture_stage_check_mark(window)
+
+    updated = registry.get(committed.frame_id)
+    assert updated is not None
+    assert updated.transform == committed.transform
+    assert updated.readiness == committed.readiness
+    metadata = main_module.DesignFrameMetadata.from_mapping(updated.metadata)
+    assert metadata.source_design_marks == ((0.0, 0.0), (1000.0, 0.0))
+    assert metadata.source_machine_marks == ((3.0, 4.0), (3.0, 5.0))
+    assert metadata.check_design_marks == (check_design,)
+    assert metadata.check_machine_marks[0] == pytest.approx(reference_check_machine)
+    assert metadata.rms_residual_mm == pytest.approx(0.0, abs=1e-12)
+    assert metadata.max_residual_mm == pytest.approx(0.0, abs=1e-12)
+
+
+def test_source_capture_at_changed_b_retains_existing_check_evidence(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    document = _make_document(tmp_path)
+    pivot = (10.0, -2.0)
+    registry = CoordinateFrameRegistry()
+    committed = registry.add(
+        main_module.commit_xyb_registration(
+            new_design_frame_draft(document, existing_names=()),
+            design_points=((0.0, 0.0), (1000.0, 0.0)),
+            physical_machine_points=((3.0, 4.0), (3.0, 5.0)),
+            physical_b_deg=12.0,
+            pivot_machine_xy=pivot,
+            check_design_points=((500.0, 500.0),),
+            check_machine_points=((2.5, 4.5),),
+        )
+    )
+    assert committed.transform is not None
+    current_b = 42.0
+    third_design = (0.0, 1000.0)
+    third_machine = committed.transform.frame_xy_to_machine(
+        (0.0, 1.0),
+        machine_b_deg=current_b,
+        pivot_machine_xy=pivot,
+    )
+    existing_check_at_current_b = committed.transform.frame_xy_to_machine(
+        (0.5, 0.5),
+        machine_b_deg=current_b,
+        pivot_machine_xy=pivot,
+    )
+    session = DesignSession(document=document)
+    session.link_active_frame(
+        committed,
+        machine_b_deg=current_b,
+        pivot_machine_xy=pivot,
+    )
+    session.add_source_design_mark(third_design)
+    session.add_source_stage_mark(third_machine)
+    statuses: list[str] = []
+    window = Main.__new__(Main)
+    window._design_session = session
+    window._coordinate_frame_registry = registry
+    window._design_navigation_xy_from_physical_machine_xy = lambda point: point
+    window._show_status = lambda message, _timeout: statuses.append(str(message))
+    monkeypatch.setattr(main_module, "DEFAULT_B_AXIS_ROTATION_PIVOT_STAGE", pivot)
+    monkeypatch.setattr(
+        main_module.connection_flow,
+        "publish_coordinate_frames",
+        lambda _owner: None,
+    )
+
+    Main._commit_active_design_frame_registration(window, current_b)
+
+    updated = registry.get(committed.frame_id)
+    assert updated is not None
+    assert updated.version == committed.version + 1
+    metadata = main_module.DesignFrameMetadata.from_mapping(updated.metadata)
+    assert metadata.source_design_marks == (
+        (0.0, 0.0),
+        (1000.0, 0.0),
+        third_design,
+    )
+    assert metadata.check_design_marks == ((500.0, 500.0),)
+    assert metadata.check_machine_marks[0] == pytest.approx(
+        existing_check_at_current_b
+    )
+    assert statuses == []
+
+
+def test_legacy_migration_projection_failure_leaves_registry_and_link_unchanged(
+    tmp_path: Path,
+) -> None:
+    document = _make_document(tmp_path)
+    registry = CoordinateFrameRegistry()
+    session = DesignSession(document=document)
+    session.source_design_marks = ((0.0, 0.0), (1000.0, 0.0))
+    session.source_stage_marks = ((3.0, 4.0), (4.0, 4.0))
+    before = registry.snapshot()
+    statuses: list[str] = []
+    window = Main.__new__(Main)
+    window._design_session = session
+    window._coordinate_frame_registry = registry
+    window._coordinate_frames_loaded = True
+    window._active_design_frame_metadata = main_module.DesignFrameMetadata.from_document(
+        document
+    )
+    window._raw_stage_xy_from_camera_stage_xy = lambda point: point
+    window._camera_stage_xy_from_raw_stage_xy = lambda point: point
+    window.stage_controller = types.SimpleNamespace(
+        latest_stage_position=lambda: (0.0, 0.0, 0.0, 0.0, 12.0),
+        calibrated_axis_display_value=lambda _axis, value: float(value),
+        calibrated_axis_raw_value=lambda _axis, _value: (_ for _ in ()).throw(
+            RuntimeError("inverse calibration unavailable")
+        ),
+    )
+    window._show_status = lambda message, _timeout: statuses.append(str(message))
+
+    Main._activate_loaded_design_frame(window)
+
+    assert registry.snapshot() == before
+    assert session.active_frame_id is None
+    assert statuses == [
+        "Design frame coordinates are unavailable: inverse calibration unavailable"
+    ]
+
+
 def test_reset_design_registration_creates_an_independent_persistent_draft(
     monkeypatch,
     tmp_path: Path,

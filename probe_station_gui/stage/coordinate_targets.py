@@ -397,7 +397,7 @@ def plan_coordinate_target_start(
             ends_at=started_at + max(duration_s, 0.05),
             status=status,
             publish_position=origin_tuple,
-            invalidate_design_registration="B" in active_axes,
+            invalidate_design_registration=False,
             common_feedrate=coordinate_target_common_feedrate_plan(
                 ordered_axes,
                 feedrate,

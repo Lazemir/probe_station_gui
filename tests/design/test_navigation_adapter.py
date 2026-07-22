@@ -3,11 +3,17 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from probe_station_gui.coordinates.registry import CoordinateFrameRegistry
-from probe_station_gui.design.frame_registration import new_design_frame_draft
+from probe_station_gui.design.frame_registration import (
+    DesignFrameMetadata,
+    commit_xyb_registration,
+    new_design_frame_draft,
+)
 from probe_station_gui.design.model import (
     DesignDocument,
+    DesignModelError,
     DesignRegistration,
     MeasurementTarget,
 )
@@ -329,3 +335,99 @@ def test_loaded_design_links_requested_existing_frame_and_new_registration_is_in
     assert created.record.frame_id not in {first.frame_id, second.frame_id}
     assert created.record.name == f"{document.path.stem} (3)"
     assert session.active_frame_id == created.record.frame_id
+
+
+def test_reconciled_frame_projection_failure_is_transactional(tmp_path: Path) -> None:
+    document = _make_document(tmp_path)
+    registry = CoordinateFrameRegistry()
+    existing = registry.add(
+        commit_xyb_registration(
+            new_design_frame_draft(document, existing_names=()),
+            design_points=((0.0, 0.0), (1000.0, 0.0)),
+            physical_machine_points=((3.0, 4.0), (4.0, 4.0)),
+            physical_b_deg=0.0,
+            pivot_machine_xy=(0.0, 0.0),
+        )
+    )
+    session = DesignSession(document=document)
+    session.link_active_frame(existing)
+    before = registry.snapshot()
+    document.path.write_bytes(b"changed-design")
+    changed_metadata = DesignFrameMetadata.from_document(document)
+
+    with pytest.raises(DesignModelError, match="calibration unavailable"):
+        activate_design_frame_for_document(
+            session,
+            registry,
+            document,
+            requested_frame_id=existing.frame_id,
+            current_metadata=changed_metadata,
+            machine_point_for_navigation=lambda _point: (_ for _ in ()).throw(
+                RuntimeError("calibration unavailable")
+            ),
+        )
+
+    assert registry.snapshot() == before
+    assert session.active_frame_id == existing.frame_id
+
+
+def test_requested_frame_for_other_top_cell_is_rejected_without_linking(
+    tmp_path: Path,
+) -> None:
+    top_document = _make_document(tmp_path)
+    alt_document = top_document.with_top_cell("ALT")
+    registry = CoordinateFrameRegistry()
+    top_frame = registry.add(new_design_frame_draft(top_document, existing_names=()))
+    session = DesignSession(document=alt_document)
+
+    with pytest.raises(DesignModelError, match="top cell"):
+        activate_design_frame_for_document(
+            session,
+            registry,
+            alt_document,
+            requested_frame_id=top_frame.frame_id,
+        )
+
+    assert session.active_frame_id is None
+
+
+def test_persisted_wrong_top_frame_id_is_cleared_when_activation_rejects_it(
+    tmp_path: Path,
+) -> None:
+    top_document = _make_document(tmp_path)
+    alt_document = top_document.with_top_cell("ALT")
+    registry = CoordinateFrameRegistry()
+    top_frame = registry.add(new_design_frame_draft(top_document, existing_names=()))
+    session = DesignSession(document=alt_document, active_frame_id=top_frame.frame_id)
+
+    with pytest.raises(DesignModelError, match="top cell"):
+        activate_design_frame_for_document(
+            session,
+            registry,
+            alt_document,
+            requested_frame_id=top_frame.frame_id,
+        )
+
+    assert session.active_frame_id is None
+    assert session.registration is None
+
+
+def test_automatic_activation_selects_frame_matching_path_and_top_cell(
+    tmp_path: Path,
+) -> None:
+    top_document = _make_document(tmp_path)
+    alt_document = top_document.with_top_cell("ALT")
+    registry = CoordinateFrameRegistry()
+    top_frame = registry.add(new_design_frame_draft(top_document, existing_names=()))
+    alt_frame = registry.add(
+        new_design_frame_draft(
+            alt_document,
+            existing_names=(top_frame.name,),
+        )
+    )
+    session = DesignSession(document=alt_document)
+
+    activation = activate_design_frame_for_document(session, registry, alt_document)
+
+    assert activation.record.frame_id == alt_frame.frame_id
+    assert session.active_frame_id == alt_frame.frame_id

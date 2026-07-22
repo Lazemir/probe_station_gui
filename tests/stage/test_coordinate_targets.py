@@ -123,7 +123,7 @@ def test_start_plan_rejects_empty_targets_unavailable_origin_limit_errors_and_ba
     assert target_position_failure.status.timeout_ms == 3000
 
 
-def test_start_plan_computes_tracking_maps_duration_status_and_b_axis_invalidation() -> None:
+def test_start_plan_computes_tracking_maps_duration_without_b_registration_invalidation() -> None:
     decision = plan_coordinate_target_start(
         _config(),
         targets={"B": (4.0, 4.5), "X": (1.0, 1.25)},
@@ -143,7 +143,7 @@ def test_start_plan_computes_tracking_maps_duration_status_and_b_axis_invalidati
     assert decision.plan.origin_position == (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
     assert decision.plan.target_position == (1.0, 0.0, 0.0, 0.0, 4.0, 0.0)
     assert decision.plan.remove_pending_axes == ("X", "B")
-    assert decision.plan.invalidate_design_registration is True
+    assert decision.plan.invalidate_design_registration is False
     assert decision.plan.publish_position == (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
     assert decision.plan.started_at == 10.0
     assert math.isclose(

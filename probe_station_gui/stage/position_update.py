@@ -215,10 +215,10 @@ def on_stage_position_changed(
             signal_plan.status.contact_calibration_position
         )
     center_xy = signal_plan.status.center_xy
+    _apply_b_axis_registration(owner, signal_plan, current_position)
     if signal_plan.status.use_unhomed_fallback:
         _apply_unhomed_fallback(owner, position, signal_plan, center_xy, latest_state)
         return
-    _apply_b_axis_registration(owner, signal_plan)
     if signal_plan.defer_manual_jog_stop_sample:
         logger.debug(
             "MOTION PREDICTION deferred_stop_sample stage=%s state=%s",
@@ -305,11 +305,17 @@ def _build_stage_position_signal_plan(
 def _apply_b_axis_registration(
     owner: StagePositionUpdateOwner,
     signal_plan: Any,
+    stage_position: tuple[float, ...] | None,
 ) -> None:
-    if signal_plan.b_axis.invalidate_reason is not None:
-        owner._invalidate_design_registration(signal_plan.b_axis.invalidate_reason)
     if signal_plan.b_axis.current_b is not None:
         owner._last_reported_b_position = signal_plan.b_axis.current_b
+    refresh_authority = getattr(
+        owner,
+        "_apply_coordinate_frame_authority_blocks",
+        None,
+    )
+    if callable(refresh_authority):
+        refresh_authority(stage_position)
 
 
 def _apply_unhomed_fallback(

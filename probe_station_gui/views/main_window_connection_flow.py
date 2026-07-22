@@ -187,9 +187,9 @@ def on_serial_disconnected(owner: object) -> None:
     if owner.oscillation_panel:
         owner.oscillation_panel.set_running(False, "")
     owner._reset_manual_alignment(cancel_pick=True)
-    owner._invalidate_design_registration(
-        "Design registration cleared after serial disconnect."
-    )
+    apply_authority = getattr(owner, "_apply_coordinate_frame_authority_blocks", None)
+    if callable(apply_authority):
+        apply_authority()
     owner._update_design_position(None)
 
 
@@ -299,9 +299,9 @@ def on_controller_reboot_detected(owner: object) -> None:
     owner._stage_unhomed_display_origins.clear()
     owner._pending_persisted_design_state = None
     owner._pending_persisted_design_position = None
-    owner._invalidate_design_registration(
-        "Design registration cleared after controller reboot."
-    )
+    apply_authority = getattr(owner, "_apply_coordinate_frame_authority_blocks", None)
+    if callable(apply_authority):
+        apply_authority()
 
 
 def _clear_exact_step_targets(owner: object) -> None:

@@ -146,6 +146,12 @@ class _Owner:
     def _invalidate_design_registration(self, message: str) -> None:
         self.calls.append(("invalidate", message))
 
+    def _apply_coordinate_frame_authority_blocks(
+        self,
+        position: tuple[float, ...] | None = None,
+    ) -> None:
+        self.calls.append(("frame_authority", position))
+
     def _log_design_position_reconcile(
         self,
         predicted_stage_xy: tuple[float, float],
@@ -210,6 +216,7 @@ def test_unhomed_fallback_clears_prediction_and_keeps_idle_finish_order(
     assert owner._planned_move_stage_xy is None
     assert owner.calls == [
         ("restore", (1.0, 2.0, 3.0)),
+        ("frame_authority", (1.0, 2.0, 3.0)),
         ("display", (1.0, 2.0, 3.0)),
         ("coordinate", None),
         ("design", (1.0, 2.0)),
@@ -231,3 +238,18 @@ def test_preferred_design_stage_xy_clears_completed_planned_wait_state() -> None
     assert stage_xy == (1.5, 2.5)
     assert owner._planned_move_waiting_for_fresh_status is False
     assert owner._planned_move_stop_status_timestamp is None
+
+
+def test_fresh_status_without_b_temporarily_refreshes_frame_authority() -> None:
+    owner = _Owner()
+    signal_plan = types.SimpleNamespace(
+        b_axis=types.SimpleNamespace(current_b=None),
+    )
+
+    position_update._apply_b_axis_registration(
+        owner,
+        signal_plan,
+        (1.0, 2.0, 3.0),
+    )
+
+    assert ("frame_authority", (1.0, 2.0, 3.0)) in owner.calls

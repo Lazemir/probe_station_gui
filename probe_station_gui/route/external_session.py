@@ -99,6 +99,7 @@ class RouteExternalMeasurementSessionRunner:
         photo_focus_enabled: bool = True,
         photo_settle_s: float = 0.2,
         wait_before_first_point: bool = False,
+        design_frame_snapshot: object | None = None,
     ) -> None:
         self.session_id = str(session_id)
         self._points = list(points)
@@ -112,6 +113,7 @@ class RouteExternalMeasurementSessionRunner:
         self._photo_enabled = bool(photo_enabled)
         self._photo_focus_enabled = bool(photo_focus_enabled)
         self._wait_before_first_point = bool(wait_before_first_point)
+        self._design_frame_snapshot = design_frame_snapshot
         self._condition = threading.Condition()
         self._stop_requested = False
         self._pause_requested = False
@@ -163,11 +165,19 @@ class RouteExternalMeasurementSessionRunner:
             else ROUTE_OPERATION_MEASURE,
             photo_settle_s=photo_settle_s,
             photo_focus_enabled=self._photo_focus_enabled,
+            design_frame_snapshot=design_frame_snapshot,
         )
 
     @property
     def csv_path(self) -> Path:
         return self._csv_path
+
+    @property
+    def design_frame_snapshot(self) -> object | None:
+        return self._design_frame_snapshot
+
+    def design_frame_payload(self) -> dict[str, object] | None:
+        return self._contact_runner.design_frame_payload()
 
     def requires_optical_session(self) -> bool:
         return bool(self._photo_enabled or self._photo_focus_enabled)
@@ -286,6 +296,7 @@ class RouteExternalMeasurementSessionRunner:
                 ),
                 "last_external_result": self._last_external_result,
                 "history": list(self._history),
+                "design_frame": self.design_frame_payload(),
             }
 
     def wait_until_initial_pause(self, timeout_s: float) -> bool:
@@ -803,6 +814,7 @@ class RouteExternalMeasurementSessionRunner:
             "status": str(status),
             "preparation": self._preparation_payload(preparation),
             "external_result": external_result,
+            "design_frame": self.design_frame_payload(),
         }
         with self._condition:
             self._history.append(entry)

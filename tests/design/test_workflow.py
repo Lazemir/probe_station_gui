@@ -284,6 +284,53 @@ class DesignSessionTest(unittest.TestCase):
         self.assertEqual(tuple(restored.source_design_marks_compact()), expected_marks)
         self.assertEqual(restored.active_frame_id, frame.frame_id)
 
+    def test_active_frame_link_rejects_matching_file_with_wrong_top_cell(self) -> None:
+        top_document = self._make_document()
+        frame = new_design_frame_draft(top_document, existing_names=())
+        session = DesignSession(
+            document=replace(
+                top_document,
+                top_cell_name="ALT",
+                cell_names=("TOP", "ALT"),
+            )
+        )
+
+        with self.assertRaisesRegex(DesignModelError, "top cell"):
+            session.link_active_frame(frame)
+
+        self.assertIsNone(session.active_frame_id)
+
+    def test_active_frame_projects_durable_marks_at_current_physical_b(self) -> None:
+        document = self._make_document()
+        pivot = (10.0, -2.0)
+        frame = commit_xyb_registration(
+            new_design_frame_draft(document, existing_names=()),
+            design_points=((0.0, 0.0), (1000.0, 0.0)),
+            physical_machine_points=((3.0, 4.0), (3.0, 5.0)),
+            physical_b_deg=12.0,
+            pivot_machine_xy=pivot,
+        )
+        durable = frame
+        session = DesignSession(document=document)
+
+        session.link_active_frame(
+            frame,
+            machine_b_deg=42.0,
+            pivot_machine_xy=pivot,
+        )
+
+        expected = tuple(
+            frame.transform.frame_xy_to_machine(
+                (point[0] * 0.001, point[1] * 0.001),
+                machine_b_deg=42.0,
+                pivot_machine_xy=pivot,
+            )
+            for point in ((0.0, 0.0), (1000.0, 0.0))
+        )
+        self.assertEqual(tuple(session.source_stage_marks_compact()), expected)
+        self.assertTrue(session.registration.valid)
+        self.assertEqual(frame, durable)
+
     def test_persisted_state_roundtrip_restores_registration(self) -> None:
         document = self._make_document()
         session = DesignSession()
