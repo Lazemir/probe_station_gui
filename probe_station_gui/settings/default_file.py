@@ -19,6 +19,7 @@ from probe_station_gui.settings.objective_config import (
 )
 from probe_station_gui.settings.oscillation_config import OscillationSettings
 from probe_station_gui.settings.precision_approach import PrecisionApproachSettings
+from probe_station_gui.settings.software_coordinates import SoftwareCoordinateSettings
 from probe_station_gui.settings.sections import (
     ApiSettings,
     ClickToMoveSettings,
@@ -68,6 +69,11 @@ def normalize_default_settings_data(
     _ensure_needle_section(data)
     _ensure_axis_calibrations_section(data)
     _ensure_dict_section(data, "coordinate_system", CoordinateSystemSettings().to_dict())
+    _ensure_dict_section(
+        data,
+        "software_coordinates",
+        SoftwareCoordinateSettings().to_dict(),
+    )
     _ensure_precision_approach_section(data)
     _ensure_objectives_section(data)
     if not isinstance(data.get("design_last_directory"), str):

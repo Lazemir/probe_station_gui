@@ -212,6 +212,24 @@
     "startup_mode": "controller",
     "preferred_system": "G54"
   },
+  "software_coordinates": {
+    "version": 1,
+    "custom_frames": [],
+    "pivot": {
+      "x_mm": 0.0,
+      "y_mm": 0.0,
+      "source": "assumed",
+      "calibration_version": 0,
+      "objective_name": "",
+      "sampled_b_min_deg": null,
+      "sampled_b_max_deg": null,
+      "rms_error_mm": null,
+      "max_error_mm": null
+    },
+    "last_selected_frame_id": "machine",
+    "max_rotation_segment_deg": 0.5,
+    "max_rotation_chord_error_mm": 0.005
+  },
   "precision_approach": {
     "X": {
       "enabled": false,

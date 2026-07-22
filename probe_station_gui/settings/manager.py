@@ -70,6 +70,10 @@ from probe_station_gui.settings.precision_approach import (
     PrecisionApproachSettings,
     parse_precision_approach_settings,
 )
+from probe_station_gui.settings.software_coordinates import (
+    SoftwareCoordinateSettings,
+    parse_software_coordinate_settings,
+)
 from probe_station_gui.settings.value_parsing import (
     coerce_bool,
     finite_float,
@@ -120,8 +124,12 @@ class Settings:
     axis_calibrations: dict[str, AxisCalibrationSettings] = field(
         default_factory=default_axis_calibrations
     )
+    # Legacy FluidNC work-coordinate-system settings; retain for WCO parsing.
     coordinate_system: CoordinateSystemSettings = field(
         default_factory=CoordinateSystemSettings
+    )
+    software_coordinates: SoftwareCoordinateSettings = field(
+        default_factory=SoftwareCoordinateSettings
     )
     objectives: ObjectivesSettings = field(default_factory=ObjectivesSettings)
     precision_approach: PrecisionApproachSettings = field(
@@ -151,6 +159,7 @@ class Settings:
                 for axis, calibration in self.axis_calibrations.items()
             },
             coordinate_system=self.coordinate_system.clone(),
+            software_coordinates=self.software_coordinates.clone(),
             objectives=self.objectives.clone(),
             precision_approach=self.precision_approach.clone(),
             design_last_directory=self.design_last_directory,
@@ -187,6 +196,7 @@ class Settings:
                 for axis, calibration in self.axis_calibrations.items()
             },
             "coordinate_system": self.coordinate_system.to_dict(),
+            "software_coordinates": self.software_coordinates.to_dict(),
             "objectives": self.objectives.to_dict(),
             "precision_approach": self.precision_approach.to_dict(),
             "design_last_directory": self.design_last_directory,
@@ -675,6 +685,9 @@ class SettingsManager:
             coordinate_system=self._parse_coordinate_system(
                 self._raw_section(raw, "coordinate_system")
             ),
+            software_coordinates=parse_software_coordinate_settings(
+                self._raw_section(raw, "software_coordinates")
+            ),
             objectives=parse_objectives_settings(self._raw_section(raw, "objectives")),
             precision_approach=parse_precision_approach_settings(
                 self._raw_section(raw, "precision_approach")
@@ -968,6 +981,9 @@ class SettingsManager:
                 axis: calibration.to_dict()
                 for axis, calibration in clone.axis_calibrations.items()
             }
+        )
+        clone.software_coordinates = parse_software_coordinate_settings(
+            clone.software_coordinates.to_dict()
         )
         clone.objectives = parse_objectives_settings(clone.objectives.to_dict())
         clone.precision_approach = parse_precision_approach_settings(
