@@ -14,6 +14,7 @@ from probe_station_gui.coordinates.model import (
     VISIBLE_STAGE_AXES,
 )
 from probe_station_gui.design.frame_registration import DesignFrameMetadata
+from probe_station_gui.stage.axis_mapping import curve_from_settings
 
 
 def design_calibration_fingerprints(
@@ -21,10 +22,7 @@ def design_calibration_fingerprints(
 ) -> tuple[tuple[str, str], ...]:
     """Return canonical visible-axis controller-to-physical curve fingerprints."""
 
-    return tuple(
-        (axis, _fingerprint(calibrations.get(axis)))
-        for axis in VISIBLE_STAGE_AXES
-    )
+    return tuple((axis, _fingerprint(calibrations.get(axis))) for axis in VISIBLE_STAGE_AXES)
 
 
 def reconcile_design_calibrations(
@@ -54,7 +52,13 @@ def _reconcile_design_record(
     record: CoordinateFrameRecord,
     current: tuple[tuple[str, str], ...],
 ) -> CoordinateFrameRecord:
-    metadata = DesignFrameMetadata.from_mapping(record.metadata)
+    if not isinstance(record.metadata, Mapping):
+        return _fail_closed_malformed_metadata(record, current)
+    raw_metadata = dict(record.metadata)
+    try:
+        metadata = DesignFrameMetadata.from_mapping(raw_metadata)
+    except (KeyError, TypeError, ValueError, IndexError):
+        return _fail_closed_malformed_metadata(record, current)
     stored = dict(metadata.calibration_fingerprints)
     current_map = dict(current)
     changed_axes = {
@@ -71,12 +75,40 @@ def _reconcile_design_record(
                 ReadinessStatus.STALE,
                 "Axis calibration changed.",
             )
-    updated_metadata = replace(metadata, calibration_fingerprints=current)
+    updated_metadata = dict(raw_metadata)
+    updated_metadata["calibration_fingerprints"] = [list(item) for item in current]
     return replace(
         record,
         version=record.version + 1,
         readiness=readiness,
-        metadata=updated_metadata.to_dict(),
+        metadata=updated_metadata,
+    )
+
+
+def _fail_closed_malformed_metadata(
+    record: CoordinateFrameRecord,
+    current: tuple[tuple[str, str], ...],
+) -> CoordinateFrameRecord:
+    raw_metadata = dict(record.metadata) if isinstance(record.metadata, Mapping) else {}
+    if raw_metadata.get("calibration_metadata_invalid") is True and (
+        raw_metadata.get("calibration_fingerprints")
+        == [list(item) for item in current]
+    ):
+        return record
+    readiness = dict(record.readiness)
+    for axis in VISIBLE_STAGE_AXES:
+        if readiness[axis].available:
+            readiness[axis] = AxisReadiness(
+                ReadinessStatus.STALE,
+                "Design calibration metadata is invalid.",
+            )
+    raw_metadata["calibration_fingerprints"] = [list(item) for item in current]
+    raw_metadata["calibration_metadata_invalid"] = True
+    return replace(
+        record,
+        version=record.version + 1,
+        readiness=readiness,
+        metadata=raw_metadata,
     )
 
 
@@ -91,12 +123,22 @@ def _dependent_axes(changed_axes: set[str]) -> set[str]:
 
 
 def _fingerprint(value: object) -> str:
-    serializer = getattr(value, "to_dict", None)
-    raw = serializer() if callable(serializer) else value
-    try:
-        return json.dumps(raw, sort_keys=True, separators=(",", ":"), allow_nan=False)
-    except (TypeError, ValueError):
-        return repr(raw)
+    curve = curve_from_settings(value) if _is_curve_settings(value) else None
+    if curve is None:
+        return "identity"
+    payload = (
+        tuple(_normalized(value) for value in curve.controller),
+        tuple(_normalized(value) for value in curve.physical),
+    )
+    return json.dumps(payload, separators=(",", ":"), allow_nan=False)
+
+
+def _is_curve_settings(value: object) -> bool:
+    return all(hasattr(value, name) for name in ("enabled", "controller_points", "physical_points"))
+
+
+def _normalized(value: float) -> float:
+    return 0.0 if float(value) == 0.0 else float(value)
 
 
 __all__ = ["design_calibration_fingerprints", "reconcile_design_calibrations"]

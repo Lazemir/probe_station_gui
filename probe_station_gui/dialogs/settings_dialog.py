@@ -886,6 +886,7 @@ class SettingsDialog(QDialog):
         api_key_store: ApiKeyStore | None = None,
         physical_pose_source: Callable[[], object | None] | None = None,
         stage_idle_source: Callable[[], bool] | None = None,
+        stage_state_signal: object | None = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Settings")
@@ -898,6 +899,7 @@ class SettingsDialog(QDialog):
         self._accept_after_camera_apply = False
         self._collecting_settings = False
         self._deferred_camera_apply_result: bool | None = None
+        self._camera_apply_busy = False
 
         root_layout = QVBoxLayout(self)
         self._tabs = QTabWidget(self)
@@ -980,6 +982,9 @@ class SettingsDialog(QDialog):
         self._coordinate_system_tab.availability_changed.connect(
             self.refresh_coordinate_availability
         )
+        connect_stage_state = getattr(stage_state_signal, "connect", None)
+        if callable(connect_stage_state):
+            connect_stage_state(self.refresh_coordinate_availability)
         root_layout.addWidget(self._button_box)
         self.refresh_coordinate_availability()
 
@@ -1002,7 +1007,8 @@ class SettingsDialog(QDialog):
         self._applied_once = True
         self.settings_applied.emit(self._settings.clone())
         if camera_started:
-            self._button_box.setEnabled(False)
+            self._camera_apply_busy = True
+            self.refresh_coordinate_availability()
             self._finish_deferred_camera_apply_if_ready()
             return
         self._accept_after_camera_apply = False
@@ -1017,7 +1023,8 @@ class SettingsDialog(QDialog):
         self._applied_once = True
         self.settings_applied.emit(self._settings.clone())
         if camera_started:
-            self._button_box.setEnabled(False)
+            self._camera_apply_busy = True
+            self.refresh_coordinate_availability()
             self._finish_deferred_camera_apply_if_ready()
 
     def _set_calibration_imports_active(self, active: bool) -> None:
@@ -1028,7 +1035,11 @@ class SettingsDialog(QDialog):
         """Refresh the buttons after a local draft or stage-state change."""
 
         available, _message = self._coordinate_system_tab.apply_availability()
-        enabled = not self._calibration_imports_active and available
+        enabled = (
+            not self._calibration_imports_active
+            and not self._camera_apply_busy
+            and available
+        )
         if self._save_button is not None:
             self._save_button.setEnabled(enabled)
         if self._apply_button is not None:
@@ -1078,7 +1089,8 @@ class SettingsDialog(QDialog):
             self._complete_camera_apply(result)
 
     def _complete_camera_apply(self, success: bool) -> None:
-        self._button_box.setEnabled(True)
+        self._camera_apply_busy = False
+        self.refresh_coordinate_availability()
         if not self._accept_after_camera_apply:
             return
         self._accept_after_camera_apply = False

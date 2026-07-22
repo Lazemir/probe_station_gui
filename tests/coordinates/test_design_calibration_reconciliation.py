@@ -16,6 +16,10 @@ from probe_station_gui.coordinates.design_calibration import (
     design_calibration_fingerprints,
     reconcile_design_calibrations,
 )
+from probe_station_gui.coordinates.persistence import (
+    CoordinateFrameDocument,
+    FilesystemCoordinateFrameBackend,
+)
 from probe_station_gui.design.frame_registration import DesignFrameMetadata
 from probe_station_gui.settings.axis_calibration_config import (
     AxisCalibrationSettings,
@@ -132,3 +136,77 @@ def test_c_only_curve_change_and_custom_records_are_noops() -> None:
 
     assert not changed
     assert reconciled == (design, custom)
+
+
+def test_fingerprint_uses_runtime_effective_curve_not_file_or_disabled_values() -> None:
+    settings = default_axis_calibrations()
+    settings["X"] = AxisCalibrationSettings(
+        enabled=True,
+        calibration_file="first.csv",
+        controller_points=[-0.0, 1.0],
+        physical_points=[-0.0, 2.0],
+    )
+    first = design_calibration_fingerprints(settings)
+    settings["X"].calibration_file = "other.csv"
+    assert design_calibration_fingerprints(settings) == first
+    settings["X"] = AxisCalibrationSettings(
+        enabled=False,
+        controller_points=[0.0, 1.0],
+        physical_points=[0.0, 9.0],
+    )
+    assert dict(design_calibration_fingerprints(settings))["X"] == "identity"
+    settings["X"] = AxisCalibrationSettings(
+        enabled=True,
+        controller_points=[0.0, 0.0],
+        physical_points=[0.0, 1.0],
+    )
+    assert dict(design_calibration_fingerprints(settings))["X"] == "identity"
+
+
+def test_malformed_metadata_isolated_preserved_and_stable() -> None:
+    settings = default_axis_calibrations()
+    valid = _design(fingerprints=design_calibration_fingerprints(settings))
+    changed_settings = default_axis_calibrations()
+    changed_settings["Z"] = AxisCalibrationSettings(
+        enabled=True, controller_points=[0.0, 1.0], physical_points=[0.0, 2.0]
+    )
+    malformed = replace(
+        _design(),
+        metadata={"future_key": {"kept": True}},
+    )
+
+    reconciled, changed = reconcile_design_calibrations(
+        (malformed, valid), changed_settings
+    )
+    repeated, changed_again = reconcile_design_calibrations(reconciled, changed_settings)
+
+    assert changed
+    assert all(not state.available for state in reconciled[0].readiness.values())
+    assert reconciled[0].metadata["future_key"] == {"kept": True}
+    assert reconciled[0].metadata["calibration_metadata_invalid"] is True
+    assert reconciled[1].readiness["Z"].status is ReadinessStatus.STALE
+    assert reconciled[1].readiness["A"].status is ReadinessStatus.STALE
+    assert not changed_again
+    assert repeated == reconciled
+
+
+def test_reconciled_design_round_trips_and_fresh_reconcile_is_noop(tmp_path) -> None:
+    previous = default_axis_calibrations()
+    current = default_axis_calibrations()
+    current["Z"] = AxisCalibrationSettings(
+        enabled=True, controller_points=[0.0, 1.0], physical_points=[0.0, 2.0]
+    )
+    stale, changed = reconcile_design_calibrations(
+        (_design(fingerprints=design_calibration_fingerprints(previous)),), current
+    )
+    path = tmp_path / "coordinate-frames.json"
+    backend = FilesystemCoordinateFrameBackend(path)
+    backend.save(CoordinateFrameDocument(records=stale))
+    loaded = backend.load().records
+
+    fresh, changed_again = reconcile_design_calibrations(loaded, current)
+
+    assert changed
+    assert loaded[0].readiness["Z"].status is ReadinessStatus.STALE
+    assert not changed_again
+    assert fresh == loaded

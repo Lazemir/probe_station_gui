@@ -250,6 +250,7 @@ def open_settings_dialog(
         api_key_store=owner._api_key_store,
         physical_pose_source=lambda: getattr(owner, "_latest_physical_machine_pose", None),
         stage_idle_source=lambda: not bool(owner.stage_controller.is_busy()),
+        stage_state_signal=getattr(owner.stage_controller, "stage_position_changed", None),
     )
 
     def apply_settings(new_settings: object) -> None:

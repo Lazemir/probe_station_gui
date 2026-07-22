@@ -8,7 +8,8 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 pytest.importorskip("PySide6")
 
-from PySide6.QtWidgets import QApplication
+from PySide6.QtCore import QObject, Signal
+from PySide6.QtWidgets import QApplication, QDialogButtonBox
 
 from probe_station_gui.coordinates import PhysicalMachinePose
 from probe_station_gui.coordinates import STAGE_AXES, VISIBLE_STAGE_AXES
@@ -172,4 +173,30 @@ def test_settings_dialog_rechecks_stage_busy_when_apply_is_invoked() -> None:
 
     assert applied == []
     assert "Stage is busy" in dialog.coordinate_system_tab.status_message()
+    dialog.deleteLater()
+
+
+def test_stage_notification_refreshes_save_apply_without_polling() -> None:
+    _qt_app()
+
+    class StageNotifier(QObject):
+        changed = Signal()
+
+    stage = {"idle": False}
+    notifier = StageNotifier()
+    dialog = SettingsDialog(
+        Settings(),
+        stage_idle_source=lambda: stage["idle"],
+        stage_state_signal=notifier.changed,
+    )
+    cancel = dialog._button_box.button(QDialogButtonBox.Cancel)
+    assert not dialog._save_button.isEnabled()
+    assert cancel.isEnabled()
+    stage["idle"] = True
+    notifier.changed.emit()
+    assert dialog._save_button.isEnabled()
+    stage["idle"] = False
+    notifier.changed.emit()
+    assert not dialog._apply_button.isEnabled()
+    assert cancel.isEnabled()
     dialog.deleteLater()
