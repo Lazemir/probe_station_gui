@@ -62,6 +62,18 @@ def test_temporary_authority_block_does_not_erase_reference_values() -> None:
     )
 
 
+def test_axis_readiness_normalizes_ready_status_string() -> None:
+    readiness = AxisReadiness("ready")
+
+    assert readiness.status is ReadinessStatus.READY
+    assert readiness.available
+
+
+def test_axis_readiness_rejects_unknown_status_string() -> None:
+    with pytest.raises(ValueError):
+        AxisReadiness("unknown")
+
+
 def test_design_constructor_requires_valid_identity_name_and_all_axes() -> None:
     ready = {
         axis: AxisReadiness(ReadinessStatus.READY)

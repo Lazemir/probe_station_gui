@@ -32,6 +32,9 @@ class AxisReadiness:
     status: ReadinessStatus
     reason: str = ""
 
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "status", ReadinessStatus(self.status))
+
     @property
     def available(self) -> bool:
         return self.status is ReadinessStatus.READY
