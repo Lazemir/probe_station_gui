@@ -48,6 +48,15 @@ def test_rotate_xy_uses_counter_clockwise_rotation() -> None:
     assert rotate_xy((1.0, 0.0), 90.0) == pytest.approx((0.0, 1.0))
 
 
+def test_identity_transform_has_zero_xy_and_b_references_without_z_or_a() -> None:
+    assert BFrameTransform.identity() == BFrameTransform(
+        origin_xy_at_reference_b=(0.0, 0.0),
+        reference_b_deg=0.0,
+        xy_angle_at_reference_b_deg=0.0,
+        b_zero_machine_deg=0.0,
+    )
+
+
 def test_b_attached_transform_round_trips_after_rotation() -> None:
     transform = BFrameTransform(
         origin_xy_at_reference_b=(10.0, 0.0),

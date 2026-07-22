@@ -38,6 +38,15 @@ class BFrameTransform:
     z_zero_machine_mm: float | None = None
     a_zero_machine_mm: float | None = None
 
+    @classmethod
+    def identity(cls) -> BFrameTransform:
+        return cls(
+            origin_xy_at_reference_b=(0.0, 0.0),
+            reference_b_deg=0.0,
+            xy_angle_at_reference_b_deg=0.0,
+            b_zero_machine_deg=0.0,
+        )
+
     def __post_init__(self) -> None:
         object.__setattr__(
             self,
