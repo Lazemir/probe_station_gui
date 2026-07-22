@@ -272,6 +272,8 @@ def test_worker_coalesces_pending_publications_to_newest(
     newest = CoordinateFrameDocument(records=(_record(name="newest"),))
     backend = _BlockingBackend()
     worker = CoordinateFrameStoreWorker(backend_factory=lambda: backend)
+    saved: list[CoordinateFrameStoreSuccess] = []
+    worker.saved.connect(saved.append)
 
     worker.publish(1, first)
     assert backend.started.wait(timeout=1.0)
@@ -279,8 +281,13 @@ def test_worker_coalesces_pending_publications_to_newest(
     worker.publish(3, newest)
     backend.release.set()
     _wait_until(qt_app, lambda: worker.is_idle)
+    _wait_until(qt_app, lambda: len(saved) == 2)
 
     assert backend.saved_documents == [first, newest]
+    assert saved == [
+        CoordinateFrameStoreSuccess(1, "save"),
+        CoordinateFrameStoreSuccess(3, "save"),
+    ]
     worker.stop()
 
 
