@@ -10,16 +10,12 @@ pytest.importorskip("PySide6")
 
 from PySide6.QtWidgets import QApplication
 
-from probe_station_gui.dialogs.settings.coordinate_system import (
-    CoordinateSystemSettingsWidget,
-)
 from probe_station_gui.dialogs.settings.objectives import ObjectivesSettingsWidget
 from probe_station_gui.settings.manager import Settings
 from probe_station_gui.settings.objective_config import (
     ObjectiveCalibrationSettings,
     ObjectivesSettings,
 )
-from probe_station_gui.settings.sections import CoordinateSystemSettings
 
 
 def _qt_app() -> QApplication:
@@ -89,8 +85,6 @@ def test_objectives_widget_saves_active_profile_edits() -> None:
     assert x20.xy_calibration_configured
 
     widget.deleteLater()
-
-
 def test_objectives_widget_saves_profile_before_switching() -> None:
     _qt_app()
     settings = Settings()
@@ -117,8 +111,6 @@ def test_objectives_widget_saves_profile_before_switching() -> None:
     assert settings.objectives.objectives["X20"].z_offset_mm == pytest.approx(2.0)
 
     widget.deleteLater()
-
-
 def test_objectives_widget_restores_active_selection_and_keeps_inactive_edits() -> None:
     _qt_app()
     settings = Settings()
@@ -145,40 +137,13 @@ def test_objectives_widget_restores_active_selection_and_keeps_inactive_edits() 
     widget.deleteLater()
 
 
-def test_coordinate_system_widget_updates_hint_state_and_settings() -> None:
+def test_coordinates_tab_uses_software_frame_settings() -> None:
     _qt_app()
-    settings = Settings()
-    widget = CoordinateSystemSettingsWidget(
-        CoordinateSystemSettings(
-            position_mode="work",
-            startup_mode="controller",
-            preferred_system="G55",
-        )
+    from probe_station_gui.dialogs.settings.coordinate_system import (
+        CoordinateSystemSettingsWidget,
     )
 
-    assert widget._preferred_system_combo.isEnabled()
-    assert widget._preferred_system_combo.toolTip() == (
-        "Controller-selected WCS will be used."
-    )
+    widget = CoordinateSystemSettingsWidget(Settings().software_coordinates)
 
-    _set_combo_data(widget._startup_mode_combo, "fixed")
-    assert widget._preferred_system_combo.toolTip() == (
-        "This WCS will be sent to the controller on connect."
-    )
-
-    _set_combo_data(widget._position_mode_combo, "machine")
-    assert not widget._preferred_system_combo.isEnabled()
-    assert widget._preferred_system_combo.toolTip() == (
-        "Unused in absolute machine-coordinate mode."
-    )
-    _set_combo_data(widget._preferred_system_combo, "G59.1")
-
-    widget.to_settings(settings)
-
-    assert settings.coordinate_system == CoordinateSystemSettings(
-        position_mode="machine",
-        startup_mode="fixed",
-        preferred_system="G59.1",
-    )
-
+    assert not hasattr(widget, "_preferred_system_combo")
     widget.deleteLater()

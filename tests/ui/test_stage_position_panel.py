@@ -330,6 +330,7 @@ def test_explicit_gui_selection_cancels_pending_restore_and_persists_locally() -
 
     assert owner._selected_coordinate_frame_id == "machine"
     assert owner._pending_coordinate_frame_restore_id is None
+    assert owner.settings_manager.in_memory_updates == ["machine"]
     assert manager.in_memory_updates == ["machine"]
     assert published == [SoftwareCoordinateSelectionSnapshot("machine", 1)]
     assert owner._api_coordinate_frame_id == "api-frame-must-not-change"
@@ -353,6 +354,7 @@ def test_deleted_selected_frame_falls_back_safely_without_rearming_restore() -> 
 
     assert owner._selected_coordinate_frame_id == "machine"
     assert owner._pending_coordinate_frame_restore_id is None
+    assert owner.settings_manager.in_memory_updates == ["machine"]
 
 
 def test_missing_fresh_machine_axis_clears_stale_value_and_shows_exact_yellow_reason(

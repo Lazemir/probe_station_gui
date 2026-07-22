@@ -107,8 +107,12 @@ from probe_station_gui.coordinates import (
     CoordinateFrameRegistry,
     CoordinateFrameStoreWorker,
     PhysicalMachinePose,
+    VISIBLE_STAGE_AXES,
+    invalidate_axes,
     rotate_xy,
 )
+from probe_station_gui.coordinates.calibration import changed_calibration_axes
+from probe_station_gui.coordinates.software_frames import materialize_custom_frames
 from probe_station_gui.design.focus_candidate import (
     FocusCandidate,
     select_central_focus_candidate,
@@ -4636,6 +4640,31 @@ class Main(QMainWindow):
         if not isinstance(new_settings, Settings):
             return
         settings_to_apply = new_settings.clone()
+        changed_calibrations = changed_calibration_axes(
+            self.settings_manager.settings.axis_calibrations,
+            settings_to_apply.axis_calibrations,
+        )
+        existing_coordinates = self.settings_manager.settings.software_coordinates
+        coordinates_changed = (
+            settings_to_apply.software_coordinates != existing_coordinates
+        )
+        prepared_coordinate_records = None
+        if coordinates_changed and self.stage_controller.is_busy():
+            settings_to_apply.software_coordinates = existing_coordinates.clone()
+            self._show_status("Stage is busy; coordinate settings not changed.", 4000)
+            coordinates_changed = False
+        elif coordinates_changed and bool(
+            getattr(self, "_coordinate_frames_loaded", False)
+        ):
+            try:
+                prepared_coordinate_records = materialize_custom_frames(
+                    self._coordinate_frame_registry.snapshot().records,
+                    settings_to_apply.software_coordinates,
+                )
+            except (TypeError, ValueError) as exc:
+                settings_to_apply.software_coordinates = existing_coordinates.clone()
+                self._show_status(str(exc), 6000)
+                coordinates_changed = False
         active_objective_update_rejected = False
         objective_mutation_busy = self._objective_mutation_busy()
         if objective_mutation_busy:
@@ -4669,6 +4698,11 @@ class Main(QMainWindow):
             settings_to_apply,
             preserve_exposure_policy=True,
         )
+        if prepared_coordinate_records is not None:
+            self._coordinate_frame_registry.reset(prepared_coordinate_records)
+        self._invalidate_coordinate_frames_for_calibration_change(changed_calibrations)
+        if prepared_coordinate_records is not None or changed_calibrations:
+            stage_position_panel_adapter.refresh_coordinate_frame_display(self)
         if objective_mutation_busy:
             self._apply_settings(apply_objective_runtime=False)
         else:
@@ -4679,6 +4713,41 @@ class Main(QMainWindow):
                 4000,
             )
         logger.info("Settings updated from dialog")
+
+    def _materialize_software_coordinate_frames(self) -> None:
+        """Install settings-backed custom frames after the durable document loads."""
+
+        registry = getattr(self, "_coordinate_frame_registry", None)
+        if registry is None or not bool(getattr(self, "_coordinate_frames_loaded", False)):
+            return
+        try:
+            records = materialize_custom_frames(
+                registry.snapshot().records,
+                self.settings_manager.settings.software_coordinates,
+            )
+        except (TypeError, ValueError) as exc:
+            self._show_status(f"Custom coordinate settings could not be loaded: {exc}", 6000)
+            return
+        registry.reset(records)
+
+    def _invalidate_coordinate_frames_for_calibration_change(
+        self,
+        changed_axes: set[str],
+    ) -> None:
+        """Invalidate only coordinate dependencies affected by physical calibration."""
+
+        visible_changed = set(changed_axes).intersection(VISIBLE_STAGE_AXES)
+        registry = getattr(self, "_coordinate_frame_registry", None)
+        if not visible_changed or registry is None:
+            return
+        for record in registry.snapshot().records:
+            stale = invalidate_axes(
+                record,
+                visible_changed,
+                "Axis calibration changed.",
+            )
+            if stale != record:
+                registry.replace(stale, expected_version=record.version)
 
     def _send_telegram_alert(
         self,

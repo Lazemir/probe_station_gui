@@ -37,6 +37,9 @@ def handle_coordinate_frame_loaded(owner: object, result: object) -> None:
     owner._coordinate_frame_load_request_id = None
     owner._coordinate_frame_registry.reset(result.document.records)
     owner._coordinate_frames_loaded = True
+    materialize_custom = getattr(owner, "_materialize_software_coordinate_frames", None)
+    if callable(materialize_custom):
+        materialize_custom()
     apply_authority = getattr(owner, "_apply_coordinate_frame_authority_blocks", None)
     if callable(apply_authority):
         apply_authority()

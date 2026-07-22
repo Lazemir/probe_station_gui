@@ -34,6 +34,7 @@ from probe_station_gui.shared.qt_compat import (
     keyboard_modifiers_to_int,
     native_scan_code_to_int,
 )
+from probe_station_gui.coordinates import VISIBLE_STAGE_AXES
 from probe_station_gui.settings.controls_config import CONTROL_ACTIONS, KeyBinding
 from probe_station_gui.shared.wheel_guard import (
     GuardedComboBox as QComboBox,
@@ -110,7 +111,7 @@ class JoystickWindow(JoystickFeedrateMixin, QWidget):
     KEYBOARD_JOG_DIRECTION_CHANGE_CHORD_WINDOW_MS = 250
     KEYBOARD_JOG_PHYSICAL_KEY_WATCHDOG_MS = 80
     JOG_STOP_RESEND_DELAYS_MS = (80, 180, 400, 900, 1500)
-    MANUAL_JOG_AXES = ("X", "Y", "Z", "A", "B", "C")
+    MANUAL_JOG_AXES = VISIBLE_STAGE_AXES
     MANUAL_AXIS_MODES = ("G91", "G90")
     LINEAR_AXES = {"X", "Y", "Z"}
     HOMING_AXES = ("X", "Y", "Z", "A")
@@ -622,6 +623,11 @@ class JoystickWindow(JoystickFeedrateMixin, QWidget):
         root_layout.addStretch(1)
         self._update_enabled_state()
         self.set_needles_state(False, False)
+
+    def visible_axis_names(self) -> tuple[str, ...]:
+        """Return axes exposed by ordinary jog controls."""
+
+        return VISIBLE_STAGE_AXES
 
     def _install_event_filter(self) -> None:
         if self._event_filter_installed:

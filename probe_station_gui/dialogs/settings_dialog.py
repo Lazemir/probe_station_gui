@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from collections.abc import Callable
 from typing import Dict
 
 from PySide6.QtCore import QLocale, QObject, Qt, QThread, QUrl, Signal
@@ -883,6 +884,8 @@ class SettingsDialog(QDialog):
         exposure_policy_source: object | None = None,
         axis_position_source: object | None = None,
         api_key_store: ApiKeyStore | None = None,
+        physical_pose_source: Callable[[], object | None] | None = None,
+        stage_idle_source: Callable[[], bool] | None = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Settings")
@@ -916,7 +919,10 @@ class SettingsDialog(QDialog):
             self._settings.needle_calibration, self
         )
         self._coordinate_system_tab = CoordinateSystemSettingsWidget(
-            self._settings.coordinate_system, self
+            self._settings.software_coordinates,
+            self,
+            physical_pose_source=physical_pose_source,
+            stage_idle_source=stage_idle_source,
         )
         self._objectives_tab = ObjectivesSettingsWidget(
             self._settings.objectives,
@@ -1064,6 +1070,12 @@ class SettingsDialog(QDialog):
         """Return a clone of the adjusted settings."""
 
         return self._settings.clone()
+
+    @property
+    def coordinate_system_tab(self) -> CoordinateSystemSettingsWidget:
+        """Expose the software-coordinate editor for settings integrations."""
+
+        return self._coordinate_system_tab
 
     def set_objectives(self, objectives: ObjectivesSettings) -> None:
         """Reload effective objective settings after applying the dialog."""

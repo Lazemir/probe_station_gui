@@ -55,7 +55,7 @@ class MainWindowStagePositionPanelOwner(Protocol):
 def create_stage_position_widget(
     owner: MainWindowStagePositionPanelOwner,
 ) -> StagePositionPanel:
-    panel = StagePositionPanel(owner.STAGE_AXIS_NAMES, owner)
+    panel = StagePositionPanel(VISIBLE_STAGE_AXES, owner)
     panel.axis_escape_pressed.connect(owner._on_stage_axis_escape_pressed)
     panel.axis_editing_finished.connect(owner._on_stage_axis_editing_finished)
     panel.axis_text_edited.connect(owner._update_stage_coordinate_apply_state)
@@ -183,6 +183,7 @@ def update_software_coordinate_display(
     )
     if plan.selected_frame_id != selected:
         owner._selected_coordinate_frame_id = plan.selected_frame_id
+        _persist_gui_coordinate_selection(owner, plan.selected_frame_id)
     owner._stage_axis_display_values = {
         update.axis: float(update.value)
         for update in plan.axis_updates
