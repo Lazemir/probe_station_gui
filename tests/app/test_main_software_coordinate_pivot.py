@@ -14,6 +14,10 @@ from probe_station_gui.coordinates import (
     ReadinessStatus,
 )
 from probe_station_gui.coordinates.software_frames import materialize_custom_frames
+from probe_station_gui.coordinates.persistence import (
+    CoordinateFrameStoreFailure,
+    CoordinateFrameStoreSuccess,
+)
 from probe_station_gui.settings.manager import Settings
 from probe_station_gui.settings.software_coordinates import CustomFrameSettings
 from probe_station_gui.views import main_window_stage_position_panel as panel_adapter
@@ -144,3 +148,16 @@ def test_busy_stage_rejects_programmatic_settings_submission_without_side_effect
     assert owner.settings_manager.settings == before_settings
     assert owner.settings_manager.saved == []
     assert owner._coordinate_frame_registry.snapshot() == before_frames
+
+
+def test_late_coordinate_store_callbacks_do_not_mutate_runtime_registry() -> None:
+    owner = _owner()
+    before = owner._coordinate_frame_registry.snapshot()
+
+    Main._on_coordinate_frames_saved(owner, CoordinateFrameStoreSuccess(1, "save"))
+    Main._on_coordinate_frame_store_failed(
+        owner,
+        CoordinateFrameStoreFailure(1, "save", "late failure"),
+    )
+
+    assert owner._coordinate_frame_registry.snapshot() == before
