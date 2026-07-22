@@ -748,6 +748,96 @@ class MainStageCoordinateControlsTest(unittest.TestCase):
         self.assertEqual(joystick.coordinate_modes, ["jog"])
         self.assertEqual(stage_controller.requests, [({"X": 5.0}, 99.0)])
 
+    def test_non_machine_offset_and_rotated_frames_cannot_emit_legacy_apply_targets(
+        self,
+    ) -> None:
+        cases = (
+            BFrameTransform(
+                origin_xy_at_reference_b=(10.0, -3.0),
+                reference_b_deg=0.0,
+                xy_angle_at_reference_b_deg=0.0,
+                b_zero_machine_deg=0.0,
+            ),
+            BFrameTransform(
+                origin_xy_at_reference_b=(0.0, 0.0),
+                reference_b_deg=0.0,
+                xy_angle_at_reference_b_deg=90.0,
+                b_zero_machine_deg=0.0,
+            ),
+        )
+        for index, transform in enumerate(cases, start=1):
+            with self.subTest(transform=transform):
+                frame_id = f"11111111-1111-4111-8111-{index:012d}"
+                window, stage_controller, _joystick, _timer, _statuses = _make_main(99.0)
+                registry = CoordinateFrameRegistry()
+                registry.add(
+                    CoordinateFrameRecord(
+                        frame_id=frame_id,
+                        kind=FrameKind.DESIGN,
+                        name=f"chip-{index}",
+                        version=0,
+                        transform=transform,
+                        readiness={
+                            axis: AxisReadiness(ReadinessStatus.READY)
+                            for axis in ("X", "Y", "Z", "A", "B")
+                        },
+                        metadata={},
+                    )
+                )
+                window._coordinate_frame_registry = registry
+                window._selected_coordinate_frame_id = frame_id
+                window._pending_stage_axis_targets = {"X": (99.0, 1.0)}
+
+                Main._apply_pending_stage_coordinate_targets(window)
+
+                self.assertEqual(stage_controller.requests, [])
+
+    def test_non_machine_offset_and_rotated_frames_cannot_emit_legacy_step_targets(
+        self,
+    ) -> None:
+        transforms = (
+            BFrameTransform(
+                origin_xy_at_reference_b=(10.0, -3.0),
+                reference_b_deg=0.0,
+                xy_angle_at_reference_b_deg=0.0,
+                b_zero_machine_deg=0.0,
+            ),
+            BFrameTransform(
+                origin_xy_at_reference_b=(0.0, 0.0),
+                reference_b_deg=0.0,
+                xy_angle_at_reference_b_deg=90.0,
+                b_zero_machine_deg=0.0,
+            ),
+        )
+        for index, transform in enumerate(transforms, start=1):
+            with self.subTest(transform=transform):
+                frame_id = f"22222222-2222-4222-8222-{index:012d}"
+                window, stage_controller, _joystick, _timer, _statuses = _make_main(120.0)
+                exact_timer = self._prepare_exact_step(window)
+                registry = CoordinateFrameRegistry()
+                registry.add(
+                    CoordinateFrameRecord(
+                        frame_id=frame_id,
+                        kind=FrameKind.DESIGN,
+                        name=f"chip-{index}",
+                        version=0,
+                        transform=transform,
+                        readiness={
+                            axis: AxisReadiness(ReadinessStatus.READY)
+                            for axis in ("X", "Y", "Z", "A", "B")
+                        },
+                        metadata={},
+                    )
+                )
+                window._coordinate_frame_registry = registry
+                window._selected_coordinate_frame_id = frame_id
+                window._stage_axis_display_values["X"] = 1.0
+
+                Main._on_manual_axis_move_requested(window, "X", 0.001, "G91", 120.0)
+                exact_timer.fire()
+
+                self.assertEqual(stage_controller.requests, [])
+
     def test_step_presses_accumulate_during_one_fixed_window(self) -> None:
         window, stage_controller, _joystick, _timer, _statuses = _make_main(120.0)
         exact_timer = self._prepare_exact_step(window)

@@ -4332,6 +4332,7 @@ class Main(QMainWindow):
         self._update_stage_coordinate_apply_state()
 
     def _on_software_coordinate_system_changed(self, frame_id: str) -> None:
+        self._clear_exact_step_targets()
         stage_position_panel_adapter.select_gui_coordinate_frame(self, frame_id)
 
     def _refresh_software_coordinate_display(self) -> None:
@@ -4410,7 +4411,9 @@ class Main(QMainWindow):
         active = self._coordinate_targets.has_active_move() or controller_busy
         available = panel.has_pending_or_modified_fields()
         panel.set_action_buttons_enabled(
-            available and not active,
+            available
+            and not active
+            and stage_position_panel_adapter.gui_coordinate_motion_editing_enabled(self),
             available or stage_move_lifecycle.has_cancelable_operation(self),
         )
 
@@ -6457,6 +6460,10 @@ class Main(QMainWindow):
         axis = axis.strip().upper()
         if axis not in self.STAGE_AXIS_NAMES:
             return
+        if not stage_position_panel_adapter.gui_coordinate_motion_editing_enabled(self):
+            self._clear_exact_step_targets()
+            self._show_status("Select Machine to use Step.", 3000)
+            return
         mode = mode.strip().upper()
         if mode not in {"G90", "G91"}:
             self._show_status(f"Unsupported manual move mode: {mode}.", 3000)
@@ -6508,6 +6515,9 @@ class Main(QMainWindow):
 
     def _dispatch_exact_step_targets(self) -> bool:
         if not self._exact_step_window_elapsed:
+            return False
+        if not stage_position_panel_adapter.gui_coordinate_motion_editing_enabled(self):
+            self._clear_exact_step_targets()
             return False
         if self._coordinate_targets.has_active_move() or self.stage_controller.is_busy():
             return False
@@ -10095,6 +10105,10 @@ class Main(QMainWindow):
         panel = getattr(self, "_stage_position_panel", None)
         if panel is None or panel.is_programmatic_update:
             return None
+        if not stage_position_panel_adapter.gui_coordinate_motion_editing_enabled(self):
+            panel.clear_pending_target_state()
+            self._show_status("Select Machine to edit position fields.", 3000)
+            return False
         axis = axis_name.strip().upper()
         commit_from_return = panel.consume_return_commit(axis)
         field = panel.field(axis)
@@ -10135,6 +10149,14 @@ class Main(QMainWindow):
         return True
 
     def _apply_pending_stage_coordinate_targets(self) -> None:
+        if not stage_position_panel_adapter.gui_coordinate_motion_editing_enabled(self):
+            self._pending_stage_axis_targets.clear()
+            panel = getattr(self, "_stage_position_panel", None)
+            if panel is not None:
+                panel.clear_pending_target_state()
+            self._update_stage_coordinate_apply_state()
+            self._show_status("Select Machine to apply position fields.", 3000)
+            return
         had_error = False
         for axis in self.STAGE_AXIS_NAMES:
             field = self._stage_axis_fields.get(axis)

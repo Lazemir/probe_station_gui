@@ -238,6 +238,15 @@ def select_gui_coordinate_frame(
     _persist_gui_coordinate_selection(owner, requested)
 
 
+def gui_coordinate_motion_editing_enabled(owner: object) -> bool:
+    """Return whether legacy position-field/Step targets are Machine-valued."""
+
+    return str(
+        getattr(owner, "_selected_coordinate_frame_id", MACHINE_FRAME_ID)
+        or MACHINE_FRAME_ID
+    ) == MACHINE_FRAME_ID
+
+
 def display_axis_value_from_raw(
     owner: MainWindowStagePositionPanelOwner,
     axis_name: str,

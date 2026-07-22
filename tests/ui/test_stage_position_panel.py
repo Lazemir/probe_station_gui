@@ -205,6 +205,38 @@ def test_coordinate_display_updates_existing_fields_with_blue_and_yellow_reasons
     panel.deleteLater()
 
 
+def test_non_machine_coordinate_fields_are_display_only_until_motion_resolution_exists(
+    qt_app: QApplication,
+) -> None:
+    frame_id = "11111111-1111-4111-8111-111111111111"
+    panel = StagePositionPanel(("X", "Y"))
+    panel.set_coordinate_display_plan(_coordinate_plan())
+    panel.set_pending_target("X", 99.0, 1.25)
+    panel.set_action_buttons_enabled(True, True)
+
+    panel.set_coordinate_display_plan(
+        _coordinate_plan(
+            selected_frame_id=frame_id,
+            updates=(
+                CoordinateAxisDisplay("X", 1.25, "available", "X is registered."),
+                CoordinateAxisDisplay("Y", 2.5, "available", "Y is registered."),
+            ),
+        )
+    )
+
+    assert all(field.isEnabled() for field in panel.axis_fields.values())
+    assert all(field.isReadOnly() for field in panel.axis_fields.values())
+    assert panel.pending_targets == {}
+    assert not panel.input_mode_combo.isEnabled()
+    assert not panel.apply_button.isEnabled()
+
+    panel.set_coordinate_display_plan(_coordinate_plan())
+
+    assert all(not field.isReadOnly() for field in panel.axis_fields.values())
+    assert panel.input_mode_combo.isEnabled()
+    panel.deleteLater()
+
+
 def test_selector_refresh_preserves_stable_selection_across_version_or_name_change(
     qt_app: QApplication,
 ) -> None:

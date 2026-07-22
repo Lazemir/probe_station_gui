@@ -18,7 +18,10 @@ from PySide6.QtWidgets import (
 )
 
 from probe_station_gui.shared.wheel_guard import GuardedComboBox as QComboBox
-from probe_station_gui.coordinates.presentation import CoordinateDisplayPlan
+from probe_station_gui.coordinates.presentation import (
+    MACHINE_FRAME_ID,
+    CoordinateDisplayPlan,
+)
 from probe_station_gui.stage.api_moves import normalize_api_coordinate_input_mode
 from probe_station_gui.stage.position_presenter import StagePositionDisplayPlan
 
@@ -80,6 +83,7 @@ class StagePositionPanel(QWidget):
         self._motion_blink_dimmed = False
         self._programmatic_update_depth = 0
         self._coordinate_selector_signature: tuple[tuple[object, ...], ...] = ()
+        self._coordinate_motion_editing_enabled = True
 
         outer_layout = QVBoxLayout(self)
         outer_layout.setContentsMargins(0, 0, 0, 0)
@@ -307,6 +311,8 @@ class StagePositionPanel(QWidget):
         raw_target: float,
         display_target: float,
     ) -> None:
+        if not self._coordinate_motion_editing_enabled:
+            return
         axis = self._normalize_axis(axis_name)
         if axis not in self._axis_fields:
             return
@@ -389,6 +395,15 @@ class StagePositionPanel(QWidget):
         """Apply software-frame values without reconstructing position fields."""
 
         self._sync_coordinate_selector(plan)
+        motion_editing_enabled = plan.selected_frame_id == MACHINE_FRAME_ID
+        self._coordinate_motion_editing_enabled = motion_editing_enabled
+        if not motion_editing_enabled:
+            self._pending_targets.clear()
+            self._return_commits.clear()
+            self._apply_button.setEnabled(False)
+        self._input_mode_combo.setEnabled(motion_editing_enabled)
+        for field in self._axis_fields.values():
+            field.setReadOnly(not motion_editing_enabled)
         with self._programmatic_update():
             for axis_plan in plan.axis_updates:
                 field = self._axis_fields.get(axis_plan.axis)
@@ -407,7 +422,8 @@ class StagePositionPanel(QWidget):
                     self._return_commits.discard(axis_plan.axis)
                 field.blockSignals(True)
                 field.setEnabled(available)
-                if not field.hasFocus() or not available:
+                field.setReadOnly(not motion_editing_enabled)
+                if not field.hasFocus() or not available or not motion_editing_enabled:
                     if axis_plan.value is None:
                         field.clear()
                     else:
@@ -537,7 +553,9 @@ class StagePositionPanel(QWidget):
         apply_enabled: bool,
         cancel_enabled: bool,
     ) -> None:
-        self._apply_button.setEnabled(bool(apply_enabled))
+        self._apply_button.setEnabled(
+            bool(apply_enabled) and self._coordinate_motion_editing_enabled
+        )
         self._cancel_button.setEnabled(bool(cancel_enabled))
 
     def _on_axis_return_pressed(self, axis_name: str) -> None:
