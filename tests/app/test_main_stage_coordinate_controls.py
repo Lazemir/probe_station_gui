@@ -32,7 +32,10 @@ from probe_station_gui.coordinates.model import (
 )
 from probe_station_gui.coordinates.registry import CoordinateFrameRegistry
 from probe_station_gui.coordinates.transforms import BFrameTransform
-from probe_station_gui.settings.manager import Settings
+from probe_station_gui.settings.manager import (
+    Settings,
+    SoftwareCoordinateSelectionSnapshot,
+)
 from probe_station_gui.stage.exact_step import ExactStepAccumulator
 from probe_station_gui.views import main_window_homing as homing_ui
 from probe_station_gui.views import main_window_needle_calibration as needle_calibration_ui
@@ -145,7 +148,7 @@ class MainStageCoordinateControlsTest(unittest.TestCase):
         settings = Settings()
         settings.software_coordinates.last_selected_frame_id = frame_id
         in_memory: list[str] = []
-        published: list[str] = []
+        published: list[SoftwareCoordinateSelectionSnapshot] = []
         window = Main.__new__(Main)
         window._selected_coordinate_frame_id = "machine"
         window._pending_coordinate_frame_restore_id = frame_id
@@ -157,9 +160,14 @@ class MainStageCoordinateControlsTest(unittest.TestCase):
         window._stage_position_panel = None
         window.stage_controller = types.SimpleNamespace(homed_axes=lambda: {"X", "Y"})
 
-        def set_selection(selected: str) -> None:
+        def set_selection(selected: str) -> SoftwareCoordinateSelectionSnapshot:
             settings.software_coordinates.last_selected_frame_id = selected
+            settings.software_coordinates.selection_generation += 1
             in_memory.append(selected)
+            return SoftwareCoordinateSelectionSnapshot(
+                selected,
+                settings.software_coordinates.selection_generation,
+            )
 
         window.settings_manager = types.SimpleNamespace(
             settings=settings,
@@ -177,7 +185,10 @@ class MainStageCoordinateControlsTest(unittest.TestCase):
         self.assertEqual(window._selected_coordinate_frame_id, "machine")
         self.assertIsNone(window._pending_coordinate_frame_restore_id)
         self.assertEqual(in_memory, ["machine"])
-        self.assertEqual(published, ["machine"])
+        self.assertEqual(
+            published,
+            [SoftwareCoordinateSelectionSnapshot("machine", 1)],
+        )
 
     def test_selection_persistence_failure_reports_without_reverting_ui(self) -> None:
         frame_id = "11111111-1111-4111-8111-111111111111"

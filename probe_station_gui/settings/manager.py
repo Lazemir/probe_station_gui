@@ -204,12 +204,21 @@ class Settings:
         }
 
 
+@dataclass(frozen=True)
+class SoftwareCoordinateSelectionSnapshot:
+    """Immutable GUI selection publication ordered by a monotonic generation."""
+
+    frame_id: str
+    generation: int
+
+
 class SettingsManager:
     """Load, persist, and expose user configurable settings."""
 
     CONFIG_FILENAME = "settings.json"
     COORDINATE_FRAMES_FILENAME = "coordinate-frames.json"
     SOFTWARE_COORDINATE_SELECTION_FILENAME = "software-coordinate-selection.json"
+    SOFTWARE_COORDINATE_SELECTION_VERSION = 1
     CONTROLLER_STATE_FILENAME = "controller-state.json"
     SERIAL_CONNECTION_STATE_FILENAME = "serial-connection-state.json"
     METER_CONNECTION_STATE_FILENAME = "meter-connection-state.json"
@@ -293,12 +302,14 @@ class SettingsManager:
 
     def __init__(self) -> None:
         self._settings_lock = threading.RLock()
+        self._persistence_lock = threading.Lock()
         self._config_dir = self._determine_config_dir()
         self._config_path = self._config_dir / self.CONFIG_FILENAME
         self._logger = logging.getLogger(__name__)
         self._logger.debug("Configuration directory resolved to %s", self._config_dir)
         self._ensure_default_file()
         self._settings = self._load()
+        self._ensure_software_coordinate_selection_state_locked()
         self.apply()
 
     @property
@@ -317,25 +328,52 @@ class SettingsManager:
 
         return self._config_dir / self.COORDINATE_FRAMES_FILENAME
 
-    def set_software_coordinate_selection(self, frame_id: str) -> None:
+    def set_software_coordinate_selection(
+        self,
+        frame_id: str,
+    ) -> SoftwareCoordinateSelectionSnapshot:
         """Update the GUI selection in memory without performing filesystem I/O."""
 
         selected = self._normalize_software_coordinate_selection(frame_id)
         with self._settings_lock:
+            self._ensure_software_coordinate_selection_state_locked()
+            generation = self._software_coordinate_selection_generation + 1
+            self._software_coordinate_selection_frame_id = selected
+            self._software_coordinate_selection_generation = generation
             updated = self._settings.clone()
             updated.software_coordinates.last_selected_frame_id = selected
-            self._replace_locked(updated, apply_runtime=False)
+            updated.software_coordinates.selection_generation = generation
+            self._replace_locked(updated)
+            return SoftwareCoordinateSelectionSnapshot(selected, generation)
 
-    def persist_software_coordinate_selection(self, frame_id: str) -> bool:
+    def persist_software_coordinate_selection(
+        self,
+        snapshot: SoftwareCoordinateSelectionSnapshot,
+    ) -> bool:
         """Persist one still-current immutable selection on a worker thread."""
 
-        selected = self._normalize_software_coordinate_selection(frame_id)
-        with self._settings_lock:
-            current = self._settings.software_coordinates.last_selected_frame_id
-            if current != selected:
-                return False
-        self._write_software_coordinate_selection_atomic(selected)
-        return True
+        if not isinstance(snapshot, SoftwareCoordinateSelectionSnapshot):
+            raise TypeError("Selection persistence requires an immutable snapshot.")
+        selected = self._normalize_software_coordinate_selection(snapshot.frame_id)
+        generation = self._normalize_software_coordinate_selection_generation(
+            snapshot.generation
+        )
+        with self._software_coordinate_persistence_lock():
+            with self._settings_lock:
+                self._ensure_software_coordinate_selection_state_locked()
+                if (
+                    self._software_coordinate_selection_frame_id != selected
+                    or self._software_coordinate_selection_generation != generation
+                ):
+                    return False
+                data = self._capture_settings_data_locked()
+                persisted_snapshot = SoftwareCoordinateSelectionSnapshot(
+                    selected,
+                    generation,
+                )
+            self._write_captured_settings(data)
+            self._write_software_coordinate_selection_atomic(persisted_snapshot)
+            return True
 
     @staticmethod
     def _normalize_software_coordinate_selection(frame_id: str) -> str:
@@ -357,16 +395,78 @@ class SettingsManager:
             config_dir = Path(self._config_path).parent
         return Path(config_dir) / self.SOFTWARE_COORDINATE_SELECTION_FILENAME
 
-    def _write_software_coordinate_selection_atomic(self, frame_id: str) -> None:
-        self._config_dir.mkdir(parents=True, exist_ok=True)
+    @staticmethod
+    def _normalize_software_coordinate_selection_generation(value: object) -> int:
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            return 0
+        return value
+
+    def _selection_snapshot_from_settings(
+        self,
+        settings: Settings,
+    ) -> SoftwareCoordinateSelectionSnapshot:
+        coordinates = settings.software_coordinates
+        try:
+            selected = self._normalize_software_coordinate_selection(
+                coordinates.last_selected_frame_id
+            )
+        except ValueError:
+            selected = "machine"
+        generation = self._normalize_software_coordinate_selection_generation(
+            coordinates.selection_generation
+        )
+        return SoftwareCoordinateSelectionSnapshot(selected, generation)
+
+    def _ensure_software_coordinate_selection_state_locked(self) -> None:
+        if hasattr(self, "_software_coordinate_selection_frame_id"):
+            return
+        snapshot = self._selection_snapshot_from_settings(self._settings)
+        self._software_coordinate_selection_frame_id = snapshot.frame_id
+        self._software_coordinate_selection_generation = snapshot.generation
+        self._merge_authoritative_software_coordinate_selection(self._settings)
+
+    def _software_coordinate_persistence_lock(self) -> threading.Lock:
+        """Return the I/O lock without holding the state lock while waiting on it."""
+
+        persistence_lock = getattr(self, "_persistence_lock", None)
+        if persistence_lock is not None:
+            return persistence_lock
+        # Compatibility for lightweight SettingsManager.__new__ test seams.
+        with self._settings_lock:
+            persistence_lock = getattr(self, "_persistence_lock", None)
+            if persistence_lock is None:
+                persistence_lock = threading.Lock()
+                self._persistence_lock = persistence_lock
+        return persistence_lock
+
+    def _merge_authoritative_software_coordinate_selection(
+        self,
+        settings: Settings,
+    ) -> None:
+        settings.software_coordinates.last_selected_frame_id = (
+            self._software_coordinate_selection_frame_id
+        )
+        settings.software_coordinates.selection_generation = (
+            self._software_coordinate_selection_generation
+        )
+
+    def _write_software_coordinate_selection_atomic(
+        self,
+        snapshot: SoftwareCoordinateSelectionSnapshot,
+    ) -> None:
         path = self._software_coordinate_selection_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
         temporary_path = path.with_name(
             f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
         )
         try:
             with temporary_path.open("w", encoding="utf-8") as handle:
                 json.dump(
-                    {"last_selected_frame_id": frame_id},
+                    {
+                        "version": self.SOFTWARE_COORDINATE_SELECTION_VERSION,
+                        "last_selected_frame_id": snapshot.frame_id,
+                        "generation": snapshot.generation,
+                    },
                     handle,
                     indent=2,
                     ensure_ascii=False,
@@ -381,8 +481,15 @@ class SettingsManager:
                 pass
 
     def _restore_software_coordinate_selection(self, settings: Settings) -> None:
+        main_snapshot = self._selection_snapshot_from_settings(settings)
         path = self._software_coordinate_selection_path()
         if not path.exists():
+            settings.software_coordinates.last_selected_frame_id = (
+                main_snapshot.frame_id
+            )
+            settings.software_coordinates.selection_generation = (
+                main_snapshot.generation
+            )
             return
         try:
             with path.open("r", encoding="utf-8-sig") as handle:
@@ -392,6 +499,9 @@ class SettingsManager:
             selected = self._normalize_software_coordinate_selection(
                 data.get("last_selected_frame_id")
             )
+            generation = self._normalize_software_coordinate_selection_generation(
+                data.get("generation", 0)
+            )
         except (OSError, ValueError, json.JSONDecodeError) as exc:
             self._logger.warning(
                 "Failed to load software coordinate selection from %s: %s",
@@ -399,19 +509,31 @@ class SettingsManager:
                 exc,
             )
             return
-        settings.software_coordinates.last_selected_frame_id = selected
+        sidecar_snapshot = SoftwareCoordinateSelectionSnapshot(selected, generation)
+        # The main document wins generation ties. This keeps a legacy generation-0
+        # sidecar from rolling back a main settings file edited or saved later.
+        winner = (
+            sidecar_snapshot
+            if sidecar_snapshot.generation > main_snapshot.generation
+            else main_snapshot
+        )
+        settings.software_coordinates.last_selected_frame_id = winner.frame_id
+        settings.software_coordinates.selection_generation = winner.generation
 
     def replace(self, settings: Settings) -> None:
         """Replace the stored settings with the provided instance."""
 
         with self._settings_lock:
-            self._replace_locked(settings, apply_runtime=True)
+            self._replace_locked(settings)
+        self.apply()
 
     def save(self) -> None:
         """Persist the current settings to disk."""
 
-        with self._settings_lock:
-            self._save_locked()
+        with self._software_coordinate_persistence_lock():
+            with self._settings_lock:
+                data = self._capture_settings_data_locked()
+            self._write_captured_settings(data)
 
     def replace_and_save(
         self,
@@ -422,12 +544,16 @@ class SettingsManager:
     ) -> None:
         """Replace and atomically persist settings as one serialized transaction."""
 
-        with self._settings_lock:
-            updated = settings.clone()
-            if preserve_exposure_policy:
-                updated.exposure_policy = self._settings.exposure_policy.clone()
-            self._replace_locked(updated, apply_runtime=apply_runtime)
-            self._save_locked()
+        with self._software_coordinate_persistence_lock():
+            with self._settings_lock:
+                updated = settings.clone()
+                if preserve_exposure_policy:
+                    updated.exposure_policy = self._settings.exposure_policy.clone()
+                self._replace_locked(updated)
+                data = self._capture_settings_data_locked()
+            if apply_runtime:
+                self.apply()
+            self._write_captured_settings(data)
 
     def update_and_save(
         self,
@@ -437,25 +563,35 @@ class SettingsManager:
     ) -> None:
         """Mutate a fresh settings clone and persist it under one lock."""
 
-        with self._settings_lock:
-            updated = self._settings.clone()
-            mutation(updated)
-            self._replace_locked(updated, apply_runtime=apply_runtime)
-            self._save_locked()
+        with self._software_coordinate_persistence_lock():
+            with self._settings_lock:
+                updated = self._settings.clone()
+                mutation(updated)
+                self._replace_locked(updated)
+                data = self._capture_settings_data_locked()
+            if apply_runtime:
+                self.apply()
+            self._write_captured_settings(data)
 
-    def _replace_locked(self, settings: Settings, *, apply_runtime: bool) -> None:
-        self._settings = self._normalise_settings(settings)
-        if apply_runtime:
-            self.apply()
+    def _replace_locked(self, settings: Settings) -> None:
+        self._ensure_software_coordinate_selection_state_locked()
+        updated = self._normalise_settings(settings)
+        self._merge_authoritative_software_coordinate_selection(updated)
+        self._settings = updated
 
-    def _save_locked(self) -> None:
-        data = self._settings.to_dict()
+    def _capture_settings_data_locked(self) -> dict:
+        self._ensure_software_coordinate_selection_state_locked()
+        self._merge_authoritative_software_coordinate_selection(self._settings)
+        return self._settings.to_dict()
+
+    def _write_captured_settings(self, data: dict) -> None:
         self._write_settings_file_atomic(data)
         self._logger.info("Settings saved to %s", self._config_path)
 
     def _write_settings_file_atomic(self, data: dict) -> None:
-        self._config_dir.mkdir(parents=True, exist_ok=True)
-        temporary_path = self._config_path.with_name(
+        config_path = Path(self._config_path)
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary_path = config_path.with_name(
             f".{self._config_path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
         )
         try:
@@ -463,7 +599,7 @@ class SettingsManager:
                 json.dump(data, handle, indent=2, ensure_ascii=False)
                 handle.flush()
                 os.fsync(handle.fileno())
-            os.replace(temporary_path, self._config_path)
+            os.replace(temporary_path, config_path)
         finally:
             try:
                 temporary_path.unlink()
@@ -1182,13 +1318,15 @@ class SettingsManager:
             except OSError:
                 pass
             new_value = str(path)
-        with self._settings_lock:
-            if self._settings.design_last_directory == new_value:
-                return
-            updated = self._settings.clone()
-            updated.design_last_directory = new_value
-            self._replace_locked(updated, apply_runtime=False)
-            self._save_locked()
+        with self._software_coordinate_persistence_lock():
+            with self._settings_lock:
+                if self._settings.design_last_directory == new_value:
+                    return
+                updated = self._settings.clone()
+                updated.design_last_directory = new_value
+                self._replace_locked(updated)
+                data = self._capture_settings_data_locked()
+            self._write_captured_settings(data)
 
     def set_exposure_policy_configuration(
         self, settings: ExposurePolicySettings

@@ -9,10 +9,13 @@ import time
 
 from PySide6.QtCore import QObject, Qt, Signal, Slot
 
+from probe_station_gui.settings.manager import SoftwareCoordinateSelectionSnapshot
+
 
 @dataclass(frozen=True)
 class SoftwareCoordinateSelectionSaveFailure:
     frame_id: str
+    generation: int
     message: str
 
 
@@ -22,7 +25,7 @@ class _Publication:
     value: object
 
 
-PersistSelection = Callable[[str], bool | None]
+PersistSelection = Callable[[SoftwareCoordinateSelectionSnapshot], bool | None]
 
 
 class SoftwareCoordinateSelectionStoreWorker(QObject):
@@ -45,7 +48,7 @@ class SoftwareCoordinateSelectionStoreWorker(QObject):
         self._creator_thread_id = threading.get_ident()
         self._persist_selection = persist_selection
         self._condition = threading.Condition(threading.Lock())
-        self._pending_frame_id: str | None = None
+        self._pending_snapshot: SoftwareCoordinateSelectionSnapshot | None = None
         self._active = False
         self._stopping = False
         self._thread: threading.Thread | None = None
@@ -63,21 +66,20 @@ class SoftwareCoordinateSelectionStoreWorker(QObject):
     @property
     def is_idle(self) -> bool:
         with self._condition:
-            return not self._active and self._pending_frame_id is None
+            return not self._active and self._pending_snapshot is None
 
     @property
     def drain_thread(self) -> threading.Thread | None:
         return self._drain_thread
 
-    def publish(self, frame_id: str) -> None:
+    def publish(self, snapshot: SoftwareCoordinateSelectionSnapshot) -> None:
         self._require_creator_thread()
-        selected = str(frame_id).strip()
-        if not selected:
-            raise ValueError("Coordinate-frame selection must not be empty.")
+        if not isinstance(snapshot, SoftwareCoordinateSelectionSnapshot):
+            raise TypeError("Selection store requires an immutable snapshot.")
         with self._condition:
             if self._stopping:
                 return
-            self._pending_frame_id = selected
+            self._pending_snapshot = snapshot
             if self._thread is None:
                 self._thread = threading.Thread(
                     target=self._run,
@@ -121,18 +123,19 @@ class SoftwareCoordinateSelectionStoreWorker(QObject):
     def _run(self) -> None:
         try:
             while True:
-                frame_id = self._take_pending()
-                if frame_id is None:
+                snapshot = self._take_pending()
+                if snapshot is None:
                     return
                 try:
-                    persisted = self._persist_selection(frame_id)
+                    persisted = self._persist_selection(snapshot)
                     if persisted is not False:
-                        self._post_publication("saved", frame_id)
+                        self._post_publication("saved", snapshot.frame_id)
                 except Exception as exc:
                     self._post_publication(
                         "failed",
                         SoftwareCoordinateSelectionSaveFailure(
-                            frame_id,
+                            snapshot.frame_id,
+                            snapshot.generation,
                             f"{type(exc).__name__}: {exc}",
                         ),
                     )
@@ -144,16 +147,16 @@ class SoftwareCoordinateSelectionStoreWorker(QObject):
             if not self._drop_publications.is_set():
                 self._finished_posted.emit()
 
-    def _take_pending(self) -> str | None:
+    def _take_pending(self) -> SoftwareCoordinateSelectionSnapshot | None:
         with self._condition:
-            while self._pending_frame_id is None:
+            while self._pending_snapshot is None:
                 if self._stopping:
                     return None
                 self._condition.wait()
-            frame_id = self._pending_frame_id
-            self._pending_frame_id = None
+            snapshot = self._pending_snapshot
+            self._pending_snapshot = None
             self._active = True
-            return frame_id
+            return snapshot
 
     def _post_publication(self, kind: str, value: object) -> None:
         if not self._drop_publications.is_set():

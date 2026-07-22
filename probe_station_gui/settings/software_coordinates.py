@@ -247,6 +247,7 @@ class SoftwareCoordinateSettings:
     custom_frames: tuple[CustomFrameSettings, ...] = ()
     pivot: RotationPivotSettings = field(default_factory=RotationPivotSettings)
     last_selected_frame_id: str = "machine"
+    selection_generation: int = 0
     max_rotation_segment_deg: float = 0.5
     max_rotation_chord_error_mm: float = 0.005
     diagnostics: tuple[str, ...] = ()
@@ -272,6 +273,12 @@ class SoftwareCoordinateSettings:
         if not isinstance(self.last_selected_frame_id, str) or not self.last_selected_frame_id.strip():
             raise ValueError("Selected frame ID must not be empty.")
         self.last_selected_frame_id = self.last_selected_frame_id.strip()
+        if (
+            not isinstance(self.selection_generation, int)
+            or isinstance(self.selection_generation, bool)
+            or self.selection_generation < 0
+        ):
+            raise ValueError("Selection generation must be a non-negative integer.")
         self.max_rotation_segment_deg = _positive_finite_float(
             self.max_rotation_segment_deg,
             "Maximum rotation segment",
@@ -288,6 +295,7 @@ class SoftwareCoordinateSettings:
             custom_frames=self.custom_frames,
             pivot=self.pivot.clone(),
             last_selected_frame_id=self.last_selected_frame_id,
+            selection_generation=self.selection_generation,
             max_rotation_segment_deg=self.max_rotation_segment_deg,
             max_rotation_chord_error_mm=self.max_rotation_chord_error_mm,
             diagnostics=self.diagnostics,
@@ -299,6 +307,7 @@ class SoftwareCoordinateSettings:
             "custom_frames": [frame.to_dict() for frame in self.custom_frames],
             "pivot": self.pivot.to_dict(),
             "last_selected_frame_id": self.last_selected_frame_id,
+            "selection_generation": self.selection_generation,
             "max_rotation_segment_deg": self.max_rotation_segment_deg,
             "max_rotation_chord_error_mm": self.max_rotation_chord_error_mm,
         }
@@ -436,11 +445,22 @@ def parse_software_coordinate_settings(raw: object) -> SoftwareCoordinateSetting
     selected = raw.get("last_selected_frame_id", defaults.last_selected_frame_id)
     if not isinstance(selected, str) or not selected.strip():
         selected = defaults.last_selected_frame_id
+    selection_generation = raw.get(
+        "selection_generation",
+        defaults.selection_generation,
+    )
+    if (
+        not isinstance(selection_generation, int)
+        or isinstance(selection_generation, bool)
+        or selection_generation < 0
+    ):
+        selection_generation = defaults.selection_generation
     return SoftwareCoordinateSettings(
         version=version,
         custom_frames=tuple(frames),
         pivot=_parse_pivot(raw.get("pivot")),
         last_selected_frame_id=selected,
+        selection_generation=selection_generation,
         max_rotation_segment_deg=_positive_finite_or_default(
             raw.get("max_rotation_segment_deg", defaults.max_rotation_segment_deg),
             defaults.max_rotation_segment_deg,

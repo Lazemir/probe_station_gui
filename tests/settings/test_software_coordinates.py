@@ -29,6 +29,29 @@ def test_software_coordinate_defaults_use_assumed_machine_zero_pivot() -> None:
     assert parsed.pivot.y_mm == 0.0
     assert parsed.pivot.source == "assumed"
     assert parsed.last_selected_frame_id == "machine"
+    assert parsed.selection_generation == 0
+
+
+def test_software_coordinate_selection_generation_round_trips() -> None:
+    settings = SoftwareCoordinateSettings(
+        last_selected_frame_id="14c838bd-a9a5-47bd-9d22-6326ca63c469",
+        selection_generation=17,
+    )
+
+    restored = parse_software_coordinate_settings(settings.to_dict())
+
+    assert restored.selection_generation == 17
+
+
+def test_invalid_or_legacy_selection_generation_migrates_to_zero() -> None:
+    for raw_generation in (None, -1, True, "7"):
+        raw = {"last_selected_frame_id": "machine"}
+        if raw_generation is not None:
+            raw["selection_generation"] = raw_generation
+
+        parsed = parse_software_coordinate_settings(raw)
+
+        assert parsed.selection_generation == 0
 
 
 def test_custom_frame_round_trip_keeps_stable_id_and_physical_values() -> None:

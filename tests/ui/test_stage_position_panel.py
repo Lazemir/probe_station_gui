@@ -35,6 +35,7 @@ from probe_station_gui.stage.position_presenter import (
 from probe_station_gui.settings.axis_calibration_config import (
     default_axis_calibrations,
 )
+from probe_station_gui.settings.manager import SoftwareCoordinateSelectionSnapshot
 from probe_station_gui.stage.controller import StageController
 from probe_station_gui.stage.position_update import physical_machine_pose_from_controller
 from probe_station_gui.stage.types import _Status
@@ -264,9 +265,13 @@ class _SelectionSettingsManager:
         )
         self.in_memory_updates: list[str] = []
 
-    def set_software_coordinate_selection(self, frame_id: str) -> None:
+    def set_software_coordinate_selection(
+        self,
+        frame_id: str,
+    ) -> SoftwareCoordinateSelectionSnapshot:
         self.settings.software_coordinates.last_selected_frame_id = frame_id
         self.in_memory_updates.append(frame_id)
+        return SoftwareCoordinateSelectionSnapshot(frame_id, len(self.in_memory_updates))
 
     def update_and_save(self, *_args, **_kwargs) -> None:
         raise AssertionError("selector callback must not synchronously save settings")
@@ -305,12 +310,13 @@ def test_explicit_gui_selection_cancels_pending_restore_and_persists_locally() -
     registry = CoordinateFrameRegistry()
     registry.add(_ready_frame_without_a(frame_id))
     manager = _SelectionSettingsManager(frame_id)
-    published: list[str] = []
+    published: list[SoftwareCoordinateSelectionSnapshot] = []
     owner = SimpleNamespace(
         _coordinate_frame_registry=registry,
         _coordinate_frames_loaded=True,
         _selected_coordinate_frame_id="machine",
         _pending_coordinate_frame_restore_id=frame_id,
+        _api_coordinate_frame_id="api-frame-must-not-change",
         _latest_physical_machine_pose=PhysicalMachinePose(
             {"X": 0.0, "Y": 0.0, "Z": 1.0, "A": 2.0, "B": 0.0}
         ),
@@ -325,7 +331,8 @@ def test_explicit_gui_selection_cancels_pending_restore_and_persists_locally() -
     assert owner._selected_coordinate_frame_id == "machine"
     assert owner._pending_coordinate_frame_restore_id is None
     assert manager.in_memory_updates == ["machine"]
-    assert published == ["machine"]
+    assert published == [SoftwareCoordinateSelectionSnapshot("machine", 1)]
+    assert owner._api_coordinate_frame_id == "api-frame-must-not-change"
 
 
 def test_deleted_selected_frame_falls_back_safely_without_rearming_restore() -> None:

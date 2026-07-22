@@ -97,10 +97,11 @@ def _persist_gui_coordinate_selection(owner: object, frame_id: str) -> None:
     store = getattr(owner, "_software_coordinate_selection_store", None)
     publish = getattr(store, "publish", None)
     try:
+        snapshot = None
         if callable(update_in_memory):
-            update_in_memory(frame_id)
-        if callable(publish):
-            publish(frame_id)
+            snapshot = update_in_memory(frame_id)
+        if callable(publish) and snapshot is not None:
+            publish(snapshot)
     except Exception:
         logger.exception("Software coordinate selection submission failed")
         show_status = getattr(owner, "_show_status", None)
