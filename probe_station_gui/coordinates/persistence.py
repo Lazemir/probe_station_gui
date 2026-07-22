@@ -41,6 +41,7 @@ class CoordinateFrameDocument:
     diagnostics: tuple[FrameLoadDiagnostic, ...] = ()
 
     def to_dict(self) -> dict[str, object]:
+        _require_document_version(self.version)
         return {
             "version": self.version,
             "records": [
@@ -54,13 +55,7 @@ class CoordinateFrameDocument:
     def from_dict(cls, value: object) -> CoordinateFrameDocument:
         if not isinstance(value, dict):
             raise ValueError("Coordinate frame document root must be an object.")
-        version = value.get("version")
-        if (
-            not isinstance(version, int)
-            or isinstance(version, bool)
-            or version != COORDINATE_FRAME_DOCUMENT_VERSION
-        ):
-            raise ValueError(f"Unsupported coordinate frame document version: {version!r}.")
+        version = _require_document_version(value.get("version"))
         raw_records = value.get("records")
         if not isinstance(raw_records, list):
             raise ValueError("Coordinate frame document records must be a list.")
@@ -79,6 +74,43 @@ class CoordinateFrameDocument:
             records=tuple(records),
             diagnostics=tuple(diagnostics),
         )
+
+
+def _require_document_version(value: object) -> int:
+    if (
+        not isinstance(value, int)
+        or isinstance(value, bool)
+        or value != COORDINATE_FRAME_DOCUMENT_VERSION
+    ):
+        raise ValueError(f"Unsupported coordinate frame document version: {value!r}.")
+    return value
+
+
+def _require_json_string(value: object, name: str) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"{name} must be a string.")
+    return value
+
+
+def _require_json_integer(value: object, name: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise ValueError(f"{name} must be an integer.")
+    return value
+
+
+def _require_json_number(value: object, name: str) -> int | float:
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        raise ValueError(f"{name} must be a JSON number.")
+    return value
+
+
+def _require_optional_json_number(
+    value: object,
+    name: str,
+) -> int | float | None:
+    if value is None:
+        return None
+    return _require_json_number(value, name)
 
 
 def _record_to_dict(record: CoordinateFrameRecord) -> dict[str, object]:
@@ -112,9 +144,12 @@ def _record_to_dict(record: CoordinateFrameRecord) -> dict[str, object]:
 def _record_from_dict(value: object) -> CoordinateFrameRecord:
     if not isinstance(value, dict):
         raise ValueError("Coordinate frame record must be an object.")
-    kind = FrameKind(value["kind"])
+    frame_id = _require_json_string(value["frame_id"], "Coordinate frame ID")
+    kind = FrameKind(_require_json_string(value["kind"], "Coordinate frame kind"))
     if kind is not FrameKind.DESIGN:
         raise ValueError("Coordinate frame document may contain Design records only.")
+    name = _require_json_string(value["name"], "Coordinate frame name")
+    version = _require_json_integer(value["version"], "Coordinate frame version")
     raw_transform = value["transform"]
     if not isinstance(raw_transform, dict):
         raise ValueError("Coordinate frame transform must be an object.")
@@ -122,14 +157,30 @@ def _record_from_dict(value: object) -> CoordinateFrameRecord:
     if not isinstance(raw_origin, (list, tuple)) or len(raw_origin) != 2:
         raise ValueError("Coordinate frame XY origin must have two values.")
     transform = BFrameTransform(
-        origin_xy_at_reference_b=(raw_origin[0], raw_origin[1]),
-        reference_b_deg=raw_transform["reference_b_deg"],
-        xy_angle_at_reference_b_deg=raw_transform[
-            "xy_angle_at_reference_b_deg"
-        ],
-        b_zero_machine_deg=raw_transform["b_zero_machine_deg"],
-        z_zero_machine_mm=raw_transform.get("z_zero_machine_mm"),
-        a_zero_machine_mm=raw_transform.get("a_zero_machine_mm"),
+        origin_xy_at_reference_b=(
+            _require_json_number(raw_origin[0], "Coordinate frame X origin"),
+            _require_json_number(raw_origin[1], "Coordinate frame Y origin"),
+        ),
+        reference_b_deg=_require_json_number(
+            raw_transform["reference_b_deg"],
+            "Coordinate frame reference B",
+        ),
+        xy_angle_at_reference_b_deg=_require_json_number(
+            raw_transform["xy_angle_at_reference_b_deg"],
+            "Coordinate frame XY angle",
+        ),
+        b_zero_machine_deg=_require_json_number(
+            raw_transform["b_zero_machine_deg"],
+            "Coordinate frame B origin",
+        ),
+        z_zero_machine_mm=_require_optional_json_number(
+            raw_transform.get("z_zero_machine_mm"),
+            "Coordinate frame Z origin",
+        ),
+        a_zero_machine_mm=_require_optional_json_number(
+            raw_transform.get("a_zero_machine_mm"),
+            "Coordinate frame A origin",
+        ),
     )
     raw_readiness = value["readiness"]
     if not isinstance(raw_readiness, dict):
@@ -139,17 +190,25 @@ def _record_from_dict(value: object) -> CoordinateFrameRecord:
         if not isinstance(raw_state, dict):
             raise ValueError(f"Coordinate frame {axis} readiness must be an object.")
         readiness[axis] = AxisReadiness(
-            ReadinessStatus(raw_state["status"]),
-            str(raw_state.get("reason", "")),
+            ReadinessStatus(
+                _require_json_string(
+                    raw_state["status"],
+                    f"Coordinate frame {axis} readiness status",
+                )
+            ),
+            _require_json_string(
+                raw_state.get("reason", ""),
+                f"Coordinate frame {axis} readiness reason",
+            ),
         )
     metadata = value.get("metadata", {})
     if not isinstance(metadata, Mapping):
         raise ValueError("Coordinate frame metadata must be an object.")
     return CoordinateFrameRecord(
-        frame_id=value["frame_id"],
+        frame_id=frame_id,
         kind=kind,
-        name=value["name"],
-        version=value["version"],
+        name=name,
+        version=version,
         transform=transform,
         readiness=readiness,
         metadata=metadata,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 import json
 import os
 from pathlib import Path
@@ -111,6 +112,51 @@ def test_document_load_isolates_one_invalid_record(tmp_path: Path) -> None:
     assert loaded.diagnostics[0].index == 1
 
 
+def test_document_load_diagnoses_invalid_json_scalar_types_per_record(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "coordinate-frames.json"
+    payload = CoordinateFrameDocument(records=(_record(),)).to_dict()
+    valid_record = payload["records"][0]
+
+    invalid_records = []
+    for field, value in (
+        ("frame_id", 123),
+        ("kind", 123),
+        ("name", 123),
+        ("version", True),
+    ):
+        invalid = deepcopy(valid_record)
+        invalid[field] = value
+        invalid_records.append(invalid)
+
+    invalid_status = deepcopy(valid_record)
+    invalid_status["readiness"]["X"]["status"] = 1
+    invalid_records.append(invalid_status)
+
+    invalid_reason = deepcopy(valid_record)
+    invalid_reason["readiness"]["X"]["reason"] = 1
+    invalid_records.append(invalid_reason)
+
+    boolean_coordinate = deepcopy(valid_record)
+    boolean_coordinate["transform"]["origin_xy_at_reference_b"][0] = True
+    invalid_records.append(boolean_coordinate)
+
+    numeric_string_coordinate = deepcopy(valid_record)
+    numeric_string_coordinate["transform"]["reference_b_deg"] = "3.5"
+    invalid_records.append(numeric_string_coordinate)
+
+    payload["records"].extend(invalid_records)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    loaded = FilesystemCoordinateFrameBackend(path).load()
+
+    assert [record.name for record in loaded.records] == ["valid"]
+    assert [diagnostic.index for diagnostic in loaded.diagnostics] == list(
+        range(1, 9)
+    )
+
+
 @pytest.mark.parametrize("payload", [[], {"version": 0, "records": []}, {"version": 99, "records": []}])
 def test_document_rejects_invalid_root_or_schema_version(payload: object) -> None:
     with pytest.raises(ValueError, match="version|object"):
@@ -148,6 +194,20 @@ def test_failed_atomic_replace_preserves_previous_document(
 
     assert path.read_bytes() == previous
     assert list(tmp_path.glob("*.tmp")) == []
+
+
+def test_invalid_document_version_is_not_saved_over_existing_document(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "coordinate-frames.json"
+    backend = FilesystemCoordinateFrameBackend(path)
+    backend.save(CoordinateFrameDocument(records=(_record(),)))
+    previous = path.read_bytes()
+
+    with pytest.raises(ValueError, match="version"):
+        backend.save(CoordinateFrameDocument(version=99))
+
+    assert path.read_bytes() == previous
 
 
 def test_backend_persists_design_records_only(tmp_path: Path) -> None:
