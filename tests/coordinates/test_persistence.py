@@ -112,6 +112,73 @@ def test_document_load_isolates_one_invalid_record(tmp_path: Path) -> None:
     assert loaded.diagnostics[0].index == 1
 
 
+def test_rejected_raw_record_survives_valid_record_mutation_and_save() -> None:
+    payload = CoordinateFrameDocument(records=(_record(),)).to_dict()
+    rejected = {"frame_id": "broken", "future_payload": {"keep": [1, 2, 3]}}
+    payload["records"].append(deepcopy(rejected))
+
+    loaded = CoordinateFrameDocument.from_dict(payload)
+    renamed = loaded.records[0].with_name("renamed")
+    saved = loaded.with_records((renamed,)).to_dict()
+
+    assert saved["records"][0]["name"] == "renamed"
+    assert saved["records"][1] == rejected
+
+
+def test_duplicate_valid_uuid_is_diagnosed_deterministically_and_preserved() -> None:
+    payload = CoordinateFrameDocument(records=(_record(name="first"),)).to_dict()
+    duplicate = deepcopy(payload["records"][0])
+    duplicate["name"] = "duplicate"
+    payload["records"].append(deepcopy(duplicate))
+
+    loaded = CoordinateFrameDocument.from_dict(payload)
+
+    assert [record.name for record in loaded.records] == ["first"]
+    assert [diagnostic.index for diagnostic in loaded.diagnostics] == [1]
+    assert "duplicate" in loaded.diagnostics[0].message.lower()
+    assert loaded.to_dict()["records"][1] == duplicate
+
+
+@pytest.mark.parametrize(
+    ("axis", "transform_field", "message"),
+    [
+        ("Z", "z_zero_machine_mm", "READY Z requires"),
+        ("A", "a_zero_machine_mm", "READY A requires"),
+    ],
+)
+def test_semantically_corrupt_ready_origin_is_rejected_and_preserved(
+    axis: str,
+    transform_field: str,
+    message: str,
+) -> None:
+    payload = CoordinateFrameDocument(records=(_record(),)).to_dict()
+    corrupt = deepcopy(payload["records"][0])
+    corrupt["transform"][transform_field] = None
+    payload["records"] = [corrupt]
+
+    loaded = CoordinateFrameDocument.from_dict(payload)
+
+    assert loaded.records == ()
+    assert message in loaded.diagnostics[0].message
+    assert loaded.to_dict()["records"] == [corrupt]
+
+
+def test_ready_a_without_ready_z_is_rejected_and_preserved() -> None:
+    payload = CoordinateFrameDocument(records=(_record(),)).to_dict()
+    corrupt = deepcopy(payload["records"][0])
+    corrupt["readiness"]["Z"] = {
+        "status": "missing",
+        "reason": "Set Z first.",
+    }
+    payload["records"] = [corrupt]
+
+    loaded = CoordinateFrameDocument.from_dict(payload)
+
+    assert loaded.records == ()
+    assert "READY A requires READY Z" in loaded.diagnostics[0].message
+    assert loaded.to_dict()["records"] == [corrupt]
+
+
 def test_document_load_diagnoses_invalid_json_scalar_types_per_record(
     tmp_path: Path,
 ) -> None:

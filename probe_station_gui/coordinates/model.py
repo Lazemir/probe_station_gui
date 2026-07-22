@@ -105,6 +105,22 @@ class CoordinateFrameRecord:
     def with_name(self, name: str) -> CoordinateFrameRecord:
         return replace(self, name=name)
 
+    def semantic_validation_error(self) -> str | None:
+        """Return a durable-readiness contradiction without mutating the record."""
+
+        transform = self.transform
+        if transform is None:
+            return "Coordinate transform is unavailable."
+        z_ready = self.readiness["Z"].status is ReadinessStatus.READY
+        a_ready = self.readiness["A"].status is ReadinessStatus.READY
+        if z_ready and transform.z_zero_machine_mm is None:
+            return "READY Z requires a Z origin."
+        if a_ready and transform.a_zero_machine_mm is None:
+            return "READY A requires an A origin."
+        if a_ready and not z_ready:
+            return "READY A requires READY Z."
+        return None
+
     def with_authority_block(
         self,
         axes: set[str],

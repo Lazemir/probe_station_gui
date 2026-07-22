@@ -44,12 +44,21 @@ def _record(
     ready_axes: tuple[str, ...] = ("X", "Y", "Z", "A", "B"),
     transform: BFrameTransform | None = None,
 ) -> CoordinateFrameRecord:
+    if transform is None:
+        transform = BFrameTransform(
+            origin_xy_at_reference_b=(0.0, 0.0),
+            reference_b_deg=0.0,
+            xy_angle_at_reference_b_deg=0.0,
+            b_zero_machine_deg=0.0,
+            z_zero_machine_mm=0.0 if "Z" in ready_axes else None,
+            a_zero_machine_mm=0.0 if "A" in ready_axes else None,
+        )
     return CoordinateFrameRecord(
         frame_id=frame_id,
         kind=kind,
         name=name,
         version=0,
-        transform=transform or BFrameTransform.identity(),
+        transform=transform,
         readiness=_readiness(*ready_axes),
         metadata={},
     )
@@ -253,6 +262,54 @@ def test_restore_rejects_missing_z_or_deleted_frame_after_authority_is_known() -
     ) == MACHINE_FRAME_ID
     assert decide_pending_frame_restore(
         _snapshot(),
+        frame_id=DESIGN_ID,
+        homed_axes={"X", "Y"},
+        authority_axes={"X", "Y", "Z", "A", "B"},
+    ) == MACHINE_FRAME_ID
+
+
+def test_semantically_invalid_ready_origins_cannot_select_or_restore() -> None:
+    corrupt = _record(
+        DESIGN_ID,
+        FrameKind.DESIGN,
+        "corrupt",
+        transform=BFrameTransform.identity(),
+    )
+    snapshot = _snapshot(corrupt)
+
+    plan = _plan(snapshot, selected_frame_id=DESIGN_ID)
+
+    entry = next(item for item in plan.selector_entries if item.frame_id == DESIGN_ID)
+    assert entry.enabled is False
+    assert "READY Z requires" in entry.reason
+    assert plan.selected_frame_id == MACHINE_FRAME_ID
+    assert decide_pending_frame_restore(
+        snapshot,
+        frame_id=DESIGN_ID,
+        homed_axes={"X", "Y"},
+        authority_axes={"X", "Y", "Z", "A", "B"},
+    ) == MACHINE_FRAME_ID
+
+
+@pytest.mark.parametrize("status", ["pending", "blocked"])
+def test_unverified_design_provenance_cannot_select_or_restore(status: str) -> None:
+    record = _record(DESIGN_ID, FrameKind.DESIGN, "chip-a")
+    record = replace(
+        record,
+        metadata={
+            "_runtime_provenance_status": status,
+            "_runtime_provenance_reason": "Design source changed.",
+        },
+    )
+    snapshot = _snapshot(record)
+
+    plan = _plan(snapshot, selected_frame_id=DESIGN_ID)
+
+    entry = next(item for item in plan.selector_entries if item.frame_id == DESIGN_ID)
+    assert entry.enabled is False
+    assert entry.reason == "Design source changed."
+    assert decide_pending_frame_restore(
+        snapshot,
         frame_id=DESIGN_ID,
         homed_axes={"X", "Y"},
         authority_axes={"X", "Y", "Z", "A", "B"},

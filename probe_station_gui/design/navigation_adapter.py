@@ -9,6 +9,7 @@ from typing import Callable
 
 from probe_station_gui.coordinates.model import CoordinateFrameRecord
 from probe_station_gui.coordinates.registry import CoordinateFrameRegistry
+from probe_station_gui.coordinates.provenance import design_frame_provenance_error
 from probe_station_gui.design.frame_registration import (
     DesignFrameMetadata,
     design_frame_for_loaded_document,
@@ -263,6 +264,11 @@ def activate_design_frame_for_document(
     if requested_frame_id and selected is None:
         raise DesignModelError("Selected Design coordinate frame was not found.")
     if requested_frame_id and selected is not None:
+        provenance_error = design_frame_provenance_error(selected)
+        if provenance_error is not None:
+            if session.active_frame_id == requested_frame_id:
+                session.clear_registration()
+            raise DesignModelError(provenance_error)
         resolved_path = document.path.expanduser().resolve()
         mismatch_message = None
         if _frame_source_path(selected) != resolved_path:
@@ -286,6 +292,12 @@ def activate_design_frame_for_document(
             ),
             None,
         )
+    if selected is not None:
+        provenance_error = design_frame_provenance_error(selected)
+        if provenance_error is not None:
+            if session.active_frame_id == selected.frame_id:
+                session.clear_registration()
+            raise DesignModelError(provenance_error)
     if selected is None:
         candidate = new_design_frame_draft(
             document,

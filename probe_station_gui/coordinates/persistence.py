@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from collections import deque
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from copy import deepcopy
+from dataclasses import dataclass, field, replace
 import json
 import os
 from pathlib import Path
@@ -39,17 +40,48 @@ class CoordinateFrameDocument:
     version: int = COORDINATE_FRAME_DOCUMENT_VERSION
     records: tuple[CoordinateFrameRecord, ...] = ()
     diagnostics: tuple[FrameLoadDiagnostic, ...] = ()
+    raw_records: tuple[object, ...] = field(default=(), compare=False, repr=False)
+    accepted_record_slots: tuple[tuple[int, str], ...] = field(
+        default=(),
+        compare=False,
+        repr=False,
+    )
+
+    def with_records(
+        self,
+        records: tuple[CoordinateFrameRecord, ...] | list[CoordinateFrameRecord],
+    ) -> CoordinateFrameDocument:
+        """Replace accepted records while retaining rejected raw document slots."""
+
+        return replace(self, records=tuple(records))
 
     def to_dict(self) -> dict[str, object]:
         _require_document_version(self.version)
-        return {
-            "version": self.version,
-            "records": [
+        design_records = tuple(
+            record for record in self.records if record.kind is FrameKind.DESIGN
+        )
+        if not self.raw_records:
+            serialized = [_record_to_dict(record) for record in design_records]
+        else:
+            current_by_id = {record.frame_id: record for record in design_records}
+            accepted_by_slot = dict(self.accepted_record_slots)
+            emitted: set[str] = set()
+            serialized: list[object] = []
+            for index, raw_record in enumerate(self.raw_records):
+                accepted_id = accepted_by_slot.get(index)
+                if accepted_id is None:
+                    serialized.append(deepcopy(raw_record))
+                    continue
+                current = current_by_id.get(accepted_id)
+                if current is not None:
+                    serialized.append(_record_to_dict(current))
+                    emitted.add(accepted_id)
+            serialized.extend(
                 _record_to_dict(record)
-                for record in self.records
-                if record.kind is FrameKind.DESIGN
-            ],
-        }
+                for record in design_records
+                if record.frame_id not in emitted
+            )
+        return {"version": self.version, "records": serialized}
 
     @classmethod
     def from_dict(cls, value: object) -> CoordinateFrameDocument:
@@ -62,9 +94,18 @@ class CoordinateFrameDocument:
 
         records: list[CoordinateFrameRecord] = []
         diagnostics: list[FrameLoadDiagnostic] = []
+        accepted_slots: list[tuple[int, str]] = []
+        seen_frame_ids: set[str] = set()
         for index, raw_record in enumerate(raw_records):
             try:
-                records.append(_record_from_dict(raw_record))
+                record = _record_from_dict(raw_record)
+                if record.frame_id in seen_frame_ids:
+                    raise ValueError(
+                        f"Coordinate frame ID {record.frame_id} is duplicated."
+                    )
+                seen_frame_ids.add(record.frame_id)
+                records.append(record)
+                accepted_slots.append((index, record.frame_id))
             except Exception as exc:
                 diagnostics.append(
                     FrameLoadDiagnostic(index, f"{type(exc).__name__}: {exc}")
@@ -73,6 +114,8 @@ class CoordinateFrameDocument:
             version=version,
             records=tuple(records),
             diagnostics=tuple(diagnostics),
+            raw_records=tuple(deepcopy(raw_records)),
+            accepted_record_slots=tuple(accepted_slots),
         )
 
 
@@ -137,7 +180,11 @@ def _record_to_dict(record: CoordinateFrameRecord) -> dict[str, object]:
             }
             for axis in VISIBLE_STAGE_AXES
         },
-        "metadata": dict(record.metadata),
+        "metadata": {
+            key: value
+            for key, value in record.metadata.items()
+            if not (isinstance(key, str) and key.startswith("_runtime_"))
+        },
     }
 
 
@@ -204,7 +251,7 @@ def _record_from_dict(value: object) -> CoordinateFrameRecord:
     metadata = value.get("metadata", {})
     if not isinstance(metadata, Mapping):
         raise ValueError("Coordinate frame metadata must be an object.")
-    return CoordinateFrameRecord(
+    record = CoordinateFrameRecord(
         frame_id=frame_id,
         kind=kind,
         name=name,
@@ -213,6 +260,10 @@ def _record_from_dict(value: object) -> CoordinateFrameRecord:
         readiness=readiness,
         metadata=metadata,
     )
+    semantic_error = record.semantic_validation_error()
+    if semantic_error is not None:
+        raise ValueError(semantic_error)
+    return record
 
 
 class FilesystemCoordinateFrameBackend:
@@ -254,6 +305,8 @@ def _write_atomic(path: Path, payload: bytes) -> None:
 class CoordinateFrameLoadResult:
     request_id: int
     document: CoordinateFrameDocument
+    runtime_records: tuple[CoordinateFrameRecord, ...] | None = None
+    provenance_diagnostics: tuple[object, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -274,6 +327,7 @@ class _StoreOperation:
     request_id: int
     operation: str
     document: CoordinateFrameDocument | None = None
+    machine_profile_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -313,7 +367,9 @@ class CoordinateFrameStoreWorker(QObject):
             if path is None:
                 raise ValueError("A coordinate frame path or backend factory is required.")
             persisted_path = Path(path)
-            backend_factory = lambda: FilesystemCoordinateFrameBackend(persisted_path)
+
+            def backend_factory() -> FilesystemCoordinateFrameBackend:
+                return FilesystemCoordinateFrameBackend(persisted_path)
         self._creator_thread_id = threading.get_ident()
         self._backend_factory = backend_factory
         self._condition = threading.Condition(threading.Lock())
@@ -341,8 +397,19 @@ class CoordinateFrameStoreWorker(QObject):
     def drain_thread(self) -> threading.Thread | None:
         return self._drain_thread
 
-    def load(self, request_id: int) -> None:
-        self._submit(_StoreOperation(int(request_id), "load"))
+    def load(
+        self,
+        request_id: int,
+        *,
+        machine_profile_id: str | None = None,
+    ) -> None:
+        self._submit(
+            _StoreOperation(
+                int(request_id),
+                "load",
+                machine_profile_id=machine_profile_id,
+            )
+        )
 
     def publish(
         self,
@@ -448,9 +515,25 @@ class CoordinateFrameStoreWorker(QObject):
         operation: _StoreOperation,
     ) -> None:
         if operation.operation == "load":
+            document = backend.load()
+            if operation.machine_profile_id is None:
+                result = CoordinateFrameLoadResult(operation.request_id, document)
+            else:
+                from .provenance import validate_design_frame_provenance
+
+                validation = validate_design_frame_provenance(
+                    document.records,
+                    operation.machine_profile_id,
+                )
+                result = CoordinateFrameLoadResult(
+                    operation.request_id,
+                    document,
+                    runtime_records=validation.records,
+                    provenance_diagnostics=validation.diagnostics,
+                )
             self._post_publication(
                 "loaded",
-                CoordinateFrameLoadResult(operation.request_id, backend.load()),
+                result,
             )
             return
         if operation.operation == "save":

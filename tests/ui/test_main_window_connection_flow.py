@@ -2,12 +2,21 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+from probe_station_gui.coordinates.model import (
+    AxisReadiness,
+    CoordinateFrameRecord,
+    FrameKind,
+    ReadinessStatus,
+)
+
 from probe_station_gui.coordinates.persistence import (
     CoordinateFrameDocument,
     CoordinateFrameLoadResult,
     CoordinateFrameStoreSuccess,
 )
+from probe_station_gui.coordinates.provenance import RUNTIME_PROVENANCE_STATUS
 from probe_station_gui.coordinates.registry import CoordinateFrameRegistry
+from probe_station_gui.coordinates.transforms import BFrameTransform
 from probe_station_gui.views import main_window_connection_flow as connection_flow
 
 
@@ -233,6 +242,28 @@ def _owner(events: list[object]) -> SimpleNamespace:
         ("apply_joystick_preferences",)
     )
     return owner
+
+
+def _design_record(*, name: str = "valid") -> CoordinateFrameRecord:
+    return CoordinateFrameRecord(
+        frame_id="45e78a25-3c24-48ad-a028-8e2c989d6adf",
+        kind=FrameKind.DESIGN,
+        name=name,
+        version=0,
+        transform=BFrameTransform(
+            origin_xy_at_reference_b=(0.0, 0.0),
+            reference_b_deg=0.0,
+            xy_angle_at_reference_b_deg=0.0,
+            b_zero_machine_deg=0.0,
+            z_zero_machine_mm=0.0,
+            a_zero_machine_mm=0.0,
+        ),
+        readiness={
+            axis: AxisReadiness(ReadinessStatus.READY)
+            for axis in ("X", "Y", "Z", "A", "B")
+        },
+        metadata={},
+    )
 
 
 def test_on_serial_connected_preserves_attach_order(monkeypatch) -> None:
@@ -470,8 +501,11 @@ def test_coordinate_frame_document_load_is_independent_from_serial_controller_st
         _coordinate_frames_loaded=False,
         _coordinate_frame_registry=CoordinateFrameRegistry(),
         _coordinate_frame_store=SimpleNamespace(
-            load=lambda request_id: events.append(("frame_load", request_id))
+            load=lambda request_id, **kwargs: events.append(
+                ("frame_load", request_id, kwargs)
+            )
         ),
+        _current_machine_profile_id=lambda: "rig-7",
         _apply_coordinate_frame_authority_blocks=lambda: events.append(
             ("authority_blocks",)
         ),
@@ -489,13 +523,98 @@ def test_coordinate_frame_document_load_is_independent_from_serial_controller_st
     )
 
     assert events == [
-        ("frame_load", request_id),
+        ("frame_load", request_id, {"machine_profile_id": "rig-7"}),
         ("custom_frames",),
         ("reconcile_calibrations",),
         ("authority_blocks",),
         ("activate_design",),
     ]
     assert owner._coordinate_frames_loaded is True
+
+
+def test_coordinate_frame_load_marks_existing_designs_unavailable_while_pending() -> None:
+    loads: list[tuple[int, dict[str, object]]] = []
+    registry = CoordinateFrameRegistry()
+    registry.add(_design_record())
+    owner = SimpleNamespace(
+        _coordinate_frame_request_id=0,
+        _coordinate_frame_load_request_id=None,
+        _coordinate_frames_loaded=True,
+        _coordinate_frame_registry=registry,
+        _coordinate_frame_store=SimpleNamespace(
+            load=lambda request_id, **kwargs: loads.append((request_id, kwargs))
+        ),
+    )
+
+    request_id = connection_flow.request_coordinate_frame_load(owner)
+
+    pending = registry.get(_design_record().frame_id)
+    assert request_id == 1
+    assert owner._coordinate_frames_loaded is False
+    assert pending is not None
+    assert pending.metadata[RUNTIME_PROVENANCE_STATUS] == "pending"
+    assert loads == [(1, {"machine_profile_id": "default"})]
+
+
+def test_loaded_document_preserves_rejected_raw_records_through_publish(
+    monkeypatch,
+) -> None:
+    published: list[CoordinateFrameDocument] = []
+    payload = CoordinateFrameDocument(records=(_design_record(),)).to_dict()
+    rejected = {"frame_id": "broken", "future": {"keep": True}}
+    payload["records"].append(rejected)
+    document = CoordinateFrameDocument.from_dict(payload)
+    owner = SimpleNamespace(
+        _coordinate_frame_request_id=1,
+        _coordinate_frame_load_request_id=1,
+        _coordinate_frames_loaded=False,
+        _coordinate_frame_registry=CoordinateFrameRegistry(),
+        _coordinate_frame_store=SimpleNamespace(
+            publish=lambda _request_id, value: published.append(value)
+        ),
+        _activate_loaded_design_frame=lambda: None,
+        _show_status=lambda *_args: None,
+    )
+    monkeypatch.setattr(
+        connection_flow.stage_position_panel,
+        "refresh_coordinate_frame_display",
+        lambda _owner: None,
+    )
+
+    connection_flow.handle_coordinate_frame_loaded(
+        owner,
+        CoordinateFrameLoadResult(1, document),
+    )
+    owner._coordinate_frame_registry.reset((_design_record(name="renamed"),))
+    connection_flow.publish_coordinate_frames(owner)
+
+    assert published[0].to_dict()["records"][0]["name"] == "renamed"
+    assert published[0].to_dict()["records"][1] == rejected
+
+
+def test_stale_provenance_callback_cannot_expose_design_frames(monkeypatch) -> None:
+    owner = SimpleNamespace(
+        _coordinate_frame_load_request_id=2,
+        _coordinate_frames_loaded=False,
+        _coordinate_frame_registry=CoordinateFrameRegistry(),
+    )
+    monkeypatch.setattr(
+        connection_flow.stage_position_panel,
+        "refresh_coordinate_frame_display",
+        lambda _owner: None,
+    )
+
+    connection_flow.handle_coordinate_frame_loaded(
+        owner,
+        CoordinateFrameLoadResult(
+            1,
+            CoordinateFrameDocument(records=(_design_record(),)),
+            runtime_records=(_design_record(),),
+        ),
+    )
+
+    assert owner._coordinate_frames_loaded is False
+    assert owner._coordinate_frame_registry.snapshot().records == ()
 
 
 def test_legacy_state_is_removed_only_after_frame_document_publish_succeeds(

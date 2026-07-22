@@ -7,6 +7,9 @@ import logging
 from PySide6.QtCore import QTimer
 
 from probe_station_gui.coordinates.persistence import CoordinateFrameDocument
+from probe_station_gui.coordinates.provenance import (
+    mark_design_frame_provenance_pending,
+)
 from probe_station_gui.design import navigation_adapter as design_navigation
 from probe_station_gui.stage import move_lifecycle as stage_move_lifecycle
 from probe_station_gui.views import main_window_homing as homing_ui
@@ -27,7 +30,19 @@ def request_coordinate_frame_load(owner: object) -> int:
 
     request_id = _next_coordinate_frame_request_id(owner)
     owner._coordinate_frame_load_request_id = request_id
-    owner._coordinate_frame_store.load(request_id)
+    registry = getattr(owner, "_coordinate_frame_registry", None)
+    if registry is not None:
+        snapshot = registry.snapshot()
+        registry.reset(mark_design_frame_provenance_pending(snapshot.records))
+    owner._coordinate_frames_loaded = False
+    profile_source = getattr(owner, "_current_machine_profile_id", None)
+    profile_id = profile_source() if callable(profile_source) else "default"
+    if not isinstance(profile_id, str) or not profile_id.strip():
+        profile_id = "default"
+    owner._coordinate_frame_store.load(
+        request_id,
+        machine_profile_id=profile_id.strip(),
+    )
     return request_id
 
 
@@ -35,8 +50,22 @@ def handle_coordinate_frame_loaded(owner: object, result: object) -> None:
     if result.request_id != getattr(owner, "_coordinate_frame_load_request_id", None):
         return
     owner._coordinate_frame_load_request_id = None
-    owner._coordinate_frame_registry.reset(result.document.records)
+    owner._coordinate_frame_document = result.document
+    runtime_records = getattr(result, "runtime_records", None)
+    owner._coordinate_frame_registry.reset(
+        result.document.records if runtime_records is None else runtime_records
+    )
     owner._coordinate_frames_loaded = True
+    diagnostics = (
+        *result.document.diagnostics,
+        *getattr(result, "provenance_diagnostics", ()),
+    )
+    if diagnostics:
+        for diagnostic in diagnostics:
+            logger.warning("Design coordinate frame unavailable: %s", diagnostic)
+        show_status = getattr(owner, "_show_status", None)
+        if callable(show_status):
+            show_status("Some Design coordinate frames are unavailable.", 6000)
     materialize_custom = getattr(owner, "_materialize_software_coordinate_frames", None)
     if callable(materialize_custom):
         materialize_custom()
@@ -61,9 +90,13 @@ def publish_coordinate_frames(
 ) -> int:
     stage_position_panel.refresh_coordinate_frame_display(owner)
     request_id = _next_coordinate_frame_request_id(owner)
-    document = CoordinateFrameDocument(
-        records=owner._coordinate_frame_registry.snapshot().records
+    base_document = getattr(owner, "_coordinate_frame_document", None)
+    if not isinstance(base_document, CoordinateFrameDocument):
+        base_document = CoordinateFrameDocument()
+    document = base_document.with_records(
+        owner._coordinate_frame_registry.snapshot().records
     )
+    owner._coordinate_frame_document = document
     if legacy_migration or getattr(
         owner,
         "_legacy_design_migration_request_id",

@@ -13,6 +13,7 @@ from .model import (
     VISIBLE_STAGE_AXES,
 )
 from .registry import RegistrySnapshot
+from .provenance import design_frame_provenance_error
 
 
 MACHINE_FRAME_ID = "machine"
@@ -60,6 +61,12 @@ def _frame_selection_reason(
     homed_axes: frozenset[str],
     authority_axes: frozenset[str],
 ) -> str:
+    provenance_error = design_frame_provenance_error(record)
+    if provenance_error is not None:
+        return provenance_error
+    semantic_error = record.semantic_validation_error()
+    if semantic_error is not None:
+        return semantic_error
     if not {"X", "Y"}.issubset(homed_axes):
         return "Home X and Y to use this coordinate system."
     if "B" not in authority_axes:
@@ -305,6 +312,12 @@ def decide_pending_frame_restore(
         None,
     )
     if record is None or record.transform is None:
+        return MACHINE_FRAME_ID
+    if _frame_selection_reason(
+        record,
+        homed_axes=homed,
+        authority_axes=authority,
+    ):
         return MACHINE_FRAME_ID
     if not all(
         record.readiness[axis].status is ReadinessStatus.READY

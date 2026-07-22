@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
 import pytest
 
 from probe_station_gui.coordinates.registry import CoordinateFrameRegistry
+from probe_station_gui.coordinates.provenance import (
+    RUNTIME_PROVENANCE_REASON,
+    RUNTIME_PROVENANCE_STATUS,
+)
 from probe_station_gui.design.frame_registration import (
     DesignFrameMetadata,
     commit_xyb_registration,
@@ -335,6 +340,35 @@ def test_loaded_design_links_requested_existing_frame_and_new_registration_is_in
     assert created.record.frame_id not in {first.frame_id, second.frame_id}
     assert created.record.name == f"{document.path.stem} (3)"
     assert session.active_frame_id == created.record.frame_id
+
+
+def test_requested_frame_with_blocked_provenance_cannot_link(
+    tmp_path: Path,
+) -> None:
+    document = _make_document(tmp_path)
+    registry = CoordinateFrameRegistry()
+    draft = new_design_frame_draft(document, existing_names=())
+    blocked = registry.add(
+        replace(
+            draft,
+            metadata={
+                **draft.metadata,
+                RUNTIME_PROVENANCE_STATUS: "blocked",
+                RUNTIME_PROVENANCE_REASON: "Design source changed.",
+            },
+        )
+    )
+    session = DesignSession(document=document, active_frame_id=blocked.frame_id)
+
+    with pytest.raises(DesignModelError, match="Design source changed"):
+        activate_design_frame_for_document(
+            session,
+            registry,
+            document,
+            requested_frame_id=blocked.frame_id,
+        )
+
+    assert session.active_frame_id is None
 
 
 def test_reconciled_frame_projection_failure_is_transactional(tmp_path: Path) -> None:
