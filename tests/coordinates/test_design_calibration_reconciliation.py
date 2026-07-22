@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import time
 from uuid import uuid4
 
 import pytest
+from PySide6.QtWidgets import QApplication
 
 from probe_station_gui.coordinates import (
     AxisReadiness,
@@ -19,6 +21,7 @@ from probe_station_gui.coordinates.design_calibration import (
 from probe_station_gui.coordinates.persistence import (
     CoordinateFrameDocument,
     FilesystemCoordinateFrameBackend,
+    CoordinateFrameStoreWorker,
 )
 from probe_station_gui.design.frame_registration import DesignFrameMetadata
 from probe_station_gui.settings.axis_calibration_config import (
@@ -210,3 +213,54 @@ def test_reconciled_design_round_trips_and_fresh_reconcile_is_noop(tmp_path) -> 
     assert loaded[0].readiness["Z"].status is ReadinessStatus.STALE
     assert not changed_again
     assert fresh == loaded
+
+
+def test_real_worker_failure_keeps_runtime_stale_and_retry_persists_it(tmp_path) -> None:
+    app = QApplication.instance() or QApplication([])
+    old_settings = default_axis_calibrations()
+    new_settings = default_axis_calibrations()
+    new_settings["Z"] = AxisCalibrationSettings(
+        enabled=True, controller_points=[0.0, 1.0], physical_points=[0.0, 2.0]
+    )
+    ready = _design(fingerprints=design_calibration_fingerprints(old_settings))
+    stale, changed = reconcile_design_calibrations((ready,), new_settings)
+
+    class FailOnceBackend:
+        def __init__(self):
+            self.document = CoordinateFrameDocument(records=(ready,))
+            self.failed_once = False
+
+        def load(self):
+            return self.document
+
+        def save(self, document):
+            if not self.failed_once:
+                self.failed_once = True
+                raise OSError("intentional failure")
+            self.document = document
+
+    backend = FailOnceBackend()
+    worker = CoordinateFrameStoreWorker(backend_factory=lambda: backend)
+    failures, saved = [], []
+    worker.failed.connect(failures.append)
+    worker.saved.connect(saved.append)
+    worker.publish(1, CoordinateFrameDocument(records=stale))
+    _wait_for(app, lambda: len(failures) == 1)
+    assert changed and stale[0].readiness["Z"].status is ReadinessStatus.STALE
+    assert backend.document.records[0].readiness["Z"].status is ReadinessStatus.READY
+    fresh, changed_again = reconcile_design_calibrations(backend.load().records, new_settings)
+    assert changed_again and fresh[0].readiness["Z"].status is ReadinessStatus.STALE
+    worker.publish(2, CoordinateFrameDocument(records=fresh))
+    _wait_for(app, lambda: len(saved) == 1)
+    assert backend.document.records[0].readiness["Z"].status is ReadinessStatus.STALE
+    worker.stop()
+
+
+def _wait_for(app: QApplication, predicate) -> None:
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline:
+        app.processEvents()
+        if predicate():
+            return
+        time.sleep(0.005)
+    assert predicate()
