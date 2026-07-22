@@ -207,6 +207,7 @@ class SettingsManager:
     """Load, persist, and expose user configurable settings."""
 
     CONFIG_FILENAME = "settings.json"
+    COORDINATE_FRAMES_FILENAME = "coordinate-frames.json"
     CONTROLLER_STATE_FILENAME = "controller-state.json"
     SERIAL_CONNECTION_STATE_FILENAME = "serial-connection-state.json"
     METER_CONNECTION_STATE_FILENAME = "meter-connection-state.json"
@@ -308,6 +309,11 @@ class SettingsManager:
         """Return the application configuration directory."""
 
         return self._config_dir
+
+    def coordinate_frames_path(self) -> Path:
+        """Return the separate measured Design-frame document path."""
+
+        return self._config_dir / self.COORDINATE_FRAMES_FILENAME
 
     def replace(self, settings: Settings) -> None:
         """Replace the stored settings with the provided instance."""

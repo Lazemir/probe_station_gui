@@ -1,0 +1,277 @@
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+import threading
+import time
+
+import pytest
+
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+pytest.importorskip("PySide6")
+
+from PySide6.QtWidgets import QApplication
+
+from probe_station_gui.coordinates.model import (
+    AxisReadiness,
+    CoordinateFrameRecord,
+    FrameKind,
+    ReadinessStatus,
+)
+from probe_station_gui.coordinates.persistence import (
+    CoordinateFrameDocument,
+    CoordinateFrameLoadResult,
+    CoordinateFrameStoreSuccess,
+    CoordinateFrameStoreWorker,
+    FilesystemCoordinateFrameBackend,
+)
+from probe_station_gui.coordinates.transforms import BFrameTransform
+from probe_station_gui.settings.manager import SettingsManager
+
+
+@pytest.fixture(scope="module")
+def qt_app() -> QApplication:
+    return QApplication.instance() or QApplication([])
+
+
+def _wait_until(
+    qt_app: QApplication,
+    predicate,
+    *,
+    timeout: float = 2.0,
+) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        qt_app.processEvents()
+        if predicate():
+            return
+        time.sleep(0.005)
+    qt_app.processEvents()
+    assert predicate()
+
+
+def _record(*, name: str = "valid", version: int = 0) -> CoordinateFrameRecord:
+    return CoordinateFrameRecord(
+        frame_id="ba64e533-7143-49ef-b41a-290f16d7ca1b",
+        kind=FrameKind.DESIGN,
+        name=name,
+        version=version,
+        transform=BFrameTransform(
+            origin_xy_at_reference_b=(1.25, -2.5),
+            reference_b_deg=3.5,
+            xy_angle_at_reference_b_deg=-4.5,
+            b_zero_machine_deg=5.5,
+            z_zero_machine_mm=6.5,
+            a_zero_machine_mm=7.5,
+        ),
+        readiness={
+            axis: AxisReadiness(ReadinessStatus.READY, f"{axis} ready")
+            for axis in ("X", "Y", "Z", "A", "B")
+        },
+        metadata={"source": "calibration"},
+    )
+
+
+def test_document_round_trip_uses_explicit_json_values() -> None:
+    document = CoordinateFrameDocument(records=(_record(version=4),))
+
+    payload = document.to_dict()
+    restored = CoordinateFrameDocument.from_dict(payload)
+
+    assert restored == document
+    assert payload["version"] == 1
+    assert payload["records"][0]["kind"] == "design"
+    assert payload["records"][0]["readiness"]["X"] == {
+        "status": "ready",
+        "reason": "X ready",
+    }
+    assert payload["records"][0]["transform"] == {
+        "origin_xy_at_reference_b": [1.25, -2.5],
+        "reference_b_deg": 3.5,
+        "xy_angle_at_reference_b_deg": -4.5,
+        "b_zero_machine_deg": 5.5,
+        "z_zero_machine_mm": 6.5,
+        "a_zero_machine_mm": 7.5,
+    }
+
+
+def test_document_load_isolates_one_invalid_record(tmp_path: Path) -> None:
+    path = tmp_path / "coordinate-frames.json"
+    valid = _record()
+    payload = CoordinateFrameDocument(records=(valid,)).to_dict()
+    payload["records"].append({"frame_id": "broken"})
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    loaded = FilesystemCoordinateFrameBackend(path).load()
+
+    assert [record.name for record in loaded.records] == ["valid"]
+    assert len(loaded.diagnostics) == 1
+    assert loaded.diagnostics[0].index == 1
+
+
+@pytest.mark.parametrize("payload", [[], {"version": 0, "records": []}, {"version": 99, "records": []}])
+def test_document_rejects_invalid_root_or_schema_version(payload: object) -> None:
+    with pytest.raises(ValueError, match="version|object"):
+        CoordinateFrameDocument.from_dict(payload)
+
+
+def test_backend_loads_missing_file_as_empty_document(tmp_path: Path) -> None:
+    loaded = FilesystemCoordinateFrameBackend(
+        tmp_path / "coordinate-frames.json"
+    ).load()
+
+    assert loaded == CoordinateFrameDocument()
+
+
+def test_failed_atomic_replace_preserves_previous_document(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "coordinate-frames.json"
+    backend = FilesystemCoordinateFrameBackend(path)
+    first = CoordinateFrameDocument(records=(_record(),))
+    backend.save(first)
+    previous = path.read_bytes()
+
+    def fail_replace(_source, _target) -> None:
+        raise OSError("replace failed")
+
+    monkeypatch.setattr(
+        "probe_station_gui.coordinates.persistence.os.replace",
+        fail_replace,
+    )
+
+    with pytest.raises(OSError, match="replace failed"):
+        backend.save(CoordinateFrameDocument())
+
+    assert path.read_bytes() == previous
+    assert list(tmp_path.glob("*.tmp")) == []
+
+
+def test_backend_persists_design_records_only(tmp_path: Path) -> None:
+    design = _record()
+    custom = CoordinateFrameRecord(
+        frame_id="bd5dbba5-4a51-4314-bb18-c6cdca3e1e0f",
+        kind=FrameKind.CUSTOM,
+        name="settings-owned",
+        version=0,
+        transform=BFrameTransform.identity(),
+        readiness=design.readiness,
+        metadata={},
+    )
+    path = tmp_path / "coordinate-frames.json"
+
+    FilesystemCoordinateFrameBackend(path).save(
+        CoordinateFrameDocument(records=(design, custom))
+    )
+
+    assert [record.kind for record in FilesystemCoordinateFrameBackend(path).load().records] == [
+        FrameKind.DESIGN
+    ]
+
+
+def test_settings_manager_exposes_coordinate_frames_path(tmp_path: Path) -> None:
+    manager = SettingsManager.__new__(SettingsManager)
+    manager._config_dir = tmp_path
+
+    assert manager.coordinate_frames_path() == tmp_path / "coordinate-frames.json"
+    assert SettingsManager.COORDINATE_FRAMES_FILENAME == "coordinate-frames.json"
+
+
+def test_worker_loads_and_saves_off_creator_thread(
+    qt_app: QApplication,
+) -> None:
+    creator_thread = threading.get_ident()
+    backend = _RecordingBackend(CoordinateFrameDocument(records=(_record(),)))
+    worker = CoordinateFrameStoreWorker(backend_factory=lambda: backend)
+    loaded: list[CoordinateFrameLoadResult] = []
+    saved: list[CoordinateFrameStoreSuccess] = []
+    worker.loaded.connect(loaded.append)
+    worker.saved.connect(saved.append)
+
+    worker.load(1)
+    _wait_until(qt_app, lambda: len(loaded) == 1)
+    worker.publish(2, CoordinateFrameDocument())
+    _wait_until(qt_app, lambda: len(saved) == 1)
+
+    assert loaded == [CoordinateFrameLoadResult(1, backend.loaded_document)]
+    assert saved == [CoordinateFrameStoreSuccess(2, "save")]
+    assert backend.thread_ids
+    assert set(backend.thread_ids) == {backend.thread_ids[0]}
+    assert backend.thread_ids[0] != creator_thread
+    worker.stop()
+
+
+def test_worker_coalesces_pending_publications_to_newest(
+    qt_app: QApplication,
+) -> None:
+    first = CoordinateFrameDocument(records=(_record(name="first"),))
+    second = CoordinateFrameDocument(records=(_record(name="second"),))
+    newest = CoordinateFrameDocument(records=(_record(name="newest"),))
+    backend = _BlockingBackend()
+    worker = CoordinateFrameStoreWorker(backend_factory=lambda: backend)
+
+    worker.publish(1, first)
+    assert backend.started.wait(timeout=1.0)
+    worker.publish(2, second)
+    worker.publish(3, newest)
+    backend.release.set()
+    _wait_until(qt_app, lambda: worker.is_idle)
+
+    assert backend.saved_documents == [first, newest]
+    worker.stop()
+
+
+def test_timed_out_stop_drains_latest_publication_on_nondaemon_thread() -> None:
+    first = CoordinateFrameDocument(records=(_record(name="first"),))
+    newest = CoordinateFrameDocument(records=(_record(name="newest"),))
+    backend = _BlockingBackend()
+    worker = CoordinateFrameStoreWorker(backend_factory=lambda: backend)
+    worker.publish(1, first)
+    assert backend.started.wait(timeout=1.0)
+    worker.publish(2, newest)
+
+    started_at = time.perf_counter()
+    worker.stop(timeout_s=0.0)
+    elapsed = time.perf_counter() - started_at
+
+    assert elapsed < 0.1
+    drain = worker.drain_thread
+    assert drain is not None and drain.is_alive()
+    assert not drain.daemon
+
+    backend.release.set()
+    drain.join(timeout=1.0)
+    assert not drain.is_alive()
+    assert backend.saved_documents == [first, newest]
+
+
+class _RecordingBackend:
+    def __init__(self, loaded_document: CoordinateFrameDocument) -> None:
+        self.loaded_document = loaded_document
+        self.thread_ids: list[int] = []
+        self.saved_documents: list[CoordinateFrameDocument] = []
+
+    def load(self) -> CoordinateFrameDocument:
+        self.thread_ids.append(threading.get_ident())
+        return self.loaded_document
+
+    def save(self, document: CoordinateFrameDocument) -> None:
+        self.thread_ids.append(threading.get_ident())
+        self.saved_documents.append(document)
+
+
+class _BlockingBackend(_RecordingBackend):
+    def __init__(self) -> None:
+        super().__init__(CoordinateFrameDocument())
+        self.started = threading.Event()
+        self.release = threading.Event()
+
+    def save(self, document: CoordinateFrameDocument) -> None:
+        self.thread_ids.append(threading.get_ident())
+        self.saved_documents.append(document)
+        if len(self.saved_documents) == 1:
+            self.started.set()
+            assert self.release.wait(timeout=2.0)
