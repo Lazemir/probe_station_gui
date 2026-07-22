@@ -12,7 +12,7 @@ import re
 import threading
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from importlib import resources
 from pathlib import Path
@@ -103,6 +103,16 @@ from probe_station_gui import (
     MicroscopeView,
     StageController,
 )
+from probe_station_gui.coordinates import (
+    CoordinateFrameRegistry,
+    CoordinateFrameStoreWorker,
+)
+from probe_station_gui.design.frame_registration import (
+    DesignFrameMetadata,
+    commit_xyb_registration,
+    find_equivalent_migrated_frame,
+    migrate_legacy_design_state,
+)
 from probe_station_gui.design.model import DesignDocument, DesignModelError
 from probe_station_gui.design.contact_navigation import (
     api_contact_context,
@@ -131,7 +141,11 @@ from probe_station_gui.design.selection_model import (
     plan_mixed_delete,
     project_entities,
 )
-from probe_station_gui.design.session import AlignmentPreparation, DesignSession
+from probe_station_gui.design.session import (
+    DEFAULT_B_AXIS_ROTATION_PIVOT_STAGE,
+    AlignmentPreparation,
+    DesignSession,
+)
 from probe_station_gui.shared.diagnostics import configure_crash_diagnostics
 from probe_station_gui.api.request_bridge import ApiRequestBridge, DeferredApiResponse
 from probe_station_gui.api.server import ProbeStationApiServer
@@ -315,6 +329,7 @@ from probe_station_gui.route.session_start import (
     gui_route_launch_state,
     gui_route_start_availability,
     gui_route_start_preflight,
+    snapshot_route_design_frame,
 )
 from probe_station_gui.route.finish_flow import (
     route_finish_outcome_plan,
@@ -525,6 +540,13 @@ class _PendingDesignMarkupLoad:
     plan: design_navigation.DesignLoadResultPlan
     show_window: bool
     previous_markup: MarkupDocument | None
+    frame_metadata: DesignFrameMetadata | None = None
+
+
+@dataclass(frozen=True)
+class _LoadedDesignDocument:
+    document: DesignDocument
+    frame_metadata: DesignFrameMetadata
 
 
 @dataclass(frozen=True)
@@ -941,6 +963,29 @@ class Main(QMainWindow):
         self._contact_seek_thread: threading.Thread | None = None
         self._contact_seek_stop_requested = threading.Event()
         self._design_session = DesignSession()
+        self._coordinate_frame_registry = CoordinateFrameRegistry()
+        self._coordinate_frame_store = CoordinateFrameStoreWorker(
+            self,
+            path=self.settings_manager.coordinate_frames_path(),
+        )
+        self._coordinate_frame_request_id = 0
+        self._coordinate_frame_load_request_id: int | None = None
+        self._legacy_design_migration_request_id: int | None = None
+        self._legacy_design_migration_state: dict[str, object] | None = None
+        self._coordinate_frames_loaded = False
+        self._active_design_frame_metadata: DesignFrameMetadata | None = None
+        self._coordinate_frame_authority_blocked_axes: set[str] = set()
+        self._active_route_design_frame_snapshot = None
+        self._coordinate_frame_store.loaded.connect(
+            self._on_coordinate_frames_loaded
+        )
+        self._coordinate_frame_store.saved.connect(
+            self._on_coordinate_frames_saved
+        )
+        self._coordinate_frame_store.failed.connect(
+            self._on_coordinate_frame_store_failed
+        )
+        connection_flow.request_coordinate_frame_load(self)
         self.statusBar()
         self._objective_widget = self._create_objective_widget()
         self.statusBar().addPermanentWidget(self._objective_widget, 0)
@@ -3141,6 +3186,7 @@ class Main(QMainWindow):
             ),
             default_contact_seek_step_mm=RouteMeasurementRunner.AUTO_CONTACT_SEEK_STEP_MM,
             default_contact_settle_s=RouteMeasurementRunner.DEFAULT_CONTACT_SETTLE_S,
+            design_frame_snapshot=self._snapshot_active_route_design_frame(),
         )
         if not start_decision.accepted:
             return start_decision.rejection_payload()
@@ -3148,6 +3194,9 @@ class Main(QMainWindow):
         points = start_decision.plan.points
         selected_point = start_decision.plan.selected_point
         start_settings = start_decision.plan.start_settings
+        self._active_route_design_frame_snapshot = (
+            start_decision.plan.design_frame_snapshot
+        )
         try:
             meter_configuration = self._api_route_meter_configuration(
                 payload.get("meter", payload.get("meter_configuration", {})),
@@ -4146,6 +4195,16 @@ class Main(QMainWindow):
     ) -> tuple[float, float]:
         return offsets.camera_stage_to_raw_stage(camera_stage_xy, self._active_objective_xy_offset())
 
+    def _design_navigation_xy_from_physical_machine_xy(
+        self,
+        machine_xy: tuple[float, float],
+    ) -> tuple[float, float]:
+        configured_xy = (
+            self.stage_controller.calibrated_axis_raw_value("X", machine_xy[0]),
+            self.stage_controller.calibrated_axis_raw_value("Y", machine_xy[1]),
+        )
+        return self._camera_stage_xy_from_raw_stage_xy(configured_xy)
+
     def _design_xy_from_raw_stage_xy(
         self, raw_stage_xy: tuple[float, float]
     ) -> tuple[float, float] | None:
@@ -4317,6 +4376,8 @@ class Main(QMainWindow):
         self._manual_alignment_pick_slot = None
         self._manual_alignment_points = [None, None]
         self._pending_alignment_preparation = None
+        if not self._start_fresh_design_frame_for_source_replacement():
+            return
         self._design_session.clear_source_stage_marks()
         self._last_selected_design_point = snapped_point
         self._set_design_snap_enabled(True)
@@ -4328,6 +4389,46 @@ class Main(QMainWindow):
             f"Design mark {slot_label} snapped to X={snapped_point[0]:.3f}, Y={snapped_point[1]:.3f}.",
             4000,
         )
+
+    def _start_fresh_design_frame_for_source_replacement(self) -> bool:
+        registry = getattr(self, "_coordinate_frame_registry", None)
+        frame_id = self._design_session.active_frame_id
+        document = self._design_session.document
+        metadata = getattr(self, "_active_design_frame_metadata", None)
+        if (
+            registry is None
+            or frame_id is None
+            or document is None
+            or metadata is None
+            or not bool(getattr(self, "_coordinate_frames_loaded", False))
+        ):
+            return True
+        current = registry.get(frame_id)
+        if current is None:
+            return True
+        current_metadata = DesignFrameMetadata.from_mapping(current.metadata)
+        if not (
+            current_metadata.source_design_marks
+            or current_metadata.source_machine_marks
+        ):
+            return True
+        try:
+            design_navigation.activate_design_frame_for_document(
+                self._design_session,
+                registry,
+                document,
+                create_new=True,
+                current_metadata=metadata,
+                machine_point_for_navigation=(
+                    self._design_navigation_xy_from_physical_machine_xy
+                ),
+            )
+        except DesignModelError as exc:
+            self._show_status(str(exc), 6000)
+            return False
+        connection_flow.publish_coordinate_frames(self)
+        self._apply_coordinate_frame_authority_blocks()
+        return True
 
     def _on_alignment_draft_accepted(self, points: object) -> None:
         if self._pending_alignment_preparation is not None:
@@ -6666,10 +6767,15 @@ class Main(QMainWindow):
         def load_design() -> None:
             try:
                 document = DesignDocument.load(path_text)
+                frame_metadata = DesignFrameMetadata.from_document(document)
             except Exception as exc:
                 self.design_document_loaded.emit(generation, None, exc)
                 return
-            self.design_document_loaded.emit(generation, document, None)
+            self.design_document_loaded.emit(
+                generation,
+                _LoadedDesignDocument(document, frame_metadata),
+                None,
+            )
 
         threading.Thread(target=load_design, name="DesignDocumentLoad", daemon=True).start()
 
@@ -6678,6 +6784,10 @@ class Main(QMainWindow):
             return
         restore_state = self._design_load_restore_states.pop(generation, None)
         show_window = self._design_load_show_window.pop(generation, True)
+        frame_metadata = None
+        if isinstance(document, _LoadedDesignDocument):
+            frame_metadata = document.frame_metadata
+            document = document.document
         candidate_session = self._snapshot_design_session()
         previous_markup = getattr(self, "_design_markup", None)
         try:
@@ -6698,14 +6808,22 @@ class Main(QMainWindow):
             self._apply_design_load_failure_plan(plan, show_window)
             return
         if plan.document is not None:
-            self._begin_design_markup_load(
-                plan.document,
-                generation=generation,
-                candidate_session=candidate_session,
-                plan=plan,
-                show_window=show_window,
-                previous_markup=previous_markup,
-            )
+            if frame_metadata is not None:
+                frame_metadata = replace(
+                    frame_metadata,
+                    top_cell_name=plan.document.top_cell_name,
+                    design_unit_mm=float(plan.document.dbu) * 1e3,
+                )
+            load_arguments = {
+                "generation": generation,
+                "candidate_session": candidate_session,
+                "plan": plan,
+                "show_window": show_window,
+                "previous_markup": previous_markup,
+            }
+            if frame_metadata is not None:
+                load_arguments["frame_metadata"] = frame_metadata
+            self._begin_design_markup_load(plan.document, **load_arguments)
 
     def _snapshot_design_session(self) -> DesignSession:
         session = self._design_session
@@ -6721,6 +6839,7 @@ class Main(QMainWindow):
             route=session.route,
             selected_route_point_index=session.selected_route_point_index,
             registration_status=session.registration_status,
+            active_frame_id=session.active_frame_id,
         )
 
     def _apply_design_load_success_plan(self, plan: design_navigation.DesignLoadResultPlan, show_window: bool) -> None:
@@ -6778,6 +6897,7 @@ class Main(QMainWindow):
         plan: design_navigation.DesignLoadResultPlan,
         show_window: bool,
         previous_markup: MarkupDocument | None,
+        frame_metadata: DesignFrameMetadata | None = None,
     ) -> None:
         self._design_markup_pending_visibility = None
         request_id = self._next_design_markup_request_id()
@@ -6793,6 +6913,7 @@ class Main(QMainWindow):
             plan=plan,
             show_window=show_window,
             previous_markup=previous_markup,
+            frame_metadata=frame_metadata,
         )
         self._set_design_load_pending_ui(True)
         if show_window:
@@ -6807,6 +6928,8 @@ class Main(QMainWindow):
         markup: MarkupDocument,
     ) -> None:
         self._design_session = context.session
+        self._active_design_frame_metadata = context.frame_metadata
+        self._activate_loaded_design_frame(frame_metadata=context.frame_metadata)
         self._design_markup = markup
         self._design_markup_direct_guide_ids = []
         self._design_markup_pending_visibility = None
@@ -7035,6 +7158,188 @@ class Main(QMainWindow):
         if store is not None:
             store.stop(timeout_s=0.0)
 
+    def _stop_coordinate_frame_store(self) -> None:
+        store = getattr(self, "_coordinate_frame_store", None)
+        if store is not None:
+            store.stop(timeout_s=0.0)
+
+    def _on_coordinate_frames_loaded(self, result: object) -> None:
+        connection_flow.handle_coordinate_frame_loaded(self, result)
+
+    def _on_coordinate_frames_saved(self, result: object) -> None:
+        connection_flow.handle_coordinate_frame_saved(self, result)
+
+    def _on_coordinate_frame_store_failed(self, failure: object) -> None:
+        operation = str(getattr(failure, "operation", "operation"))
+        message = str(getattr(failure, "message", "Unknown persistence error."))
+        logger.warning("Coordinate frame %s failed: %s", operation, message)
+        action = "loaded" if operation == "load" else "saved"
+        self._show_status(f"Design coordinate frames could not be {action}.", 6000)
+
+    def _activate_loaded_design_frame(
+        self,
+        *,
+        frame_metadata: DesignFrameMetadata | None = None,
+    ) -> None:
+        registry = getattr(self, "_coordinate_frame_registry", None)
+        if (
+            registry is None
+            or not bool(getattr(self, "_coordinate_frames_loaded", False))
+            or self._design_session.document is None
+        ):
+            return
+        metadata = frame_metadata or getattr(
+            self,
+            "_active_design_frame_metadata",
+            None,
+        )
+        if metadata is None:
+            return
+
+        legacy_state = self._design_session.export_persisted_state()
+        is_legacy_registration = bool(
+            self._design_session.active_frame_id is None
+            and isinstance(legacy_state, dict)
+            and len(self._design_session.source_design_marks_compact()) >= 2
+            and len(self._design_session.source_stage_marks_compact()) >= 2
+        )
+        if is_legacy_registration:
+            latest = self.stage_controller.latest_stage_position()
+            if latest is None or len(latest) <= self.STAGE_AXIS_NAMES.index("B"):
+                return
+            b_index = self.STAGE_AXIS_NAMES.index("B")
+            try:
+                physical_b = self.stage_controller.calibrated_axis_display_value(
+                    "B",
+                    float(latest[b_index]),
+                )
+                migration_state = self._legacy_design_state_for_frame_migration(
+                    legacy_state
+                )
+            except Exception as exc:
+                self._show_status(str(exc), 6000)
+                return
+            try:
+                migrated = migrate_legacy_design_state(
+                    migration_state,
+                    design_document=self._design_session.document,
+                    physical_b_deg=physical_b,
+                    pivot_machine_xy=DEFAULT_B_AXIS_ROTATION_PIVOT_STAGE,
+                    existing_names=(
+                        record.name for record in registry.snapshot().records
+                    ),
+                    metadata=metadata,
+                )
+            except (DesignModelError, ValueError) as exc:
+                self._show_status(str(exc), 6000)
+                return
+            if migrated is not None:
+                existing = find_equivalent_migrated_frame(
+                    registry.snapshot().records,
+                    migrated,
+                )
+                migrated = existing or registry.add(migrated)
+                self._design_session.link_active_frame(
+                    migrated,
+                    machine_point_for_navigation=(
+                        self._design_navigation_xy_from_physical_machine_xy
+                    ),
+                )
+                self._legacy_design_migration_state = dict(legacy_state)
+                connection_flow.publish_coordinate_frames(
+                    self,
+                    legacy_migration=True,
+                )
+                self._apply_coordinate_frame_authority_blocks()
+            return
+
+        try:
+            activation = design_navigation.activate_design_frame_for_document(
+                self._design_session,
+                registry,
+                self._design_session.document,
+                requested_frame_id=self._design_session.active_frame_id,
+                current_metadata=metadata,
+                machine_point_for_navigation=(
+                    self._design_navigation_xy_from_physical_machine_xy
+                ),
+            )
+        except DesignModelError as exc:
+            self._show_status(str(exc), 6000)
+            return
+        if activation.created or activation.updated:
+            connection_flow.publish_coordinate_frames(self)
+        self._apply_coordinate_frame_authority_blocks()
+
+    def _apply_coordinate_frame_authority_blocks(self) -> None:
+        registry = getattr(self, "_coordinate_frame_registry", None)
+        session = getattr(self, "_design_session", None)
+        if registry is None or session is None:
+            return
+        unavailable = {
+            axis
+            for axis in ("X", "Y", "B")
+            if not self.stage_controller.axes_are_homed({axis})
+        }
+        self._coordinate_frame_authority_blocked_axes = unavailable
+        if session.active_frame_id is None:
+            return
+        record = registry.get(session.active_frame_id)
+        if record is None:
+            return
+        effective = (
+            record.with_authority_block(
+                unavailable,
+                "Controller coordinate authority is unavailable.",
+            )
+            if unavailable
+            else record
+        )
+        try:
+            session.link_active_frame(
+                effective,
+                machine_point_for_navigation=(
+                    self._design_navigation_xy_from_physical_machine_xy
+                ),
+            )
+        except DesignModelError as exc:
+            session.link_active_frame(
+                effective.with_authority_block({"X", "Y", "B"}, str(exc))
+            )
+
+    def _legacy_design_state_for_frame_migration(
+        self,
+        legacy_state: Mapping[str, object],
+    ) -> dict[str, object]:
+        document = self._design_session.document
+        if document is None:
+            raise DesignModelError("Load a design before migrating its registration.")
+        converted = dict(legacy_state)
+        turns = int(document.rotation_quarter_turns) % 4
+        for key in ("source_design_marks", "check_design_marks"):
+            converted[key] = [
+                list(document.rotate_point((float(point[0]), float(point[1])), -turns))
+                for point in legacy_state.get(key, ())
+            ]
+        for key in ("source_stage_marks", "check_stage_marks"):
+            physical_marks: list[list[float]] = []
+            for point in legacy_state.get(key, ()):
+                configured_xy = self._raw_stage_xy_from_camera_stage_xy(
+                    (float(point[0]), float(point[1]))
+                )
+                physical_marks.append(
+                    [
+                        self.stage_controller.calibrated_axis_display_value(
+                            "X", configured_xy[0]
+                        ),
+                        self.stage_controller.calibrated_axis_display_value(
+                            "Y", configured_xy[1]
+                        ),
+                    ]
+                )
+            converted[key] = physical_marks
+        return converted
+
     def _show_navigation_status(self, plan: object) -> None:
         message = getattr(plan, "status_message", None)
         if message is not None:
@@ -7082,6 +7387,16 @@ class Main(QMainWindow):
         except DesignModelError as exc:
             self._show_status(str(exc), 6000)
             return
+        metadata = getattr(self, "_active_design_frame_metadata", None)
+        if metadata is not None and self._design_session.document is not None:
+            self._active_design_frame_metadata = replace(
+                metadata,
+                top_cell_name=self._design_session.document.top_cell_name,
+                design_unit_mm=float(self._design_session.document.dbu) * 1e3,
+            )
+            self._activate_loaded_design_frame(
+                frame_metadata=self._active_design_frame_metadata
+            )
         self._pending_alignment_preparation = None
         self._last_selected_design_point = None
         self._refresh_design_panel()
@@ -7729,6 +8044,7 @@ class Main(QMainWindow):
     ) -> RouteMeasurementStartPlan | None:
         route = self._design_session.route
         registration = self._design_session.registration
+        frame_snapshot = self._snapshot_active_route_design_frame()
         decision = route_measurement_start_decision(
             route=route,
             registration_valid=bool(registration is not None and registration.valid),
@@ -7737,14 +8053,29 @@ class Main(QMainWindow):
             previous_ok_only=configuration.previous_ok_only,
             previous_csv_path=configuration.previous_csv_path,
             structure_number_for_point=self._api_structure_number_for_measurement_point,
+            design_frame_snapshot=frame_snapshot,
         )
         if decision.accepted:
+            self._active_route_design_frame_snapshot = (
+                decision.plan.design_frame_snapshot
+                if decision.plan is not None
+                else None
+            )
             return decision.plan
         if decision.dialog_status:
             self._show_route_runtime_status(decision.message, decision.timeout_ms)
         else:
             self._show_status(decision.message, decision.timeout_ms)
         return None
+
+    def _snapshot_active_route_design_frame(self):
+        registry = getattr(self, "_coordinate_frame_registry", None)
+        frame_id = getattr(self._design_session, "active_frame_id", None)
+        record = registry.get(frame_id) if registry is not None and frame_id else None
+        return snapshot_route_design_frame(
+            frame_id=(record.frame_id if record is not None else None),
+            frame_version=(record.version if record is not None else None),
+        )
 
     def _route_measurement_points(
         self,
@@ -8788,20 +9119,39 @@ class Main(QMainWindow):
     def _capture_stage_registration_mark(self, *, check_mark: bool) -> None:
         try:
             stage_position = self.stage_controller.current_stage_position()
+            if len(stage_position) < 2:
+                self._show_status("X/Y coordinates are unavailable.", 5000)
+                return
+            stage_xy = (
+                self.stage_controller.calibrated_axis_display_value(
+                    "X",
+                    float(stage_position[0]),
+                ),
+                self.stage_controller.calibrated_axis_display_value(
+                    "Y",
+                    float(stage_position[1]),
+                ),
+            )
+            b_index = self.STAGE_AXIS_NAMES.index("B")
+            physical_b = (
+                self.stage_controller.calibrated_axis_display_value(
+                    "B",
+                    float(stage_position[b_index]),
+                )
+                if len(stage_position) > b_index
+                else None
+            )
         except Exception as exc:
             self._show_status(str(exc), 6000)
             return
-        if len(stage_position) < 2:
-            self._show_status("X/Y coordinates are unavailable.", 5000)
-            return
-        raw_stage_xy = (float(stage_position[0]), float(stage_position[1]))
-        stage_xy = self._camera_stage_xy_from_raw_stage_xy(raw_stage_xy)
         if check_mark:
             self._design_session.add_check_stage_mark(stage_xy)
             label = "check"
         else:
             self._design_session.add_source_stage_mark(stage_xy)
             label = "source"
+        if physical_b is not None:
+            self._commit_active_design_frame_registration(physical_b)
         self._refresh_design_panel()
         self._refresh_design_position()
         self._show_status(
@@ -8809,13 +9159,107 @@ class Main(QMainWindow):
             4000,
         )
 
+    def _commit_active_design_frame_registration(self, physical_b_deg: float) -> None:
+        registry = getattr(self, "_coordinate_frame_registry", None)
+        frame_id = self._design_session.active_frame_id
+        if registry is None or frame_id is None:
+            return
+        current = registry.get(frame_id)
+        document = self._design_session.document
+        if current is None or document is None:
+            return
+        current_metadata = DesignFrameMetadata.from_mapping(current.metadata)
+        turns = int(document.rotation_quarter_turns) % 4
+        design_marks = tuple(
+            document.rotate_point(point, -turns)
+            for point in self._design_session.source_design_marks_compact()
+        )
+        check_design_marks = tuple(
+            document.rotate_point(point, -turns)
+            for point in self._design_session.check_design_marks
+        )
+        source_stage_marks = tuple(
+            self._design_session.source_stage_marks_compact()
+        )
+        source_prefix_count = len(current_metadata.source_machine_marks)
+        machine_marks = (
+            tuple(current_metadata.source_machine_marks)
+            + source_stage_marks[source_prefix_count:]
+            if source_prefix_count
+            else source_stage_marks
+        )
+        check_stage_marks = tuple(self._design_session.check_stage_marks)
+        check_prefix_count = len(current_metadata.check_machine_marks)
+        physical_check_marks = (
+            tuple(current_metadata.check_machine_marks)
+            + check_stage_marks[check_prefix_count:]
+            if check_prefix_count
+            else check_stage_marks
+        )
+        if len(design_marks) < 2 or len(design_marks) != len(machine_marks):
+            return
+        try:
+            committed = commit_xyb_registration(
+                current,
+                design_points=design_marks,
+                physical_machine_points=machine_marks,
+                physical_b_deg=physical_b_deg,
+                pivot_machine_xy=DEFAULT_B_AXIS_ROTATION_PIVOT_STAGE,
+                check_design_points=check_design_marks,
+                check_machine_points=physical_check_marks,
+            )
+            committed = registry.replace(
+                committed,
+                expected_version=current.version,
+            )
+        except (DesignModelError, ValueError) as exc:
+            self._show_status(str(exc), 6000)
+            return
+        try:
+            self._design_session.link_active_frame(
+                committed,
+                machine_point_for_navigation=(
+                    self._design_navigation_xy_from_physical_machine_xy
+                ),
+            )
+        except DesignModelError as exc:
+            self._design_session.link_active_frame(
+                committed.with_authority_block({"X", "Y", "B"}, str(exc))
+            )
+        connection_flow.publish_coordinate_frames(self)
+
     def _design_spacing_ratio_is_reasonable(self, ratio: float) -> bool:
         return abs(float(ratio) - 1.0) <= self.DESIGN_SPACING_RATIO_TOLERANCE
 
     def _clear_design_registration(self) -> None:
         self._pending_alignment_preparation = None
         self._last_selected_design_point = None
-        self._design_session.clear_registration()
+        registry = getattr(self, "_coordinate_frame_registry", None)
+        metadata = getattr(self, "_active_design_frame_metadata", None)
+        if (
+            registry is not None
+            and bool(getattr(self, "_coordinate_frames_loaded", False))
+            and self._design_session.document is not None
+            and metadata is not None
+        ):
+            try:
+                design_navigation.activate_design_frame_for_document(
+                    self._design_session,
+                    registry,
+                    self._design_session.document,
+                    create_new=True,
+                    current_metadata=metadata,
+                    machine_point_for_navigation=(
+                        self._design_navigation_xy_from_physical_machine_xy
+                    ),
+                )
+            except DesignModelError as exc:
+                self._show_status(str(exc), 6000)
+                return
+            connection_flow.publish_coordinate_frames(self)
+            self._apply_coordinate_frame_authority_blocks()
+        else:
+            self._design_session.clear_registration()
         self._set_design_snap_enabled(True)
         self._refresh_design_panel()
         self._refresh_design_position()

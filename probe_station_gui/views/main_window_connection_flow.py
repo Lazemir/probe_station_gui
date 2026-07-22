@@ -6,6 +6,7 @@ import logging
 
 from PySide6.QtCore import QTimer
 
+from probe_station_gui.coordinates.persistence import CoordinateFrameDocument
 from probe_station_gui.design import navigation_adapter as design_navigation
 from probe_station_gui.stage import move_lifecycle as stage_move_lifecycle
 from probe_station_gui.views import main_window_homing as homing_ui
@@ -13,6 +14,86 @@ from probe_station_gui.views import main_window_stage_position_panel as stage_po
 
 
 logger = logging.getLogger(__name__)
+
+
+def _next_coordinate_frame_request_id(owner: object) -> int:
+    request_id = int(getattr(owner, "_coordinate_frame_request_id", 0)) + 1
+    owner._coordinate_frame_request_id = request_id
+    return request_id
+
+
+def request_coordinate_frame_load(owner: object) -> int:
+    """Start the durable-frame load independently from serial connection state."""
+
+    request_id = _next_coordinate_frame_request_id(owner)
+    owner._coordinate_frame_load_request_id = request_id
+    owner._coordinate_frame_store.load(request_id)
+    return request_id
+
+
+def handle_coordinate_frame_loaded(owner: object, result: object) -> None:
+    if result.request_id != getattr(owner, "_coordinate_frame_load_request_id", None):
+        return
+    owner._coordinate_frame_load_request_id = None
+    owner._coordinate_frame_registry.reset(result.document.records)
+    owner._coordinate_frames_loaded = True
+    apply_authority = getattr(owner, "_apply_coordinate_frame_authority_blocks", None)
+    if callable(apply_authority):
+        apply_authority()
+    owner._activate_loaded_design_frame()
+
+
+def publish_coordinate_frames(
+    owner: object,
+    *,
+    legacy_migration: bool = False,
+) -> int:
+    request_id = _next_coordinate_frame_request_id(owner)
+    document = CoordinateFrameDocument(
+        records=owner._coordinate_frame_registry.snapshot().records
+    )
+    if legacy_migration or getattr(
+        owner,
+        "_legacy_design_migration_request_id",
+        None,
+    ) is not None:
+        owner._legacy_design_migration_request_id = request_id
+    owner._coordinate_frame_store.publish(request_id, document)
+    return request_id
+
+
+def handle_coordinate_frame_saved(owner: object, result: object) -> None:
+    if result.request_id != getattr(
+        owner,
+        "_legacy_design_migration_request_id",
+        None,
+    ):
+        return
+    try:
+        complete_legacy_design_migration(owner)
+    except Exception:
+        logger.exception("Failed to replace legacy Design registration state")
+        show_status = getattr(owner, "_show_status", None)
+        if callable(show_status):
+            show_status("Design registration migration could not be finalized.", 6000)
+        return
+    owner._legacy_design_migration_request_id = None
+    owner._legacy_design_migration_state = None
+
+
+def complete_legacy_design_migration(owner: object) -> None:
+    """Replace legacy controller-owned registration after frame publication."""
+
+    state = owner.stage_controller.export_cached_controller_state()
+    if state is None:
+        loaded = owner.settings_manager.load_controller_state()
+        state = dict(loaded) if isinstance(loaded, dict) else {}
+    state.pop("design", None)
+    state.pop("design_session", None)
+    session_state = owner._design_session.export_persisted_state()
+    if session_state is not None:
+        state["design_session"] = session_state
+    owner.settings_manager.save_controller_state(state)
 
 
 def serial_baud_rate(serial_port: object) -> int:
@@ -47,6 +128,9 @@ def on_serial_connected(owner: object, serial_port: object) -> None:
         cached_state,
         cache_already_loaded=True,
     )
+    apply_authority = getattr(owner, "_apply_coordinate_frame_authority_blocks", None)
+    if callable(apply_authority):
+        apply_authority()
     if owner.joystick_panel and owner.joystick_dock:
         owner.joystick_panel.set_serial(owner.serial_connection)
         owner.joystick_dock.setVisible(True)
@@ -288,6 +372,18 @@ def controller_state_with_design(owner: object) -> dict[str, object] | None:
     state = owner.stage_controller.export_cached_controller_state()
     if state is None:
         return None
+    if getattr(owner, "_legacy_design_migration_request_id", None) is not None:
+        legacy_state = getattr(owner, "_legacy_design_migration_state", None)
+        if not isinstance(legacy_state, dict):
+            persisted = owner.settings_manager.load_controller_state()
+            if isinstance(persisted, dict):
+                legacy_state = persisted.get(
+                    "design_session",
+                    persisted.get("design"),
+                )
+        if isinstance(legacy_state, dict):
+            state["design_session"] = dict(legacy_state)
+        return state
     design_state = owner._design_session.export_persisted_state()
     if design_state is not None:
         state["design_session"] = design_state
@@ -298,7 +394,7 @@ def prepare_persisted_design_restore(
     owner: object,
     cached_state: dict[str, object],
 ) -> None:
-    design_state = cached_state.get("design_session")
+    design_state = cached_state.get("design_session", cached_state.get("design"))
     cached_position = design_navigation.coerce_position_tuple(
         cached_state.get("last_stage_position")
     )
@@ -365,9 +461,11 @@ def save_controller_state_without_design(owner: object) -> None:
     if state is None:
         cached_state = owner.settings_manager.load_controller_state()
         if isinstance(cached_state, dict):
+            cached_state.pop("design", None)
             cached_state.pop("design_session", None)
             owner.settings_manager.save_controller_state(cached_state)
         return
+    state.pop("design", None)
     state.pop("design_session", None)
     owner.settings_manager.save_controller_state(state)
 

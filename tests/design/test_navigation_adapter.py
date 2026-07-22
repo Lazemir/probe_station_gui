@@ -4,12 +4,15 @@ from pathlib import Path
 
 import numpy as np
 
+from probe_station_gui.coordinates.registry import CoordinateFrameRegistry
+from probe_station_gui.design.frame_registration import new_design_frame_draft
 from probe_station_gui.design.model import (
     DesignDocument,
     DesignRegistration,
     MeasurementTarget,
 )
 from probe_station_gui.design.navigation_adapter import (
+    activate_design_frame_for_document,
     apply_loaded_design_document,
     add_route_array_points,
     design_panel_presentation,
@@ -294,3 +297,35 @@ def test_panel_and_position_presentations_include_navigation_state(tmp_path: Pat
     assert position.selected_design_point == (1.0, 2.0)
     assert position.source_design_marks == ((0.0, 0.0),)
     assert position.check_design_marks == ((5.0, 6.0),)
+
+
+def test_loaded_design_links_requested_existing_frame_and_new_registration_is_independent(
+    tmp_path: Path,
+) -> None:
+    document = _make_document(tmp_path)
+    registry = CoordinateFrameRegistry()
+    first = registry.add(new_design_frame_draft(document, existing_names=()))
+    second = registry.add(
+        new_design_frame_draft(document, existing_names=(first.name,))
+    )
+    session = DesignSession(document=document)
+
+    linked = activate_design_frame_for_document(
+        session,
+        registry,
+        document,
+        requested_frame_id=first.frame_id,
+    )
+    created = activate_design_frame_for_document(
+        session,
+        registry,
+        document,
+        create_new=True,
+    )
+
+    assert linked.record.frame_id == first.frame_id
+    assert linked.created is False
+    assert created.created is True
+    assert created.record.frame_id not in {first.frame_id, second.frame_id}
+    assert created.record.name == f"{document.path.stem} (3)"
+    assert session.active_frame_id == created.record.frame_id

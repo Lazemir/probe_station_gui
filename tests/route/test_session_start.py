@@ -13,6 +13,7 @@ from probe_station_gui.route.session_start import (
     route_contact_quality_limits_from_payload,
     route_external_session_start_settings_from_payload,
     route_max_relative_rms_from_payload,
+    snapshot_route_design_frame,
 )
 from probe_station_gui.route.measurement_records import RouteMeasurementPoint
 
@@ -191,6 +192,36 @@ def test_api_route_session_start_decision_builds_points_settings_and_contact_sel
     assert decision.plan.start_settings.photo_focus_enabled is True
     assert decision.plan.start_settings.photo_focus_range_mm == 0.04
     assert decision.plan.start_settings.max_relative_rms == pytest.approx(0.015)
+
+
+def test_route_start_snapshots_active_design_frame_identity_and_version() -> None:
+    frame = snapshot_route_design_frame(frame_id="design-a", frame_version=4)
+    point = RouteMeasurementPoint(
+        index=1,
+        point_id="p001",
+        label="P001",
+        design_center=(0.0, 0.0),
+        stage_xy=(1.0, 1.0),
+        needle_1_design=(0.0, 0.0),
+        needle_2_design=(0.0, 0.0),
+    )
+
+    result = api_route_session_start_decision(
+        route=types.SimpleNamespace(points=[object()]),
+        registration_valid=True,
+        payload={},
+        current_point=1,
+        points_factory=lambda _route: [point],
+        default_contact_seek_range_mm=0.05,
+        default_contact_seek_step_mm=0.002,
+        default_contact_settle_s=0.4,
+        design_frame_snapshot=frame,
+    )
+
+    assert result.plan is not None
+    assert result.plan.design_frame_snapshot is frame
+    assert result.plan.design_frame_snapshot.frame_id == "design-a"
+    assert result.plan.design_frame_snapshot.frame_version == 4
 
 
 @pytest.mark.parametrize(

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import types
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -25,6 +26,8 @@ from probe_station_gui.design.selection_model import (
     route_entity_id,
 )
 from probe_station_gui.design.session import DesignSession
+from probe_station_gui.coordinates.registry import CoordinateFrameRegistry
+from probe_station_gui.design.frame_registration import new_design_frame_draft
 from probe_station_gui.route.model import MeasurementRoute
 
 DesignDocument = main_module.DesignDocument
@@ -236,6 +239,404 @@ def test_on_design_document_loaded_success_refreshes_persists_and_restores_route
     assert any("Loaded design 'loaded.gds' (TOP)." == item for item in statuses)
     assert panel.directories == [tmp_path]
     assert window.settings_manager.last_design_directory == tmp_path
+
+
+def test_design_load_worker_carries_precomputed_frame_metadata(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    window, _stage_controller, _statuses = _make_window()
+    document = _make_document(tmp_path)
+    emitted: list[tuple[object, ...]] = []
+    metadata = object()
+    window.design_document_loaded = types.SimpleNamespace(
+        emit=lambda *args: emitted.append(args)
+    )
+    monkeypatch.setattr(
+        main_module.DesignDocument,
+        "load",
+        lambda _path: document,
+    )
+    monkeypatch.setattr(
+        main_module.DesignFrameMetadata,
+        "from_document",
+        lambda _document: metadata,
+    )
+    monkeypatch.setattr(
+        main_module.threading,
+        "Thread",
+        lambda **kwargs: types.SimpleNamespace(start=kwargs["target"]),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "toggle_design_layout_window",
+        lambda *_args: None,
+    )
+
+    Main._start_design_document_load(
+        window,
+        str(document.path),
+        restore_state=None,
+        show_window=False,
+    )
+
+    payload = emitted[-1][1]
+    assert payload.document is document
+    assert payload.frame_metadata is metadata
+
+
+def test_restored_top_cell_reconciles_worker_frame_metadata(tmp_path: Path) -> None:
+    window, _stage_controller, _statuses = _make_window()
+    top_document = replace(
+        _make_document(tmp_path),
+        file_backed=True,
+        cell_names=("ALT", "TOP"),
+        cell_bounds={
+            "TOP": (0.0, 0.0, 10.0, 10.0),
+            "ALT": (20.0, 20.0, 30.0, 30.0),
+        },
+    )
+    alt_document = top_document.with_top_cell("ALT")
+    restore_state = DesignSession(document=alt_document).export_persisted_state()
+    assert restore_state is not None
+    worker_metadata = main_module.DesignFrameMetadata.from_document(top_document)
+    captured: list[tuple[DesignDocument, object]] = []
+    window._design_load_restore_states[1] = restore_state
+    window._design_load_show_window[1] = False
+    window._begin_design_markup_load = lambda document, **kwargs: captured.append(
+        (document, kwargs["frame_metadata"])
+    )
+
+    Main._on_design_document_loaded(
+        window,
+        1,
+        main_module._LoadedDesignDocument(top_document, worker_metadata),
+        None,
+    )
+
+    assert captured[0][0].top_cell_name == "ALT"
+    assert captured[0][1].top_cell_name == "ALT"
+
+
+def test_legacy_migration_reports_b_calibration_failure_without_adding_frame(
+    tmp_path: Path,
+) -> None:
+    document = _make_document(tmp_path)
+    session = DesignSession(document=document)
+    session.source_design_marks = ((0.0, 0.0), (1000.0, 0.0))
+    session.source_stage_marks = ((3.0, 4.0), (4.0, 4.0))
+    registry = CoordinateFrameRegistry()
+    statuses: list[str] = []
+    window = Main.__new__(Main)
+    window._design_session = session
+    window._coordinate_frame_registry = registry
+    window._coordinate_frames_loaded = True
+    window._active_design_frame_metadata = main_module.DesignFrameMetadata.from_document(
+        document
+    )
+    window.stage_controller = types.SimpleNamespace(
+        latest_stage_position=lambda: (0.0, 0.0, 0.0, 0.0, 12.0),
+        calibrated_axis_display_value=lambda _axis, _value: (_ for _ in ()).throw(
+            RuntimeError("B calibration unavailable")
+        ),
+    )
+    window._show_status = lambda message, _timeout: statuses.append(message)
+
+    Main._activate_loaded_design_frame(window)
+
+    assert registry.snapshot().records == ()
+    assert statuses == ["B calibration unavailable"]
+
+
+def test_legacy_migration_converts_camera_configured_marks_to_physical_machine(
+    tmp_path: Path,
+) -> None:
+    document = _make_document(tmp_path)
+    window = Main.__new__(Main)
+    window._design_session = DesignSession(document=document)
+    window._raw_stage_xy_from_camera_stage_xy = lambda point: (
+        point[0] + 100.0,
+        point[1] - 200.0,
+    )
+    window.stage_controller = types.SimpleNamespace(
+        calibrated_axis_display_value=lambda axis, value: float(value)
+        + {"X": 10.0, "Y": 20.0}[axis],
+    )
+    legacy = {
+        "source_design_marks": [[0.0, 0.0], [1000.0, 0.0]],
+        "source_stage_marks": [[-97.0, 204.0], [-96.0, 204.0]],
+        "check_design_marks": [[500.0, 0.0]],
+        "check_stage_marks": [[-96.5, 204.0]],
+    }
+
+    converted = Main._legacy_design_state_for_frame_migration(window, legacy)
+
+    assert converted["source_stage_marks"] == [[13.0, 24.0], [14.0, 24.0]]
+    assert converted["check_stage_marks"] == [[13.5, 24.0]]
+
+
+def test_stage_mark_capture_commits_active_frame_without_motion(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    base_document = _make_document(tmp_path)
+    document = base_document.with_rotation_delta(1)
+    canonical_design_marks = ((0.0, 0.0), (1000.0, 0.0))
+    registry = CoordinateFrameRegistry()
+    draft = registry.add(new_design_frame_draft(document, existing_names=()))
+    session = DesignSession(document=document)
+    session.link_active_frame(draft)
+    session.source_design_marks = tuple(
+        base_document.rotate_point(point, 1) for point in canonical_design_marks
+    )
+    positions = iter(
+        (
+            (3.0, 4.0, 0.0, 0.0, 12.0),
+            (4.0, 4.0, 0.0, 0.0, 12.0),
+        )
+    )
+    events: list[object] = []
+    window = Main.__new__(Main)
+    window._design_session = session
+    window._coordinate_frame_registry = registry
+    window.stage_controller = types.SimpleNamespace(
+        current_stage_position=lambda: next(positions),
+        calibrated_axis_display_value=lambda axis, value: float(value)
+        + {"X": 10.0, "Y": 20.0, "B": 30.0}[axis],
+        calibrated_axis_raw_value=lambda axis, value: float(value)
+        - {"X": 10.0, "Y": 20.0}[axis],
+    )
+    window._camera_stage_xy_from_raw_stage_xy = lambda point: (
+        point[0] - 100.0,
+        point[1] + 200.0,
+    )
+    window._refresh_design_panel = lambda: None
+    window._refresh_design_position = lambda: None
+    window._show_status = lambda *_args: None
+    monkeypatch.setattr(
+        main_module.connection_flow,
+        "publish_coordinate_frames",
+        lambda _owner: events.append(("publish",)),
+    )
+
+    Main._capture_stage_source_mark(window)
+    Main._capture_stage_source_mark(window)
+
+    committed = registry.get(draft.frame_id)
+    assert committed is not None
+    assert all(committed.readiness[axis].available for axis in ("X", "Y", "B"))
+    assert not committed.readiness["Z"].available
+    metadata = main_module.DesignFrameMetadata.from_mapping(committed.metadata)
+    assert metadata.source_design_marks == canonical_design_marks
+    assert metadata.source_machine_marks == ((13.0, 24.0), (14.0, 24.0))
+    assert committed.transform.reference_b_deg == 42.0
+    assert session.source_stage_marks_compact() == [(-97.0, 204.0), (-96.0, 204.0)]
+    assert events == [("publish",)]
+
+
+def test_stage_mark_capture_rejects_calibration_failure_before_mutating_session(
+    tmp_path: Path,
+) -> None:
+    document = _make_document(tmp_path)
+    session = DesignSession(document=document)
+    session.source_design_marks = ((0.0, 0.0),)
+    statuses: list[str] = []
+    window = Main.__new__(Main)
+    window._design_session = session
+    window.stage_controller = types.SimpleNamespace(
+        current_stage_position=lambda: (3.0, 4.0, 0.0, 0.0, 12.0),
+        calibrated_axis_display_value=lambda _axis, _value: (_ for _ in ()).throw(
+            RuntimeError("calibration unavailable")
+        ),
+    )
+    window._refresh_design_panel = lambda: None
+    window._refresh_design_position = lambda: None
+    window._show_status = lambda message, _timeout: statuses.append(message)
+
+    Main._capture_stage_source_mark(window)
+
+    assert not session.source_stage_marks_compact()
+    assert statuses == ["calibration unavailable"]
+
+
+def test_reset_design_registration_creates_an_independent_persistent_draft(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    document = _make_document(tmp_path)
+    registry = CoordinateFrameRegistry()
+    first = registry.add(new_design_frame_draft(document, existing_names=()))
+    session = DesignSession(document=document)
+    session.link_active_frame(first)
+    events: list[object] = []
+    window = Main.__new__(Main)
+    window._design_session = session
+    window._coordinate_frame_registry = registry
+    window._coordinate_frames_loaded = True
+    window._active_design_frame_metadata = main_module.DesignFrameMetadata.from_mapping(
+        first.metadata
+    )
+    window._pending_alignment_preparation = object()
+    window._last_selected_design_point = (1.0, 2.0)
+    window._set_design_snap_enabled = lambda value: events.append(("snap", value))
+    window._refresh_design_panel = lambda: events.append(("panel",))
+    window._refresh_design_position = lambda: events.append(("position",))
+    window._show_status = lambda message, _timeout: events.append(("status", message))
+    window._apply_coordinate_frame_authority_blocks = lambda: events.append(
+        ("authority",)
+    )
+    monkeypatch.setattr(
+        main_module.connection_flow,
+        "publish_coordinate_frames",
+        lambda _owner: events.append(("publish",)),
+    )
+
+    Main._clear_design_registration(window)
+
+    records = registry.snapshot().records
+    assert len(records) == 2
+    assert session.active_frame_id != first.frame_id
+    assert session.active_frame_id == records[-1].frame_id
+    assert records[-1].name == f"{document.path.stem} (2)"
+    new_metadata = main_module.DesignFrameMetadata.from_mapping(records[-1].metadata)
+    assert new_metadata.source_design_marks == ()
+    assert new_metadata.source_machine_marks == ()
+    assert ("publish",) in events
+
+
+def test_replacing_committed_source_marks_starts_fresh_draft_before_capture(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    document = _make_document(tmp_path)
+    registry = CoordinateFrameRegistry()
+    committed = registry.add(
+        main_module.commit_xyb_registration(
+            new_design_frame_draft(document, existing_names=()),
+            design_points=((0.0, 0.0), (1000.0, 0.0)),
+            physical_machine_points=((1.0, 2.0), (2.0, 2.0)),
+            physical_b_deg=0.0,
+            pivot_machine_xy=(0.0, 0.0),
+        )
+    )
+    session = DesignSession(document=document)
+    session.link_active_frame(committed)
+    positions = iter(
+        (
+            (10.0, 20.0, 0.0, 0.0, 5.0),
+            (11.0, 20.0, 0.0, 0.0, 5.0),
+        )
+    )
+    window = Main.__new__(Main)
+    window._design_session = session
+    window._coordinate_frame_registry = registry
+    window._coordinate_frames_loaded = True
+    window._active_design_frame_metadata = main_module.DesignFrameMetadata.from_mapping(
+        committed.metadata
+    )
+    window._manual_alignment_pick_slot = None
+    window._manual_alignment_points = [None, None]
+    window._pending_alignment_preparation = None
+    window._last_selected_design_point = None
+    window.stage_controller = types.SimpleNamespace(
+        current_stage_position=lambda: next(positions),
+        calibrated_axis_display_value=lambda _axis, value: float(value),
+        calibrated_axis_raw_value=lambda _axis, value: float(value),
+    )
+    window._camera_stage_xy_from_raw_stage_xy = lambda point: point
+    window._set_design_snap_enabled = lambda _enabled: None
+    window._refresh_design_panel = lambda: None
+    window._refresh_design_position = lambda: None
+    window._set_alignment_panel_expanded = lambda: None
+    window._show_status = lambda *_args: None
+    window._apply_coordinate_frame_authority_blocks = lambda: None
+    monkeypatch.setattr(
+        main_module.connection_flow,
+        "publish_coordinate_frames",
+        lambda _owner: None,
+    )
+
+    Main._on_design_layout_point_selected(window, 0, 100.0, 200.0)
+    Main._on_design_layout_point_selected(window, 1, 1100.0, 200.0)
+    replacement_id = session.active_frame_id
+    Main._capture_stage_source_mark(window)
+
+    first_capture = registry.get(replacement_id)
+    assert replacement_id != committed.frame_id
+    assert first_capture is not None
+    assert not first_capture.readiness["X"].available
+
+    Main._capture_stage_source_mark(window)
+
+    replacement = registry.get(replacement_id)
+    assert replacement is not None
+    metadata = main_module.DesignFrameMetadata.from_mapping(replacement.metadata)
+    assert metadata.source_design_marks == ((100.0, 200.0), (1100.0, 200.0))
+    assert metadata.source_machine_marks == ((10.0, 20.0), (11.0, 20.0))
+    assert replacement.readiness["X"].available
+    assert registry.get(committed.frame_id) == committed
+
+
+def test_top_cell_switch_links_the_matching_persistent_frame(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    top_document = replace(
+        _make_document(tmp_path),
+        file_backed=True,
+        cell_names=("ALT", "TOP"),
+        cell_bounds={
+            "TOP": (0.0, 0.0, 10.0, 10.0),
+            "ALT": (20.0, 20.0, 30.0, 30.0),
+        },
+    )
+    alt_document = top_document.with_top_cell("ALT")
+    top_metadata = main_module.DesignFrameMetadata.from_document(top_document)
+    alt_metadata = replace(top_metadata, top_cell_name="ALT")
+    registry = CoordinateFrameRegistry()
+    top_frame = registry.add(
+        new_design_frame_draft(
+            top_document,
+            existing_names=(),
+            metadata=top_metadata,
+        )
+    )
+    alt_frame = registry.add(
+        new_design_frame_draft(
+            alt_document,
+            existing_names=(top_frame.name,),
+            metadata=alt_metadata,
+        )
+    )
+    session = DesignSession(document=top_document)
+    session.link_active_frame(top_frame)
+    window = Main.__new__(Main)
+    window._design_session = session
+    window._coordinate_frame_registry = registry
+    window._coordinate_frames_loaded = True
+    window._active_design_frame_metadata = top_metadata
+    window._pending_alignment_preparation = None
+    window._last_selected_design_point = None
+    window._design_load_pending = False
+    window._route_measurement_thread = None
+    window._route_measurement_session_active = False
+    window._refresh_design_panel = lambda: None
+    window._refresh_design_position = lambda: None
+    window._show_navigation_status = lambda _plan: None
+    window._show_status = lambda *_args: None
+    window._apply_coordinate_frame_authority_blocks = lambda: None
+    monkeypatch.setattr(
+        main_module.connection_flow,
+        "publish_coordinate_frames",
+        lambda _owner: None,
+    )
+
+    Main._set_design_top_cell(window, "ALT")
+
+    assert session.document is not None
+    assert session.document.top_cell_name == "ALT"
+    assert session.active_frame_id == alt_frame.frame_id
+    assert window._active_design_frame_metadata.top_cell_name == "ALT"
 
 
 def _make_mixed_edit_window(tmp_path: Path) -> tuple[Main, list[str]]:

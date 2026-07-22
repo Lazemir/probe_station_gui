@@ -5,8 +5,10 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
+from probe_station_gui.coordinates.model import CoordinateFrameRecord
+from probe_station_gui.design.frame_registration import DesignFrameMetadata
 from probe_station_gui.design.model import (
     DesignDocument,
     DesignModelError,
@@ -52,6 +54,7 @@ class DesignSession:
     route: MeasurementRoute | None = None
     selected_route_point_index: int = -1
     registration_status: str = "No design registration."
+    active_frame_id: str | None = None
 
     def export_persisted_state(self) -> dict[str, object] | None:
         """Return design state tied to the current controller coordinate session."""
@@ -59,7 +62,7 @@ class DesignSession:
         if self.document is None:
             return None
         state: dict[str, object] = {
-            "version": 2,
+            "version": 3 if self.active_frame_id is not None else 2,
             "document_path": str(self.document.path),
             "top_cell_name": self.document.top_cell_name,
             "rotation_quarter_turns": int(self.document.rotation_quarter_turns),
@@ -67,22 +70,35 @@ class DesignSession:
                 [int(layer), int(datatype)]
                 for layer, datatype in sorted(self.document.visible_layers)
             ],
-            "source_design_marks": self._serialize_points(
-                self.source_design_marks_compact()
-            ),
-            "source_stage_marks": self._serialize_points(
-                self.source_stage_marks_compact()
-            ),
-            "check_design_marks": self._serialize_points(self.check_design_marks),
-            "check_stage_marks": self._serialize_points(self.check_stage_marks),
-            "registration_valid": bool(
-                self.registration is not None and self.registration.valid
-            ),
-            "registration_status": self.registration_status,
-            "registration_stale_reason": (
-                self.registration.stale_reason if self.registration is not None else ""
-            ),
         }
+        if self.active_frame_id is not None:
+            state["active_frame_id"] = self.active_frame_id
+        else:
+            state.update(
+                {
+                    "source_design_marks": self._serialize_points(
+                        self.source_design_marks_compact()
+                    ),
+                    "source_stage_marks": self._serialize_points(
+                        self.source_stage_marks_compact()
+                    ),
+                    "check_design_marks": self._serialize_points(
+                        self.check_design_marks
+                    ),
+                    "check_stage_marks": self._serialize_points(
+                        self.check_stage_marks
+                    ),
+                    "registration_valid": bool(
+                        self.registration is not None and self.registration.valid
+                    ),
+                    "registration_status": self.registration_status,
+                    "registration_stale_reason": (
+                        self.registration.stale_reason
+                        if self.registration is not None
+                        else ""
+                    ),
+                }
+            )
         try:
             stat = self.document.path.stat()
         except OSError:
@@ -109,6 +125,18 @@ class DesignSession:
             state_version = int(state.get("version", 1))
         except (TypeError, ValueError):
             state_version = 1
+        self.active_frame_id = None
+        if state_version >= 3:
+            frame_id = str(state.get("active_frame_id") or "").strip()
+            self.active_frame_id = frame_id or None
+            self.source_design_marks = ()
+            self.source_stage_marks = ()
+            self.check_design_marks = []
+            self.check_stage_marks = []
+            self.registration = None
+            self.registration_status = "Design frame is loading."
+            self._restore_persisted_route(document, state.get("route"))
+            return
         if state_version <= 1:
             self.source_design_marks = tuple(
                 point
@@ -207,6 +235,7 @@ class DesignSession:
         """Attach a new design document and clear derived state."""
 
         self.document = document
+        self.active_frame_id = None
         self.clear_targets()
         self.clear_route()
         self.clear_registration()
@@ -215,6 +244,7 @@ class DesignSession:
         """Remove the active design and all related state."""
 
         self.document = None
+        self.active_frame_id = None
         self.clear_targets()
         self.clear_route()
         self.clear_registration()
@@ -289,6 +319,68 @@ class DesignSession:
         self.check_stage_marks.clear()
         self.registration = None
         self.registration_status = "No design registration."
+        self.active_frame_id = None
+
+    def link_active_frame(
+        self,
+        frame: CoordinateFrameRecord,
+        *,
+        machine_point_for_navigation: Callable[[Point2D], Point2D] | None = None,
+    ) -> None:
+        """Link one durable frame and project it into legacy navigation state."""
+
+        metadata = DesignFrameMetadata.from_mapping(frame.metadata)
+        if self.document is None:
+            raise DesignModelError("Load a design before selecting its coordinate frame.")
+        if Path(metadata.source_path).resolve() != self.document.path.resolve():
+            raise DesignModelError("Coordinate frame belongs to a different design file.")
+        turns = int(self.document.rotation_quarter_turns) % 4
+        project_machine = machine_point_for_navigation or (
+            lambda point: (float(point[0]), float(point[1]))
+        )
+        try:
+            source_machine_marks = tuple(
+                project_machine(point) for point in metadata.source_machine_marks
+            )
+            check_machine_marks = tuple(
+                project_machine(point) for point in metadata.check_machine_marks
+            )
+        except Exception as exc:
+            raise DesignModelError(
+                f"Design frame coordinates are unavailable: {exc}"
+            ) from exc
+        self.active_frame_id = frame.frame_id
+        self.source_design_marks = tuple(
+            self.document.rotate_point(point, turns)
+            for point in metadata.source_design_marks
+        )
+        self.source_stage_marks = source_machine_marks
+        self.check_design_marks = [
+            self.document.rotate_point(point, turns)
+            for point in metadata.check_design_marks
+        ]
+        self.check_stage_marks = list(check_machine_marks)
+        self.registration = None
+        if len(self.source_design_marks) >= 2:
+            try:
+                self._rebuild_registration()
+            except DesignModelError as exc:
+                self.registration_status = str(exc)
+        if self.registration is None:
+            self.registration_status = "Design frame registration is incomplete."
+            return
+        unavailable = [
+            frame.readiness[axis]
+            for axis in ("X", "Y", "B")
+            if not frame.readiness[axis].available
+        ]
+        if unavailable:
+            reason = next(
+                (state.reason for state in unavailable if state.reason),
+                "Design frame registration is unavailable.",
+            )
+            self.registration = self.registration.mark_stale(reason)
+            self.registration_status = reason
 
     def clear_source_stage_marks(self) -> None:
         """Drop captured stage-side marks while preserving selected design marks."""

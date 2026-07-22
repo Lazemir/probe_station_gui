@@ -2,6 +2,12 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+from probe_station_gui.coordinates.persistence import (
+    CoordinateFrameDocument,
+    CoordinateFrameLoadResult,
+    CoordinateFrameStoreSuccess,
+)
+from probe_station_gui.coordinates.registry import CoordinateFrameRegistry
 from probe_station_gui.views import main_window_connection_flow as connection_flow
 
 
@@ -452,3 +458,139 @@ def test_restore_persisted_controller_state_imports_current_cache(monkeypatch) -
         ("joystick_rates", {"X": 900.0}),
         ("status", "Restored cached homing state; reading live coordinates."),
     ]
+
+
+def test_coordinate_frame_document_load_is_independent_from_serial_controller_state() -> None:
+    events: list[object] = []
+    owner = SimpleNamespace(
+        serial_connection=None,
+        _coordinate_frame_request_id=0,
+        _coordinate_frame_load_request_id=None,
+        _coordinate_frames_loaded=False,
+        _coordinate_frame_registry=CoordinateFrameRegistry(),
+        _coordinate_frame_store=SimpleNamespace(
+            load=lambda request_id: events.append(("frame_load", request_id))
+        ),
+        _apply_coordinate_frame_authority_blocks=lambda: events.append(
+            ("authority_blocks",)
+        ),
+        _activate_loaded_design_frame=lambda: events.append(("activate_design",)),
+    )
+
+    request_id = connection_flow.request_coordinate_frame_load(owner)
+    connection_flow.handle_coordinate_frame_loaded(
+        owner,
+        CoordinateFrameLoadResult(request_id, CoordinateFrameDocument()),
+    )
+
+    assert events == [
+        ("frame_load", request_id),
+        ("authority_blocks",),
+        ("activate_design",),
+    ]
+    assert owner._coordinate_frames_loaded is True
+
+
+def test_legacy_state_is_removed_only_after_frame_document_publish_succeeds(
+    monkeypatch,
+) -> None:
+    events: list[object] = []
+    owner = SimpleNamespace(
+        _coordinate_frame_request_id=0,
+        _legacy_design_migration_request_id=None,
+        _legacy_design_migration_state={"version": 2},
+        _coordinate_frame_registry=CoordinateFrameRegistry(),
+        _coordinate_frame_store=SimpleNamespace(
+            publish=lambda request_id, _document: events.append(
+                ("publish", request_id)
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        connection_flow,
+        "complete_legacy_design_migration",
+        lambda _owner: events.append(("remove_legacy",)),
+    )
+
+    request_id = connection_flow.publish_coordinate_frames(
+        owner,
+        legacy_migration=True,
+    )
+    assert events == [("publish", request_id)]
+
+    replacement_request_id = connection_flow.publish_coordinate_frames(owner)
+    connection_flow.handle_coordinate_frame_saved(
+        owner,
+        CoordinateFrameStoreSuccess(request_id, "save"),
+    )
+    assert events == [
+        ("publish", request_id),
+        ("publish", replacement_request_id),
+    ]
+
+    connection_flow.handle_coordinate_frame_saved(
+        owner,
+        CoordinateFrameStoreSuccess(replacement_request_id, "save"),
+    )
+
+    assert events == [
+        ("publish", request_id),
+        ("publish", replacement_request_id),
+        ("remove_legacy",),
+    ]
+    assert owner._legacy_design_migration_request_id is None
+    assert owner._legacy_design_migration_state is None
+
+
+def test_failed_legacy_controller_state_rewrite_keeps_migration_pending(
+    monkeypatch,
+) -> None:
+    statuses: list[str] = []
+    legacy = {"version": 2}
+    owner = SimpleNamespace(
+        _legacy_design_migration_request_id=4,
+        _legacy_design_migration_state=legacy,
+        _show_status=lambda message, _timeout: statuses.append(message),
+    )
+    monkeypatch.setattr(
+        connection_flow,
+        "complete_legacy_design_migration",
+        lambda _owner: (_ for _ in ()).throw(OSError("disk full")),
+    )
+
+    connection_flow.handle_coordinate_frame_saved(
+        owner,
+        CoordinateFrameStoreSuccess(4, "save"),
+    )
+
+    assert owner._legacy_design_migration_request_id == 4
+    assert owner._legacy_design_migration_state is legacy
+    assert statuses == ["Design registration migration could not be finalized."]
+
+
+def test_controller_state_persistence_preserves_legacy_registration_until_frame_save() -> None:
+    legacy = {
+        "version": 2,
+        "source_design_marks": [[0.0, 0.0], [1.0, 0.0]],
+        "source_stage_marks": [[2.0, 3.0], [3.0, 3.0]],
+    }
+    owner = SimpleNamespace(
+        _legacy_design_migration_request_id=7,
+        _legacy_design_migration_state=legacy,
+        stage_controller=SimpleNamespace(
+            export_cached_controller_state=lambda: {"last_stage_position": [1.0, 2.0]}
+        ),
+        _design_session=SimpleNamespace(
+            export_persisted_state=lambda: {
+                "version": 3,
+                "active_frame_id": "new-frame",
+            }
+        ),
+    )
+
+    state = connection_flow.controller_state_with_design(owner)
+
+    assert state == {
+        "last_stage_position": [1.0, 2.0],
+        "design_session": legacy,
+    }

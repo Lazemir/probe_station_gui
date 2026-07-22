@@ -30,6 +30,7 @@ class RouteMeasurementStartPlan:
     points: list[RouteMeasurementPoint]
     selected_point: RouteMeasurementPoint
     previous_ok_skipped_count: int | None
+    design_frame_snapshot: Any | None = None
 
 
 @dataclass(frozen=True)
@@ -147,6 +148,7 @@ def route_measurement_start_decision(
     previous_ok_only: bool,
     previous_csv_path: str | Path,
     structure_number_for_point: StructureNumberForPoint | None = None,
+    design_frame_snapshot: Any | None = None,
 ) -> RouteMeasurementStartDecision:
     """Plan the route points and selected starting point for a measurement run."""
 
@@ -213,6 +215,7 @@ def route_measurement_start_decision(
             points=points,
             selected_point=selected_point,
             previous_ok_skipped_count=previous_ok_skipped_count,
+            design_frame_snapshot=design_frame_snapshot,
         )
     )
 

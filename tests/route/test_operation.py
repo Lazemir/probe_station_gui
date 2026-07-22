@@ -11,6 +11,7 @@ from probe_station_gui.route.operation import (
     route_measurement_points_for_route,
     route_measurement_start_decision,
 )
+from probe_station_gui.route.session_start import snapshot_route_design_frame
 
 
 def _point(index: int, label: str | None = None) -> RouteMeasurementPoint:
@@ -52,6 +53,29 @@ def test_route_measurement_start_decision_filters_previous_ok_points(tmp_path) -
     assert decision.plan.selected_point.index == 3
     assert decision.plan.previous_ok_skipped_count == 1
     assert decision.message == ""
+
+
+def test_gui_route_plan_retains_design_frame_identity_when_active_link_changes(
+    tmp_path,
+) -> None:
+    snapshot = snapshot_route_design_frame(frame_id="design-a", frame_version=4)
+    active_link = {"frame_id": "design-a"}
+
+    decision = route_measurement_start_decision(
+        route=SimpleNamespace(points=[object()]),
+        registration_valid=True,
+        points_factory=lambda _route: [_point(1)],
+        current_point=1,
+        previous_ok_only=False,
+        previous_csv_path=tmp_path / "unused.csv",
+        design_frame_snapshot=snapshot,
+    )
+    active_link["frame_id"] = "design-b"
+
+    assert decision.plan is not None
+    assert decision.plan.design_frame_snapshot is snapshot
+    assert decision.plan.design_frame_snapshot.frame_id == "design-a"
+    assert decision.plan.points[0].stage_xy == (11.0, 21.0)
 
 
 def test_route_measurement_start_decision_rejects_current_point_filtered_out(

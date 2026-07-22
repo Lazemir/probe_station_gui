@@ -67,6 +67,13 @@ class ApiRouteSessionStartPlan:
     points: list[RouteMeasurementPoint]
     selected_point: RouteMeasurementPoint
     start_settings: RouteExternalSessionStartSettings
+    design_frame_snapshot: RouteDesignFrameSnapshot | None = None
+
+
+@dataclass(frozen=True)
+class RouteDesignFrameSnapshot:
+    frame_id: str
+    frame_version: int
 
 
 @dataclass(frozen=True)
@@ -133,6 +140,7 @@ def api_route_session_start_decision(
     default_contact_seek_range_mm: float,
     default_contact_seek_step_mm: float,
     default_contact_settle_s: float,
+    design_frame_snapshot: RouteDesignFrameSnapshot | None = None,
 ) -> ApiRouteSessionStartDecision:
     if route is None or not getattr(route, "points", None):
         return ApiRouteSessionStartDecision(
@@ -177,8 +185,21 @@ def api_route_session_start_decision(
             points=points,
             selected_point=selected_point,
             start_settings=start_settings,
+            design_frame_snapshot=design_frame_snapshot,
         )
     )
+
+
+def snapshot_route_design_frame(
+    *,
+    frame_id: str | None,
+    frame_version: int | None,
+) -> RouteDesignFrameSnapshot | None:
+    """Capture an immutable Design-frame identity for one route launch."""
+
+    if frame_id is None or frame_version is None:
+        return None
+    return RouteDesignFrameSnapshot(str(frame_id), int(frame_version))
 
 
 def route_launch_presentation(
@@ -612,6 +633,7 @@ __all__ = [
     "GuiRouteLaunchState",
     "GuiRouteStartPreflight",
     "RouteExternalSessionStartSettings",
+    "RouteDesignFrameSnapshot",
     "RouteLaunchPresentation",
     "api_route_session_start_decision",
     "gui_route_camera_frame_preflight",
@@ -622,4 +644,5 @@ __all__ = [
     "route_contact_quality_limits_from_payload",
     "route_external_session_start_settings_from_payload",
     "route_max_relative_rms_from_payload",
+    "snapshot_route_design_frame",
 ]

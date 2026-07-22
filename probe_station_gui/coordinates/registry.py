@@ -39,6 +39,23 @@ class CoordinateFrameRegistry:
             self._generation += 1
             return record
 
+    def get(self, frame_id: str) -> CoordinateFrameRecord | None:
+        with self._lock:
+            return self._records.get(str(frame_id))
+
+    def reset(self, records: Iterable[CoordinateFrameRecord]) -> RegistrySnapshot:
+        """Atomically install one loaded durable frame document."""
+
+        loaded: dict[str, CoordinateFrameRecord] = {}
+        for record in records:
+            if record.frame_id in loaded:
+                raise ValueError(f"Frame {record.frame_id} appears more than once.")
+            loaded[record.frame_id] = record
+        with self._lock:
+            self._records = loaded
+            self._generation += 1
+        return self.snapshot()
+
     def replace(
         self,
         record: CoordinateFrameRecord,

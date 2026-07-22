@@ -7,6 +7,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+from probe_station_gui.coordinates.model import CoordinateFrameRecord
+from probe_station_gui.coordinates.registry import CoordinateFrameRegistry
+from probe_station_gui.design.frame_registration import (
+    DesignFrameMetadata,
+    design_frame_for_loaded_document,
+    new_design_frame_draft,
+)
 from probe_station_gui.design.model import (
     DesignDocument,
     MeasurementTarget,
@@ -50,6 +57,13 @@ class DesignLoadResultPlan:
     clear_cached_design: bool = False
     last_selected_design_point: Point2D | None = None
     route_to_restore: MeasurementRoute | None = None
+
+
+@dataclass(frozen=True)
+class DesignFrameActivation:
+    record: CoordinateFrameRecord
+    created: bool = False
+    updated: bool = False
 
 
 @dataclass(frozen=True)
@@ -206,6 +220,92 @@ def persisted_design_file_is_current(state: dict[str, object]) -> bool:
         except (TypeError, ValueError):
             return False
     return True
+
+
+def activate_design_frame_for_document(
+    session: DesignSession,
+    registry: CoordinateFrameRegistry,
+    document: DesignDocument,
+    *,
+    requested_frame_id: str | None = None,
+    create_new: bool = False,
+    current_metadata: DesignFrameMetadata | None = None,
+    machine_point_for_navigation: Callable[[Point2D], Point2D] | None = None,
+) -> DesignFrameActivation:
+    """Select a durable frame for a loaded design or create another draft."""
+
+    snapshot = registry.snapshot()
+    records = snapshot.records
+    existing_names = tuple(record.name for record in records)
+    if create_new:
+        record = registry.add(
+            new_design_frame_draft(
+                document,
+                existing_names=existing_names,
+                metadata=current_metadata,
+            )
+        )
+        session.link_active_frame(
+            record,
+            machine_point_for_navigation=machine_point_for_navigation,
+        )
+        return DesignFrameActivation(record=record, created=True)
+
+    selected = registry.get(requested_frame_id) if requested_frame_id else None
+    if requested_frame_id and selected is None:
+        raise DesignModelError("Selected Design coordinate frame was not found.")
+    if selected is None:
+        resolved_path = document.path.expanduser().resolve()
+        selected = next(
+            (
+                record
+                for record in records
+                if _frame_source_path(record) == resolved_path
+                and _frame_top_cell(record) == document.top_cell_name
+            ),
+            None,
+        )
+    if selected is None:
+        selected = registry.add(
+            new_design_frame_draft(
+                document,
+                existing_names=existing_names,
+                metadata=current_metadata,
+            )
+        )
+        session.link_active_frame(
+            selected,
+            machine_point_for_navigation=machine_point_for_navigation,
+        )
+        return DesignFrameActivation(record=selected, created=True)
+
+    reconciled = design_frame_for_loaded_document(
+        selected,
+        document,
+        current_metadata=current_metadata,
+    )
+    updated = reconciled != selected
+    if updated:
+        reconciled = registry.replace(reconciled, expected_version=selected.version)
+    session.link_active_frame(
+        reconciled,
+        machine_point_for_navigation=machine_point_for_navigation,
+    )
+    return DesignFrameActivation(record=reconciled, updated=updated)
+
+
+def _frame_source_path(record: CoordinateFrameRecord) -> Path | None:
+    try:
+        return Path(DesignFrameMetadata.from_mapping(record.metadata).source_path).resolve()
+    except (KeyError, TypeError, ValueError, OSError):
+        return None
+
+
+def _frame_top_cell(record: CoordinateFrameRecord) -> str:
+    try:
+        return DesignFrameMetadata.from_mapping(record.metadata).top_cell_name
+    except (KeyError, TypeError, ValueError):
+        return ""
 
 
 def prepare_persisted_design_restore(
@@ -860,6 +960,7 @@ def design_position_presentation(
 
 
 __all__ = [
+    "DesignFrameActivation",
     "DesignLoadResultPlan",
     "DesignMovePlan",
     "DesignPanelPresentation",
@@ -870,6 +971,7 @@ __all__ = [
     "RoutePointSelectionPlan",
     "add_design_route_point",
     "add_route_array_points",
+    "activate_design_frame_for_document",
     "apply_loaded_design_document",
     "clear_measurement_route_points",
     "coerce_position_tuple",

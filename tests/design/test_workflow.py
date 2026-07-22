@@ -1,9 +1,15 @@
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
 
+from probe_station_gui.coordinates.registry import CoordinateFrameRegistry
+from probe_station_gui.design.frame_registration import (
+    commit_xyb_registration,
+    new_design_frame_draft,
+)
 from probe_station_gui.design.model import (
     DesignDocument,
     DesignModelError,
@@ -215,6 +221,68 @@ class DesignSessionTest(unittest.TestCase):
         self.assertFalse(session.registration.valid)
         self.assertEqual(session.registration_status, "Controller reset.")
         self.assertEqual(session.registration.stale_reason, "Controller reset.")
+
+    def test_active_frame_link_is_session_state_and_unload_keeps_registry_record(
+        self,
+    ) -> None:
+        document = self._make_document()
+        registry = CoordinateFrameRegistry()
+        frame = registry.add(
+            commit_xyb_registration(
+                new_design_frame_draft(document, existing_names=()),
+                design_points=((0.0, 0.0), (1000.0, 0.0)),
+                physical_machine_points=((1.0, 2.0), (2.0, 2.0)),
+                physical_b_deg=5.0,
+                pivot_machine_xy=(0.0, 0.0),
+            )
+        )
+        session = DesignSession(document=document)
+
+        session.link_active_frame(frame)
+        state = session.export_persisted_state()
+        session.unload_document()
+
+        assert state is not None
+        self.assertEqual(state["version"], 3)
+        self.assertEqual(state["active_frame_id"], frame.frame_id)
+        self.assertNotIn("source_stage_marks", state)
+        self.assertIsNone(session.active_frame_id)
+        self.assertEqual(registry.get(frame.frame_id), frame)
+
+    def test_active_frame_marks_roundtrip_through_rotated_view_in_canonical_coordinates(
+        self,
+    ) -> None:
+        document = replace(
+            self._make_document(),
+            bounds=(0.0, 0.0, 1.0, 0.0),
+        )
+        canonical_marks = ((0.0, 0.0), (1.0, 0.0))
+        frame = commit_xyb_registration(
+            new_design_frame_draft(document, existing_names=()),
+            design_points=canonical_marks,
+            physical_machine_points=((1.0, 2.0), (1.001, 2.0)),
+            physical_b_deg=5.0,
+            pivot_machine_xy=(0.0, 0.0),
+        )
+        rotated = document.with_rotation_delta(1)
+        expected_marks = tuple(
+            document.rotate_point(point, 1) for point in canonical_marks
+        )
+        session = DesignSession(document=rotated)
+        session.link_active_frame(frame)
+        state = session.export_persisted_state()
+        restored = DesignSession()
+
+        assert state is not None
+        restored_document = document.with_rotation_delta(
+            int(state["rotation_quarter_turns"])
+        )
+        restored.restore_persisted_state(restored_document, state)
+        restored.link_active_frame(frame)
+
+        self.assertEqual(tuple(session.source_design_marks_compact()), expected_marks)
+        self.assertEqual(tuple(restored.source_design_marks_compact()), expected_marks)
+        self.assertEqual(restored.active_frame_id, frame.frame_id)
 
     def test_persisted_state_roundtrip_restores_registration(self) -> None:
         document = self._make_document()
