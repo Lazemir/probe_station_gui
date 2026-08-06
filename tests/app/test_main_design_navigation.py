@@ -303,6 +303,19 @@ def _set_rotation_settings(
     )
 
 
+def _record_legacy_work_provenance(
+    session: DesignSession,
+    work_offset: tuple[float, ...],
+) -> None:
+    session.record_legacy_stage_coordinate_provenance(
+        {
+            "position_reporting_mode": "work",
+            "coordinate_system": "G54",
+            "work_offset": list(work_offset),
+        }
+    )
+
+
 def test_design_load_worker_carries_precomputed_frame_metadata(
     monkeypatch,
     tmp_path: Path,
@@ -418,6 +431,7 @@ def test_legacy_migration_waiting_for_b_is_runtime_invalid_but_persisted(
     session.source_design_marks = ((0.0, 0.0), (1000.0, 0.0))
     session.source_stage_marks = ((3.0, 4.0), (4.0, 4.0))
     session._rebuild_registration()
+    _record_legacy_work_provenance(session, (0.0, 0.0, 0.0, 0.0, 0.0))
     assert session.registration is not None and session.registration.valid
     persisted_before = session.export_persisted_state()
     registry = CoordinateFrameRegistry()
@@ -455,6 +469,7 @@ def test_first_fresh_b_status_retries_legacy_migration_once(
     session = DesignSession(document=document)
     session.source_design_marks = ((0.0, 0.0), (1000.0, 0.0))
     session.source_stage_marks = ((3.0, 4.0), (4.0, 4.0))
+    _record_legacy_work_provenance(session, (0.0, 0.0, 0.0, 0.0, 0.0))
     session._rebuild_registration()
     registry = CoordinateFrameRegistry()
     snapshot: dict[str, MachineCoordinateSnapshot | None] = {"value": None}
@@ -509,7 +524,7 @@ def test_first_fresh_b_status_retries_legacy_migration_once(
     assert publish_calls == [True]
 
 
-def test_legacy_migration_converts_camera_configured_marks_to_physical_machine(
+def test_legacy_migration_uses_verified_capture_wco_not_changed_current_wco(
     tmp_path: Path,
 ) -> None:
     document = _make_document(tmp_path)
@@ -543,16 +558,88 @@ def test_legacy_migration_converts_camera_configured_marks_to_physical_machine(
         "source_stage_marks": [[-97.0, 204.0], [-96.0, 204.0]],
         "check_design_marks": [[500.0, 0.0]],
         "check_stage_marks": [[-96.5, 204.0]],
+        "stage_coordinate_provenance": {
+            "position_reporting_mode": "work",
+            "coordinate_system": "G54",
+            "work_offset": [1.0, 2.0, 0.0, 0.0, 0.0],
+        },
     }
 
     converted = Main._legacy_design_state_for_frame_migration(window, legacy)
 
     assert np.asarray(converted["source_stage_marks"]) == pytest.approx(
-        np.asarray([[8.4, 7.2], [9.6, 7.2]])
+        np.asarray([[4.8, 4.8], [6.0, 4.8]])
     )
     assert np.asarray(converted["check_stage_marks"]) == pytest.approx(
-        np.asarray([[9.0, 7.2]])
+        np.asarray([[5.4, 4.8]])
     )
+
+
+@pytest.mark.parametrize(
+    "capture_provenance",
+    [
+        None,
+        {
+            "position_reporting_mode": "work",
+            "coordinate_system": "G54",
+            "work_offset": [[]],
+        },
+    ],
+    ids=("absent", "malformed"),
+)
+def test_legacy_migration_without_verified_capture_wco_blocks_and_preserves_payload(
+    capture_provenance: object,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    document = _make_document(tmp_path)
+    session = DesignSession(document=document)
+    session.source_design_marks = ((0.0, 0.0), (1000.0, 0.0))
+    session.source_stage_marks = ((3.0, 4.0), (4.0, 4.0))
+    if capture_provenance is not None:
+        session._legacy_stage_coordinate_provenance = capture_provenance
+    expected_payload = {
+        **session.export_persisted_state(),
+        **(
+            {}
+            if capture_provenance is None
+            else {"stage_coordinate_provenance": capture_provenance}
+        ),
+    }
+    registry = CoordinateFrameRegistry()
+    statuses: list[str] = []
+    window = Main.__new__(Main)
+    window._design_session = session
+    window._coordinate_frame_registry = registry
+    window._coordinate_frames_loaded = True
+    window._active_design_frame_metadata = main_module.DesignFrameMetadata.from_document(
+        document
+    )
+    window._raw_stage_xy_from_camera_stage_xy = lambda point: point
+    window._design_navigation_xy_from_physical_machine_xy = lambda point: point
+    window.stage_controller = types.SimpleNamespace(
+        latest_machine_coordinate_snapshot=lambda: _machine_snapshot(
+            (13.0, 24.0, 0.0, 0.0, 5.0),
+            work_offset=(10.0, 20.0, 0.0, 0.0, 0.0),
+        ),
+        axes_are_homed=lambda axes: axes.issubset({"X", "Y"}),
+    )
+    window._show_status = lambda message, _timeout: statuses.append(str(message))
+    _set_rotation_settings(window)
+    monkeypatch.setattr(
+        main_module.connection_flow,
+        "publish_coordinate_frames",
+        lambda _owner, *, legacy_migration=False: None,
+    )
+
+    Main._activate_loaded_design_frame(window)
+
+    assert registry.snapshot().records == ()
+    assert session.active_frame_id is None
+    assert session.stage_from_design((500.0, 0.0)) is None
+    assert "capture-time" in session.registration_status.lower()
+    assert session.export_persisted_state() == expected_payload
+    assert statuses and "capture-time" in statuses[-1].lower()
 
 
 def test_stage_mark_capture_commits_active_frame_without_motion(
@@ -646,6 +733,72 @@ def test_stage_mark_capture_commits_active_frame_without_motion(
     assert committed.transform.reference_b_deg == 42.0
     assert session.source_stage_marks_compact() == [(-97.0, 204.0), (-96.0, 204.0)]
     assert events == [("publish",)]
+
+
+def test_legacy_stage_mark_capture_persists_its_wco_provenance(tmp_path: Path) -> None:
+    document = _make_document(tmp_path)
+    session = DesignSession(document=document)
+    session.source_design_marks = ((0.0, 0.0),)
+    requests: list[object] = []
+    snapshot = _machine_snapshot(
+        (13.0, 24.0, 0.0, 0.0, 5.0),
+        work_offset=(10.0, 20.0, 0.0, 0.0, 0.0),
+    )
+    window = Main.__new__(Main)
+    window._design_session = session
+    window._coordinate_frame_registry = CoordinateFrameRegistry()
+    window.stage_controller = types.SimpleNamespace(
+        request_machine_coordinate_snapshot=lambda token, *, axes: (
+            requests.append(token) or True
+        ),
+    )
+    window._camera_stage_xy_from_raw_stage_xy = lambda point: point
+    window._refresh_design_panel = lambda: None
+    window._refresh_design_position = lambda: None
+    window._show_status = lambda *_args: None
+
+    Main._capture_stage_source_mark(window)
+    Main._on_registration_machine_coordinate_snapshot_finished(
+        window,
+        requests.pop(),
+        True,
+        snapshot,
+        "",
+    )
+
+    persisted = session.export_persisted_state()
+    assert persisted is not None
+    assert persisted["stage_coordinate_provenance"] == {
+        "position_reporting_mode": "work",
+        "coordinate_system": "G54",
+        "work_offset": [10.0, 20.0, 0.0, 0.0, 0.0],
+    }
+
+
+def test_legacy_stage_mark_captures_under_different_wcos_fail_closed(
+    tmp_path: Path,
+) -> None:
+    session = DesignSession(document=_make_document(tmp_path))
+    first = {
+        "position_reporting_mode": "work",
+        "coordinate_system": "G54",
+        "work_offset": [1.0, 2.0, 0.0, 0.0, 0.0],
+    }
+    second = {
+        "position_reporting_mode": "work",
+        "coordinate_system": "G54",
+        "work_offset": [4.0, 5.0, 0.0, 0.0, 0.0],
+    }
+
+    session.record_legacy_stage_coordinate_provenance(first)
+    session.add_source_stage_mark((3.0, 4.0))
+    session.record_legacy_stage_coordinate_provenance(second)
+
+    persisted = session.export_persisted_state()
+    assert persisted is not None
+    assert persisted["stage_coordinate_provenance"] == {
+        "conflicting_capture_provenance": [first, second]
+    }
 
 
 def test_stage_mark_capture_rejects_calibration_failure_before_mutating_session(
@@ -1037,6 +1190,7 @@ def test_legacy_migration_projection_failure_leaves_registry_and_link_unchanged(
     session = DesignSession(document=document)
     session.source_design_marks = ((0.0, 0.0), (1000.0, 0.0))
     session.source_stage_marks = ((3.0, 4.0), (4.0, 4.0))
+    _record_legacy_work_provenance(session, (0.0, 0.0, 0.0, 0.0, 0.0))
     before = registry.snapshot()
     statuses: list[str] = []
     window = Main.__new__(Main)

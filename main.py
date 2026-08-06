@@ -7547,7 +7547,9 @@ class Main(QMainWindow):
                     legacy_state
                 )
             except Exception as exc:
-                self._show_status(str(exc), 6000)
+                reason = str(exc) or "Legacy Design registration is unavailable."
+                self._design_session.block_legacy_registration(reason)
+                self._show_status(reason, 6000)
                 return
             try:
                 migrated = migrate_legacy_design_state(
@@ -7701,6 +7703,12 @@ class Main(QMainWindow):
             raise DesignModelError(
                 "Legacy registration requires same-generation Machine and work coordinates."
             )
+        capture_mode, capture_work_offset = (
+            self._verified_legacy_stage_coordinate_provenance(
+                legacy_state.get("stage_coordinate_provenance"),
+                snapshot,
+            )
+        )
         converted = dict(legacy_state)
         turns = int(document.rotation_quarter_turns) % 4
         for key in ("source_design_marks", "check_design_marks"):
@@ -7714,18 +7722,73 @@ class Main(QMainWindow):
                 configured_xy = self._raw_stage_xy_from_camera_stage_xy(
                     (float(point[0]), float(point[1]))
                 )
+                raw_machine_xy = []
+                for axis, configured_value in zip(("X", "Y"), configured_xy):
+                    axis_index = snapshot.axis_index[axis]
+                    offset = (
+                        capture_work_offset[axis_index]
+                        if capture_mode == "work"
+                        else 0.0
+                    )
+                    raw_machine_xy.append(float(configured_value) + offset)
                 physical_marks.append(
                     [
-                        snapshot.configured_controller_to_physical_machine(
-                            "X", configured_xy[0]
+                        snapshot.mapper.controller_to_physical(
+                            "X", raw_machine_xy[0]
                         ),
-                        snapshot.configured_controller_to_physical_machine(
-                            "Y", configured_xy[1]
+                        snapshot.mapper.controller_to_physical(
+                            "Y", raw_machine_xy[1]
                         ),
                     ]
                 )
             converted[key] = physical_marks
         return converted
+
+    @staticmethod
+    def _verified_legacy_stage_coordinate_provenance(
+        value: object,
+        snapshot: MachineCoordinateSnapshot,
+    ) -> tuple[str, tuple[float, ...]]:
+        message = "Legacy registration requires verified capture-time WCO provenance."
+        if not isinstance(value, Mapping) or set(value) != {
+            "position_reporting_mode",
+            "coordinate_system",
+            "work_offset",
+        }:
+            raise DesignModelError(message)
+        mode = value.get("position_reporting_mode")
+        if not isinstance(mode, str) or mode not in {"machine", "work"}:
+            raise DesignModelError(message)
+        coordinate_system = value.get("coordinate_system")
+        if mode == "work":
+            if not isinstance(coordinate_system, str) or not coordinate_system.strip():
+                raise DesignModelError(message)
+        elif coordinate_system is not None:
+            raise DesignModelError(message)
+        raw_offsets = value.get("work_offset")
+        if not isinstance(raw_offsets, (list, tuple)):
+            raise DesignModelError(message)
+        try:
+            offsets = tuple(
+                float(offset)
+                for offset in raw_offsets
+                if not isinstance(offset, bool)
+            )
+        except (TypeError, ValueError) as exc:
+            raise DesignModelError(message) from exc
+        if len(offsets) != len(raw_offsets) or not all(
+            math.isfinite(offset) for offset in offsets
+        ):
+            raise DesignModelError(message)
+        required_indices = tuple(snapshot.axis_index[axis] for axis in ("X", "Y"))
+        if any(index < 0 or index >= len(offsets) for index in required_indices):
+            raise DesignModelError(message)
+        if mode == "machine" and any(
+            not math.isclose(offsets[index], 0.0, rel_tol=0.0, abs_tol=1e-12)
+            for index in required_indices
+        ):
+            raise DesignModelError(message)
+        return mode, offsets
 
     def _show_navigation_status(self, plan: object) -> None:
         message = getattr(plan, "status_message", None)
@@ -9651,6 +9714,14 @@ class Main(QMainWindow):
             return
 
         key = context.frame_id or "legacy"
+        if context.frame_id is None:
+            self._design_session.record_legacy_stage_coordinate_provenance(
+                {
+                    "position_reporting_mode": snapshot.position_reporting_mode,
+                    "coordinate_system": snapshot.coordinate_system,
+                    "work_offset": list(snapshot.work_offset),
+                }
+            )
         pending_by_frame = getattr(self, "_pending_registration_physical_marks", None)
         if pending_by_frame is None:
             pending_by_frame = {}

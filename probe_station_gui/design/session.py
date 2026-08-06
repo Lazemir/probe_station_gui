@@ -86,6 +86,18 @@ class DesignSession:
         repr=False,
         compare=False,
     )
+    _legacy_stage_coordinate_provenance: object = field(
+        default=None,
+        init=False,
+        repr=False,
+        compare=False,
+    )
+    _legacy_stage_coordinate_provenance_present: bool = field(
+        default=False,
+        init=False,
+        repr=False,
+        compare=False,
+    )
 
     def export_persisted_state(self) -> dict[str, object] | None:
         """Return design state tied to the current controller coordinate session."""
@@ -142,6 +154,22 @@ class DesignSession:
         else:
             state["document_mtime_ns"] = int(stat.st_mtime_ns)
             state["document_size"] = int(stat.st_size)
+        legacy_provenance = getattr(
+            self,
+            "_legacy_stage_coordinate_provenance",
+            None,
+        )
+        if self.active_frame_id is None and (
+            bool(
+                getattr(
+                    self,
+                    "_legacy_stage_coordinate_provenance_present",
+                    False,
+                )
+            )
+            or legacy_provenance is not None
+        ):
+            state["stage_coordinate_provenance"] = deepcopy(legacy_provenance)
         route_state = self._export_persisted_route_state()
         if route_state is not None:
             state["route"] = route_state
@@ -162,6 +190,14 @@ class DesignSession:
         except (TypeError, ValueError):
             state_version = 1
         self.active_frame_id = None
+        self._legacy_stage_coordinate_provenance_present = (
+            state_version < 3 and "stage_coordinate_provenance" in state
+        )
+        self._legacy_stage_coordinate_provenance = (
+            deepcopy(state.get("stage_coordinate_provenance"))
+            if self._legacy_stage_coordinate_provenance_present
+            else None
+        )
         if state_version >= 3:
             frame_id = str(state.get("active_frame_id") or "").strip()
             self.active_frame_id = frame_id or None
@@ -358,6 +394,8 @@ class DesignSession:
         self.registration_status = "No design registration."
         self.active_frame_id = None
         self._runtime_blocked_persisted_state = None
+        self._legacy_stage_coordinate_provenance = None
+        self._legacy_stage_coordinate_provenance_present = False
 
     @property
     def legacy_registration_waiting_for_b(self) -> bool:
@@ -367,6 +405,11 @@ class DesignSession:
         )
 
     def block_legacy_registration_until_b(self, reason: str) -> None:
+        """Block legacy runtime use without changing its persisted payload."""
+
+        self.block_legacy_registration(reason)
+
+    def block_legacy_registration(self, reason: str) -> None:
         """Block legacy runtime use without changing its persisted payload."""
 
         if self.active_frame_id is not None:
@@ -474,6 +517,8 @@ class DesignSession:
         if projection.frame_id != frame.frame_id:
             raise DesignModelError("Design frame projection no longer matches the frame.")
         self._runtime_blocked_persisted_state = None
+        self._legacy_stage_coordinate_provenance = None
+        self._legacy_stage_coordinate_provenance_present = False
         self.active_frame_id = frame.frame_id
         self.source_design_marks = projection.source_design_marks
         self.source_stage_marks = projection.source_stage_marks
@@ -507,8 +552,35 @@ class DesignSession:
         self.source_stage_marks = ()
         self.check_design_marks.clear()
         self.check_stage_marks.clear()
+        self._legacy_stage_coordinate_provenance = None
+        self._legacy_stage_coordinate_provenance_present = False
         self.registration = None
         self.registration_status = self.calibration_prompt()
+
+    def record_legacy_stage_coordinate_provenance(
+        self,
+        provenance: object,
+    ) -> None:
+        """Retain one verified configured-coordinate context for legacy marks."""
+
+        if self.active_frame_id is not None:
+            return
+        captured = deepcopy(provenance)
+        present = bool(
+            getattr(
+                self,
+                "_legacy_stage_coordinate_provenance_present",
+                False,
+            )
+        )
+        previous = getattr(self, "_legacy_stage_coordinate_provenance", None)
+        if not present or not (self.source_stage_marks or self.check_stage_marks):
+            self._legacy_stage_coordinate_provenance = captured
+        elif previous != captured:
+            self._legacy_stage_coordinate_provenance = {
+                "conflicting_capture_provenance": [deepcopy(previous), captured]
+            }
+        self._legacy_stage_coordinate_provenance_present = True
 
     def has_complete_source_design_marks(self) -> bool:
         """Return whether both design-side source marks are selected."""
