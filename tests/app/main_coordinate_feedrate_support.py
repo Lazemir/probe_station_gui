@@ -802,6 +802,7 @@ def _make_route_start_main(
 
     window._route_measurement_thread = thread
     window.serial_connection = types.SimpleNamespace(is_open=serial_open)
+    window._coordinate_frames_loaded = True
     window._design_session = types.SimpleNamespace(
         route=types.SimpleNamespace(points=[object()], name="route"),
         registration=types.SimpleNamespace(valid=True),

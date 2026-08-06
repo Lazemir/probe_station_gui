@@ -29,6 +29,11 @@ from tests.app.main_coordinate_feedrate_support import (
     request_route_measurement_for_point,
     route_measurement_dialog_module,
 )
+from probe_station_gui.coordinates.model import FrameKind
+from probe_station_gui.coordinates.provenance import (
+    RUNTIME_PROVENANCE_REASON,
+    RUNTIME_PROVENANCE_STATUS,
+)
 
 
 class MainRouteMeasurementSessionTest(unittest.TestCase):
@@ -273,6 +278,7 @@ class MainRouteMeasurementSessionTest(unittest.TestCase):
         window._route_measurement_waiting = False
         window._last_route_measurement_result = None
         window._route_measurement_current_point = 12
+        window._coordinate_frames_loaded = True
         window.serial_connection = types.SimpleNamespace(is_open=True)
         window._design_session = types.SimpleNamespace(
             route=types.SimpleNamespace(points=[object()], name="route"),
@@ -297,6 +303,56 @@ class MainRouteMeasurementSessionTest(unittest.TestCase):
         self.assertEqual(response["error_type"], "RuntimeError")
         self.assertIn("Route measurement instrument setup failed", response["message"])
         self.assertIn("Invalid session handle", response["message"])
+
+    def test_api_route_session_rejects_unverified_design_provenance(self) -> None:
+        for status, reason in (
+            ("pending", "Design coordinate provenance is being checked."),
+            ("blocked", "Design source changed since registration."),
+        ):
+            with self.subTest(status=status):
+                unsafe_point_calls: list[object] = []
+                record = types.SimpleNamespace(
+                    kind=FrameKind.DESIGN,
+                    metadata={
+                        RUNTIME_PROVENANCE_STATUS: status,
+                        RUNTIME_PROVENANCE_REASON: reason,
+                    },
+                )
+                window = Main.__new__(Main)
+                window._api_route_session_thread_preflight = lambda _payload: (
+                    None,
+                    (0.0, 0.0),
+                )
+                window.serial_connection = types.SimpleNamespace(is_open=True)
+                window._coordinate_frames_loaded = True
+                window._coordinate_frame_registry = types.SimpleNamespace(
+                    get=lambda _frame_id, current=record: current
+                )
+                window._design_session = types.SimpleNamespace(
+                    active_frame_id="design-a",
+                    route=types.SimpleNamespace(points=[object()], name="route"),
+                    registration=types.SimpleNamespace(valid=True),
+                )
+                window._route_measurement_current_point = 1
+                window._snapshot_active_route_design_frame = lambda: (
+                    main_module.snapshot_route_design_frame(
+                        frame_id="design-a",
+                        frame_version=4,
+                    )
+                )
+
+                def unsafe_points(route: object) -> list[RouteMeasurementPoint]:
+                    unsafe_point_calls.append(route)
+                    raise AssertionError("Unverified route points were materialized.")
+
+                window._route_measurement_points = unsafe_points
+
+                response = Main._api_start_route_session(window, {})
+
+                self.assertFalse(response["accepted"], response)
+                self.assertEqual(response["status_code"], 409)
+                self.assertEqual(response["message"], reason)
+                self.assertEqual(unsafe_point_calls, [])
 
     def test_route_session_active_reads_new_and_legacy_settings(self) -> None:
         self.assertTrue(
@@ -940,6 +996,7 @@ class MainRouteMeasurementSessionTest(unittest.TestCase):
         lcr = _FakeConnectedLcr()
         window = Main.__new__(Main)
         window._route_measurement_thread = old_thread
+        window._coordinate_frames_loaded = True
         window._route_measurement_runner = old_runner
         window._route_measurement_waiting = True
         window._last_route_measurement_result = None
@@ -1418,6 +1475,7 @@ class MainRouteMeasurementSessionTest(unittest.TestCase):
         camera_calls: list[float] = []
         dialog_calls: list[tuple[str, object]] = []
         window._route_measurement_thread = None
+        window._coordinate_frames_loaded = True
         window.serial_connection = types.SimpleNamespace(is_open=True)
         window._design_session = types.SimpleNamespace(
             route=types.SimpleNamespace(points=[object()], name="route"),

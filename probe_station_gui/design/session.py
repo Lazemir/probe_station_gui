@@ -466,18 +466,11 @@ class DesignSession:
         if machine_b_deg is not None and frame.transform is not None:
             current_b = float(machine_b_deg)
             pivot = (float(pivot_machine_xy[0]), float(pivot_machine_xy[1]))
-            source_physical_marks = tuple(
-                frame.transform.frame_xy_to_machine(
-                    (
-                        float(point[0]) * metadata.design_unit_mm,
-                        float(point[1]) * metadata.design_unit_mm,
-                    ),
-                    machine_b_deg=current_b,
-                    pivot_machine_xy=pivot,
-                )
-                for point in metadata.source_design_marks
-            )
             delta_b = current_b - frame.transform.reference_b_deg
+            source_physical_marks = tuple(
+                _rotate_machine_point_about_pivot(point, pivot, delta_b)
+                for point in metadata.source_machine_marks
+            )
             check_physical_marks = tuple(
                 _rotate_machine_point_about_pivot(point, pivot, delta_b)
                 for point in metadata.check_machine_marks

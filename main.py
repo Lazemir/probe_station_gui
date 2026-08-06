@@ -3284,6 +3284,13 @@ class Main(QMainWindow):
                 "status_code": 503,
                 "message": "Serial connection is not available.",
             }
+        provenance_error = self._active_design_frame_provenance_error()
+        if provenance_error is not None:
+            return {
+                "accepted": False,
+                "status_code": 409,
+                "message": provenance_error,
+            }
         start_decision = api_route_session_start_decision(
             route=self._design_session.route,
             registration_valid=bool(
@@ -4338,16 +4345,12 @@ class Main(QMainWindow):
     def _raw_stage_xy_from_design_xy(
         self, design_xy: tuple[float, float]
     ) -> tuple[float, float] | None:
-        if not bool(getattr(self, "_coordinate_frames_loaded", False)):
+        if self._active_design_frame_provenance_error() is not None:
             return None
         frame_id = self._design_session.active_frame_id
         registry = getattr(self, "_coordinate_frame_registry", None)
         document = self._design_session.document
         record = registry.get(frame_id) if registry is not None and frame_id else None
-        if frame_id is not None and (
-            record is None or design_frame_provenance_error(record) is not None
-        ):
-            return None
         if record is not None and record.transform is not None and document is not None:
             snapshot = self.stage_controller.latest_machine_coordinate_snapshot()
             if snapshot is None:
@@ -4377,6 +4380,19 @@ class Main(QMainWindow):
         return self._raw_stage_xy_from_camera_stage_xy(
             (float(camera_stage_xy[0]), float(camera_stage_xy[1]))
         )
+
+    def _active_design_frame_provenance_error(self) -> str | None:
+        if not bool(getattr(self, "_coordinate_frames_loaded", False)):
+            return "Design coordinate provenance is being checked."
+        session = getattr(self, "_design_session", None)
+        frame_id = getattr(session, "active_frame_id", None)
+        if frame_id is None:
+            return None
+        registry = getattr(self, "_coordinate_frame_registry", None)
+        record = registry.get(frame_id) if registry is not None else None
+        if record is None:
+            return "Design coordinate frame is unavailable."
+        return design_frame_provenance_error(record)
 
     def _on_stage_axis_escape_pressed(self, axis_name: str) -> None:
         panel = getattr(self, "_stage_position_panel", None)
@@ -7637,6 +7653,11 @@ class Main(QMainWindow):
         session = getattr(self, "_design_session", None)
         if registry is None or session is None:
             return
+        provenance_error = self._active_design_frame_provenance_error()
+        if provenance_error is not None:
+            self._coordinate_frame_authority_blocked_axes = {"X", "Y", "B"}
+            session.invalidate_registration(provenance_error)
+            return
         unavailable = {
             axis
             for axis in ("X", "Y")
@@ -8510,6 +8531,10 @@ class Main(QMainWindow):
         self,
         configuration: RouteMeasurementRunConfiguration,
     ) -> RouteMeasurementStartPlan | None:
+        provenance_error = self._active_design_frame_provenance_error()
+        if provenance_error is not None:
+            self._show_status(provenance_error, 6000)
+            return None
         route = self._design_session.route
         registration = self._design_session.registration
         frame_snapshot = self._snapshot_active_route_design_frame()

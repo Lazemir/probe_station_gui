@@ -1032,6 +1032,83 @@ def test_unverified_design_provenance_blocks_conversion_and_motion_until_verifie
     )
     assert len(move_requests) == 1
 
+
+def test_pending_provenance_cannot_reactivate_on_homing_or_start_route(
+    tmp_path: Path,
+) -> None:
+    document = _make_document(tmp_path)
+    registry = CoordinateFrameRegistry()
+    committed = registry.add(
+        commit_xyb_registration(
+            new_design_frame_draft(document, existing_names=()),
+            design_points=((0.0, 0.0), (1000.0, 0.0)),
+            physical_machine_points=((12.0, 8.0), (13.0, 8.0)),
+            physical_b_deg=10.0,
+            pivot_machine_xy=(0.0, 0.0),
+        )
+    )
+    pending = replace(
+        committed,
+        metadata={
+            **committed.metadata,
+            RUNTIME_PROVENANCE_STATUS: "pending",
+            RUNTIME_PROVENANCE_REASON: (
+                "Design coordinate provenance is being checked."
+            ),
+        },
+    )
+    registry.reset((pending,))
+    session = DesignSession(document=document)
+    session.link_active_frame(committed)
+    session.invalidate_registration("Design coordinate provenance is being checked.")
+    session.route = types.SimpleNamespace(points=[object()])
+    snapshot = _machine_snapshot((12.0, 8.0, 0.0, 0.0, 10.0))
+    statuses: list[str] = []
+    route_point_calls: list[object] = []
+    route_point = types.SimpleNamespace(index=1)
+    window = Main.__new__(Main)
+    window._design_session = session
+    window._coordinate_frame_registry = registry
+    window._coordinate_frames_loaded = False
+    window._design_navigation_xy_from_physical_machine_xy = lambda point: point
+    window.stage_controller = types.SimpleNamespace(
+        axes_are_homed=lambda axes: axes.issubset({"X", "Y"}),
+        latest_machine_coordinate_snapshot=lambda: snapshot,
+    )
+    _set_rotation_settings(window)
+    window._route_measurement_points = lambda route: (
+        route_point_calls.append(route) or [route_point]
+    )
+    window._api_structure_number_for_measurement_point = lambda point: point.index
+    window._show_route_runtime_status = (
+        lambda message, _timeout: statuses.append(str(message))
+    )
+    window._show_status = lambda message, _timeout=0: statuses.append(str(message))
+
+    Main._apply_coordinate_frame_authority_blocks(window)
+
+    assert window._coordinate_frame_authority_blocked_axes == {"X", "Y", "B"}
+    assert session.registration is not None
+    assert not session.registration.valid
+
+    session.link_active_frame(pending)
+    assert session.registration is not None
+    assert session.registration.valid
+    window._coordinate_frames_loaded = True
+    plan = Main._route_measurement_start_plan(
+        window,
+        types.SimpleNamespace(
+            current_point=1,
+            previous_ok_only=False,
+            previous_csv_path="",
+        ),
+    )
+
+    assert plan is None
+    assert route_point_calls == []
+    assert any("provenance" in message.lower() for message in statuses)
+
+
 def test_authority_uses_xy_homing_and_tracked_calibrated_b_without_b_homing(
     tmp_path: Path,
 ) -> None:
@@ -1059,6 +1136,7 @@ def test_authority_uses_xy_homing_and_tracked_calibrated_b_without_b_homing(
     window = Main.__new__(Main)
     window._design_session = session
     window._coordinate_frame_registry = registry
+    window._coordinate_frames_loaded = True
     window._design_navigation_xy_from_physical_machine_xy = lambda point: point
     _set_rotation_settings(window)
     b_snapshot = _machine_snapshot((0.0, 0.0, 0.0, 0.0, 42.0))
@@ -1104,6 +1182,7 @@ def test_authority_temporarily_blocks_b_when_tracked_position_is_unknown(
     window = Main.__new__(Main)
     window._design_session = session
     window._coordinate_frame_registry = registry
+    window._coordinate_frames_loaded = True
     window._design_navigation_xy_from_physical_machine_xy = lambda point: point
     _set_rotation_settings(window)
     window.stage_controller = types.SimpleNamespace(
