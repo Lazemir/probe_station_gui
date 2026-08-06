@@ -2522,7 +2522,7 @@ def test_find_focus_submits_visible_fixture_geometry_and_waits_for_worker(
     assert window._focus_candidate.center == (5.0, 5.0)
 
 
-def test_main_close_uses_bounded_focus_structure_worker_retirement(
+def test_main_close_delegates_focus_retirement_to_transactional_shutdown(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     stop_timeouts: list[float] = []
@@ -2541,8 +2541,7 @@ def test_main_close_uses_bounded_focus_structure_worker_retirement(
 
     Main.closeEvent(window, event)
 
-    assert len(stop_timeouts) == 1
-    assert 0.0 < stop_timeouts[0] <= 1.0
+    assert stop_timeouts == []
     assert delegated == [(window, event)]
 
 

@@ -470,6 +470,13 @@ assert image.height() == 4
         window._design_session = types.SimpleNamespace(
             stage_from_design=lambda _design_xy: (1.0, 2.0)
         )
+        usability = types.SimpleNamespace(usable=True, rejection_reason=None)
+        window._snapshot_active_design_frame_usability = lambda: usability
+        window._camera_stage_xy_from_design_usability_snapshot = (
+            lambda snapshot, _design_xy, *, require_current=True: (
+                (1.0, 2.0) if snapshot is usability and require_current else None
+            )
+        )
         route_point = types.SimpleNamespace(
             enabled=True,
             camera_center=(10.0, 20.0),

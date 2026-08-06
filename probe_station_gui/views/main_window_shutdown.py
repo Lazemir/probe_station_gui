@@ -61,20 +61,24 @@ def close_event(owner: MainWindowShutdownOwner, event: Any) -> None:
         serial_was_connected=serial_was_connected,
         lcr_was_connected=lcr_was_connected,
     )
-    _stop_services_and_timers(owner)
+    _quiesce_api_intake(owner)
     try:
         _stop_api_stage_command_workers(owner)
-        _drain_and_close_api_bridge(owner)
+        _drain_api_bridge(owner)
         _stop_route_worker(owner)
         _stop_microscope_scan(owner)
         _stop_manual_alignment_capture(owner)
         _stop_optical_calibration(owner)
         _close_serial_and_panels(owner)
+        _finalize_api_shutdown(owner)
     except Exception as exc:
         logger.exception("Camera shutdown blocked before worker teardown")
         owner._show_status(f"Camera shutdown blocked: {exc}", 10000)
+        _resume_api_intake_after_abort(owner)
         event.ignore()
         return
+    _stop_services_and_timers(owner)
+    _retire_focus_structure_worker(owner)
     _shutdown_controllers(owner)
     close_auxiliary_windows(owner, force_route_dialog=True)
     if owner.serial_connection_panel:
@@ -95,9 +99,6 @@ def _persist_shutdown_state(
 
 
 def _stop_services_and_timers(owner: MainWindowShutdownOwner) -> None:
-    api_bridge = getattr(owner, "_api_bridge", None)
-    if api_bridge is not None:
-        api_bridge.stop_accepting()
     if owner._api_server is not None:
         owner._api_server.stop()
     owner._stop_telegram_bot_service()
@@ -118,6 +119,29 @@ def _stop_services_and_timers(owner: MainWindowShutdownOwner) -> None:
     )
     if callable(stop_coordinate_selection):
         stop_coordinate_selection()
+
+
+def _quiesce_api_intake(owner: MainWindowShutdownOwner) -> None:
+    api_bridge = getattr(owner, "_api_bridge", None)
+    if api_bridge is not None:
+        api_bridge.stop_accepting()
+
+
+def _resume_api_intake_after_abort(owner: MainWindowShutdownOwner) -> None:
+    api_bridge = getattr(owner, "_api_bridge", None)
+    resume = getattr(api_bridge, "resume_accepting", None)
+    if callable(resume):
+        resume()
+
+
+def _retire_focus_structure_worker(owner: MainWindowShutdownOwner) -> None:
+    worker = getattr(owner, "_focus_structure_bounds_worker", None)
+    if worker is None:
+        return
+    timeout = float(
+        getattr(owner, "FOCUS_STRUCTURE_WORKER_SHUTDOWN_TIMEOUT_S", 0.25)
+    )
+    worker.stop(timeout_s=max(0.0, timeout))
 
 
 def _stop_route_worker(owner: MainWindowShutdownOwner) -> None:
@@ -161,14 +185,27 @@ def _stop_manual_alignment_capture(owner: MainWindowShutdownOwner) -> None:
     owner._manual_alignment_pick_slot = None
 
 
-def _drain_and_close_api_bridge(owner: MainWindowShutdownOwner) -> None:
+def _drain_api_bridge(owner: MainWindowShutdownOwner) -> None:
     bridge = getattr(owner, "_api_bridge", None)
     if bridge is None:
         return
     if not bridge.wait_for_inflight(timeout_s=2.0):
         raise RuntimeError("API request completion is still pending.")
+
+
+def _finalize_api_shutdown(owner: MainWindowShutdownOwner) -> None:
+    bridge = getattr(owner, "_api_bridge", None)
+    if bridge is None:
+        return
     if not bridge.close():
         raise RuntimeError("API request completion could not be published.")
+
+
+def _drain_and_close_api_bridge(owner: MainWindowShutdownOwner) -> None:
+    """Compatibility wrapper for focused bridge shutdown tests."""
+
+    _drain_api_bridge(owner)
+    _finalize_api_shutdown(owner)
 
 
 def _stop_optical_calibration(owner: MainWindowShutdownOwner) -> None:

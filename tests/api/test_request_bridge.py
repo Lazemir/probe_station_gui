@@ -82,6 +82,28 @@ def test_bridge_stop_accepting_cancels_queued_request_before_dispatch() -> None:
     assert bridge.close()
 
 
+def test_bridge_can_resume_intake_after_aborted_close() -> None:
+    handled: list[dict[str, object]] = []
+    bridge = ApiRequestBridge(
+        lambda request: handled.append(dict(request)) or {"accepted": True}
+    )
+    bridge.request_received.connect(
+        bridge._handle_request,
+        Qt.ConnectionType.DirectConnection,
+    )
+
+    bridge.stop_accepting()
+    assert bridge.resume_accepting()
+
+    assert bridge.submit({"action": "status"}, timeout_s=1.0) == {
+        "accepted": True
+    }
+    assert handled == [{"action": "status"}]
+    bridge.stop_accepting()
+    assert bridge.close()
+    assert not bridge.resume_accepting()
+
+
 def test_bridge_shutdown_drains_started_handler_to_definitive_result() -> None:
     handler_started = threading.Event()
     release_handler = threading.Event()

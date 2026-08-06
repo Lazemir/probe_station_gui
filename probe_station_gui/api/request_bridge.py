@@ -153,6 +153,16 @@ class ApiRequestBridge(QObject):
                     event.set()
             self._pending_changed.notify_all()
 
+    def resume_accepting(self) -> bool:
+        """Resume intake after a close attempt aborts before bridge finalization."""
+
+        with self._pending_lock:
+            if self._closed:
+                return False
+            self._accepting = True
+            self._pending_changed.notify_all()
+            return True
+
     def wait_for_inflight(self, *, timeout_s: float) -> bool:
         """Wait for every handling request to publish its definitive response."""
 

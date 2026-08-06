@@ -12129,9 +12129,6 @@ class Main(QMainWindow):
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
         self._clear_exact_step_targets()
-        worker = getattr(self, "_focus_structure_bounds_worker", None)
-        if worker is not None:
-            worker.stop(timeout_s=self.FOCUS_STRUCTURE_WORKER_SHUTDOWN_TIMEOUT_S)
         shutdown_ui.close_event(self, event)
 
     def _clear_microscope_scan_dialog(self) -> None:

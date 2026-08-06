@@ -263,17 +263,8 @@ def test_close_event_preserves_shutdown_order(monkeypatch) -> None:
         ("persist_lcr", True),
         ("persist_controller",),
         ("bridge_stop_accepting",),
-        ("api_stop",),
-        ("telegram_stop",),
-        ("design_timer_stop",),
-        ("manual_timer_stop",),
-        ("blink_timer_stop",),
-        ("feedrate_timer_stop",),
-        ("save_feedrate",),
-        ("markup_store_stop",),
         ("api_workers", 2.0),
         ("bridge_wait", 2.0),
-        ("bridge_close",),
         ("route_runner_stop",),
         ("route_thread", "join", 2.0),
         ("scan_stop_requested",),
@@ -289,6 +280,15 @@ def test_close_event_preserves_shutdown_order(monkeypatch) -> None:
         ("serial_close",),
         ("joystick_serial", None),
         ("terminal_serial", None),
+        ("bridge_close",),
+        ("api_stop",),
+        ("telegram_stop",),
+        ("design_timer_stop",),
+        ("manual_timer_stop",),
+        ("blink_timer_stop",),
+        ("feedrate_timer_stop",),
+        ("save_feedrate",),
+        ("markup_store_stop",),
         ("stop_oscillation",),
         ("stage_shutdown",),
         ("lcr_shutdown",),
@@ -342,7 +342,6 @@ def test_close_event_keeps_bridge_open_when_worker_drain_times_out(
     shutdown_ui.close_event(owner, event)
 
     assert events == [
-        ("stop_intake",),
         ("worker_drain",),
         (
             "status",
@@ -350,6 +349,154 @@ def test_close_event_keeps_bridge_open_when_worker_drain_times_out(
             10000,
         ),
         ("event_ignore",),
+    ]
+
+
+def test_rejected_close_keeps_focus_and_persistence_services_operational(
+    monkeypatch,
+) -> None:
+    events: list[object] = []
+    monkeypatch.setattr(shutdown_ui, "_persist_shutdown_state", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        shutdown_ui,
+        "_quiesce_api_intake",
+        lambda _owner: events.append(("api_quiesce",)),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        shutdown_ui,
+        "_resume_api_intake_after_abort",
+        lambda _owner: events.append(("api_resume",)),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        shutdown_ui,
+        "_stop_services_and_timers",
+        lambda _owner: events.append(("services_stop",)),
+    )
+    monkeypatch.setattr(
+        shutdown_ui,
+        "_retire_focus_structure_worker",
+        lambda _owner: events.append(("focus_stop",)),
+        raising=False,
+    )
+
+    def fail_worker_drain(_owner) -> None:
+        events.append(("worker_drain",))
+        raise RuntimeError("API stage command is still stopping.")
+
+    monkeypatch.setattr(
+        shutdown_ui,
+        "_stop_api_stage_command_workers",
+        fail_worker_drain,
+    )
+    owner = SimpleNamespace(
+        serial_connection=SimpleNamespace(is_open=False),
+        lcr_controller=SimpleNamespace(is_connected=lambda: False),
+        _show_status=lambda message, timeout: events.append(
+            ("status", message, timeout)
+        ),
+    )
+    event = SimpleNamespace(
+        accept=lambda: events.append(("event_accept",)),
+        ignore=lambda: events.append(("event_ignore",)),
+    )
+
+    shutdown_ui.close_event(owner, event)
+
+    assert events == [
+        ("api_quiesce",),
+        ("worker_drain",),
+        (
+            "status",
+            "Camera shutdown blocked: API stage command is still stopping.",
+            10000,
+        ),
+        ("api_resume",),
+        ("event_ignore",),
+    ]
+
+
+def test_accepted_close_retires_focus_and_persistence_after_fallible_checks(
+    monkeypatch,
+) -> None:
+    events: list[object] = []
+    monkeypatch.setattr(shutdown_ui, "_persist_shutdown_state", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        shutdown_ui,
+        "_quiesce_api_intake",
+        lambda _owner: events.append(("api_quiesce",)),
+        raising=False,
+    )
+    for name, label in (
+        ("_stop_api_stage_command_workers", "api_workers"),
+        ("_drain_api_bridge", "bridge_drain"),
+        ("_stop_route_worker", "route"),
+        ("_stop_microscope_scan", "scan"),
+        ("_stop_manual_alignment_capture", "alignment"),
+        ("_stop_optical_calibration", "optical"),
+        ("_close_serial_and_panels", "camera_serial"),
+    ):
+        monkeypatch.setattr(
+            shutdown_ui,
+            name,
+            lambda _owner, current=label: events.append((current,)),
+            raising=False,
+        )
+    monkeypatch.setattr(
+        shutdown_ui,
+        "_finalize_api_shutdown",
+        lambda _owner: events.append(("api_finalize",)),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        shutdown_ui,
+        "_stop_services_and_timers",
+        lambda _owner: events.append(("services_stop",)),
+    )
+    monkeypatch.setattr(
+        shutdown_ui,
+        "_retire_focus_structure_worker",
+        lambda _owner: events.append(("focus_stop",)),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        shutdown_ui,
+        "_shutdown_controllers",
+        lambda _owner: events.append(("controllers",)),
+    )
+    monkeypatch.setattr(
+        shutdown_ui,
+        "close_auxiliary_windows",
+        lambda _owner, **_kwargs: events.append(("windows",)),
+    )
+    owner = SimpleNamespace(
+        serial_connection=SimpleNamespace(is_open=False),
+        lcr_controller=SimpleNamespace(is_connected=lambda: False),
+        serial_connection_panel=None,
+    )
+    event = SimpleNamespace(
+        accept=lambda: events.append(("event_accept",)),
+        ignore=lambda: events.append(("event_ignore",)),
+    )
+
+    shutdown_ui.close_event(owner, event)
+
+    assert events == [
+        ("api_quiesce",),
+        ("api_workers",),
+        ("bridge_drain",),
+        ("route",),
+        ("scan",),
+        ("alignment",),
+        ("optical",),
+        ("camera_serial",),
+        ("api_finalize",),
+        ("services_stop",),
+        ("focus_stop",),
+        ("controllers",),
+        ("windows",),
+        ("event_accept",),
     ]
 
 
@@ -416,7 +563,6 @@ def test_exposure_shutdown_timeout_blocks_camera_teardown_and_close(
 
     assert events == [
         ("persist",),
-        ("services",),
         ("route",),
         ("scan",),
         ("exposure_adapter_shutdown", {"timeout_s": 2.0}),
