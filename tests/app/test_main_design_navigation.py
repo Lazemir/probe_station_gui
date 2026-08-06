@@ -305,6 +305,7 @@ def _set_rotation_settings(
             )
         )
     )
+    window._active_objective_xy_offset = lambda: (0.0, 0.0)
 
 
 def _record_legacy_work_provenance(
@@ -1032,6 +1033,7 @@ def test_design_navigation_inverts_universal_calibration_and_current_wco(
             )
         )
     )
+    window._active_objective_xy_offset = lambda: (0.0, 0.0)
 
     physical_target = committed.transform.frame_xy_to_machine(
         (0.5, 0.25),
@@ -1046,6 +1048,90 @@ def test_design_navigation_inverts_universal_calibration_and_current_wco(
     assert Main._raw_stage_xy_from_design_xy(window, (500.0, 250.0)) == pytest.approx(
         expected
     )
+
+
+def test_direct_design_conversion_rejects_stale_usability_snapshot(
+    tmp_path: Path,
+) -> None:
+    document = _make_document(tmp_path)
+    registry = CoordinateFrameRegistry()
+    committed = registry.add(
+        commit_xyb_registration(
+            new_design_frame_draft(document, existing_names=()),
+            design_points=((0.0, 0.0), (1000.0, 0.0)),
+            physical_machine_points=((12.0, 8.0), (13.0, 8.0)),
+            physical_b_deg=10.0,
+            pivot_machine_xy=(0.0, 0.0),
+        )
+    )
+    session = DesignSession(document=document)
+    session.link_active_frame(committed)
+    snapshot = _machine_snapshot((12.0, 8.0, 0.0, 0.0, 10.0))
+    window = Main.__new__(Main)
+    window._design_session = session
+    window._coordinate_frame_registry = registry
+    window._coordinate_frames_loaded = True
+    window._coordinate_frame_authority_blocked_axes = set()
+    window.stage_controller = types.SimpleNamespace(
+        latest_machine_coordinate_snapshot=lambda: snapshot
+    )
+    window._active_objective_xy_offset = lambda: (0.0, 0.0)
+    _set_rotation_settings(window)
+
+    usability = Main._snapshot_active_design_frame_usability(window)
+    registry.replace(committed.with_name("Renamed"), expected_version=committed.version)
+
+    assert (
+        Main._raw_stage_xy_from_design_usability_snapshot(
+            window,
+            usability,
+            (500.0, 0.0),
+        )
+        is None
+    )
+
+
+def test_gui_route_rejects_verified_missing_reference_draft_before_materializing(
+    tmp_path: Path,
+) -> None:
+    document = _make_document(tmp_path)
+    registry = CoordinateFrameRegistry()
+    draft = registry.add(new_design_frame_draft(document, existing_names=()))
+    session = DesignSession(document=document)
+    session.link_active_frame(draft)
+    session.source_design_marks = ((0.0, 0.0), (1000.0, 0.0))
+    session.source_stage_marks = ((10.0, 20.0), (11.0, 20.0))
+    session._rebuild_registration()
+    assert session.registration is not None and session.registration.valid
+    session.route = types.SimpleNamespace(points=[object()])
+    materialized: list[object] = []
+    statuses: list[str] = []
+    window = Main.__new__(Main)
+    window._design_session = session
+    window._coordinate_frame_registry = registry
+    window._coordinate_frames_loaded = True
+    window._coordinate_frame_authority_blocked_axes = set()
+    window._route_measurement_points = lambda route: (
+        materialized.append(route) or [types.SimpleNamespace(index=1)]
+    )
+    window._api_structure_number_for_measurement_point = lambda point: point.index
+    window._show_route_runtime_status = (
+        lambda message, _timeout: statuses.append(str(message))
+    )
+    window._show_status = lambda message, _timeout=0: statuses.append(str(message))
+
+    plan = Main._route_measurement_start_plan(
+        window,
+        types.SimpleNamespace(
+            current_point=1,
+            previous_ok_only=False,
+            previous_csv_path="",
+        ),
+    )
+
+    assert plan is None
+    assert materialized == []
+    assert statuses
 
 
 def test_unverified_design_provenance_blocks_conversion_and_motion_until_verified(

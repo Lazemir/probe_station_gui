@@ -807,13 +807,25 @@ def _make_route_start_main(
         route=types.SimpleNamespace(points=[object()], name="route"),
         registration=types.SimpleNamespace(valid=True),
     )
-    window._snapshot_active_route_design_frame = lambda: (
+    frame_usability = types.SimpleNamespace(
+        usable=True,
+        rejection_reason=None,
+        frame_id="design-a",
+        frame_version=4,
+    )
+    window._snapshot_active_design_frame_usability = lambda: frame_usability
+    window._design_frame_usability_snapshot_is_current = (
+        lambda snapshot: snapshot is frame_usability
+    )
+    window._snapshot_active_route_design_frame = lambda _usability=None: (
         main_module.snapshot_route_design_frame(
             frame_id="design-a",
             frame_version=4,
         )
     )
-    window._route_measurement_points = lambda _route: [point]
+    window._route_measurement_points = (
+        lambda _route, *, frame_usability_snapshot=None: [point]
+    )
     window._set_route_measurement_resume_point = lambda _point: None
     window._route_measurement_session_active = False
     window._set_route_measurement_pending = lambda _pending: None

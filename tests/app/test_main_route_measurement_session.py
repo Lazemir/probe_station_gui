@@ -33,6 +33,28 @@ from probe_station_gui.coordinates.provenance import (
     RUNTIME_PROVENANCE_REASON,
     RUNTIME_PROVENANCE_STATUS,
 )
+from probe_station_gui.coordinates.transforms import BFrameTransform
+
+
+def _install_usable_design_frame(window: Main) -> object:
+    usability = types.SimpleNamespace(
+        usable=True,
+        rejection_reason=None,
+        frame_id="design-a",
+        frame_version=4,
+    )
+    route_frame = main_module.snapshot_route_design_frame(
+        frame_id="design-a",
+        frame_version=4,
+    )
+    window._snapshot_active_design_frame_usability = lambda: usability
+    window._design_frame_usability_snapshot_is_current = (
+        lambda snapshot: snapshot is usability
+    )
+    window._snapshot_active_route_design_frame = (
+        lambda _usability=None: route_frame
+    )
+    return usability
 
 
 class MainRouteMeasurementSessionTest(unittest.TestCase):
@@ -283,13 +305,10 @@ class MainRouteMeasurementSessionTest(unittest.TestCase):
             route=types.SimpleNamespace(points=[object()], name="route"),
             registration=types.SimpleNamespace(valid=True),
         )
-        window._snapshot_active_route_design_frame = lambda: (
-            main_module.snapshot_route_design_frame(
-                frame_id="design-a",
-                frame_version=4,
-            )
+        _install_usable_design_frame(window)
+        window._route_measurement_points = (
+            lambda _route, *, frame_usability_snapshot=None: [point]
         )
-        window._route_measurement_points = lambda _route: [point]
         window._api_route_meter_configuration = (
             lambda _payload, voltages_v=None: RouteMeterConfiguration()
         )
@@ -355,6 +374,58 @@ class MainRouteMeasurementSessionTest(unittest.TestCase):
                 self.assertEqual(response["status_code"], 409)
                 self.assertEqual(response["message"], reason)
                 self.assertEqual(unsafe_point_calls, [])
+
+    def test_api_route_session_rejects_verified_missing_reference_draft(self) -> None:
+        design_kind = main_module.design_frame_provenance_error.__globals__[
+            "FrameKind"
+        ].DESIGN
+        record = types.SimpleNamespace(
+            frame_id="design-a",
+            version=4,
+            kind=design_kind,
+            transform=BFrameTransform.identity(),
+            readiness={
+                axis: types.SimpleNamespace(
+                    available=False,
+                    reason=f"Design {axis} reference is not registered.",
+                )
+                for axis in ("X", "Y", "Z", "A", "B")
+            },
+            metadata={
+                RUNTIME_PROVENANCE_STATUS: "verified",
+                RUNTIME_PROVENANCE_REASON: "",
+            },
+        )
+        unsafe_point_calls: list[object] = []
+        window = Main.__new__(Main)
+        window._api_route_session_thread_preflight = lambda _payload: (
+            None,
+            (0.0, 0.0),
+        )
+        window.serial_connection = types.SimpleNamespace(is_open=True)
+        window._coordinate_frames_loaded = True
+        window._coordinate_frame_authority_blocked_axes = set()
+        window._coordinate_frame_registry = types.SimpleNamespace(
+            get=lambda _frame_id: record
+        )
+        window._design_session = types.SimpleNamespace(
+            active_frame_id="design-a",
+            route=types.SimpleNamespace(points=[object()], name="route"),
+            registration=types.SimpleNamespace(valid=True),
+        )
+        window._route_measurement_current_point = 1
+
+        def unsafe_points(route: object) -> list[RouteMeasurementPoint]:
+            unsafe_point_calls.append(route)
+            raise AssertionError("Missing-reference route points were materialized.")
+
+        window._route_measurement_points = unsafe_points
+
+        response = Main._api_start_route_session(window, {})
+
+        self.assertFalse(response["accepted"], response)
+        self.assertEqual(response["status_code"], 409)
+        self.assertEqual(unsafe_point_calls, [])
 
     def test_route_session_active_reads_new_and_legacy_settings(self) -> None:
         self.assertTrue(
@@ -1020,12 +1091,7 @@ class MainRouteMeasurementSessionTest(unittest.TestCase):
             route=types.SimpleNamespace(points=[object()], name="route"),
             registration=types.SimpleNamespace(valid=True),
         )
-        window._snapshot_active_route_design_frame = lambda: (
-            main_module.snapshot_route_design_frame(
-                frame_id="design-a",
-                frame_version=4,
-            )
-        )
+        _install_usable_design_frame(window)
         window.serial_connection = types.SimpleNamespace(is_open=True)
         window.stage_controller = stage
         window.lcr_controller = lcr
@@ -1040,7 +1106,9 @@ class MainRouteMeasurementSessionTest(unittest.TestCase):
         optical_lease.__enter__.return_value = optical_lease
         window._optical_session_manager = mock.MagicMock()
         window._optical_session_manager.open.return_value = optical_lease
-        window._route_measurement_points = lambda _route: [point]
+        window._route_measurement_points = (
+            lambda _route, *, frame_usability_snapshot=None: [point]
+        )
         window._wait_for_camera_frame = lambda timeout_s=0.1: (None, None)
         window._api_route_meter_configuration = (
             lambda _payload, voltages_v=None: RouteMeterConfiguration()
@@ -1417,7 +1485,9 @@ class MainRouteMeasurementSessionTest(unittest.TestCase):
             frame_version=9,
         )
         captured: list[RouteMeasurementRunner] = []
-        window._snapshot_active_route_design_frame = lambda: start_frame
+        window._snapshot_active_route_design_frame = (
+            lambda _usability=None: start_frame
+        )
         window._start_route_measurement_runner = (
             lambda runner, *_args, **_kwargs: captured.append(runner)
         )
@@ -1483,13 +1553,10 @@ class MainRouteMeasurementSessionTest(unittest.TestCase):
             route=types.SimpleNamespace(points=[object()], name="route"),
             registration=types.SimpleNamespace(valid=True),
         )
-        window._snapshot_active_route_design_frame = lambda: (
-            main_module.snapshot_route_design_frame(
-                frame_id="design-a",
-                frame_version=4,
-            )
+        _install_usable_design_frame(window)
+        window._route_measurement_points = (
+            lambda _route, *, frame_usability_snapshot=None: [point]
         )
-        window._route_measurement_points = lambda _route: [point]
         window._set_route_measurement_resume_point = lambda _point: None
         window._route_measurement_session_active = False
         window._set_route_measurement_pending = lambda _pending: None
