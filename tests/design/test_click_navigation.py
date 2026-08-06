@@ -77,6 +77,7 @@ def _navigation_pane() -> types.SimpleNamespace:
         route_pick_requested=_FakeSignal(),
         route_point_requested=_FakeSignal(),
         calibration_point_selected=_FakeSignal(),
+        selected_focus_point_changed=_FakeSignal(),
         _is_double_click_event=_DesignPlotPane._is_double_click_event,
         _set_hover_snap=lambda _snap, **_kwargs: None,
         _resolve_snap_result=lambda raw: types.SimpleNamespace(
