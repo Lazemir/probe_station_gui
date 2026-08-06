@@ -10,6 +10,17 @@ from uuid import UUID
 
 
 SOFTWARE_COORDINATE_SETTINGS_VERSION: Final = 1
+_SOFTWARE_COORDINATE_ROOT_FIELDS: Final = frozenset(
+    {
+        "version",
+        "custom_frames",
+        "pivot",
+        "last_selected_frame_id",
+        "selection_generation",
+        "max_rotation_segment_deg",
+        "max_rotation_chord_error_mm",
+    }
+)
 _UNSET = object()
 
 
@@ -285,7 +296,12 @@ class SoftwareCoordinateSettings:
     )
     _raw_pivot_present: bool = field(default=False, compare=False, repr=False)
     _raw_pivot: object = field(default=None, compare=False, repr=False)
-    _preserved_raw_section: dict[str, object] | None = field(
+    _preserved_raw_section_present: bool = field(
+        default=False,
+        compare=False,
+        repr=False,
+    )
+    _preserved_raw_section: object = field(
         default=None,
         compare=False,
         repr=False,
@@ -316,6 +332,7 @@ class SoftwareCoordinateSettings:
         if (
             self.pivot is None
             and not self._raw_pivot_present
+            and not self._preserved_raw_section_present
             and self._preserved_raw_section is None
         ):
             raise ValueError("Pivot must be RotationPivotSettings.")
@@ -343,11 +360,9 @@ class SoftwareCoordinateSettings:
             for index, frame_id in self._accepted_custom_frame_slots
         )
         self._raw_pivot = deepcopy(self._raw_pivot)
-        self._preserved_raw_section = (
-            None
-            if self._preserved_raw_section is None
-            else deepcopy(self._preserved_raw_section)
-        )
+        if self._preserved_raw_section is not None:
+            self._preserved_raw_section_present = True
+        self._preserved_raw_section = deepcopy(self._preserved_raw_section)
 
     @property
     def degraded(self) -> bool:
@@ -359,7 +374,7 @@ class SoftwareCoordinateSettings:
     def materialization_blocked(self) -> bool:
         """Return whether this section is unsafe to apply to the frame registry."""
 
-        return self._preserved_raw_section is not None or self.pivot is None
+        return self._preserved_raw_section_present or self.pivot is None
 
     def clone(self) -> "SoftwareCoordinateSettings":
         return SoftwareCoordinateSettings(
@@ -375,11 +390,12 @@ class SoftwareCoordinateSettings:
             _accepted_custom_frame_slots=self._accepted_custom_frame_slots,
             _raw_pivot_present=self._raw_pivot_present,
             _raw_pivot=self._raw_pivot,
+            _preserved_raw_section_present=self._preserved_raw_section_present,
             _preserved_raw_section=self._preserved_raw_section,
         )
 
-    def to_dict(self) -> dict[str, object]:
-        if self._preserved_raw_section is not None:
+    def to_dict(self) -> object:
+        if self._preserved_raw_section_present:
             return deepcopy(self._preserved_raw_section)
         if not self._raw_custom_frames:
             serialized_frames = [frame.to_dict() for frame in self.custom_frames]
@@ -503,42 +519,68 @@ def _parse_pivot(raw: object) -> RotationPivotSettings:
     )
 
 
-def parse_software_coordinate_settings(raw: object) -> SoftwareCoordinateSettings:
+def _preserved_settings(
+    raw: object,
+    diagnostic: str,
+) -> SoftwareCoordinateSettings:
+    return SoftwareCoordinateSettings(
+        pivot=None,
+        diagnostics=(diagnostic,),
+        _preserved_raw_section_present=True,
+        _preserved_raw_section=deepcopy(raw),
+    )
+
+
+def parse_software_coordinate_settings(
+    raw: object,
+    *,
+    section_present: bool = False,
+) -> SoftwareCoordinateSettings:
     """Parse persisted settings, retaining valid frames and reporting bad records."""
 
     defaults = SoftwareCoordinateSettings()
     if not isinstance(raw, dict):
+        if section_present:
+            return _preserved_settings(
+                raw,
+                "Software coordinate settings root must be an object.",
+            )
         return defaults
+    current_schema = bool(section_present or "version" in raw)
+    if current_schema and "version" not in raw:
+        return _preserved_settings(
+            raw,
+            "Software coordinate settings schema is invalid (missing ['version']).",
+        )
     if "version" in raw and (
         not isinstance(raw["version"], int)
         or isinstance(raw["version"], bool)
         or raw["version"] != SOFTWARE_COORDINATE_SETTINGS_VERSION
     ):
-        return SoftwareCoordinateSettings(
-            pivot=None,
-            diagnostics=(
-                f"Unsupported software coordinate settings version: {raw['version']!r}.",
-            ),
-            _preserved_raw_section=deepcopy(raw),
+        return _preserved_settings(
+            raw,
+            f"Unsupported software coordinate settings version: {raw['version']!r}.",
         )
-    supported_root_fields = {
-        "version",
-        "custom_frames",
-        "pivot",
-        "last_selected_frame_id",
-        "selection_generation",
-        "max_rotation_segment_deg",
-        "max_rotation_chord_error_mm",
-    }
-    unsupported_root_fields = set(raw).difference(supported_root_fields)
+    if current_schema and set(raw) != _SOFTWARE_COORDINATE_ROOT_FIELDS:
+        missing = sorted(_SOFTWARE_COORDINATE_ROOT_FIELDS.difference(raw))
+        unsupported = sorted(set(raw).difference(_SOFTWARE_COORDINATE_ROOT_FIELDS))
+        detail: list[str] = []
+        if missing:
+            detail.append(f"missing {missing!r}")
+        if unsupported:
+            detail.append(f"unsupported {unsupported!r}")
+        return _preserved_settings(
+            raw,
+            f"Software coordinate settings schema is invalid ({', '.join(detail)}).",
+        )
+    unsupported_root_fields = set(raw).difference(
+        _SOFTWARE_COORDINATE_ROOT_FIELDS
+    )
     if unsupported_root_fields:
-        return SoftwareCoordinateSettings(
-            pivot=None,
-            diagnostics=(
-                "Unsupported software coordinate settings fields: "
-                f"{sorted(unsupported_root_fields)!r}.",
-            ),
-            _preserved_raw_section=deepcopy(raw),
+        return _preserved_settings(
+            raw,
+            "Unsupported software coordinate settings fields: "
+            f"{sorted(unsupported_root_fields)!r}.",
         )
     try:
         max_rotation_segment_deg = (
@@ -558,21 +600,23 @@ def parse_software_coordinate_settings(raw: object) -> SoftwareCoordinateSetting
             )
         )
     except ValueError as exc:
-        return SoftwareCoordinateSettings(
-            pivot=None,
-            diagnostics=(f"Software coordinate settings unavailable: {exc}",),
-            _preserved_raw_section=deepcopy(raw),
+        return _preserved_settings(
+            raw,
+            f"Software coordinate settings unavailable: {exc}",
         )
     diagnostics: list[str] = []
     frames: list[CustomFrameSettings] = []
     accepted_slots: list[tuple[int, str]] = []
     seen_frame_ids: set[str] = set()
     raw_frames = raw.get("custom_frames", ())
-    if "custom_frames" in raw and not isinstance(raw_frames, (list, tuple)):
-        return SoftwareCoordinateSettings(
-            pivot=None,
-            diagnostics=("Custom frames unavailable: expected a list.",),
-            _preserved_raw_section=deepcopy(raw),
+    expected_frame_containers = (list,) if current_schema else (list, tuple)
+    if "custom_frames" in raw and not isinstance(
+        raw_frames,
+        expected_frame_containers,
+    ):
+        return _preserved_settings(
+            raw,
+            "Custom frames unavailable: expected a list.",
         )
     if isinstance(raw_frames, (list, tuple)):
         for index, record in enumerate(raw_frames):
@@ -589,6 +633,12 @@ def parse_software_coordinate_settings(raw: object) -> SoftwareCoordinateSetting
 
     selected = raw.get("last_selected_frame_id", defaults.last_selected_frame_id)
     if not isinstance(selected, str) or not selected.strip():
+        if current_schema:
+            return _preserved_settings(
+                raw,
+                "Software coordinate settings unavailable: selected frame ID "
+                "must be a string.",
+            )
         selected = defaults.last_selected_frame_id
     selection_generation = raw.get(
         "selection_generation",
@@ -599,14 +649,11 @@ def parse_software_coordinate_settings(raw: object) -> SoftwareCoordinateSetting
         or isinstance(selection_generation, bool)
         or selection_generation < 0
     ):
-        if "version" in raw and "selection_generation" in raw:
-            return SoftwareCoordinateSettings(
-                pivot=None,
-                diagnostics=(
-                    "Software coordinate settings unavailable: selection "
-                    "generation must be a non-negative integer.",
-                ),
-                _preserved_raw_section=deepcopy(raw),
+        if current_schema:
+            return _preserved_settings(
+                raw,
+                "Software coordinate settings unavailable: selection "
+                "generation must be a non-negative integer.",
             )
         selection_generation = defaults.selection_generation
     raw_pivot_present = "pivot" in raw
@@ -615,6 +662,11 @@ def parse_software_coordinate_settings(raw: object) -> SoftwareCoordinateSetting
         try:
             pivot = _parse_pivot(raw_pivot)
         except (TypeError, ValueError) as exc:
+            if current_schema:
+                return _preserved_settings(
+                    raw,
+                    f"Rotation pivot unavailable: {exc}",
+                )
             pivot = None
             diagnostics.append(f"Rotation pivot unavailable: {exc}")
     else:

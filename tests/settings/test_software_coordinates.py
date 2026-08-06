@@ -1,6 +1,8 @@
 import json
 import logging
 from importlib import resources
+from pathlib import Path
+import threading
 
 import pytest
 
@@ -24,6 +26,18 @@ def _custom(*, z_zero_mm: float = 6.0, a_zero_mm: float = 7.0) -> CustomFrameSet
         z_zero_mm=z_zero_mm,
         a_zero_mm=a_zero_mm,
     )
+
+
+def _manager(tmp_path: Path | None = None) -> SettingsManager:
+    manager = SettingsManager.__new__(SettingsManager)
+    manager._logger = logging.getLogger(__name__)
+    if tmp_path is not None:
+        manager._config_dir = tmp_path
+        manager._config_path = tmp_path / "settings.json"
+        manager._settings_lock = threading.RLock()
+        manager._persistence_lock = threading.RLock()
+        manager.apply = lambda: None
+    return manager
 
 
 def test_software_coordinate_defaults_use_assumed_machine_zero_pivot() -> None:
@@ -170,6 +184,62 @@ def test_unknown_current_root_fields_degrade_and_preserve_the_whole_section() ->
     assert parsed.pivot is None
     assert parsed.degraded
     assert parsed.to_dict() == raw
+
+
+@pytest.mark.parametrize("raw_section", [None, [], "future-root"])
+def test_present_non_object_root_degrades_and_round_trips(
+    raw_section: object,
+) -> None:
+    settings = _manager()._settings_from_raw(
+        {"software_coordinates": raw_section}
+    )
+
+    assert settings.software_coordinates.degraded
+    assert settings.software_coordinates.materialization_blocked
+    assert settings.to_dict()["software_coordinates"] == raw_section
+
+
+def test_present_v1_root_with_missing_required_field_is_preserved() -> None:
+    raw = SoftwareCoordinateSettings().to_dict()
+    raw.pop("pivot")
+
+    parsed = _manager()._settings_from_raw({"software_coordinates": raw})
+
+    assert parsed.software_coordinates.degraded
+    assert parsed.software_coordinates.materialization_blocked
+    assert parsed.to_dict()["software_coordinates"] == raw
+
+
+def test_present_v1_root_with_wrong_json_type_is_preserved() -> None:
+    raw = SoftwareCoordinateSettings().to_dict()
+    raw["last_selected_frame_id"] = 42
+
+    parsed = _manager()._settings_from_raw({"software_coordinates": raw})
+
+    assert parsed.software_coordinates.degraded
+    assert parsed.software_coordinates.materialization_blocked
+    assert parsed.to_dict()["software_coordinates"] == raw
+
+
+def test_absent_software_coordinate_root_keeps_legacy_defaults() -> None:
+    parsed = _manager()._settings_from_raw({})
+
+    assert not parsed.software_coordinates.degraded
+    assert not parsed.software_coordinates.materialization_blocked
+    assert parsed.software_coordinates == SoftwareCoordinateSettings()
+
+
+def test_unrelated_settings_save_preserves_present_null_root(tmp_path: Path) -> None:
+    manager = _manager(tmp_path)
+    manager._settings = manager._settings_from_raw({"software_coordinates": None})
+
+    manager.update_and_save(
+        lambda settings: setattr(settings, "design_last_directory", "C:/designs")
+    )
+
+    persisted = json.loads(manager._config_path.read_text(encoding="utf-8"))
+    assert persisted["software_coordinates"] is None
+    assert persisted["design_last_directory"] == "C:/designs"
 
 
 def test_current_root_numeric_strings_are_preserved_not_coerced() -> None:

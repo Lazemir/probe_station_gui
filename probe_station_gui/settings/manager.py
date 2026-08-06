@@ -922,6 +922,9 @@ class SettingsManager:
 
     def _settings_from_raw(self, raw: object) -> Settings:
         controls = self._load_controls(raw)
+        software_coordinate_section_present = bool(
+            isinstance(raw, dict) and "software_coordinates" in raw
+        )
         logging_settings = self._parse_logging(
             self._raw_section(raw, "logging", default={})
         )
@@ -959,7 +962,8 @@ class SettingsManager:
                 self._raw_section(raw, "coordinate_system")
             ),
             software_coordinates=parse_software_coordinate_settings(
-                self._raw_section(raw, "software_coordinates")
+                self._raw_section(raw, "software_coordinates"),
+                section_present=software_coordinate_section_present,
             ),
             objectives=parse_objectives_settings(self._raw_section(raw, "objectives")),
             precision_approach=parse_precision_approach_settings(
@@ -1256,7 +1260,8 @@ class SettingsManager:
             }
         )
         clone.software_coordinates = parse_software_coordinate_settings(
-            clone.software_coordinates.to_dict()
+            clone.software_coordinates.to_dict(),
+            section_present=True,
         )
         clone.objectives = parse_objectives_settings(clone.objectives.to_dict())
         clone.precision_approach = parse_precision_approach_settings(
