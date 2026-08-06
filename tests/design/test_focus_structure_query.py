@@ -5,8 +5,10 @@ import threading
 import time
 
 import klayout.db as db
-from PySide6.QtWidgets import QApplication
+from PySide6.QtCore import QCoreApplication, QEvent, Qt
+from PySide6.QtWidgets import QApplication, QMainWindow
 import pytest
+import shiboken6
 
 from probe_station_gui.design.klayout_types import (
     KLayoutConfig,
@@ -124,3 +126,114 @@ def test_structure_worker_ignores_stale_generation_result() -> None:
 
     assert delivered == [2]
     worker.stop()
+
+
+def test_blocked_structure_query_survives_parent_window_close_and_retires() -> None:
+    app = QApplication.instance() or QApplication([])
+    creator_thread = threading.get_ident()
+    entered = threading.Event()
+    release = threading.Event()
+
+    class Backend:
+        def query(self, request: StructureBoundsRequest) -> StructureBoundsResult:
+            entered.set()
+            assert release.wait(2.0)
+            return StructureBoundsResult(
+                request_id=request.request_id,
+                generation=request.generation,
+                structure_bounds=((1.0, 2.0, 3.0, 4.0),),
+            )
+
+        def close(self) -> None:
+            return None
+
+    parent = QMainWindow()
+    parent.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+    worker = KLayoutStructureBoundsWorker(parent, backend_factory=Backend)
+    publications: list[object] = []
+    finished_threads: list[int] = []
+    delete_threads: list[int] = []
+    thread_errors: list[str] = []
+    worker.ready.connect(publications.append)
+    worker.failed.connect(publications.append)
+    worker.lifecycle_failed.connect(publications.append)
+    worker.finished.connect(lambda: finished_threads.append(threading.get_ident()))
+    worker.deleteLater = lambda: delete_threads.append(threading.get_ident())
+    original_excepthook = threading.excepthook
+    threading.excepthook = lambda args: thread_errors.append(
+        f"{args.exc_type.__name__}: {args.exc_value}"
+    )
+    worker.submit(
+        StructureBoundsRequest(
+            request_id=11,
+            generation=11,
+            fixture_polygons=((),),
+        )
+    )
+    assert entered.wait(1.0)
+    worker_thread = worker._thread
+    assert worker_thread is not None
+
+    try:
+        started = time.monotonic()
+        worker.stop(timeout_s=0.01)
+        stop_elapsed = time.monotonic() - started
+        parent.show()
+        parent.close()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        app.processEvents()
+        parent_deleted = not shiboken6.isValid(parent)
+        worker_valid_after_parent_close = shiboken6.isValid(worker)
+        worker_parent = worker.parent() if worker_valid_after_parent_close else parent
+    finally:
+        release.set()
+        worker_thread.join(timeout=1.0)
+        deadline = time.monotonic() + 1.0
+        while time.monotonic() < deadline and not finished_threads:
+            app.processEvents()
+            time.sleep(0.005)
+        threading.excepthook = original_excepthook
+
+    assert stop_elapsed < 0.2
+    assert parent_deleted
+    assert worker_valid_after_parent_close
+    assert worker_parent is None
+    assert publications == []
+    assert thread_errors == []
+    assert finished_threads == [creator_thread]
+    assert delete_threads == [creator_thread]
+
+
+def test_structure_worker_suppresses_lifecycle_failure_after_stop() -> None:
+    app = QApplication.instance() or QApplication([])
+    entered = threading.Event()
+    release = threading.Event()
+
+    def backend_factory():
+        entered.set()
+        assert release.wait(2.0)
+        raise RuntimeError("factory failed after stop")
+
+    worker = KLayoutStructureBoundsWorker(backend_factory=backend_factory)
+    lifecycle_failures: list[str] = []
+    worker.lifecycle_failed.connect(
+        lifecycle_failures.append,
+        Qt.ConnectionType.DirectConnection,
+    )
+    worker.submit(
+        StructureBoundsRequest(
+            request_id=12,
+            generation=12,
+            fixture_polygons=((),),
+        )
+    )
+    assert entered.wait(1.0)
+    worker_thread = worker._thread
+    assert worker_thread is not None
+
+    worker.stop(timeout_s=0.01)
+    release.set()
+    worker_thread.join(timeout=1.0)
+    app.processEvents()
+
+    assert lifecycle_failures == []

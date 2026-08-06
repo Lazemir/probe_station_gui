@@ -740,6 +740,7 @@ class Main(QMainWindow):
     MICROSCOPE_AREA_SCAN_STITCH_DEBUG_PLACEMENT_FRACTION = 1.0
     MICROSCOPE_AREA_SCAN_STITCH_DEBUG_OVERLAP_FRACTION = 0.25
     MICROSCOPE_SCAN_CAMERA_SETTINGS_TIMEOUT_S = 5.0
+    FOCUS_STRUCTURE_WORKER_SHUTDOWN_TIMEOUT_S = 0.25
     CONTACT_SEEK_STEP_MM = (
         needle_calibration_ui.manual_contact_seek.DEFAULT_MANUAL_CONTACT_SEEK_STEP_MM
     )
@@ -10885,7 +10886,7 @@ class Main(QMainWindow):
         self._clear_exact_step_targets()
         worker = getattr(self, "_focus_structure_bounds_worker", None)
         if worker is not None:
-            worker.stop(timeout_s=0.0)
+            worker.stop(timeout_s=self.FOCUS_STRUCTURE_WORKER_SHUTDOWN_TIMEOUT_S)
         shutdown_ui.close_event(self, event)
 
     def _clear_microscope_scan_dialog(self) -> None:

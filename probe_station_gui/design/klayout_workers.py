@@ -88,8 +88,11 @@ class _SnapWork:
 class _StructurePublication:
     kind: str
     value: object
-    request_id: int
-    generation: int
+    request_id: int | None
+    generation: int | None
+
+
+_RETIRED_STRUCTURE_BOUNDS_WORKERS: set[QObject] = set()
 
 
 class KLayoutRenderWorker(QObject):
@@ -556,11 +559,13 @@ class KLayoutStructureBoundsWorker(QObject):
         self._backend_factory = backend_factory or _KLayoutStructureBoundsBackend
         self._condition = threading.Condition(threading.Lock())
         self._stop_requested = threading.Event()
+        self._drop_publications = threading.Event()
         self._pending: StructureBoundsRequest | None = None
         self._latest_identity: tuple[int, int] | None = None
         self._stopping = False
         self._thread: threading.Thread | None = None
         self._finished_publication_posted = False
+        self._thread_finished_event = threading.Event()
         self._publication_posted.connect(
             self._deliver_publication,
             Qt.ConnectionType.QueuedConnection,
@@ -588,16 +593,32 @@ class KLayoutStructureBoundsWorker(QObject):
 
     def stop(self, timeout_s: float = 1.0) -> None:
         self._require_creator_thread()
+        deadline = time.monotonic() + max(0.0, float(timeout_s))
         with self._condition:
             self._stopping = True
             self._stop_requested.set()
+            self._drop_publications.set()
             self._pending = None
             thread = self._thread
             self._condition.notify_all()
-        if thread is not None and thread is not threading.current_thread():
-            thread.join(timeout=max(0.0, float(timeout_s)))
-        if thread is None:
+            post_finished = thread is None
+        if post_finished:
             self._post_finished()
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=max(0.0, deadline - time.monotonic()))
+            if thread.is_alive():
+                self._retire_until_finished()
+
+    @property
+    def is_finished(self) -> bool:
+        return self._thread_finished_event.is_set()
+
+    def _retire_until_finished(self) -> None:
+        """Detach from a closing parent and retain until creator-thread finish."""
+
+        if self.parent() is not None:
+            self.setParent(None)
+        _RETIRED_STRUCTURE_BOUNDS_WORKERS.add(self)
 
     def _run(self) -> None:
         backend = None
@@ -609,26 +630,23 @@ class KLayoutStructureBoundsWorker(QObject):
                     return
                 try:
                     result = backend.query(request)
-                    publication = _StructurePublication(
-                        "ready",
-                        result,
-                        request.request_id,
-                        request.generation,
-                    )
                 except Exception as exc:
-                    publication = _StructurePublication(
+                    self._post_publication(
                         "failed",
                         StructureBoundsFailure(
                             request.request_id,
                             request.generation,
                             f"{type(exc).__name__}: {exc}",
                         ),
-                        request.request_id,
-                        request.generation,
+                        request=request,
                     )
-                self._publication_posted.emit(publication)
+                    continue
+                self._post_publication("ready", result, request=request)
         except Exception as exc:
-            self.lifecycle_failed.emit(f"{type(exc).__name__}: {exc}")
+            self._post_publication(
+                "lifecycle_failed",
+                f"{type(exc).__name__}: {exc}",
+            )
         finally:
             if backend is not None:
                 try:
@@ -651,17 +669,38 @@ class KLayoutStructureBoundsWorker(QObject):
         if threading.get_ident() != self._creator_thread_id:
             raise RuntimeError(_CREATOR_THREAD_ERROR)
 
+    def _post_publication(
+        self,
+        kind: str,
+        value: object,
+        *,
+        request: StructureBoundsRequest | None = None,
+    ) -> None:
+        if self._drop_publications.is_set():
+            return
+        self._publication_posted.emit(
+            _StructurePublication(
+                kind,
+                value,
+                None if request is None else request.request_id,
+                None if request is None else request.generation,
+            )
+        )
+
     def _post_finished(self) -> None:
         with self._condition:
             if self._finished_publication_posted:
                 return
             self._finished_publication_posted = True
+            self._thread_finished_event.set()
         self._finished_posted.emit()
 
     @Slot(object)
     def _deliver_publication(self, publication: _StructurePublication) -> None:
         with self._condition:
-            if self._stopping or (
+            if self._stopping or self._drop_publications.is_set():
+                return
+            if publication.request_id is not None and (
                 publication.request_id,
                 publication.generation,
             ) != self._latest_identity:
@@ -671,6 +710,9 @@ class KLayoutStructureBoundsWorker(QObject):
     @Slot()
     def _deliver_finished(self) -> None:
         self.finished.emit()
+        if self in _RETIRED_STRUCTURE_BOUNDS_WORKERS:
+            _RETIRED_STRUCTURE_BOUNDS_WORKERS.discard(self)
+            self.deleteLater()
 
 
 class _KLayoutRenderBackend:

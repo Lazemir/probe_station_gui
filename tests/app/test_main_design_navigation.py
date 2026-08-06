@@ -1539,6 +1539,30 @@ def test_find_focus_submits_visible_fixture_geometry_and_waits_for_worker(
     assert window._focus_candidate.center == (5.0, 5.0)
 
 
+def test_main_close_uses_bounded_focus_structure_worker_retirement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stop_timeouts: list[float] = []
+    delegated: list[object] = []
+    window = Main.__new__(Main)
+    window._focus_structure_bounds_worker = types.SimpleNamespace(
+        stop=lambda timeout_s: stop_timeouts.append(float(timeout_s))
+    )
+    window._clear_exact_step_targets = lambda: None
+    monkeypatch.setattr(
+        main_module.shutdown_ui,
+        "close_event",
+        lambda owner, event: delegated.append((owner, event)),
+    )
+    event = object()
+
+    Main.closeEvent(window, event)
+
+    assert len(stop_timeouts) == 1
+    assert 0.0 < stop_timeouts[0] <= 1.0
+    assert delegated == [(window, event)]
+
+
 @pytest.mark.parametrize("changed_part", ["fov", "objective", "calibration"])
 def test_focus_candidate_acceptance_rejects_stale_optical_context(
     changed_part: str,
