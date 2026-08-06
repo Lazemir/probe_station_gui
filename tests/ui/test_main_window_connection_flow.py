@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from types import SimpleNamespace
 
 from probe_station_gui.coordinates.model import (
@@ -534,6 +535,7 @@ def test_coordinate_frame_document_load_is_independent_from_serial_controller_st
 
 def test_coordinate_frame_load_marks_existing_designs_unavailable_while_pending() -> None:
     loads: list[tuple[int, dict[str, object]]] = []
+    invalidations: list[str] = []
     registry = CoordinateFrameRegistry()
     registry.add(_design_record())
     owner = SimpleNamespace(
@@ -544,6 +546,10 @@ def test_coordinate_frame_load_marks_existing_designs_unavailable_while_pending(
         _coordinate_frame_store=SimpleNamespace(
             load=lambda request_id, **kwargs: loads.append((request_id, kwargs))
         ),
+        _design_session=SimpleNamespace(
+            active_frame_id=_design_record().frame_id,
+            invalidate_registration=invalidations.append,
+        ),
     )
 
     request_id = connection_flow.request_coordinate_frame_load(owner)
@@ -553,6 +559,7 @@ def test_coordinate_frame_load_marks_existing_designs_unavailable_while_pending(
     assert owner._coordinate_frames_loaded is False
     assert pending is not None
     assert pending.metadata[RUNTIME_PROVENANCE_STATUS] == "pending"
+    assert invalidations == ["Design coordinate provenance is being checked."]
     assert loads == [(1, {"machine_profile_id": "default"})]
 
 
@@ -615,6 +622,82 @@ def test_stale_provenance_callback_cannot_expose_design_frames(monkeypatch) -> N
 
     assert owner._coordinate_frames_loaded is False
     assert owner._coordinate_frame_registry.snapshot().records == ()
+
+
+def test_only_current_delayed_provenance_callback_reactivates_design(
+    monkeypatch,
+) -> None:
+    loads: list[int] = []
+    invalidations: list[str] = []
+    activations: list[str] = []
+    record = _design_record()
+    verified = replace(
+        record,
+        metadata={
+            **record.metadata,
+            RUNTIME_PROVENANCE_STATUS: "verified",
+        },
+    )
+    registry = CoordinateFrameRegistry()
+    registry.add(record)
+    owner = SimpleNamespace(
+        _coordinate_frame_request_id=0,
+        _coordinate_frame_load_request_id=None,
+        _coordinate_frames_loaded=True,
+        _coordinate_frame_registry=registry,
+        _coordinate_frame_store=SimpleNamespace(
+            load=lambda request_id, **_kwargs: loads.append(request_id)
+        ),
+        _design_session=SimpleNamespace(
+            active_frame_id=record.frame_id,
+            invalidate_registration=invalidations.append,
+        ),
+        _activate_loaded_design_frame=lambda: activations.append("activated"),
+    )
+    monkeypatch.setattr(
+        connection_flow.stage_position_panel,
+        "refresh_coordinate_frame_display",
+        lambda _owner: None,
+    )
+
+    stale_request_id = connection_flow.request_coordinate_frame_load(owner)
+    current_request_id = connection_flow.request_coordinate_frame_load(owner)
+    document = CoordinateFrameDocument(records=(record,))
+
+    connection_flow.handle_coordinate_frame_loaded(
+        owner,
+        CoordinateFrameLoadResult(
+            stale_request_id,
+            document,
+            runtime_records=(verified,),
+        ),
+    )
+
+    assert owner._coordinate_frames_loaded is False
+    assert activations == []
+    assert registry.get(record.frame_id).metadata[RUNTIME_PROVENANCE_STATUS] == (
+        "pending"
+    )
+
+    connection_flow.handle_coordinate_frame_loaded(
+        owner,
+        CoordinateFrameLoadResult(
+            current_request_id,
+            document,
+            runtime_records=(verified,),
+        ),
+    )
+
+    assert loads == [stale_request_id, current_request_id]
+    assert invalidations == [
+        "Design coordinate provenance is being checked.",
+        "Design coordinate provenance is being checked.",
+    ]
+    assert owner._coordinate_frames_loaded is True
+    assert registry.get(record.frame_id).metadata[RUNTIME_PROVENANCE_STATUS] == (
+        "verified"
+    )
+    assert activations == ["activated"]
 
 
 def test_legacy_state_is_removed_only_after_frame_document_publish_succeeds(

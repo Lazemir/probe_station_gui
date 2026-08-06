@@ -29,6 +29,10 @@ from probe_station_gui.design.model import DesignRegistration
 from probe_station_gui.design.klayout_types import StructureBoundsResult
 from probe_station_gui.design.session import DesignSession
 from probe_station_gui.coordinates.registry import CoordinateFrameRegistry
+from probe_station_gui.coordinates.provenance import (
+    RUNTIME_PROVENANCE_REASON,
+    RUNTIME_PROVENANCE_STATUS,
+)
 from probe_station_gui.design.frame_registration import (
     ContactReferenceToken,
     RegistrationFocusToken,
@@ -913,6 +917,7 @@ def test_design_navigation_inverts_universal_calibration_and_current_wco(
     window = Main.__new__(Main)
     window._design_session = session
     window._coordinate_frame_registry = registry
+    window._coordinate_frames_loaded = True
     window.stage_controller = types.SimpleNamespace(
         latest_machine_coordinate_snapshot=lambda: snapshot,
     )
@@ -937,6 +942,95 @@ def test_design_navigation_inverts_universal_calibration_and_current_wco(
     assert Main._raw_stage_xy_from_design_xy(window, (500.0, 250.0)) == pytest.approx(
         expected
     )
+
+
+def test_unverified_design_provenance_blocks_conversion_and_motion_until_verified(
+    tmp_path: Path,
+) -> None:
+    document = _make_document(tmp_path)
+    registry = CoordinateFrameRegistry()
+    committed = registry.add(
+        commit_xyb_registration(
+            new_design_frame_draft(document, existing_names=()),
+            design_points=((0.0, 0.0), (1000.0, 0.0)),
+            physical_machine_points=((12.0, 8.0), (13.0, 8.0)),
+            physical_b_deg=10.0,
+            pivot_machine_xy=(0.0, 0.0),
+        )
+    )
+    session = DesignSession(document=document)
+    session.link_active_frame(committed)
+    snapshot = _machine_snapshot((12.0, 8.0, 0.0, 0.0, 10.0))
+    move_requests: list[tuple[float, float]] = []
+    statuses: list[str] = []
+    window = Main.__new__(Main)
+    window._design_session = session
+    window._coordinate_frame_registry = registry
+    window._coordinate_frames_loaded = False
+    window.stage_controller = types.SimpleNamespace(
+        latest_machine_coordinate_snapshot=lambda: snapshot,
+        is_busy=lambda: False,
+        request_move_to_xy=lambda x_value, y_value: move_requests.append(
+            (float(x_value), float(y_value))
+        ),
+    )
+    _set_rotation_settings(window)
+    window._show_status = lambda message, _timeout=0: statuses.append(str(message))
+    window._refresh_design_panel = lambda: None
+    window._clear_planned_move_prediction = lambda **_kwargs: None
+    window._last_selected_design_point = None
+    window._pending_planned_move_target_xy = None
+    window._pending_planned_move_source_label = None
+
+    assert Main._raw_stage_xy_from_design_xy(window, (500.0, 0.0)) is None
+    assert not Main._move_to_design_coordinate(
+        window,
+        (500.0, 0.0),
+        source_label="design window",
+    )
+
+    window._coordinate_frames_loaded = True
+    for status, reason in (
+        ("pending", "Design coordinate provenance is being checked."),
+        ("blocked", "Design source changed since registration."),
+    ):
+        registry.reset(
+            (
+                replace(
+                    committed,
+                    metadata={
+                        **committed.metadata,
+                        RUNTIME_PROVENANCE_STATUS: status,
+                        RUNTIME_PROVENANCE_REASON: reason,
+                    },
+                ),
+            )
+        )
+        assert Main._raw_stage_xy_from_design_xy(window, (500.0, 0.0)) is None
+        assert not Main._move_to_design_coordinate(
+            window,
+            (500.0, 0.0),
+            source_label="design window",
+        )
+
+    verified = replace(
+        committed,
+        metadata={
+            **committed.metadata,
+            RUNTIME_PROVENANCE_STATUS: "verified",
+            RUNTIME_PROVENANCE_REASON: "",
+        },
+    )
+    registry.reset((verified,))
+    session.link_active_frame(verified)
+
+    assert Main._raw_stage_xy_from_design_xy(window, (500.0, 0.0)) is not None
+    assert Main._move_to_design_coordinate(
+        window,
+        (500.0, 0.0),
+        source_label="design window",
+    )
+    assert len(move_requests) == 1
 
 def test_authority_uses_xy_homing_and_tracked_calibrated_b_without_b_homing(
     tmp_path: Path,

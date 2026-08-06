@@ -8,6 +8,7 @@ from PySide6.QtCore import QTimer
 
 from probe_station_gui.coordinates.persistence import CoordinateFrameDocument
 from probe_station_gui.coordinates.provenance import (
+    design_frame_provenance_error,
     mark_design_frame_provenance_pending,
 )
 from probe_station_gui.design import navigation_adapter as design_navigation
@@ -34,6 +35,19 @@ def request_coordinate_frame_load(owner: object) -> int:
     if registry is not None:
         snapshot = registry.snapshot()
         registry.reset(mark_design_frame_provenance_pending(snapshot.records))
+    session = getattr(owner, "_design_session", None)
+    active_frame_id = getattr(session, "active_frame_id", None)
+    invalidate_registration = getattr(session, "invalidate_registration", None)
+    if active_frame_id and callable(invalidate_registration):
+        pending_record = registry.get(active_frame_id) if registry is not None else None
+        reason = (
+            design_frame_provenance_error(pending_record)
+            if pending_record is not None
+            else None
+        )
+        invalidate_registration(
+            reason or "Design coordinate provenance is being checked."
+        )
     owner._coordinate_frames_loaded = False
     profile_source = getattr(owner, "_current_machine_profile_id", None)
     profile_id = profile_source() if callable(profile_source) else "default"

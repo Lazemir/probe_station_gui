@@ -117,6 +117,7 @@ from probe_station_gui.coordinates.design_calibration import (
     design_calibration_fingerprints,
     reconcile_design_calibrations,
 )
+from probe_station_gui.coordinates.provenance import design_frame_provenance_error
 from probe_station_gui.coordinates.software_frames import materialize_custom_frames
 from probe_station_gui.design.focus_candidate import (
     FocusCandidate,
@@ -4337,10 +4338,16 @@ class Main(QMainWindow):
     def _raw_stage_xy_from_design_xy(
         self, design_xy: tuple[float, float]
     ) -> tuple[float, float] | None:
+        if not bool(getattr(self, "_coordinate_frames_loaded", False)):
+            return None
         frame_id = self._design_session.active_frame_id
         registry = getattr(self, "_coordinate_frame_registry", None)
         document = self._design_session.document
         record = registry.get(frame_id) if registry is not None and frame_id else None
+        if frame_id is not None and (
+            record is None or design_frame_provenance_error(record) is not None
+        ):
+            return None
         if record is not None and record.transform is not None and document is not None:
             snapshot = self.stage_controller.latest_machine_coordinate_snapshot()
             if snapshot is None:
