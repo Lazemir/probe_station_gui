@@ -27,6 +27,27 @@ from .transforms import BFrameTransform
 
 
 COORDINATE_FRAME_DOCUMENT_VERSION = 1
+_RECORD_FIELDS = frozenset(
+    {
+        "frame_id",
+        "kind",
+        "name",
+        "version",
+        "transform",
+        "readiness",
+        "metadata",
+    }
+)
+_TRANSFORM_FIELDS = frozenset(
+    {
+        "origin_xy_at_reference_b",
+        "reference_b_deg",
+        "xy_angle_at_reference_b_deg",
+        "b_zero_machine_deg",
+        "z_zero_machine_mm",
+        "a_zero_machine_mm",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -156,6 +177,24 @@ def _require_optional_json_number(
     return _require_json_number(value, name)
 
 
+def _require_exact_fields(
+    value: Mapping[str, object],
+    expected: frozenset[str],
+    name: str,
+) -> None:
+    actual = set(value)
+    if actual == expected:
+        return
+    missing = sorted(expected - actual)
+    unknown = sorted(actual - expected)
+    details: list[str] = []
+    if missing:
+        details.append(f"missing {missing!r}")
+    if unknown:
+        details.append(f"unknown {unknown!r}")
+    raise ValueError(f"{name} fields are unsupported: {', '.join(details)}.")
+
+
 def _record_to_dict(record: CoordinateFrameRecord) -> dict[str, object]:
     transform = record.transform
     if transform is None:
@@ -191,6 +230,7 @@ def _record_to_dict(record: CoordinateFrameRecord) -> dict[str, object]:
 def _record_from_dict(value: object) -> CoordinateFrameRecord:
     if not isinstance(value, dict):
         raise ValueError("Coordinate frame record must be an object.")
+    _require_exact_fields(value, _RECORD_FIELDS, "Coordinate frame record")
     frame_id = _require_json_string(value["frame_id"], "Coordinate frame ID")
     kind = FrameKind(_require_json_string(value["kind"], "Coordinate frame kind"))
     if kind is not FrameKind.DESIGN:
@@ -200,6 +240,11 @@ def _record_from_dict(value: object) -> CoordinateFrameRecord:
     raw_transform = value["transform"]
     if not isinstance(raw_transform, dict):
         raise ValueError("Coordinate frame transform must be an object.")
+    _require_exact_fields(
+        raw_transform,
+        _TRANSFORM_FIELDS,
+        "Coordinate frame transform",
+    )
     raw_origin = raw_transform["origin_xy_at_reference_b"]
     if not isinstance(raw_origin, (list, tuple)) or len(raw_origin) != 2:
         raise ValueError("Coordinate frame XY origin must have two values.")

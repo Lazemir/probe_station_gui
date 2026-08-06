@@ -53,9 +53,14 @@ def _wait_until(
     assert predicate()
 
 
-def _record(*, name: str = "valid", version: int = 0) -> CoordinateFrameRecord:
+def _record(
+    *,
+    name: str = "valid",
+    version: int = 0,
+    frame_id: str = "ba64e533-7143-49ef-b41a-290f16d7ca1b",
+) -> CoordinateFrameRecord:
     return CoordinateFrameRecord(
-        frame_id="ba64e533-7143-49ef-b41a-290f16d7ca1b",
+        frame_id=frame_id,
         kind=FrameKind.DESIGN,
         name=name,
         version=version,
@@ -123,6 +128,41 @@ def test_rejected_raw_record_survives_valid_record_mutation_and_save() -> None:
 
     assert saved["records"][0]["name"] == "renamed"
     assert saved["records"][1] == rejected
+
+
+@pytest.mark.parametrize("future_field_location", ["record", "transform"])
+def test_future_record_survives_unrelated_sibling_mutation_and_save(
+    future_field_location: str,
+) -> None:
+    future = CoordinateFrameDocument(records=(_record(name="future"),)).to_dict()[
+        "records"
+    ][0]
+    if future_field_location == "record":
+        future["future_record_field"] = {"keep": [1, 2, 3]}
+    else:
+        future["transform"]["future_transform_field"] = {
+            "keep": [4, 5, 6]
+        }
+    sibling = _record(
+        name="sibling",
+        frame_id="7ba7cc11-0940-4d4d-ad24-e6c8e6f1d55c",
+    )
+    serialized_sibling = CoordinateFrameDocument(records=(sibling,)).to_dict()[
+        "records"
+    ][0]
+    payload = {
+        "version": 1,
+        "records": [deepcopy(future), serialized_sibling],
+    }
+
+    loaded = CoordinateFrameDocument.from_dict(payload)
+    renamed = loaded.records[0].with_name("renamed sibling")
+    saved = loaded.with_records((renamed,)).to_dict()
+
+    assert [diagnostic.index for diagnostic in loaded.diagnostics] == [0]
+    assert [record.name for record in loaded.records] == ["sibling"]
+    assert saved["records"][0] == future
+    assert saved["records"][1]["name"] == "renamed sibling"
 
 
 def test_duplicate_valid_uuid_is_diagnosed_deterministically_and_preserved() -> None:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import hashlib
 import os
 from pathlib import Path
@@ -42,7 +43,12 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def _record(path: Path, *, profile: str = "rig-a") -> CoordinateFrameRecord:
+def _record(
+    path: Path,
+    *,
+    profile: str = "rig-a",
+    frame_id: str = "a915904c-945f-405b-b96f-28fd3e2b0718",
+) -> CoordinateFrameRecord:
     stat = path.stat()
     metadata = DesignFrameMetadata(
         source_path=str(path.resolve()),
@@ -54,7 +60,7 @@ def _record(path: Path, *, profile: str = "rig-a") -> CoordinateFrameRecord:
         machine_profile_id=profile,
     )
     return CoordinateFrameRecord(
-        frame_id="a915904c-945f-405b-b96f-28fd3e2b0718",
+        frame_id=frame_id,
         kind=FrameKind.DESIGN,
         name="chip",
         version=0,
@@ -152,3 +158,52 @@ def test_store_worker_keeps_delayed_load_unpublished_until_validation_finishes(
         "verified"
     )
     assert worker_thread_ids != [threading.get_ident()]
+
+
+def test_store_worker_isolates_malformed_fingerprint_from_valid_sibling(
+    qt_app: QApplication,
+    tmp_path: Path,
+) -> None:
+    bad_source = tmp_path / "bad.gds"
+    good_source = tmp_path / "good.gds"
+    bad_source.write_bytes(b"bad-gds")
+    good_source.write_bytes(b"good-gds")
+    bad = _record(bad_source)
+    bad_metadata = dict(bad.metadata)
+    bad_metadata["calibration_fingerprints"] = [[]]
+    bad = replace(bad, metadata=bad_metadata)
+    good = _record(
+        good_source,
+        frame_id="7d8a14a7-1e8d-4b89-8897-57413c09c4b8",
+    )
+
+    class _Backend:
+        def load(self) -> CoordinateFrameDocument:
+            return CoordinateFrameDocument(records=(bad, good))
+
+        def save(self, _document: CoordinateFrameDocument) -> None:
+            raise AssertionError("save not expected")
+
+    worker = CoordinateFrameStoreWorker(backend_factory=_Backend)
+    loaded: list[object] = []
+    failed: list[object] = []
+    worker.loaded.connect(loaded.append)
+    worker.failed.connect(failed.append)
+
+    worker.load(8, machine_profile_id="rig-a")
+    deadline = time.monotonic() + 2.0
+    while not loaded and not failed and time.monotonic() < deadline:
+        qt_app.processEvents()
+        time.sleep(0.005)
+    worker.stop(timeout_s=1.0)
+
+    assert failed == []
+    assert len(loaded) == 1
+    result = loaded[0]
+    assert [
+        record.metadata[RUNTIME_PROVENANCE_STATUS]
+        for record in result.runtime_records
+    ] == ["blocked", "verified"]
+    assert [diagnostic.frame_id for diagnostic in result.provenance_diagnostics] == [
+        bad.frame_id
+    ]

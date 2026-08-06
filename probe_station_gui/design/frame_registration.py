@@ -85,9 +85,8 @@ class DesignFrameMetadata:
             rms_residual_mm=_optional_float(value.get("rms_residual_mm")),
             max_residual_mm=_optional_float(value.get("max_residual_mm")),
             machine_profile_id=str(value.get("machine_profile_id", "default")),
-            calibration_fingerprints=tuple(
-                (str(item[0]), str(item[1]))
-                for item in value.get("calibration_fingerprints", ())
+            calibration_fingerprints=_fingerprint_pairs(
+                value.get("calibration_fingerprints", ())
             ),
         )
 
@@ -513,6 +512,21 @@ def _points(value: object) -> tuple[Point2D, ...]:
     if value is None:
         return ()
     return tuple(_finite_point(point, "Registration mark") for point in value)
+
+
+def _fingerprint_pairs(value: object) -> tuple[tuple[str, str], ...]:
+    if not isinstance(value, (list, tuple)):
+        raise ValueError("Calibration fingerprints must be a list of pairs.")
+    fingerprints: list[tuple[str, str]] = []
+    for item in value:
+        if (
+            not isinstance(item, (list, tuple))
+            or len(item) != 2
+            or not all(isinstance(part, str) for part in item)
+        ):
+            raise ValueError("Calibration fingerprint entries must be string pairs.")
+        fingerprints.append((item[0], item[1]))
+    return tuple(fingerprints)
 
 
 def _optional_float(value: object) -> float | None:
