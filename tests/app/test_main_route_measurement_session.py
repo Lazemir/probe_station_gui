@@ -29,7 +29,6 @@ from tests.app.main_coordinate_feedrate_support import (
     request_route_measurement_for_point,
     route_measurement_dialog_module,
 )
-from probe_station_gui.coordinates.model import FrameKind
 from probe_station_gui.coordinates.provenance import (
     RUNTIME_PROVENANCE_REASON,
     RUNTIME_PROVENANCE_STATUS,
@@ -305,6 +304,9 @@ class MainRouteMeasurementSessionTest(unittest.TestCase):
         self.assertIn("Invalid session handle", response["message"])
 
     def test_api_route_session_rejects_unverified_design_provenance(self) -> None:
+        design_kind = main_module.design_frame_provenance_error.__globals__[
+            "FrameKind"
+        ].DESIGN
         for status, reason in (
             ("pending", "Design coordinate provenance is being checked."),
             ("blocked", "Design source changed since registration."),
@@ -312,7 +314,7 @@ class MainRouteMeasurementSessionTest(unittest.TestCase):
             with self.subTest(status=status):
                 unsafe_point_calls: list[object] = []
                 record = types.SimpleNamespace(
-                    kind=FrameKind.DESIGN,
+                    kind=design_kind,
                     metadata={
                         RUNTIME_PROVENANCE_STATUS: status,
                         RUNTIME_PROVENANCE_REASON: reason,
