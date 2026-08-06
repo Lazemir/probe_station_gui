@@ -1276,6 +1276,105 @@ def test_source_capture_at_changed_b_retains_existing_check_evidence(
     assert statuses == []
 
 
+def test_source_capture_at_changed_b_rotates_measured_source_evidence(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    document = _make_document(tmp_path)
+    pivot = (10.0, -2.0)
+    reference_b = 12.0
+    source_design = ((0.0, 0.0), (1000.0, 0.0), (0.0, 1000.0))
+    source_machine = ((3.0, 4.0), (4.02, 4.01), (2.98, 5.04))
+    registry = CoordinateFrameRegistry()
+    committed = registry.add(
+        main_module.commit_xyb_registration(
+            new_design_frame_draft(document, existing_names=()),
+            design_points=source_design,
+            physical_machine_points=source_machine,
+            physical_b_deg=reference_b,
+            pivot_machine_xy=pivot,
+        )
+    )
+    assert committed.transform is not None
+    initial_metadata = main_module.DesignFrameMetadata.from_mapping(
+        committed.metadata
+    )
+    assert initial_metadata.max_residual_mm is not None
+    assert initial_metadata.max_residual_mm > 0.0
+
+    current_b = 42.0
+    delta_b = current_b - reference_b
+    expected_existing_at_current_b = tuple(
+        tuple(
+            np.asarray(pivot)
+            + np.asarray(
+                main_module.rotate_xy(
+                    (point[0] - pivot[0], point[1] - pivot[1]),
+                    delta_b,
+                )
+            )
+        )
+        for point in source_machine
+    )
+    synthesized_existing_at_current_b = tuple(
+        committed.transform.frame_xy_to_machine(
+            (
+                point[0] * initial_metadata.design_unit_mm,
+                point[1] * initial_metadata.design_unit_mm,
+            ),
+            machine_b_deg=current_b,
+            pivot_machine_xy=pivot,
+        )
+        for point in source_design
+    )
+    assert not np.allclose(
+        expected_existing_at_current_b,
+        synthesized_existing_at_current_b,
+    )
+    fourth_design = (1000.0, 1000.0)
+    fourth_machine = committed.transform.frame_xy_to_machine(
+        (1.0, 1.0),
+        machine_b_deg=current_b,
+        pivot_machine_xy=pivot,
+    )
+    session = DesignSession(document=document)
+    session.link_active_frame(
+        committed,
+        machine_b_deg=current_b,
+        pivot_machine_xy=pivot,
+    )
+    session.add_source_design_mark(fourth_design)
+    session.add_source_stage_mark(fourth_machine)
+    statuses: list[str] = []
+    window = Main.__new__(Main)
+    window._design_session = session
+    window._coordinate_frame_registry = registry
+    _set_rotation_settings(window, pivot)
+    window._pending_registration_physical_marks = {
+        committed.frame_id: {"source": [fourth_machine], "check": []}
+    }
+    window._design_navigation_xy_from_physical_machine_xy = lambda point: point
+    window._show_status = lambda message, _timeout: statuses.append(str(message))
+    monkeypatch.setattr(
+        main_module.connection_flow,
+        "publish_coordinate_frames",
+        lambda _owner: None,
+    )
+
+    Main._commit_active_design_frame_registration(window, current_b)
+
+    updated = registry.get(committed.frame_id)
+    assert updated is not None
+    metadata = main_module.DesignFrameMetadata.from_mapping(updated.metadata)
+    assert np.allclose(
+        metadata.source_machine_marks[: len(source_machine)],
+        expected_existing_at_current_b,
+    )
+    assert metadata.max_residual_mm is not None
+    assert metadata.max_residual_mm > 0.0
+    assert statuses == []
+
+
 def test_legacy_migration_projection_failure_leaves_registry_and_link_unchanged(
     tmp_path: Path,
 ) -> None:
@@ -2055,6 +2154,76 @@ def test_replacing_committed_source_marks_starts_fresh_draft_before_capture(
     assert registry.get(committed.frame_id) == committed
 
 
+def test_changing_source_mark_discards_unpaired_physical_capture(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    document = _make_document(tmp_path)
+    registry = CoordinateFrameRegistry()
+    draft = registry.add(new_design_frame_draft(document, existing_names=()))
+    session = DesignSession(document=document)
+    session.link_active_frame(draft, machine_b_deg=5.0, pivot_machine_xy=(0.0, 0.0))
+    session.set_source_design_mark(0, (0.0, 0.0))
+    session.set_source_design_mark(1, (1000.0, 0.0))
+    stale_physical = (10.0, 20.0)
+    session.add_source_stage_mark(stale_physical)
+    requests: list[object] = []
+    window = Main.__new__(Main)
+    window._design_session = session
+    window._coordinate_frame_registry = registry
+    window._coordinate_frames_loaded = True
+    window._active_design_frame_metadata = main_module.DesignFrameMetadata.from_document(
+        document
+    )
+    window._manual_alignment_pick_slot = None
+    window._manual_alignment_points = [None, None]
+    window._pending_alignment_preparation = None
+    window._last_selected_design_point = None
+    window._pending_registration_mark_capture = None
+    window._pending_registration_physical_marks = {
+        draft.frame_id: {"source": [stale_physical], "check": []}
+    }
+    _set_rotation_settings(window)
+    window.stage_controller = types.SimpleNamespace(
+        request_machine_coordinate_snapshot=lambda token, *, axes: (
+            requests.append(token) or True
+        )
+    )
+    window._camera_stage_xy_from_raw_stage_xy = lambda point: point
+    window._design_navigation_xy_from_physical_machine_xy = lambda point: point
+    window._set_design_snap_enabled = lambda _enabled: None
+    window._refresh_design_panel = lambda: None
+    window._refresh_design_position = lambda: None
+    window._set_alignment_panel_expanded = lambda: None
+    window._show_status = lambda *_args: None
+    monkeypatch.setattr(
+        main_module.connection_flow,
+        "publish_coordinate_frames",
+        lambda _owner: None,
+    )
+
+    Main._on_design_layout_point_selected(window, 0, 100.0, 200.0)
+    Main._capture_stage_source_mark(window)
+    fresh_snapshot = _machine_snapshot((11.0, 20.0, 0.0, 0.0, 5.0))
+    Main._on_registration_machine_coordinate_snapshot_finished(
+        window,
+        requests.pop(),
+        True,
+        fresh_snapshot,
+        "",
+    )
+
+    unchanged = registry.get(draft.frame_id)
+    assert unchanged is not None
+    metadata = main_module.DesignFrameMetadata.from_mapping(unchanged.metadata)
+    assert metadata.source_machine_marks == ()
+    assert not unchanged.readiness["X"].available
+    assert session.source_stage_marks == ((11.0, 20.0),)
+    assert window._pending_registration_physical_marks == {
+        draft.frame_id: {"source": [(11.0, 20.0)], "check": []}
+    }
+
+
 def test_top_cell_switch_links_the_matching_persistent_frame(
     monkeypatch,
     tmp_path: Path,
@@ -2190,9 +2359,14 @@ def test_registration_instance_switch_new_and_route_lineage_preserve_records(
     assert registry.snapshot().records == original_records
     window._route_measurement_thread = None
 
+    window._pending_registration_physical_marks = {
+        first.frame_id: {"source": [(30.0, 40.0)], "check": []},
+        second.frame_id: {"source": [], "check": [(31.0, 41.0)]},
+    }
     Main._select_design_registration_instance(window, second.frame_id)
 
     assert session.active_frame_id == second.frame_id
+    assert window._pending_registration_physical_marks == {}
     assert np.allclose(session.source_stage_marks, ((10.0, 20.0), (11.0, 20.0)))
     assert Main._snapshot_active_route_design_frame(window) == (
         main_module.snapshot_route_design_frame(
@@ -2209,10 +2383,14 @@ def test_registration_instance_switch_new_and_route_lineage_preserve_records(
     assert np.allclose(session.source_stage_marks, ((1.0, 2.0), (2.0, 2.0)))
     assert registry.snapshot().records == original_records
 
+    window._pending_registration_physical_marks = {
+        first.frame_id: {"source": [(32.0, 42.0)], "check": []}
+    }
     Main._new_design_registration_instance(window)
 
     assert len(registry.snapshot().records) == 3
     assert session.active_frame_id not in {first.frame_id, second.frame_id}
+    assert window._pending_registration_physical_marks == {}
 
 
 def test_missing_selected_registration_clears_session_without_deleting_others(

@@ -4542,8 +4542,13 @@ class Main(QMainWindow):
         self._manual_alignment_pick_slot = None
         self._manual_alignment_points = [None, None]
         self._pending_alignment_preparation = None
+        previous_frame_id = self._design_session.active_frame_id
         if not self._start_fresh_design_frame_for_source_replacement():
             return
+        self._discard_pending_registration_mark_samples(
+            previous_frame_id,
+            self._design_session.active_frame_id,
+        )
         self._design_session.clear_source_stage_marks()
         self._last_selected_design_point = snapped_point
         self._set_design_snap_enabled(True)
@@ -9652,6 +9657,22 @@ class Main(QMainWindow):
     def _capture_stage_check_mark(self) -> None:
         self._capture_stage_registration_mark(check_mark=True)
 
+    def _discard_pending_registration_mark_samples(
+        self,
+        *frame_ids: str | None,
+    ) -> None:
+        keys = {frame_id or "legacy" for frame_id in frame_ids}
+        pending_by_frame = getattr(self, "_pending_registration_physical_marks", None)
+        if isinstance(pending_by_frame, dict):
+            for key in keys:
+                pending_by_frame.pop(key, None)
+        context = getattr(self, "_pending_registration_mark_capture", None)
+        if (
+            isinstance(context, _RegistrationMarkCaptureContext)
+            and (context.frame_id or "legacy") in keys
+        ):
+            self._pending_registration_mark_capture = None
+
     def _capture_stage_registration_mark(self, *, check_mark: bool) -> None:
         session = self._design_session
         document = session.document
@@ -9816,19 +9837,8 @@ class Main(QMainWindow):
         existing_source_at_current_b: tuple[tuple[float, float], ...] = ()
         existing_checks_at_current_b: tuple[tuple[float, float], ...] = ()
         if current.transform is not None:
-            existing_source_at_current_b = tuple(
-                current.transform.frame_xy_to_machine(
-                    (
-                        point[0] * current_metadata.design_unit_mm,
-                        point[1] * current_metadata.design_unit_mm,
-                    ),
-                    machine_b_deg=physical_b_deg,
-                    pivot_machine_xy=pivot,
-                )
-                for point in current_metadata.source_design_marks
-            )
             delta_b = physical_b_deg - current.transform.reference_b_deg
-            existing_checks_at_current_b = tuple(
+            existing_source_at_current_b = tuple(
                 (
                     pivot[0]
                     + rotate_xy(
@@ -9838,6 +9848,24 @@ class Main(QMainWindow):
                     pivot[1]
                     + rotate_xy(
                         (point[0] - pivot[0], point[1] - pivot[1]),
+                        delta_b,
+                    )[1],
+                )
+                for point in current_metadata.source_machine_marks
+            )
+            existing_checks_at_current_b = tuple(
+                (
+                    pivot[0]
+                    + rotate_xy(
+                        (point[0] - pivot[0], point[1] - pivot[1]),
+                        delta_b,
+                    )[0],
+                    pivot[1]
+                    + rotate_xy(
+                        (
+                            point[0] - pivot[0],
+                            point[1] - pivot[1],
+                        ),
                         delta_b,
                     )[1],
                 )
@@ -9895,6 +9923,9 @@ class Main(QMainWindow):
         return abs(float(ratio) - 1.0) <= self.DESIGN_SPACING_RATIO_TOLERANCE
 
     def _clear_design_registration(self) -> None:
+        self._discard_pending_registration_mark_samples(
+            self._design_session.active_frame_id
+        )
         self._pending_alignment_preparation = None
         self._last_selected_design_point = None
         registry = getattr(self, "_coordinate_frame_registry", None)
@@ -9967,6 +9998,7 @@ class Main(QMainWindow):
         registry = getattr(self, "_coordinate_frame_registry", None)
         if frame_id is None or registry is None or registry.get(frame_id) is not None:
             return
+        self._discard_pending_registration_mark_samples(frame_id)
         self._design_session.clear_registration()
         self._pending_alignment_preparation = None
         self._last_selected_design_point = None
@@ -9991,6 +10023,10 @@ class Main(QMainWindow):
                 5000,
             )
             return
+        self._discard_pending_registration_mark_samples(
+            self._design_session.active_frame_id,
+            selected_id,
+        )
         try:
             activation = design_navigation.activate_design_frame_for_document(
                 self._design_session,
