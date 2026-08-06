@@ -1147,6 +1147,7 @@ class Main(QMainWindow):
             path=self.settings_manager.coordinate_frames_path(),
         )
         self._coordinate_frame_request_id = 0
+        self._coordinate_frame_latest_save_request_id: int | None = None
         self._coordinate_frame_load_request_id: int | None = None
         self._legacy_design_migration_request_id: int | None = None
         self._legacy_design_migration_state: dict[str, object] | None = None
@@ -7940,6 +7941,18 @@ class Main(QMainWindow):
         message = str(getattr(failure, "message", "Unknown persistence error."))
         logger.warning("Coordinate frame %s failed: %s", operation, message)
         request_id = getattr(failure, "request_id", None)
+        latest_save_request_id = getattr(
+            self,
+            "_coordinate_frame_latest_save_request_id",
+            None,
+        )
+        if (
+            operation == "save"
+            and isinstance(request_id, int)
+            and isinstance(latest_save_request_id, int)
+            and request_id < latest_save_request_id
+        ):
+            return
         transactions = getattr(
             self,
             "_registration_persistence_transactions",

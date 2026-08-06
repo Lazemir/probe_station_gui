@@ -1396,6 +1396,87 @@ def test_coalesced_registration_save_failure_restores_earliest_durable_record(
     assert window._registration_persistence_transactions == {}
 
 
+@pytest.mark.parametrize("newer_outcome", ("saved", "failed"))
+def test_older_registration_save_failure_defers_to_newer_publication(
+    tmp_path: Path,
+    newer_outcome: str,
+) -> None:
+    document = _make_document(tmp_path)
+    registry = CoordinateFrameRegistry()
+    draft = registry.add(new_design_frame_draft(document, existing_names=()))
+    registered = registry.replace(
+        commit_xyb_registration(
+            draft,
+            design_points=((0.0, 0.0), (1000.0, 0.0)),
+            physical_machine_points=((1.0, 2.0), (2.0, 2.0)),
+            physical_b_deg=5.0,
+            pivot_machine_xy=(0.0, 0.0),
+        ),
+        expected_version=draft.version,
+    )
+    focused = registry.replace(
+        set_focus_reference(registered, physical_machine_z_mm=0.25),
+        expected_version=registered.version,
+    )
+    session = DesignSession(document=document)
+    session.link_active_frame(
+        focused,
+        machine_b_deg=5.0,
+        pivot_machine_xy=(0.0, 0.0),
+    )
+    window = Main.__new__(Main)
+    window._design_session = session
+    window._coordinate_frame_registry = registry
+    window._coordinate_frame_latest_save_request_id = 42
+    window._registration_persistence_transactions = {
+        41: main_module._RegistrationPersistenceTransaction(
+            request_id=41,
+            previous_record=draft,
+            committed_record=registered,
+            machine_b_deg=5.0,
+            pivot_machine_xy=(0.0, 0.0),
+            success_message="registration saved",
+        )
+    }
+    window._design_navigation_xy_from_physical_machine_xy = lambda point: point
+    window._refresh_design_panel = lambda: None
+    window._refresh_design_position = lambda: None
+    window._show_status = lambda _message, _timeout=0: None
+
+    Main._on_coordinate_frame_store_failed(
+        window,
+        types.SimpleNamespace(
+            request_id=41,
+            operation="save",
+            message="disk full",
+        ),
+    )
+
+    assert registry.get(draft.frame_id) == focused
+    assert tuple(window._registration_persistence_transactions) == (41,)
+
+    if newer_outcome == "saved":
+        Main._on_coordinate_frames_saved(
+            window,
+            types.SimpleNamespace(request_id=42),
+        )
+        assert registry.get(draft.frame_id) == focused
+    else:
+        Main._on_coordinate_frame_store_failed(
+            window,
+            types.SimpleNamespace(
+                request_id=42,
+                operation="save",
+                message="still full",
+            ),
+        )
+        restored = registry.get(draft.frame_id)
+        assert restored is not None
+        assert restored.transform == draft.transform
+        assert session.registration is None
+    assert window._registration_persistence_transactions == {}
+
+
 def test_design_navigation_inverts_universal_calibration_and_current_wco(
     tmp_path: Path,
 ) -> None:

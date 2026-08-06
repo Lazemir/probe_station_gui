@@ -118,6 +118,7 @@ def publish_coordinate_frames(
     ) is not None:
         owner._legacy_design_migration_request_id = request_id
     owner._coordinate_frame_store.publish(request_id, document)
+    owner._coordinate_frame_latest_save_request_id = request_id
     return request_id
 
 

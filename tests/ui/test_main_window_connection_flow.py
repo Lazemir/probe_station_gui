@@ -593,10 +593,11 @@ def test_loaded_document_preserves_rejected_raw_records_through_publish(
         CoordinateFrameLoadResult(1, document),
     )
     owner._coordinate_frame_registry.reset((_design_record(name="renamed"),))
-    connection_flow.publish_coordinate_frames(owner)
+    request_id = connection_flow.publish_coordinate_frames(owner)
 
     assert published[0].to_dict()["records"][0]["name"] == "renamed"
     assert published[0].to_dict()["records"][1] == rejected
+    assert owner._coordinate_frame_latest_save_request_id == request_id
 
 
 def test_stale_provenance_callback_cannot_expose_design_frames(monkeypatch) -> None:
