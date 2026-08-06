@@ -622,9 +622,13 @@ class _RegistrationMarkCaptureContext:
     session_identity: int
     frame_id: str | None
     frame_version: int | None
-    document_identity: tuple[str, str, int] | None
+    source_identity: tuple[str, str]
+    top_cell_name: str
+    rotation_quarter_turns: int
     source_design_marks: tuple[tuple[float, float], ...]
     check_design_marks: tuple[tuple[float, float], ...]
+    pivot_machine_xy: tuple[float, float]
+    operation_id: str
 
 
 @dataclass(frozen=True)
@@ -654,6 +658,54 @@ class _RegistrationEvidenceSample:
     frame_version: int
     design_mark_set: tuple[tuple[float, float], ...]
     operation_id: str
+
+
+@dataclass(frozen=True)
+class _CapturedRegistrationSample:
+    mark_kind: str
+    physical_machine_xy: tuple[float, float]
+    physical_b_deg: float
+    pivot_machine_xy: tuple[float, float]
+    source_identity: tuple[str, str]
+    top_cell_name: str
+    rotation_quarter_turns: int
+    frame_id: str | None
+    frame_version: int | None
+    source_design_marks: tuple[tuple[float, float], ...]
+    check_design_marks: tuple[tuple[float, float], ...]
+    operation_id: str
+
+
+@dataclass
+class _PendingRegistrationEvidence:
+    session_identity: int
+    frame_id: str | None
+    frame_version: int | None
+    source_identity: tuple[str, str]
+    top_cell_name: str
+    rotation_quarter_turns: int
+    source_design_marks: tuple[tuple[float, float], ...]
+    check_design_marks: tuple[tuple[float, float], ...]
+    operation_id: str
+    baseline_source_stage_marks: tuple[tuple[float, float] | None, ...]
+    baseline_check_stage_marks: tuple[tuple[float, float], ...]
+    baseline_registration: object | None
+    baseline_registration_status: str
+    source_samples: list[_CapturedRegistrationSample]
+    check_samples: list[_CapturedRegistrationSample]
+
+
+@dataclass(frozen=True)
+class _RegistrationPersistenceTransaction:
+    request_id: int
+    previous_record: object
+    committed_record: object
+    machine_b_deg: float
+    pivot_machine_xy: tuple[float, float]
+    success_message: str
+    operator_alignment: bool = False
+    rms_residual_mm: float | None = None
+    max_residual_mm: float | None = None
 
 
 @dataclass
@@ -1114,7 +1166,11 @@ class Main(QMainWindow):
         ] = []
         self._pending_registration_physical_marks: dict[
             str,
-            dict[str, list[tuple[float, float]]],
+            _PendingRegistrationEvidence,
+        ] = {}
+        self._registration_persistence_transactions: dict[
+            int,
+            _RegistrationPersistenceTransaction,
         ] = {}
         self._pending_registration_focus_token: RegistrationFocusToken | None = None
         self._pending_registration_focus_target_xy: tuple[float, float] | None = None
@@ -7413,6 +7469,7 @@ class Main(QMainWindow):
     def _start_design_document_load(
         self, design_path: str, *, restore_state: dict[str, object] | None, show_window: bool
     ) -> None:
+        self._discard_all_registration_evidence()
         self._invalidate_pending_design_markup_load()
         self._design_load_generation += 1
         generation = self._design_load_generation
@@ -7847,13 +7904,98 @@ class Main(QMainWindow):
 
     def _on_coordinate_frames_saved(self, result: object) -> None:
         connection_flow.handle_coordinate_frame_saved(self, result)
+        request_id = getattr(result, "request_id", None)
+        if not isinstance(request_id, int):
+            return
+        transactions = getattr(
+            self,
+            "_registration_persistence_transactions",
+            None,
+        )
+        if not isinstance(transactions, dict):
+            return
+        completed = tuple(
+            transactions.pop(candidate_id)
+            for candidate_id in sorted(tuple(transactions))
+            if candidate_id <= request_id
+        )
+        for transaction in completed:
+            committed = transaction.committed_record
+            frame_id = getattr(committed, "frame_id", None)
+            registry = getattr(self, "_coordinate_frame_registry", None)
+            session = getattr(self, "_design_session", None)
+            if (
+                frame_id is None
+                or registry is None
+                or registry.get(frame_id) != committed
+                or getattr(session, "active_frame_id", None) != frame_id
+            ):
+                continue
+            if transaction.operator_alignment:
+                self._collapse_alignment_panel_if_ready()
+            self._show_status(transaction.success_message, 7000)
 
     def _on_coordinate_frame_store_failed(self, failure: object) -> None:
         operation = str(getattr(failure, "operation", "operation"))
         message = str(getattr(failure, "message", "Unknown persistence error."))
         logger.warning("Coordinate frame %s failed: %s", operation, message)
+        request_id = getattr(failure, "request_id", None)
+        transactions = getattr(
+            self,
+            "_registration_persistence_transactions",
+            None,
+        )
+        if operation == "save" and isinstance(request_id, int) and isinstance(
+            transactions,
+            dict,
+        ):
+            failed = tuple(
+                transactions.pop(candidate_id)
+                for candidate_id in sorted(tuple(transactions))
+                if candidate_id <= request_id
+            )
+            for transaction in failed:
+                self._rollback_registration_persistence_transaction(transaction)
         action = "loaded" if operation == "load" else "saved"
         self._show_status(f"Design coordinate frames could not be {action}.", 6000)
+
+    def _rollback_registration_persistence_transaction(
+        self,
+        transaction: _RegistrationPersistenceTransaction,
+    ) -> None:
+        registry = getattr(self, "_coordinate_frame_registry", None)
+        committed = transaction.committed_record
+        previous = transaction.previous_record
+        frame_id = getattr(committed, "frame_id", None)
+        if registry is None or frame_id is None or registry.get(frame_id) != committed:
+            return
+        try:
+            restored = registry.replace(
+                previous,
+                expected_version=getattr(committed, "version"),
+            )
+            session = getattr(self, "_design_session", None)
+            if session is not None and session.active_frame_id == frame_id:
+                session.link_active_frame(
+                    restored,
+                    machine_point_for_navigation=(
+                        self._design_navigation_xy_from_physical_machine_xy
+                    ),
+                    machine_b_deg=transaction.machine_b_deg,
+                    pivot_machine_xy=transaction.pivot_machine_xy,
+                )
+            document = getattr(self, "_coordinate_frame_document", None)
+            with_records = getattr(document, "with_records", None)
+            if callable(with_records):
+                self._coordinate_frame_document = with_records(
+                    registry.snapshot().records
+                )
+            if transaction.operator_alignment:
+                self._set_design_snap_enabled(True)
+            self._refresh_design_panel()
+            self._refresh_design_position()
+        except Exception:
+            logger.exception("Failed to roll back unsaved Design registration")
 
     def _activate_loaded_design_frame(
         self,
@@ -8172,6 +8314,7 @@ class Main(QMainWindow):
     def _unload_design_document(self) -> None:
         if not self._design_mutation_ready():
             return
+        self._discard_all_registration_evidence()
         self._design_load_generation += 1
         loaded_document = self._design_session.document
         plan = design_navigation.unload_design_document(self._design_session)
@@ -8194,6 +8337,7 @@ class Main(QMainWindow):
     def _set_design_top_cell(self, top_cell_name: str) -> None:
         if not self._design_mutation_ready():
             return
+        self._discard_all_registration_evidence()
         try:
             plan = design_navigation.set_design_top_cell(self._design_session, top_cell_name)
         except DesignModelError as exc:
@@ -8253,6 +8397,7 @@ class Main(QMainWindow):
         if route_measurement_thread is not None and route_measurement_thread.is_alive():
             self._show_status("Stop route measurement before rotating the design.", 5000)
             return
+        self._discard_all_registration_evidence()
         delta = int(quarter_turn_delta) % 4
         if delta == 0:
             delta = 1
@@ -10022,6 +10167,9 @@ class Main(QMainWindow):
     def _add_design_source_mark(self, x_value: float, y_value: float) -> None:
         if not self._design_mutation_ready():
             return
+        self._discard_pending_registration_mark_samples(
+            self._design_session.active_frame_id
+        )
         self._design_session.add_source_design_mark((x_value, y_value))
         self._refresh_design_panel()
         self._show_status(
@@ -10032,6 +10180,9 @@ class Main(QMainWindow):
     def _add_design_check_mark(self, x_value: float, y_value: float) -> None:
         if not self._design_mutation_ready():
             return
+        self._discard_pending_registration_mark_samples(
+            self._design_session.active_frame_id
+        )
         self._design_session.add_check_design_mark((x_value, y_value))
         self._refresh_design_panel()
         self._show_status(
@@ -10048,12 +10199,18 @@ class Main(QMainWindow):
     def _discard_pending_registration_mark_samples(
         self,
         *frame_ids: str | None,
+        rollback_session: bool = True,
     ) -> None:
         keys = {frame_id or "legacy" for frame_id in frame_ids}
         pending_by_frame = getattr(self, "_pending_registration_physical_marks", None)
         if isinstance(pending_by_frame, dict):
             for key in keys:
-                pending_by_frame.pop(key, None)
+                pending = pending_by_frame.pop(key, None)
+                if rollback_session and isinstance(
+                    pending,
+                    _PendingRegistrationEvidence,
+                ):
+                    self._restore_registration_evidence_baseline(pending)
         context = getattr(self, "_pending_registration_mark_capture", None)
         if (
             isinstance(context, _RegistrationMarkCaptureContext)
@@ -10061,30 +10218,99 @@ class Main(QMainWindow):
         ):
             self._pending_registration_mark_capture = None
 
+    def _discard_all_registration_evidence(self) -> None:
+        pending_by_frame = getattr(self, "_pending_registration_physical_marks", None)
+        if isinstance(pending_by_frame, dict):
+            for pending in tuple(pending_by_frame.values()):
+                if isinstance(pending, _PendingRegistrationEvidence):
+                    self._restore_registration_evidence_baseline(pending)
+            pending_by_frame.clear()
+        self._pending_registration_mark_capture = None
+        self._pending_operator_alignment_capture = None
+        self._alignment_physical_draft = []
+        self._alignment_stage_draft = []
+        self._alignment_operation_id = None
+
+    def _restore_registration_evidence_baseline(
+        self,
+        pending: _PendingRegistrationEvidence,
+    ) -> None:
+        session = self._design_session
+        if (
+            id(session) != pending.session_identity
+            or session.active_frame_id != pending.frame_id
+        ):
+            return
+        session.source_stage_marks = tuple(pending.baseline_source_stage_marks)
+        session.check_stage_marks = list(pending.baseline_check_stage_marks)
+        session.registration = pending.baseline_registration
+        session.registration_status = pending.baseline_registration_status
+
+    @staticmethod
+    def _registration_capture_matches_pending(
+        context: _RegistrationMarkCaptureContext,
+        pending: _PendingRegistrationEvidence,
+    ) -> bool:
+        return bool(
+            context.session_identity == pending.session_identity
+            and context.frame_id == pending.frame_id
+            and context.frame_version == pending.frame_version
+            and context.source_identity == pending.source_identity
+            and context.top_cell_name == pending.top_cell_name
+            and context.rotation_quarter_turns == pending.rotation_quarter_turns
+            and context.source_design_marks == pending.source_design_marks
+            and context.check_design_marks == pending.check_design_marks
+        )
+
     def _capture_stage_registration_mark(self, *, check_mark: bool) -> None:
         session = self._design_session
         document = session.document
+        if document is None:
+            self._show_status("Load a design before capturing a stage mark.", 5000)
+            return
         frame_id = session.active_frame_id
         registry = getattr(self, "_coordinate_frame_registry", None)
         record = registry.get(frame_id) if registry is not None and frame_id else None
+        try:
+            source_identity = (
+                str(document.path.expanduser().resolve()),
+                str(document.source_load_id),
+            )
+            pivot_value = self._rotation_geometry_snapshot().pivot_machine_xy
+            pivot = (float(pivot_value[0]), float(pivot_value[1]))
+        except (DesignModelError, OSError, TypeError, ValueError) as exc:
+            self._show_status(str(exc), 6000)
+            return
+        key = frame_id or "legacy"
+        pending_by_frame = getattr(self, "_pending_registration_physical_marks", None)
+        if not isinstance(pending_by_frame, dict):
+            pending_by_frame = {}
+            self._pending_registration_physical_marks = pending_by_frame
+        pending = pending_by_frame.get(key)
+        operation_id = (
+            pending.operation_id
+            if isinstance(pending, _PendingRegistrationEvidence)
+            else str(uuid.uuid4())
+        )
         context = _RegistrationMarkCaptureContext(
             request_id=str(uuid.uuid4()),
             check_mark=bool(check_mark),
             session_identity=id(session),
             frame_id=frame_id,
             frame_version=None if record is None else record.version,
-            document_identity=(
-                None
-                if document is None
-                else (
-                    str(document.path.expanduser().resolve()),
-                    str(document.top_cell_name),
-                    int(document.rotation_quarter_turns) % 4,
-                )
-            ),
+            source_identity=source_identity,
+            top_cell_name=str(document.top_cell_name),
+            rotation_quarter_turns=int(document.rotation_quarter_turns) % 4,
             source_design_marks=tuple(session.source_design_marks_compact()),
             check_design_marks=tuple(session.check_design_marks),
+            pivot_machine_xy=pivot,
+            operation_id=operation_id,
         )
+        if isinstance(pending, _PendingRegistrationEvidence) and not (
+            self._registration_capture_matches_pending(context, pending)
+        ):
+            self._discard_pending_registration_mark_samples(frame_id)
+            context = replace(context, operation_id=str(uuid.uuid4()))
         self._pending_registration_mark_capture = context
         accepted = self.stage_controller.request_machine_coordinate_snapshot(
             context.request_id,
@@ -10129,6 +10355,7 @@ class Main(QMainWindow):
             self._show_status(str(message or "Machine coordinates are unavailable."), 6000)
             return
         if not self._registration_mark_capture_context_is_current(context):
+            self._discard_pending_registration_mark_samples(context.frame_id)
             return
         try:
             physical_pose = snapshot.physical_machine_pose
@@ -10156,27 +10383,71 @@ class Main(QMainWindow):
                 }
             )
         pending_by_frame = getattr(self, "_pending_registration_physical_marks", None)
-        if pending_by_frame is None:
+        if not isinstance(pending_by_frame, dict):
             pending_by_frame = {}
             self._pending_registration_physical_marks = pending_by_frame
-        pending = pending_by_frame.setdefault(
-            key,
-            {"source": [], "check": []},
+        pending = pending_by_frame.get(key)
+        if not isinstance(pending, _PendingRegistrationEvidence):
+            pending = _PendingRegistrationEvidence(
+                session_identity=context.session_identity,
+                frame_id=context.frame_id,
+                frame_version=context.frame_version,
+                source_identity=context.source_identity,
+                top_cell_name=context.top_cell_name,
+                rotation_quarter_turns=context.rotation_quarter_turns,
+                source_design_marks=context.source_design_marks,
+                check_design_marks=context.check_design_marks,
+                operation_id=context.operation_id,
+                baseline_source_stage_marks=tuple(
+                    self._design_session.source_stage_marks
+                ),
+                baseline_check_stage_marks=tuple(
+                    self._design_session.check_stage_marks
+                ),
+                baseline_registration=self._design_session.registration,
+                baseline_registration_status=str(
+                    self._design_session.registration_status
+                ),
+                source_samples=[],
+                check_samples=[],
+            )
+            pending_by_frame[key] = pending
+        sample = _CapturedRegistrationSample(
+            mark_kind="check" if context.check_mark else "source",
+            physical_machine_xy=(float(physical_xy[0]), float(physical_xy[1])),
+            physical_b_deg=float(physical_b),
+            pivot_machine_xy=context.pivot_machine_xy,
+            source_identity=context.source_identity,
+            top_cell_name=context.top_cell_name,
+            rotation_quarter_turns=context.rotation_quarter_turns,
+            frame_id=context.frame_id,
+            frame_version=context.frame_version,
+            source_design_marks=context.source_design_marks,
+            check_design_marks=context.check_design_marks,
+            operation_id=context.operation_id,
         )
         kind = "check" if context.check_mark else "source"
-        pending[kind].append(physical_xy)
+        samples = pending.check_samples if context.check_mark else pending.source_samples
+        samples.append(sample)
         if context.check_mark:
             self._design_session.add_check_stage_mark(stage_xy)
         else:
             self._design_session.add_source_stage_mark(stage_xy)
-        self._commit_active_design_frame_registration(physical_b)
+        capture_message = (
+            f"Stage {kind} mark captured at X={physical_xy[0]:.3f}, "
+            f"Y={physical_xy[1]:.3f}."
+        )
+        commit_result = self._commit_active_design_frame_registration(
+            success_message=capture_message
+        )
         self._refresh_design_panel()
         self._refresh_design_position()
-        self._show_status(
-            f"Stage {kind} mark captured at X={physical_xy[0]:.3f}, "
-            f"Y={physical_xy[1]:.3f}.",
-            4000,
-        )
+        if commit_result == "failed":
+            return
+        if commit_result == "deferred":
+            self._show_status("Saving design registration.", 0)
+            return
+        self._show_status(capture_message, 4000)
 
     def _complete_operator_alignment_machine_capture(
         self,
@@ -10319,12 +10590,9 @@ class Main(QMainWindow):
             or sample.pivot_machine_xy != first.pivot_machine_xy
             for sample in completed[1:]
         ):
-            self._alignment_physical_draft = [None] * len(samples)
-            self._alignment_stage_draft = [None] * len(samples)
-            self._design_session.clear_source_stage_marks()
-            self._show_status(
+            self._discard_operator_alignment_evidence(
+                len(samples),
                 "Alignment captures used incompatible B-axis contexts. Capture them again.",
-                7000,
             )
             return
         registry = getattr(self, "_coordinate_frame_registry", None)
@@ -10359,25 +10627,85 @@ class Main(QMainWindow):
                 pivot_machine_xy=first.pivot_machine_xy,
             )
         except (DesignModelError, KeyError, RuntimeError, ValueError) as exc:
-            self._show_status(str(exc), 7000)
+            self._discard_operator_alignment_evidence(len(samples), str(exc))
             return
         metadata = DesignFrameMetadata.from_mapping(committed.metadata)
         self._alignment_draft_fit_residuals = (
             metadata.rms_residual_mm,
             metadata.max_residual_mm,
         )
-        connection_flow.publish_coordinate_frames(self)
+        try:
+            publication_request_id = connection_flow.publish_coordinate_frames(self)
+        except Exception as exc:
+            try:
+                restored = registry.replace(
+                    current,
+                    expected_version=committed.version,
+                )
+                self._design_session.link_active_frame(
+                    restored,
+                    machine_point_for_navigation=(
+                        self._design_navigation_xy_from_physical_machine_xy
+                    ),
+                    machine_b_deg=first.physical_b_deg,
+                    pivot_machine_xy=first.pivot_machine_xy,
+                )
+            except Exception:
+                logger.exception("Failed to roll back operator alignment publish")
+            self._discard_operator_alignment_evidence(
+                len(samples),
+                str(exc) or type(exc).__name__,
+            )
+            return
+        success_message = (
+            "Design alignment complete. "
+            f"RMS {float(metadata.rms_residual_mm or 0.0):.4f} mm, "
+            f"max {float(metadata.max_residual_mm or 0.0):.4f} mm."
+        )
+        deferred = isinstance(publication_request_id, int)
+        if deferred:
+            transactions = getattr(
+                self,
+                "_registration_persistence_transactions",
+                None,
+            )
+            if not isinstance(transactions, dict):
+                transactions = {}
+                self._registration_persistence_transactions = transactions
+            transactions[publication_request_id] = (
+                _RegistrationPersistenceTransaction(
+                    request_id=publication_request_id,
+                    previous_record=current,
+                    committed_record=committed,
+                    machine_b_deg=first.physical_b_deg,
+                    pivot_machine_xy=first.pivot_machine_xy,
+                    success_message=success_message,
+                    operator_alignment=True,
+                    rms_residual_mm=metadata.rms_residual_mm,
+                    max_residual_mm=metadata.max_residual_mm,
+                )
+            )
         self._set_design_snap_enabled(False)
         self._finish_alignment_draft()
         self._refresh_design_panel()
         self._refresh_design_position()
+        if deferred:
+            self._show_status("Saving design registration.", 0)
+            return
         self._collapse_alignment_panel_if_ready()
-        self._show_status(
-            "Design alignment complete. "
-            f"RMS {float(metadata.rms_residual_mm or 0.0):.4f} mm, "
-            f"max {float(metadata.max_residual_mm or 0.0):.4f} mm.",
-            7000,
-        )
+        self._show_status(success_message, 7000)
+
+    def _discard_operator_alignment_evidence(
+        self,
+        sample_count: int,
+        message: str,
+    ) -> None:
+        self._alignment_physical_draft = [None] * max(0, int(sample_count))
+        self._alignment_stage_draft = [None] * max(0, int(sample_count))
+        self._alignment_operation_id = str(uuid.uuid4())
+        self._pending_operator_alignment_capture = None
+        self._design_session.clear_source_stage_marks()
+        self._show_status(str(message), 7000)
 
     def _registration_mark_capture_context_is_current(
         self,
@@ -10387,16 +10715,21 @@ class Main(QMainWindow):
         if id(session) != context.session_identity or session.active_frame_id != context.frame_id:
             return False
         document = session.document
-        identity = (
-            None
-            if document is None
-            else (
+        if document is None:
+            return False
+        try:
+            source_identity = (
                 str(document.path.expanduser().resolve()),
-                str(document.top_cell_name),
-                int(document.rotation_quarter_turns) % 4,
+                str(document.source_load_id),
             )
-        )
-        if identity != context.document_identity:
+        except OSError:
+            return False
+        if (
+            source_identity != context.source_identity
+            or str(document.top_cell_name) != context.top_cell_name
+            or int(document.rotation_quarter_turns) % 4
+            != context.rotation_quarter_turns
+        ):
             return False
         if (
             tuple(session.source_design_marks_compact()) != context.source_design_marks
@@ -10415,35 +10748,179 @@ class Main(QMainWindow):
             else current.version == context.frame_version
         )
 
-    def _commit_active_design_frame_registration(self, physical_b_deg: float) -> None:
+    def _commit_active_design_frame_registration(
+        self,
+        physical_b_deg: float | None = None,
+        *,
+        success_message: str = "Design registration saved.",
+    ) -> str:
         registry = getattr(self, "_coordinate_frame_registry", None)
         frame_id = self._design_session.active_frame_id
         if registry is None or frame_id is None:
-            return
+            return "incomplete"
         current = registry.get(frame_id)
         document = self._design_session.document
         if current is None or document is None:
-            return
+            return "incomplete"
         current_metadata = DesignFrameMetadata.from_mapping(current.metadata)
-        turns = int(document.rotation_quarter_turns) % 4
+        key = frame_id
+        pending_by_frame = getattr(self, "_pending_registration_physical_marks", None)
+        if not isinstance(pending_by_frame, dict):
+            return "incomplete"
+        pending = pending_by_frame.get(key)
+        if not isinstance(pending, _PendingRegistrationEvidence):
+            if not isinstance(pending, dict) or physical_b_deg is None:
+                return "incomplete"
+            try:
+                source_identity = (
+                    str(document.path.expanduser().resolve()),
+                    str(document.source_load_id),
+                )
+                pivot_value = self._rotation_geometry_snapshot().pivot_machine_xy
+                pivot = (float(pivot_value[0]), float(pivot_value[1]))
+                source_points = tuple(pending.get("source", ()))
+                check_points = tuple(pending.get("check", ()))
+                operation_id = str(uuid.uuid4())
+
+                def legacy_sample(
+                    kind: str,
+                    point: tuple[float, float],
+                ) -> _CapturedRegistrationSample:
+                    return _CapturedRegistrationSample(
+                        mark_kind=kind,
+                        physical_machine_xy=(float(point[0]), float(point[1])),
+                        physical_b_deg=float(physical_b_deg),
+                        pivot_machine_xy=pivot,
+                        source_identity=source_identity,
+                        top_cell_name=str(document.top_cell_name),
+                        rotation_quarter_turns=(
+                            int(document.rotation_quarter_turns) % 4
+                        ),
+                        frame_id=frame_id,
+                        frame_version=current.version,
+                        source_design_marks=tuple(
+                            self._design_session.source_design_marks_compact()
+                        ),
+                        check_design_marks=tuple(
+                            self._design_session.check_design_marks
+                        ),
+                        operation_id=operation_id,
+                    )
+
+                baseline_source_count = max(
+                    0,
+                    len(self._design_session.source_stage_marks)
+                    - len(source_points),
+                )
+                baseline_check_count = max(
+                    0,
+                    len(self._design_session.check_stage_marks)
+                    - len(check_points),
+                )
+                pending = _PendingRegistrationEvidence(
+                    session_identity=id(self._design_session),
+                    frame_id=frame_id,
+                    frame_version=current.version,
+                    source_identity=source_identity,
+                    top_cell_name=str(document.top_cell_name),
+                    rotation_quarter_turns=(
+                        int(document.rotation_quarter_turns) % 4
+                    ),
+                    source_design_marks=tuple(
+                        self._design_session.source_design_marks_compact()
+                    ),
+                    check_design_marks=tuple(
+                        self._design_session.check_design_marks
+                    ),
+                    operation_id=operation_id,
+                    baseline_source_stage_marks=tuple(
+                        self._design_session.source_stage_marks[
+                            :baseline_source_count
+                        ]
+                    ),
+                    baseline_check_stage_marks=tuple(
+                        self._design_session.check_stage_marks[
+                            :baseline_check_count
+                        ]
+                    ),
+                    baseline_registration=None,
+                    baseline_registration_status="Registration capture restarted.",
+                    source_samples=[
+                        legacy_sample("source", point) for point in source_points
+                    ],
+                    check_samples=[
+                        legacy_sample("check", point) for point in check_points
+                    ],
+                )
+                pending_by_frame[key] = pending
+            except (OSError, TypeError, ValueError) as exc:
+                self._show_status(str(exc), 6000)
+                pending_by_frame.pop(key, None)
+                return "failed"
+        samples = tuple(pending.source_samples) + tuple(pending.check_samples)
+        if not samples:
+            return "incomplete"
+        first_sample = samples[0]
+        if any(
+            sample.frame_id != pending.frame_id
+            or sample.frame_version != pending.frame_version
+            or sample.source_identity != pending.source_identity
+            or sample.top_cell_name != pending.top_cell_name
+            or sample.rotation_quarter_turns != pending.rotation_quarter_turns
+            or sample.source_design_marks != pending.source_design_marks
+            or sample.check_design_marks != pending.check_design_marks
+            or sample.operation_id != pending.operation_id
+            or not all(
+                math.isclose(
+                    sample.pivot_machine_xy[index],
+                    first_sample.pivot_machine_xy[index],
+                    rel_tol=0.0,
+                    abs_tol=1e-9,
+                )
+                for index in (0, 1)
+            )
+            for sample in samples
+        ):
+            self._discard_pending_registration_mark_samples(frame_id)
+            self._show_status(
+                "Registration captures used incompatible coordinate contexts. Capture them again.",
+                7000,
+            )
+            return "failed"
+        target_b = first_sample.physical_b_deg
+        pivot = first_sample.pivot_machine_xy
+
+        def normalized_sample_xy(
+            sample: _CapturedRegistrationSample,
+        ) -> tuple[float, float]:
+            rotated = rotate_xy(
+                (
+                    sample.physical_machine_xy[0] - pivot[0],
+                    sample.physical_machine_xy[1] - pivot[1],
+                ),
+                target_b - sample.physical_b_deg,
+            )
+            return (pivot[0] + rotated[0], pivot[1] + rotated[1])
+
+        turns = pending.rotation_quarter_turns
         design_marks = tuple(
             document.rotate_point(point, -turns)
-            for point in self._design_session.source_design_marks_compact()
+            for point in pending.source_design_marks
         )
         check_design_marks = tuple(
             document.rotate_point(point, -turns)
-            for point in self._design_session.check_design_marks
+            for point in pending.check_design_marks
         )
-        key = frame_id
-        pending_by_frame = getattr(self, "_pending_registration_physical_marks", {})
-        pending = pending_by_frame.get(key, {"source": [], "check": []})
-        new_physical_source_marks = tuple(pending.get("source", ()))
-        new_physical_check_marks = tuple(pending.get("check", ()))
-        pivot = self._rotation_geometry_snapshot().pivot_machine_xy
+        new_physical_source_marks = tuple(
+            normalized_sample_xy(sample) for sample in pending.source_samples
+        )
+        new_physical_check_marks = tuple(
+            normalized_sample_xy(sample) for sample in pending.check_samples
+        )
         existing_source_at_current_b: tuple[tuple[float, float], ...] = ()
         existing_checks_at_current_b: tuple[tuple[float, float], ...] = ()
         if current.transform is not None:
-            delta_b = physical_b_deg - current.transform.reference_b_deg
+            delta_b = target_b - current.transform.reference_b_deg
             existing_source_at_current_b = tuple(
                 (
                     pivot[0]
@@ -10480,14 +10957,14 @@ class Main(QMainWindow):
         source_physical_marks = existing_source_at_current_b + new_physical_source_marks
         check_physical_marks = existing_checks_at_current_b + new_physical_check_marks
         if len(design_marks) < 2 or len(design_marks) != len(source_physical_marks):
-            return
+            return "incomplete"
         try:
             if len(current_metadata.source_machine_marks) >= 2 and not new_physical_source_marks:
                 committed = update_check_registration(
                     current,
                     check_design_points=check_design_marks,
                     physical_check_machine_points=check_physical_marks,
-                    physical_b_deg=physical_b_deg,
+                    physical_b_deg=target_b,
                     pivot_machine_xy=pivot,
                 )
             else:
@@ -10495,7 +10972,7 @@ class Main(QMainWindow):
                     current,
                     design_points=design_marks,
                     physical_machine_points=source_physical_marks,
-                    physical_b_deg=physical_b_deg,
+                    physical_b_deg=target_b,
                     pivot_machine_xy=pivot,
                     check_design_points=check_design_marks,
                     check_machine_points=check_physical_marks,
@@ -10504,26 +10981,74 @@ class Main(QMainWindow):
                 committed,
                 expected_version=current.version,
             )
-        except (DesignModelError, ValueError) as exc:
+        except (DesignModelError, KeyError, RuntimeError, ValueError) as exc:
+            self._discard_pending_registration_mark_samples(frame_id)
             self._show_status(str(exc), 6000)
-            return
+            return "failed"
         try:
             self._design_session.link_active_frame(
                 committed,
                 machine_point_for_navigation=(
                     self._design_navigation_xy_from_physical_machine_xy
                 ),
-                machine_b_deg=physical_b_deg,
+                machine_b_deg=target_b,
                 pivot_machine_xy=pivot,
             )
         except DesignModelError as exc:
             self._design_session.link_active_frame(
                 committed.with_authority_block({"X", "Y", "B"}, str(exc)),
-                machine_b_deg=physical_b_deg,
+                machine_b_deg=target_b,
                 pivot_machine_xy=pivot,
             )
-        pending_by_frame.pop(key, None)
-        connection_flow.publish_coordinate_frames(self)
+        try:
+            publication_request_id = connection_flow.publish_coordinate_frames(self)
+        except Exception as exc:
+            try:
+                restored = registry.replace(
+                    current,
+                    expected_version=committed.version,
+                )
+                self._design_session.link_active_frame(
+                    restored,
+                    machine_point_for_navigation=(
+                        self._design_navigation_xy_from_physical_machine_xy
+                    ),
+                    machine_b_deg=target_b,
+                    pivot_machine_xy=pivot,
+                )
+            except Exception:
+                logger.exception("Failed to roll back Design registration publish")
+            self._discard_pending_registration_mark_samples(
+                frame_id,
+                rollback_session=False,
+            )
+            self._show_status(str(exc) or type(exc).__name__, 7000)
+            return "failed"
+        self._discard_pending_registration_mark_samples(
+            frame_id,
+            rollback_session=False,
+        )
+        if isinstance(publication_request_id, int):
+            transactions = getattr(
+                self,
+                "_registration_persistence_transactions",
+                None,
+            )
+            if not isinstance(transactions, dict):
+                transactions = {}
+                self._registration_persistence_transactions = transactions
+            transactions[publication_request_id] = (
+                _RegistrationPersistenceTransaction(
+                    request_id=publication_request_id,
+                    previous_record=current,
+                    committed_record=committed,
+                    machine_b_deg=target_b,
+                    pivot_machine_xy=pivot,
+                    success_message=str(success_message),
+                )
+            )
+            return "deferred"
+        return "committed"
 
     def _design_spacing_ratio_is_reasonable(self, ratio: float) -> bool:
         return abs(float(ratio) - 1.0) <= self.DESIGN_SPACING_RATIO_TOLERANCE

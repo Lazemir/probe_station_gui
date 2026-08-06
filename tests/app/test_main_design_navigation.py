@@ -697,7 +697,8 @@ def test_stage_mark_capture_commits_active_frame_without_motion(
     )
     window._refresh_design_panel = lambda: None
     window._refresh_design_position = lambda: None
-    window._show_status = lambda *_args: None
+    statuses: list[str] = []
+    window._show_status = lambda message, _timeout=0: statuses.append(str(message))
     monkeypatch.setattr(
         main_module.connection_flow,
         "publish_coordinate_frames",
@@ -738,6 +739,77 @@ def test_stage_mark_capture_commits_active_frame_without_motion(
     assert committed.transform.reference_b_deg == 42.0
     assert session.source_stage_marks_compact() == [(-97.0, 204.0), (-96.0, 204.0)]
     assert events == [("publish",)]
+    assert window._pending_registration_physical_marks == {}
+    assert "captured" in statuses[-1].lower()
+
+
+def test_stage_mark_capture_normalizes_mixed_b_samples_to_first_context(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    document = _make_document(tmp_path)
+    registry = CoordinateFrameRegistry()
+    draft = registry.add(new_design_frame_draft(document, existing_names=()))
+    session = DesignSession(document=document)
+    session.link_active_frame(draft)
+    session.source_design_marks = ((0.0, 0.0), (1000.0, 0.0))
+    requests: list[object] = []
+    window = Main.__new__(Main)
+    window._design_session = session
+    window._coordinate_frame_registry = registry
+    window.stage_controller = types.SimpleNamespace(
+        request_machine_coordinate_snapshot=lambda token, *, axes: (
+            requests.append(token) or True
+        )
+    )
+    _set_rotation_settings(window)
+    window._camera_stage_xy_from_raw_stage_xy = lambda point: point
+    window._design_navigation_xy_from_physical_machine_xy = lambda point: point
+    window._refresh_design_panel = lambda: None
+    window._refresh_design_position = lambda: None
+    window._show_status = lambda *_args: None
+    monkeypatch.setattr(
+        main_module.connection_flow,
+        "publish_coordinate_frames",
+        lambda _owner: None,
+    )
+
+    Main._capture_stage_source_mark(window)
+    first = _machine_snapshot((10.0, 0.0, 0.0, 0.0, 0.0))
+    Main._on_registration_machine_coordinate_snapshot_finished(
+        window,
+        requests.pop(),
+        True,
+        first,
+        "",
+    )
+    pending = window._pending_registration_physical_marks[draft.frame_id]
+    first_sample = pending.source_samples[0]
+    assert first_sample.physical_machine_xy == (10.0, 0.0)
+    assert first_sample.physical_b_deg == 0.0
+    assert first_sample.pivot_machine_xy == (0.0, 0.0)
+    assert first_sample.frame_id == draft.frame_id
+    assert first_sample.frame_version == draft.version
+    assert first_sample.top_cell_name == document.top_cell_name
+    assert first_sample.source_identity[1] == str(document.source_load_id)
+    assert first_sample.source_design_marks == session.source_design_marks
+    assert first_sample.operation_id
+
+    Main._capture_stage_source_mark(window)
+    second = _machine_snapshot((0.0, 11.0, 0.0, 0.0, 90.0))
+    Main._on_registration_machine_coordinate_snapshot_finished(
+        window,
+        requests.pop(),
+        True,
+        second,
+        "",
+    )
+
+    committed = registry.get(draft.frame_id)
+    assert committed is not None and committed.transform is not None
+    metadata = main_module.DesignFrameMetadata.from_mapping(committed.metadata)
+    assert np.allclose(metadata.source_machine_marks, ((10.0, 0.0), (11.0, 0.0)))
+    assert committed.transform.reference_b_deg == pytest.approx(0.0)
 
 
 def test_operator_align_captures_physical_machine_marks_and_publishes_frame(
@@ -844,6 +916,63 @@ def test_operator_align_captures_physical_machine_marks_and_publishes_frame(
     assert "complete" in statuses[-1].lower()
 
 
+def test_operator_alignment_fit_failure_discards_all_tentative_samples(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    document = _make_document(tmp_path)
+    registry = CoordinateFrameRegistry()
+    draft = registry.add(new_design_frame_draft(document, existing_names=()))
+    session = DesignSession(document=document)
+    session.link_active_frame(draft)
+    design_marks = ((0.0, 0.0), (1000.0, 0.0))
+    operation_id = "align-op"
+    source_identity = (str(document.path.resolve()), str(document.source_load_id))
+    samples = tuple(
+        main_module._RegistrationEvidenceSample(
+            slot=slot,
+            physical_machine_xy=physical_xy,
+            physical_b_deg=5.0,
+            pivot_machine_xy=(0.0, 0.0),
+            source_identity=source_identity,
+            top_cell_name=document.top_cell_name,
+            frame_id=draft.frame_id,
+            frame_version=draft.version,
+            design_mark_set=design_marks,
+            operation_id=operation_id,
+        )
+        for slot, physical_xy in enumerate(((1.0, 2.0), (2.0, 2.0)))
+    )
+    session.source_design_marks = design_marks
+    session.source_stage_marks = tuple(
+        sample.physical_machine_xy for sample in samples
+    )
+    statuses: list[str] = []
+    window = Main.__new__(Main)
+    window._design_session = session
+    window._coordinate_frame_registry = registry
+    window._alignment_design_draft = design_marks
+    window._alignment_stage_draft = list(session.source_stage_marks)
+    window._alignment_physical_draft = list(samples)
+    window._alignment_operation_id = operation_id
+    window._show_status = lambda message, _timeout=0: statuses.append(str(message))
+    monkeypatch.setattr(
+        main_module,
+        "commit_xyb_registration",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            main_module.DesignModelError("alignment fit failed")
+        ),
+    )
+
+    Main._commit_operator_alignment(window, samples)
+
+    assert registry.get(draft.frame_id) == draft
+    assert window._alignment_physical_draft == [None, None]
+    assert window._alignment_stage_draft == [None, None]
+    assert session.source_stage_marks_compact() == []
+    assert statuses == ["alignment fit failed"]
+
+
 def test_legacy_stage_mark_capture_persists_its_wco_provenance(tmp_path: Path) -> None:
     document = _make_document(tmp_path)
     session = DesignSession(document=document)
@@ -856,6 +985,7 @@ def test_legacy_stage_mark_capture_persists_its_wco_provenance(tmp_path: Path) -
     window = Main.__new__(Main)
     window._design_session = session
     window._coordinate_frame_registry = CoordinateFrameRegistry()
+    _set_rotation_settings(window)
     window.stage_controller = types.SimpleNamespace(
         request_machine_coordinate_snapshot=lambda token, *, axes: (
             requests.append(token) or True
@@ -920,6 +1050,7 @@ def test_stage_mark_capture_rejects_calibration_failure_before_mutating_session(
     window = Main.__new__(Main)
     window._design_session = session
     requests: list[object] = []
+    _set_rotation_settings(window)
     window.stage_controller = types.SimpleNamespace(
         request_machine_coordinate_snapshot=lambda token, *, axes: (
             requests.append(token) or True
@@ -959,6 +1090,7 @@ def test_stage_mark_capture_busy_and_stale_callbacks_do_not_mutate_session(
     window._refresh_design_panel = lambda: None
     window._refresh_design_position = lambda: None
     window._show_status = lambda message, _timeout: statuses.append(str(message))
+    _set_rotation_settings(window)
     window.stage_controller = types.SimpleNamespace(
         request_machine_coordinate_snapshot=lambda _token, *, axes: False,
         current_stage_position=lambda: pytest.fail("synchronous GUI hardware read"),
@@ -973,6 +1105,9 @@ def test_stage_mark_capture_busy_and_stale_callbacks_do_not_mutate_session(
     )
     Main._capture_stage_source_mark(window)
     stale_token = requests.pop()
+    window._pending_registration_physical_marks = {
+        draft.frame_id: {"source": [(9.0, 9.0)], "check": []}
+    }
     session.active_frame_id = "00000000-0000-0000-0000-000000000001"
     snapshot = _machine_snapshot((1.0, 2.0, 0.0, 0.0, 3.0))
     Main._on_registration_machine_coordinate_snapshot_finished(
@@ -984,6 +1119,188 @@ def test_stage_mark_capture_busy_and_stale_callbacks_do_not_mutate_session(
     )
 
     assert session.source_stage_marks_compact() == []
+    assert window._pending_registration_physical_marks == {}
+
+
+def test_failed_registration_fit_discards_tentative_evidence_before_retry(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    document = _make_document(tmp_path)
+    registry = CoordinateFrameRegistry()
+    draft = registry.add(new_design_frame_draft(document, existing_names=()))
+    session = DesignSession(document=document)
+    session.link_active_frame(draft)
+    session.source_design_marks = ((0.0, 0.0), (1000.0, 0.0))
+    requests: list[object] = []
+    statuses: list[str] = []
+    window = Main.__new__(Main)
+    window._design_session = session
+    window._coordinate_frame_registry = registry
+    window.stage_controller = types.SimpleNamespace(
+        request_machine_coordinate_snapshot=lambda token, *, axes: (
+            requests.append(token) or True
+        )
+    )
+    _set_rotation_settings(window)
+    window._camera_stage_xy_from_raw_stage_xy = lambda point: point
+    window._design_navigation_xy_from_physical_machine_xy = lambda point: point
+    window._refresh_design_panel = lambda: None
+    window._refresh_design_position = lambda: None
+    window._show_status = lambda message, _timeout=0: statuses.append(str(message))
+    original_commit = main_module.commit_xyb_registration
+    monkeypatch.setattr(
+        main_module,
+        "commit_xyb_registration",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            main_module.DesignModelError("fit failed")
+        ),
+    )
+
+    for xy in ((1.0, 2.0), (2.0, 2.0)):
+        Main._capture_stage_source_mark(window)
+        Main._on_registration_machine_coordinate_snapshot_finished(
+            window,
+            requests.pop(),
+            True,
+            _machine_snapshot((*xy, 0.0, 0.0, 5.0)),
+            "",
+        )
+
+    assert registry.get(draft.frame_id) == draft
+    assert window._pending_registration_physical_marks == {}
+    assert session.source_stage_marks_compact() == []
+    assert statuses[-1] == "fit failed"
+    assert "captured" not in statuses[-1].lower()
+
+    monkeypatch.setattr(main_module, "commit_xyb_registration", original_commit)
+    Main._capture_stage_source_mark(window)
+    Main._on_registration_machine_coordinate_snapshot_finished(
+        window,
+        requests.pop(),
+        True,
+        _machine_snapshot((3.0, 2.0, 0.0, 0.0, 5.0)),
+        "",
+    )
+
+    retry = window._pending_registration_physical_marks[draft.frame_id]
+    assert len(retry.source_samples) == 1
+    assert registry.get(draft.frame_id) == draft
+
+
+def test_registration_publish_failure_rolls_back_and_does_not_announce_success(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    document = _make_document(tmp_path)
+    registry = CoordinateFrameRegistry()
+    draft = registry.add(new_design_frame_draft(document, existing_names=()))
+    session = DesignSession(document=document)
+    session.link_active_frame(draft)
+    session.source_design_marks = ((0.0, 0.0), (1000.0, 0.0))
+    requests: list[object] = []
+    statuses: list[str] = []
+    window = Main.__new__(Main)
+    window._design_session = session
+    window._coordinate_frame_registry = registry
+    window.stage_controller = types.SimpleNamespace(
+        request_machine_coordinate_snapshot=lambda token, *, axes: (
+            requests.append(token) or True
+        )
+    )
+    _set_rotation_settings(window)
+    window._camera_stage_xy_from_raw_stage_xy = lambda point: point
+    window._design_navigation_xy_from_physical_machine_xy = lambda point: point
+    window._refresh_design_panel = lambda: None
+    window._refresh_design_position = lambda: None
+    window._show_status = lambda message, _timeout=0: statuses.append(str(message))
+    monkeypatch.setattr(
+        main_module.connection_flow,
+        "publish_coordinate_frames",
+        lambda _owner: (_ for _ in ()).throw(RuntimeError("save unavailable")),
+    )
+
+    for xy in ((1.0, 2.0), (2.0, 2.0)):
+        Main._capture_stage_source_mark(window)
+        Main._on_registration_machine_coordinate_snapshot_finished(
+            window,
+            requests.pop(),
+            True,
+            _machine_snapshot((*xy, 0.0, 0.0, 5.0)),
+            "",
+        )
+
+    restored = registry.get(draft.frame_id)
+    assert restored is not None
+    assert restored.transform == draft.transform
+    assert not restored.readiness["X"].available
+    assert window._pending_registration_physical_marks == {}
+    assert session.source_stage_marks_compact() == []
+    assert statuses[-1] == "save unavailable"
+    assert "captured" not in statuses[-1].lower()
+
+
+def test_registration_save_failure_rolls_back_before_success_is_announced(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    document = _make_document(tmp_path)
+    registry = CoordinateFrameRegistry()
+    draft = registry.add(new_design_frame_draft(document, existing_names=()))
+    session = DesignSession(document=document)
+    session.link_active_frame(draft)
+    session.source_design_marks = ((0.0, 0.0), (1000.0, 0.0))
+    requests: list[object] = []
+    statuses: list[str] = []
+    window = Main.__new__(Main)
+    window._design_session = session
+    window._coordinate_frame_registry = registry
+    window.stage_controller = types.SimpleNamespace(
+        request_machine_coordinate_snapshot=lambda token, *, axes: (
+            requests.append(token) or True
+        )
+    )
+    _set_rotation_settings(window)
+    window._camera_stage_xy_from_raw_stage_xy = lambda point: point
+    window._design_navigation_xy_from_physical_machine_xy = lambda point: point
+    window._refresh_design_panel = lambda: None
+    window._refresh_design_position = lambda: None
+    window._show_status = lambda message, _timeout=0: statuses.append(str(message))
+    monkeypatch.setattr(
+        main_module.connection_flow,
+        "publish_coordinate_frames",
+        lambda _owner: 41,
+    )
+
+    for xy in ((1.0, 2.0), (2.0, 2.0)):
+        Main._capture_stage_source_mark(window)
+        Main._on_registration_machine_coordinate_snapshot_finished(
+            window,
+            requests.pop(),
+            True,
+            _machine_snapshot((*xy, 0.0, 0.0, 5.0)),
+            "",
+        )
+
+    assert registry.get(draft.frame_id) != draft
+    assert statuses[-1] == "Saving design registration."
+    assert "captured" not in statuses[-1].lower()
+
+    Main._on_coordinate_frame_store_failed(
+        window,
+        types.SimpleNamespace(
+            request_id=41,
+            operation="save",
+            message="disk full",
+        ),
+    )
+
+    restored = registry.get(draft.frame_id)
+    assert restored is not None
+    assert restored.transform == draft.transform
+    assert not restored.readiness["X"].available
+    assert session.source_stage_marks_compact() == []
+    assert all("captured" not in status.lower() for status in statuses[-2:])
 
 
 def test_design_navigation_inverts_universal_calibration_and_current_wco(
@@ -2538,9 +2855,10 @@ def test_changing_source_mark_discards_unpaired_physical_capture(
     assert metadata.source_machine_marks == ()
     assert not unchanged.readiness["X"].available
     assert session.source_stage_marks == ((11.0, 20.0),)
-    assert window._pending_registration_physical_marks == {
-        draft.frame_id: {"source": [(11.0, 20.0)], "check": []}
-    }
+    pending = window._pending_registration_physical_marks[draft.frame_id]
+    assert len(pending.source_samples) == 1
+    assert pending.source_samples[0].physical_machine_xy == (11.0, 20.0)
+    assert pending.check_samples == []
 
 
 def test_top_cell_switch_links_the_matching_persistent_frame(
@@ -2592,6 +2910,10 @@ def test_top_cell_switch_links_the_matching_persistent_frame(
     window._design_load_pending = False
     window._route_measurement_thread = None
     window._route_measurement_session_active = False
+    window._pending_registration_physical_marks = {
+        top_frame.frame_id: {"source": [(1.0, 2.0)], "check": []}
+    }
+    window._pending_registration_mark_capture = object()
     window._refresh_design_panel = lambda: None
     window._refresh_design_position = lambda: None
     window._show_navigation_status = lambda _plan: None
@@ -2609,6 +2931,8 @@ def test_top_cell_switch_links_the_matching_persistent_frame(
     assert session.document.top_cell_name == "ALT"
     assert session.active_frame_id == alt_frame.frame_id
     assert window._active_design_frame_metadata.top_cell_name == "ALT"
+    assert window._pending_registration_physical_marks == {}
+    assert window._pending_registration_mark_capture is None
 
 
 def test_registration_instance_switch_new_and_route_lineage_preserve_records(
@@ -3245,11 +3569,17 @@ def test_explicit_unload_deletes_markup_sidecar(tmp_path: Path) -> None:
     window._update_design_position = lambda value: statuses.append(
         f"position:{value}"
     )
+    window._pending_registration_physical_marks = {
+        "design-a": {"source": [(1.0, 2.0)], "check": []}
+    }
+    window._pending_registration_mark_capture = object()
 
     Main._unload_design_document(window)
 
     assert window._design_session.document is None
     assert window._design_markup is None
+    assert window._pending_registration_physical_marks == {}
+    assert window._pending_registration_mark_capture is None
     assert "delete:loaded.gds" in statuses
 
 
