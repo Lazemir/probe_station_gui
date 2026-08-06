@@ -468,7 +468,7 @@ def test_save_active_objective_offset_non_base_saves_delta_and_refreshes() -> No
     assert statuses == ["Saved X20 objective offset: X=+0.1250, Y=-0.2500 mm."]
 
 
-def test_capture_manual_alignment_point_requests_b_rotation_for_quick_alignment() -> None:
+def test_capture_manual_alignment_point_never_requests_uncompensated_b_rotation() -> None:
     window, stage, _manager, statuses = _window()
     window._manual_alignment_pick_slot = 1
     window._manual_alignment_points = [(1.0, 1.0), None]
@@ -486,53 +486,36 @@ def test_capture_manual_alignment_point_requests_b_rotation_for_quick_alignment(
     Main._capture_manual_alignment_point(window, 1, (2.0, 2.0), source="center")
 
     assert window._manual_alignment_pick_slot is None
-    assert window._pending_quick_alignment_rotation is True
-    assert stage.rotations == [-45.0]
-    assert window._invalidated_reason == "Design registration cleared after B-axis rotation."
-    assert statuses == ["Chip alignment: rotating B by -45.000 deg."]
+    assert window._pending_quick_alignment_rotation is False
+    assert stage.rotations == []
+    assert not hasattr(window, "_invalidated_reason")
+    assert statuses == [
+        "Automatic B-axis alignment is unavailable. "
+        "Adjust the chip manually and capture the points again."
+    ]
 
 
-def test_capture_manual_alignment_point_design_near_zero_applies_without_b_rotation() -> None:
+def test_design_alignment_point_requests_synchronized_machine_capture() -> None:
     window, stage, _manager, statuses = _window()
-    session_calls: list[object] = []
     preparation = _preparation(0.0005)
-    session = types.SimpleNamespace(
-        prepare_alignment_draft=lambda design, captured: (
-            session_calls.append(("prepare", design, captured)) or preparation
-        ),
-        apply_prepared_alignment=lambda prep: session_calls.append(("apply", prep)),
-    )
-    window._design_session = session
     window._alignment_design_draft = preparation.design_marks
     window._alignment_stage_draft = [(10.0, 20.0), None]
     window._alignment_draft_fit_residuals = None
     window._manual_alignment_pick_slot = 1
     window._pending_alignment_preparation = None
     window._design_backed_alignment_active = lambda: True
-    window._camera_stage_xy_from_raw_stage_xy = lambda xy: (xy[0] - 0.12, xy[1] + 0.08)
-    window._refresh_manual_alignment_ui = lambda: None
-    window._update_stage_coordinate_apply_state = lambda: None
-    window._refresh_design_panel = lambda: session_calls.append("panel")
-    window._refresh_design_position = lambda: session_calls.append("position")
-    window._design_spacing_ratio_is_reasonable = lambda _ratio: True
-    window._set_design_snap_enabled = lambda value: session_calls.append(("snap", value))
-    window._collapse_alignment_panel_if_ready = lambda: session_calls.append("collapse")
+    captures: list[tuple[int, tuple[float, float] | None, str]] = []
+    window._request_operator_alignment_machine_capture = (
+        lambda slot, *, configured_target_xy, source: captures.append(
+            (slot, configured_target_xy, source)
+        )
+    )
 
     Main._capture_manual_alignment_point(window, 1, (11.0, 20.0), source="center")
 
-    assert (
-        "prepare",
-        preparation.design_marks,
-        ((10.0, 20.0), (10.88, 20.08)),
-    ) in session_calls
-    assert ("apply", preparation) in session_calls
-    assert ("snap", False) in session_calls
-    assert "collapse" in session_calls
+    assert captures == [(1, (11.0, 20.0), "center")]
     assert stage.rotations == []
-    assert statuses == [
-        "Design calibration complete. Spacing ratio 1.000. "
-        "RMS 0.0000 mm, max 0.0000 mm."
-    ]
+    assert statuses == []
 
 
 def test_clicked_alignment_capture_dispatches_worker_without_gui_resolution() -> None:
@@ -657,7 +640,7 @@ def test_clicked_alignment_resolution_error_restores_retry_state() -> None:
     assert statuses[-1] == "Camera frames are unavailable for calibration."
 
 
-def test_accept_multipoint_align_draft_preserves_active_registration() -> None:
+def test_accept_multipoint_align_draft_rejects_legacy_only_registration() -> None:
     window, _stage, _manager, statuses = _window()
     active_registration = object()
     window._design_session = types.SimpleNamespace(
@@ -676,18 +659,14 @@ def test_accept_multipoint_align_draft_preserves_active_registration() -> None:
     )
 
     assert window._design_session.registration is active_registration
-    assert window._alignment_design_draft == (
-        (0.0, 0.0),
-        (10.0, 0.0),
-        (2.0, 5.0),
+    assert not hasattr(window, "_alignment_design_draft")
+    assert statuses[-1] == (
+        "A durable Design coordinate frame is required before alignment."
     )
-    assert window._alignment_stage_draft == [None, None, None]
-    assert statuses[-1] == "Align: 3 design points ready. Capture S1 next."
 
 
-def test_multipoint_capture_keeps_old_registration_until_rotation_starts() -> None:
+def test_multipoint_capture_never_dispatches_direct_b_rotation() -> None:
     window, stage, _manager, statuses = _window()
-    active_registration = object()
     invalidations: list[str] = []
     preparation = AlignmentPreparation(
         design_marks=((0.0, 0.0), (10.0, 0.0), (2.0, 5.0)),
@@ -701,47 +680,29 @@ def test_multipoint_capture_keeps_old_registration_until_rotation_starts() -> No
         rms_residual_mm=0.0123,
         max_residual_mm=0.0456,
     )
-    prepared: list[object] = []
-    session = types.SimpleNamespace(
-        registration=active_registration,
-        document=object(),
-        registration_status="Registered.",
-        prepare_alignment_draft=lambda design, captured: (
-            prepared.append((design, captured)) or preparation
-        ),
-        invalidate_registration=lambda reason: invalidations.append(reason),
-    )
-    window._design_session = session
     window._alignment_design_draft = preparation.design_marks
     window._alignment_stage_draft = [None, None, None]
     window._manual_alignment_pick_slot = None
     window._pending_alignment_preparation = None
     window._pending_quick_alignment_rotation = False
-    window._camera_stage_xy_from_raw_stage_xy = lambda xy: xy
-    window._refresh_manual_alignment_ui = lambda: None
-    window._update_stage_coordinate_apply_state = lambda: None
-    window._refresh_design_panel = lambda: None
-    window._refresh_design_position = lambda: None
-    window._set_alignment_panel_expanded = lambda: None
-    window._design_spacing_ratio_is_reasonable = lambda _ratio: True
-    window._set_design_snap_enabled = lambda _enabled: None
-    window._collapse_alignment_panel_if_ready = lambda: None
-    window._collapse_alignment_panel_if_design_open = lambda: None
+    captures: list[tuple[int, tuple[float, float] | None, str]] = []
+    window._request_operator_alignment_machine_capture = (
+        lambda slot, *, configured_target_xy, source: captures.append(
+            (slot, configured_target_xy, source)
+        )
+    )
 
     Main._capture_manual_alignment_point(window, 0, (1.0, 2.0), source="center")
     Main._capture_manual_alignment_point(window, 1, (11.0, 2.0), source="center")
 
-    assert session.registration is active_registration
-    assert prepared == []
     Main._capture_manual_alignment_point(window, 2, (3.0, 7.0), source="center")
 
-    assert prepared == [(preparation.design_marks, preparation.stage_marks_before_rotation)]
-    assert window._pending_alignment_preparation is preparation
-    assert stage.rotations == [5.0]
+    assert captures == [
+        (0, (1.0, 2.0), "center"),
+        (1, (11.0, 2.0), "center"),
+        (2, (3.0, 7.0), "center"),
+    ]
+    assert window._pending_alignment_preparation is None
+    assert stage.rotations == []
     assert invalidations == []
-
-    Main._on_alignment_b_rotation_started(window)
-
-    assert invalidations == ["Design registration stale after B-axis rotation started."]
-    assert window._pending_alignment_preparation is preparation
-    assert "RMS 0.0123 mm" in statuses[-1]
+    assert statuses == []

@@ -543,11 +543,11 @@ def manual_alignment_capture_plan(
         points=points,
         expand_alignment=True,
         refresh_manual_ui=True,
-        invalidate_design_registration=True,
-        request_b_rotation=True,
-        pending_quick_alignment_rotation=True,
         rotation_deg=rotation_deg,
-        status=f"Chip alignment: rotating B by {rotation_deg:+.3f} deg.",
+        status=(
+            "Automatic B-axis alignment is unavailable. "
+            "Adjust the chip manually and capture the points again."
+        ),
         status_timeout_ms=5000,
     )
 
@@ -609,15 +609,11 @@ def design_alignment_capture_plan(
         )
     return AlignmentCapturePlan(
         preparation=preparation,
-        pending_preparation=preparation,
         expand_alignment=True,
-        request_b_rotation=True,
         rotation_deg=preparation.rotation_deg,
         status=(
-            f"{required} mark pairs captured. "
-            f"RMS {preparation.rms_residual_mm:.4f} mm, "
-            f"max {preparation.max_residual_mm:.4f} mm. "
-            f"Rotating chip by {preparation.rotation_deg:+.3f} deg to match the design."
+            "Automatic B-axis alignment is unavailable. "
+            "Adjust the chip manually and capture the points again."
         ),
         status_timeout_ms=7000,
     )

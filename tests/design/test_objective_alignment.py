@@ -1,5 +1,4 @@
 import math
-import types
 
 from probe_station_gui.design.objective_offsets import ObjectiveOffsetReference
 from probe_station_gui.design.objective_alignment import (
@@ -246,8 +245,9 @@ def test_manual_alignment_capture_handles_close_aligned_and_rotation_cases() -> 
     assert aligned.rotation_deg == 0.0
     assert aligned.collapse_alignment_if_design_open is True
     assert rotate.rotation_deg == -45.0
-    assert rotate.request_b_rotation is True
-    assert rotate.invalidate_design_registration is True
+    assert rotate.request_b_rotation is False
+    assert rotate.invalidate_design_registration is False
+    assert "unavailable" in str(rotate.status).lower()
 
 
 def test_design_alignment_capture_plans_first_point_rejections_apply_and_rotation() -> None:
@@ -310,8 +310,9 @@ def test_design_alignment_capture_plans_first_point_rejections_apply_and_rotatio
         "Design calibration complete. Spacing ratio 1.000. "
         "RMS 0.0123 mm, max 0.0456 mm."
     )
-    assert rotate.request_b_rotation is True
-    assert rotate.pending_preparation is rotate.preparation
+    assert rotate.request_b_rotation is False
+    assert rotate.pending_preparation is None
+    assert "unavailable" in str(rotate.status).lower()
     assert math.isclose(rotate.rotation_deg or 0.0, 12.5)
 
 
