@@ -7954,7 +7954,23 @@ class Main(QMainWindow):
                 for candidate_id in sorted(tuple(transactions))
                 if candidate_id <= request_id
             )
+            rollback_by_frame: dict[object, _RegistrationPersistenceTransaction] = {}
             for transaction in failed:
+                frame_id = getattr(transaction.committed_record, "frame_id", None)
+                chain = rollback_by_frame.get(frame_id)
+                if (
+                    chain is not None
+                    and chain.committed_record == transaction.previous_record
+                ):
+                    transaction = replace(
+                        transaction,
+                        previous_record=chain.previous_record,
+                        operator_alignment=(
+                            chain.operator_alignment or transaction.operator_alignment
+                        ),
+                    )
+                rollback_by_frame[frame_id] = transaction
+            for transaction in rollback_by_frame.values():
                 self._rollback_registration_persistence_transaction(transaction)
         action = "loaded" if operation == "load" else "saved"
         self._show_status(f"Design coordinate frames could not be {action}.", 6000)

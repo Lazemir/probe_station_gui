@@ -1303,6 +1303,81 @@ def test_registration_save_failure_rolls_back_before_success_is_announced(
     assert all("captured" not in status.lower() for status in statuses[-2:])
 
 
+def test_coalesced_registration_save_failure_restores_earliest_durable_record(
+    tmp_path: Path,
+) -> None:
+    document = _make_document(tmp_path)
+    registry = CoordinateFrameRegistry()
+    draft = registry.add(new_design_frame_draft(document, existing_names=()))
+    first = registry.replace(
+        commit_xyb_registration(
+            draft,
+            design_points=((0.0, 0.0), (1000.0, 0.0)),
+            physical_machine_points=((1.0, 2.0), (2.0, 2.0)),
+            physical_b_deg=5.0,
+            pivot_machine_xy=(0.0, 0.0),
+        ),
+        expected_version=draft.version,
+    )
+    second = registry.replace(
+        commit_xyb_registration(
+            first,
+            design_points=((0.0, 0.0), (1000.0, 0.0)),
+            physical_machine_points=((3.0, 4.0), (4.0, 4.0)),
+            physical_b_deg=6.0,
+            pivot_machine_xy=(0.0, 0.0),
+        ),
+        expected_version=first.version,
+    )
+    session = DesignSession(document=document)
+    session.link_active_frame(
+        second,
+        machine_b_deg=6.0,
+        pivot_machine_xy=(0.0, 0.0),
+    )
+    window = Main.__new__(Main)
+    window._design_session = session
+    window._coordinate_frame_registry = registry
+    window._registration_persistence_transactions = {
+        41: main_module._RegistrationPersistenceTransaction(
+            request_id=41,
+            previous_record=draft,
+            committed_record=first,
+            machine_b_deg=5.0,
+            pivot_machine_xy=(0.0, 0.0),
+            success_message="first saved",
+        ),
+        42: main_module._RegistrationPersistenceTransaction(
+            request_id=42,
+            previous_record=first,
+            committed_record=second,
+            machine_b_deg=6.0,
+            pivot_machine_xy=(0.0, 0.0),
+            success_message="second saved",
+        ),
+    }
+    window._design_navigation_xy_from_physical_machine_xy = lambda point: point
+    window._refresh_design_panel = lambda: None
+    window._refresh_design_position = lambda: None
+    window._show_status = lambda _message, _timeout=0: None
+
+    Main._on_coordinate_frame_store_failed(
+        window,
+        types.SimpleNamespace(
+            request_id=42,
+            operation="save",
+            message="disk full",
+        ),
+    )
+
+    restored = registry.get(draft.frame_id)
+    assert restored is not None
+    assert restored.transform == draft.transform
+    assert not restored.readiness["X"].available
+    assert session.registration is None
+    assert window._registration_persistence_transactions == {}
+
+
 def test_design_navigation_inverts_universal_calibration_and_current_wco(
     tmp_path: Path,
 ) -> None:
