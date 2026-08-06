@@ -1303,8 +1303,13 @@ def test_registration_save_failure_rolls_back_before_success_is_announced(
     assert all("captured" not in status.lower() for status in statuses[-2:])
 
 
+@pytest.mark.parametrize(
+    "save_sequence",
+    ("contiguous", "intervening-focus", "trailing-focus"),
+)
 def test_coalesced_registration_save_failure_restores_earliest_durable_record(
     tmp_path: Path,
+    save_sequence: str,
 ) -> None:
     document = _make_document(tmp_path)
     registry = CoordinateFrameRegistry()
@@ -1319,26 +1324,13 @@ def test_coalesced_registration_save_failure_restores_earliest_durable_record(
         ),
         expected_version=draft.version,
     )
-    second = registry.replace(
-        commit_xyb_registration(
-            first,
-            design_points=((0.0, 0.0), (1000.0, 0.0)),
-            physical_machine_points=((3.0, 4.0), (4.0, 4.0)),
-            physical_b_deg=6.0,
-            pivot_machine_xy=(0.0, 0.0),
-        ),
-        expected_version=first.version,
-    )
-    session = DesignSession(document=document)
-    session.link_active_frame(
-        second,
-        machine_b_deg=6.0,
-        pivot_machine_xy=(0.0, 0.0),
-    )
-    window = Main.__new__(Main)
-    window._design_session = session
-    window._coordinate_frame_registry = registry
-    window._registration_persistence_transactions = {
+    current = first
+    if save_sequence != "contiguous":
+        current = registry.replace(
+            set_focus_reference(first, physical_machine_z_mm=0.25),
+            expected_version=first.version,
+        )
+    transactions = {
         41: main_module._RegistrationPersistenceTransaction(
             request_id=41,
             previous_record=draft,
@@ -1346,16 +1338,42 @@ def test_coalesced_registration_save_failure_restores_earliest_durable_record(
             machine_b_deg=5.0,
             pivot_machine_xy=(0.0, 0.0),
             success_message="first saved",
-        ),
-        42: main_module._RegistrationPersistenceTransaction(
-            request_id=42,
-            previous_record=first,
-            committed_record=second,
-            machine_b_deg=6.0,
-            pivot_machine_xy=(0.0, 0.0),
-            success_message="second saved",
-        ),
+        )
     }
+    failed_request_id = 42
+    if save_sequence != "trailing-focus":
+        second_previous = current
+        current = registry.replace(
+            commit_xyb_registration(
+                second_previous,
+                design_points=((0.0, 0.0), (1000.0, 0.0)),
+                physical_machine_points=((3.0, 4.0), (4.0, 4.0)),
+                physical_b_deg=6.0,
+                pivot_machine_xy=(0.0, 0.0),
+            ),
+            expected_version=second_previous.version,
+        )
+        failed_request_id = 42 if save_sequence == "contiguous" else 43
+        transactions[failed_request_id] = (
+            main_module._RegistrationPersistenceTransaction(
+                request_id=failed_request_id,
+                previous_record=second_previous,
+                committed_record=current,
+                machine_b_deg=6.0,
+                pivot_machine_xy=(0.0, 0.0),
+                success_message="second saved",
+            )
+        )
+    session = DesignSession(document=document)
+    session.link_active_frame(
+        current,
+        machine_b_deg=6.0,
+        pivot_machine_xy=(0.0, 0.0),
+    )
+    window = Main.__new__(Main)
+    window._design_session = session
+    window._coordinate_frame_registry = registry
+    window._registration_persistence_transactions = transactions
     window._design_navigation_xy_from_physical_machine_xy = lambda point: point
     window._refresh_design_panel = lambda: None
     window._refresh_design_position = lambda: None
@@ -1364,7 +1382,7 @@ def test_coalesced_registration_save_failure_restores_earliest_durable_record(
     Main._on_coordinate_frame_store_failed(
         window,
         types.SimpleNamespace(
-            request_id=42,
+            request_id=failed_request_id,
             operation="save",
             message="disk full",
         ),

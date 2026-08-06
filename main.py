@@ -7958,10 +7958,9 @@ class Main(QMainWindow):
             for transaction in failed:
                 frame_id = getattr(transaction.committed_record, "frame_id", None)
                 chain = rollback_by_frame.get(frame_id)
-                if (
-                    chain is not None
-                    and chain.committed_record == transaction.previous_record
-                ):
+                if chain is not None:
+                    # Store coalescing is document-wide, so ordinary focus/contact
+                    # versions may sit between two unacknowledged registrations.
                     transaction = replace(
                         transaction,
                         previous_record=chain.previous_record,
@@ -7983,12 +7982,16 @@ class Main(QMainWindow):
         committed = transaction.committed_record
         previous = transaction.previous_record
         frame_id = getattr(committed, "frame_id", None)
-        if registry is None or frame_id is None or registry.get(frame_id) != committed:
+        current = None if registry is None or frame_id is None else registry.get(frame_id)
+        if (
+            current is None
+            or getattr(current, "version", -1) < getattr(committed, "version", 0)
+        ):
             return
         try:
             restored = registry.replace(
                 previous,
-                expected_version=getattr(committed, "version"),
+                expected_version=getattr(current, "version"),
             )
             session = getattr(self, "_design_session", None)
             if session is not None and session.active_frame_id == frame_id:
