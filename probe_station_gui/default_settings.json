@@ -227,6 +227,7 @@
       "max_error_mm": null
     },
     "last_selected_frame_id": "machine",
+    "selection_generation": 0,
     "max_rotation_segment_deg": 0.5,
     "max_rotation_chord_error_mm": 0.005
   },

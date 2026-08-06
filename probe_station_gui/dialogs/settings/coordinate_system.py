@@ -123,6 +123,9 @@ class CoordinateSystemSettingsWidget(QWidget):
     def apply_availability(self) -> tuple[bool, str]:
         """Return whether the current visible coordinate draft can be saved."""
 
+        blocked_message = self._materialization_block_message()
+        if blocked_message:
+            return False, blocked_message
         if not self._stage_is_idle(show_status=False):
             return False, "Stage is busy."
         try:
@@ -148,6 +151,10 @@ class CoordinateSystemSettingsWidget(QWidget):
         self._set_status(message)
 
     def add_custom_frame(self) -> bool:
+        blocked_message = self._materialization_block_message()
+        if blocked_message:
+            self._set_status(blocked_message)
+            return False
         frame = CustomFrameSettings(
             frame_id=str(uuid4()),
             name=self._next_default_name(),
@@ -164,6 +171,10 @@ class CoordinateSystemSettingsWidget(QWidget):
         return True
 
     def duplicate_current_frame(self) -> bool:
+        blocked_message = self._materialization_block_message()
+        if blocked_message:
+            self._set_status(blocked_message)
+            return False
         try:
             source = self.current_frame()
         except ValueError as exc:
@@ -181,6 +192,10 @@ class CoordinateSystemSettingsWidget(QWidget):
         return True
 
     def rename_current_frame(self, name: object) -> bool:
+        blocked_message = self._materialization_block_message()
+        if blocked_message:
+            self._set_status(blocked_message)
+            return False
         try:
             current = self.current_frame()
             replacement = replace(current, name=str(name))
@@ -199,6 +214,10 @@ class CoordinateSystemSettingsWidget(QWidget):
         return True
 
     def delete_current_frame(self) -> bool:
+        blocked_message = self._materialization_block_message()
+        if blocked_message:
+            self._set_status(blocked_message)
+            return False
         if self._current_frame_id is None:
             self._set_status("Select a custom frame first.")
             return False
@@ -250,6 +269,10 @@ class CoordinateSystemSettingsWidget(QWidget):
             return False
 
     def _apply_geometry_edit(self, **values: object) -> bool:
+        blocked_message = self._materialization_block_message()
+        if blocked_message:
+            self._set_status(blocked_message)
+            return False
         if not self._stage_is_idle():
             return False
         try:
@@ -274,6 +297,9 @@ class CoordinateSystemSettingsWidget(QWidget):
         return idle
 
     def _settings_from_editor(self) -> SoftwareCoordinateSettings:
+        blocked_message = self._materialization_block_message()
+        if blocked_message:
+            raise ValueError(blocked_message)
         settings = self._settings.clone()
         if self._current_frame_id is None:
             return settings
@@ -351,6 +377,8 @@ class CoordinateSystemSettingsWidget(QWidget):
                 if index >= 0:
                     self._frame_combo.setCurrentIndex(index)
             has_frame = self._current_frame_id is not None
+            editing_blocked = bool(self._materialization_block_message())
+            self._add_button.setEnabled(not editing_blocked)
             for widget in (
                 self._frame_combo,
                 self._duplicate_button,
@@ -360,7 +388,7 @@ class CoordinateSystemSettingsWidget(QWidget):
                 self._name_edit,
                 *self._fields.values(),
             ):
-                widget.setEnabled(has_frame)
+                widget.setEnabled(has_frame and not editing_blocked)
             if not has_frame:
                 self._name_edit.clear()
                 for field in self._fields.values():
@@ -374,6 +402,13 @@ class CoordinateSystemSettingsWidget(QWidget):
         finally:
             self._updating = False
         self.availability_changed.emit()
+
+    def _materialization_block_message(self) -> str:
+        if not self._settings.materialization_blocked:
+            return ""
+        if self._settings.diagnostics:
+            return self._settings.diagnostics[0]
+        return "Software coordinate settings are unavailable."
 
     def _set_status(self, message: str) -> None:
         self._status_label.setText(message)

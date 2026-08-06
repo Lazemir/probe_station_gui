@@ -18,7 +18,10 @@ from probe_station_gui.dialogs.settings.coordinate_system import (
 )
 from probe_station_gui.dialogs.settings_dialog import SettingsDialog
 from probe_station_gui.settings.manager import Settings
-from probe_station_gui.settings.software_coordinates import SoftwareCoordinateSettings
+from probe_station_gui.settings.software_coordinates import (
+    SoftwareCoordinateSettings,
+    parse_software_coordinate_settings,
+)
 from probe_station_gui.views.joystick_window import JoystickWindow
 from probe_station_gui.views.stage_position_panel import StagePositionPanel
 
@@ -94,6 +97,33 @@ def test_busy_stage_blocks_coordinate_geometry_edits() -> None:
     assert not widget.set_current_origin(x_mm=1.0, y_mm=2.0)
     assert widget.current_frame() == before
     assert "Stage is busy" in widget.status_message()
+    widget.deleteLater()
+
+
+def test_editor_rejects_a_origin_until_z_origin_exists() -> None:
+    _qt_app()
+    widget = CoordinateSystemSettingsWidget(SoftwareCoordinateSettings())
+    widget.add_custom_frame()
+
+    assert not widget.set_current_geometry(a_zero_mm=2.0)
+    assert widget.current_frame().a_zero_mm is None
+    assert "Z origin" in widget.status_message()
+    widget.deleteLater()
+
+
+def test_editor_blocks_degraded_future_settings_and_surfaces_diagnostic() -> None:
+    _qt_app()
+    raw = SoftwareCoordinateSettings().to_dict()
+    raw["version"] = 2
+    degraded = parse_software_coordinate_settings(raw)
+    widget = CoordinateSystemSettingsWidget(degraded)
+
+    available, message = widget.apply_availability()
+
+    assert not available
+    assert "version" in message.lower()
+    assert not widget.add_custom_frame()
+    assert degraded.to_dict() == raw
     widget.deleteLater()
 
 

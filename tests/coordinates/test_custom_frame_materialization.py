@@ -15,6 +15,7 @@ from probe_station_gui.coordinates.software_frames import materialize_custom_fra
 from probe_station_gui.settings.software_coordinates import (
     CustomFrameSettings,
     SoftwareCoordinateSettings,
+    parse_software_coordinate_settings,
 )
 
 
@@ -94,3 +95,29 @@ def test_materialization_rejects_id_collision_before_returning_partial_records()
         )
 
     assert design.kind is FrameKind.DESIGN
+
+
+def test_materialization_rejects_a_reference_without_z_reference() -> None:
+    frame = _custom(str(uuid4()), z=1.0)
+    object.__setattr__(frame, "a_zero_mm", 2.0)
+    settings = SoftwareCoordinateSettings(custom_frames=(frame,))
+    object.__setattr__(frame, "z_zero_mm", None)
+
+    with pytest.raises(ValueError, match="A origin requires a Z origin"):
+        materialize_custom_frames((), settings)
+
+
+def test_degraded_root_settings_cannot_delete_existing_custom_records() -> None:
+    frame_id = str(uuid4())
+    existing = materialize_custom_frames(
+        (),
+        SoftwareCoordinateSettings(custom_frames=(_custom(frame_id),)),
+    )
+    future_raw = SoftwareCoordinateSettings().to_dict()
+    future_raw["version"] = 2
+    degraded = parse_software_coordinate_settings(future_raw)
+
+    with pytest.raises(ValueError, match="degraded"):
+        materialize_custom_frames(existing, degraded)
+
+    assert [record.frame_id for record in existing] == [frame_id]

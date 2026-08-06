@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass, field, replace
 import math
 from typing import Final
@@ -26,6 +27,25 @@ def _optional_finite_float(value: object, name: str) -> float | None:
     if value is None:
         return None
     return _finite_float(value, name)
+
+
+def _json_finite_number(value: object, name: str) -> float:
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        raise ValueError(f"{name} must be a JSON number.")
+    return _finite_float(value, name)
+
+
+def _optional_json_finite_number(value: object, name: str) -> float | None:
+    if value is None:
+        return None
+    return _json_finite_number(value, name)
+
+
+def _positive_json_finite_number(value: object, name: str) -> float:
+    parsed = _json_finite_number(value, name)
+    if parsed <= 0.0:
+        raise ValueError(f"{name} must be positive.")
+    return parsed
 
 
 @dataclass(frozen=True)
@@ -87,6 +107,8 @@ class CustomFrameSettings:
             "a_zero_mm",
             _optional_finite_float(self.a_zero_mm, "Frame A origin"),
         )
+        if self.a_zero_mm is not None and self.z_zero_mm is None:
+            raise ValueError("Frame A origin requires a Z origin.")
 
     def clone(self) -> "CustomFrameSettings":
         return self
@@ -245,21 +267,39 @@ class RotationPivotSettings:
 class SoftwareCoordinateSettings:
     version: int = SOFTWARE_COORDINATE_SETTINGS_VERSION
     custom_frames: tuple[CustomFrameSettings, ...] = ()
-    pivot: RotationPivotSettings = field(default_factory=RotationPivotSettings)
+    pivot: RotationPivotSettings | None = field(default_factory=RotationPivotSettings)
     last_selected_frame_id: str = "machine"
     selection_generation: int = 0
     max_rotation_segment_deg: float = 0.5
     max_rotation_chord_error_mm: float = 0.005
     diagnostics: tuple[str, ...] = ()
+    _raw_custom_frames: tuple[object, ...] = field(
+        default=(),
+        compare=False,
+        repr=False,
+    )
+    _accepted_custom_frame_slots: tuple[tuple[int, str], ...] = field(
+        default=(),
+        compare=False,
+        repr=False,
+    )
+    _raw_pivot_present: bool = field(default=False, compare=False, repr=False)
+    _raw_pivot: object = field(default=None, compare=False, repr=False)
+    _preserved_raw_section: dict[str, object] | None = field(
+        default=None,
+        compare=False,
+        repr=False,
+    )
 
     def __post_init__(self) -> None:
         if (
             not isinstance(self.version, int)
             or isinstance(self.version, bool)
-            or self.version < 1
+            or self.version != SOFTWARE_COORDINATE_SETTINGS_VERSION
         ):
             raise ValueError(
-                "Software coordinate settings version must be a positive integer."
+                "Software coordinate settings must use supported version "
+                f"{SOFTWARE_COORDINATE_SETTINGS_VERSION}."
             )
         self.custom_frames = tuple(self.custom_frames)
         if not all(isinstance(frame, CustomFrameSettings) for frame in self.custom_frames):
@@ -268,7 +308,16 @@ class SoftwareCoordinateSettings:
             self.custom_frames
         ):
             raise ValueError("Custom frame IDs must be unique.")
-        if not isinstance(self.pivot, RotationPivotSettings):
+        if self.pivot is not None and not isinstance(
+            self.pivot,
+            RotationPivotSettings,
+        ):
+            raise ValueError("Pivot must be RotationPivotSettings.")
+        if (
+            self.pivot is None
+            and not self._raw_pivot_present
+            and self._preserved_raw_section is None
+        ):
             raise ValueError("Pivot must be RotationPivotSettings.")
         if not isinstance(self.last_selected_frame_id, str) or not self.last_selected_frame_id.strip():
             raise ValueError("Selected frame ID must not be empty.")
@@ -288,24 +337,81 @@ class SoftwareCoordinateSettings:
             "Maximum rotation chord error",
         )
         self.diagnostics = tuple(str(message) for message in self.diagnostics)
+        self._raw_custom_frames = tuple(deepcopy(self._raw_custom_frames))
+        self._accepted_custom_frame_slots = tuple(
+            (int(index), str(frame_id))
+            for index, frame_id in self._accepted_custom_frame_slots
+        )
+        self._raw_pivot = deepcopy(self._raw_pivot)
+        self._preserved_raw_section = (
+            None
+            if self._preserved_raw_section is None
+            else deepcopy(self._preserved_raw_section)
+        )
+
+    @property
+    def degraded(self) -> bool:
+        """Return whether persisted data was retained but could not be used safely."""
+
+        return bool(self.diagnostics)
+
+    @property
+    def materialization_blocked(self) -> bool:
+        """Return whether this section is unsafe to apply to the frame registry."""
+
+        return self._preserved_raw_section is not None or self.pivot is None
 
     def clone(self) -> "SoftwareCoordinateSettings":
         return SoftwareCoordinateSettings(
             version=self.version,
             custom_frames=self.custom_frames,
-            pivot=self.pivot.clone(),
+            pivot=None if self.pivot is None else self.pivot.clone(),
             last_selected_frame_id=self.last_selected_frame_id,
             selection_generation=self.selection_generation,
             max_rotation_segment_deg=self.max_rotation_segment_deg,
             max_rotation_chord_error_mm=self.max_rotation_chord_error_mm,
             diagnostics=self.diagnostics,
+            _raw_custom_frames=self._raw_custom_frames,
+            _accepted_custom_frame_slots=self._accepted_custom_frame_slots,
+            _raw_pivot_present=self._raw_pivot_present,
+            _raw_pivot=self._raw_pivot,
+            _preserved_raw_section=self._preserved_raw_section,
         )
 
     def to_dict(self) -> dict[str, object]:
+        if self._preserved_raw_section is not None:
+            return deepcopy(self._preserved_raw_section)
+        if not self._raw_custom_frames:
+            serialized_frames = [frame.to_dict() for frame in self.custom_frames]
+        else:
+            current_by_id = {frame.frame_id: frame for frame in self.custom_frames}
+            accepted_by_slot = dict(self._accepted_custom_frame_slots)
+            emitted: set[str] = set()
+            serialized_frames: list[object] = []
+            for index, raw_frame in enumerate(self._raw_custom_frames):
+                accepted_id = accepted_by_slot.get(index)
+                if accepted_id is None:
+                    serialized_frames.append(deepcopy(raw_frame))
+                    continue
+                current = current_by_id.get(accepted_id)
+                if current is not None:
+                    serialized_frames.append(current.to_dict())
+                    emitted.add(accepted_id)
+            serialized_frames.extend(
+                frame.to_dict()
+                for frame in self.custom_frames
+                if frame.frame_id not in emitted
+            )
+        if self.pivot is not None:
+            serialized_pivot = self.pivot.to_dict()
+        elif self._raw_pivot_present:
+            serialized_pivot = deepcopy(self._raw_pivot)
+        else:
+            raise ValueError("B-axis rotation pivot settings are unavailable.")
         return {
             "version": self.version,
-            "custom_frames": [frame.to_dict() for frame in self.custom_frames],
-            "pivot": self.pivot.to_dict(),
+            "custom_frames": serialized_frames,
+            "pivot": serialized_pivot,
             "last_selected_frame_id": self.last_selected_frame_id,
             "selection_generation": self.selection_generation,
             "max_rotation_segment_deg": self.max_rotation_segment_deg,
@@ -320,96 +426,78 @@ def _positive_finite_float(value: object, name: str) -> float:
     return parsed
 
 
-def _finite_or_default(value: object, default: float, name: str) -> float:
-    try:
-        return _finite_float(value, name)
-    except ValueError:
-        return default
-
-
-def _optional_finite_or_default(
-    value: object,
-    default: float | None,
-    name: str,
-) -> float | None:
-    try:
-        return _optional_finite_float(value, name)
-    except ValueError:
-        return default
-
-
-def _positive_finite_or_default(value: object, default: float, name: str) -> float:
-    try:
-        return _positive_finite_float(value, name)
-    except ValueError:
-        return default
-
-
 def _parse_frame(raw: object) -> CustomFrameSettings:
     if not isinstance(raw, dict):
         raise ValueError("Custom frame record must be an object.")
+    supported_fields = {
+        "frame_id",
+        "name",
+        "origin_x_mm",
+        "origin_y_mm",
+        "reference_b_deg",
+        "xy_angle_deg",
+        "b_zero_deg",
+        "z_zero_mm",
+        "a_zero_mm",
+    }
+    unsupported = set(raw).difference(supported_fields)
+    if unsupported:
+        raise ValueError(f"Unsupported custom frame fields: {sorted(unsupported)!r}.")
     return CustomFrameSettings(
         frame_id=raw.get("frame_id"),
         name=raw.get("name"),
-        origin_x_mm=raw.get("origin_x_mm"),
-        origin_y_mm=raw.get("origin_y_mm"),
-        reference_b_deg=raw.get("reference_b_deg"),
-        xy_angle_deg=raw.get("xy_angle_deg"),
-        b_zero_deg=raw.get("b_zero_deg"),
-        z_zero_mm=raw.get("z_zero_mm"),
-        a_zero_mm=raw.get("a_zero_mm"),
+        origin_x_mm=_json_finite_number(raw.get("origin_x_mm"), "Frame X origin"),
+        origin_y_mm=_json_finite_number(raw.get("origin_y_mm"), "Frame Y origin"),
+        reference_b_deg=_json_finite_number(
+            raw.get("reference_b_deg"),
+            "Reference B angle",
+        ),
+        xy_angle_deg=_json_finite_number(raw.get("xy_angle_deg"), "Frame XY angle"),
+        b_zero_deg=_json_finite_number(raw.get("b_zero_deg"), "Frame B origin"),
+        z_zero_mm=_optional_json_finite_number(
+            raw.get("z_zero_mm"),
+            "Frame Z origin",
+        ),
+        a_zero_mm=_optional_json_finite_number(
+            raw.get("a_zero_mm"),
+            "Frame A origin",
+        ),
     )
 
 
 def _parse_pivot(raw: object) -> RotationPivotSettings:
-    defaults = RotationPivotSettings()
     if not isinstance(raw, dict):
-        return defaults
-    source = raw.get("source", defaults.source)
-    if not isinstance(source, str) or not source.strip():
-        source = defaults.source
-    objective_name = raw.get("objective_name", defaults.objective_name)
-    if not isinstance(objective_name, str):
-        objective_name = defaults.objective_name
-    calibration_version = raw.get("calibration_version", defaults.calibration_version)
-    if (
-        not isinstance(calibration_version, int)
-        or isinstance(calibration_version, bool)
-        or calibration_version < 0
-    ):
-        calibration_version = defaults.calibration_version
+        raise ValueError("Rotation pivot must be an object.")
+    supported_fields = set(RotationPivotSettings().to_dict())
+    if set(raw) != supported_fields:
+        missing = sorted(supported_fields.difference(raw))
+        unsupported = sorted(set(raw).difference(supported_fields))
+        detail = []
+        if missing:
+            detail.append(f"missing {missing!r}")
+        if unsupported:
+            detail.append(f"unsupported {unsupported!r}")
+        raise ValueError(f"Rotation pivot schema is invalid ({', '.join(detail)}).")
     return RotationPivotSettings(
-        x_mm=_finite_or_default(
-            raw.get("x_mm", defaults.x_mm),
-            defaults.x_mm,
-            "Pivot X",
-        ),
-        y_mm=_finite_or_default(
-            raw.get("y_mm", defaults.y_mm),
-            defaults.y_mm,
-            "Pivot Y",
-        ),
-        source=source,
-        calibration_version=calibration_version,
-        objective_name=objective_name,
-        sampled_b_min_deg=_optional_finite_or_default(
-            raw.get("sampled_b_min_deg"),
-            defaults.sampled_b_min_deg,
+        x_mm=_json_finite_number(raw["x_mm"], "Pivot X"),
+        y_mm=_json_finite_number(raw["y_mm"], "Pivot Y"),
+        source=raw["source"],
+        calibration_version=raw["calibration_version"],
+        objective_name=raw["objective_name"],
+        sampled_b_min_deg=_optional_json_finite_number(
+            raw["sampled_b_min_deg"],
             "Pivot sampled B minimum",
         ),
-        sampled_b_max_deg=_optional_finite_or_default(
-            raw.get("sampled_b_max_deg"),
-            defaults.sampled_b_max_deg,
+        sampled_b_max_deg=_optional_json_finite_number(
+            raw["sampled_b_max_deg"],
             "Pivot sampled B maximum",
         ),
-        rms_error_mm=_optional_finite_or_default(
-            raw.get("rms_error_mm"),
-            defaults.rms_error_mm,
+        rms_error_mm=_optional_json_finite_number(
+            raw["rms_error_mm"],
             "Pivot RMS error",
         ),
-        max_error_mm=_optional_finite_or_default(
-            raw.get("max_error_mm"),
-            defaults.max_error_mm,
+        max_error_mm=_optional_json_finite_number(
+            raw["max_error_mm"],
             "Pivot maximum error",
         ),
     )
@@ -421,10 +509,71 @@ def parse_software_coordinate_settings(raw: object) -> SoftwareCoordinateSetting
     defaults = SoftwareCoordinateSettings()
     if not isinstance(raw, dict):
         return defaults
+    if "version" in raw and (
+        not isinstance(raw["version"], int)
+        or isinstance(raw["version"], bool)
+        or raw["version"] != SOFTWARE_COORDINATE_SETTINGS_VERSION
+    ):
+        return SoftwareCoordinateSettings(
+            pivot=None,
+            diagnostics=(
+                f"Unsupported software coordinate settings version: {raw['version']!r}.",
+            ),
+            _preserved_raw_section=deepcopy(raw),
+        )
+    supported_root_fields = {
+        "version",
+        "custom_frames",
+        "pivot",
+        "last_selected_frame_id",
+        "selection_generation",
+        "max_rotation_segment_deg",
+        "max_rotation_chord_error_mm",
+    }
+    unsupported_root_fields = set(raw).difference(supported_root_fields)
+    if unsupported_root_fields:
+        return SoftwareCoordinateSettings(
+            pivot=None,
+            diagnostics=(
+                "Unsupported software coordinate settings fields: "
+                f"{sorted(unsupported_root_fields)!r}.",
+            ),
+            _preserved_raw_section=deepcopy(raw),
+        )
+    try:
+        max_rotation_segment_deg = (
+            defaults.max_rotation_segment_deg
+            if "max_rotation_segment_deg" not in raw
+            else _positive_json_finite_number(
+                raw["max_rotation_segment_deg"],
+                "Maximum rotation segment",
+            )
+        )
+        max_rotation_chord_error_mm = (
+            defaults.max_rotation_chord_error_mm
+            if "max_rotation_chord_error_mm" not in raw
+            else _positive_json_finite_number(
+                raw["max_rotation_chord_error_mm"],
+                "Maximum rotation chord error",
+            )
+        )
+    except ValueError as exc:
+        return SoftwareCoordinateSettings(
+            pivot=None,
+            diagnostics=(f"Software coordinate settings unavailable: {exc}",),
+            _preserved_raw_section=deepcopy(raw),
+        )
     diagnostics: list[str] = []
     frames: list[CustomFrameSettings] = []
+    accepted_slots: list[tuple[int, str]] = []
     seen_frame_ids: set[str] = set()
     raw_frames = raw.get("custom_frames", ())
+    if "custom_frames" in raw and not isinstance(raw_frames, (list, tuple)):
+        return SoftwareCoordinateSettings(
+            pivot=None,
+            diagnostics=("Custom frames unavailable: expected a list.",),
+            _preserved_raw_section=deepcopy(raw),
+        )
     if isinstance(raw_frames, (list, tuple)):
         for index, record in enumerate(raw_frames):
             try:
@@ -436,12 +585,8 @@ def parse_software_coordinate_settings(raw: object) -> SoftwareCoordinateSetting
                 continue
             seen_frame_ids.add(frame.frame_id)
             frames.append(frame)
-    elif raw_frames is not None:
-        diagnostics.append("Custom frames ignored: expected a list.")
+            accepted_slots.append((index, frame.frame_id))
 
-    version = raw.get("version", defaults.version)
-    if not isinstance(version, int) or isinstance(version, bool) or version < 1:
-        version = defaults.version
     selected = raw.get("last_selected_frame_id", defaults.last_selected_frame_id)
     if not isinstance(selected, str) or not selected.strip():
         selected = defaults.last_selected_frame_id
@@ -454,27 +599,43 @@ def parse_software_coordinate_settings(raw: object) -> SoftwareCoordinateSetting
         or isinstance(selection_generation, bool)
         or selection_generation < 0
     ):
+        if "version" in raw and "selection_generation" in raw:
+            return SoftwareCoordinateSettings(
+                pivot=None,
+                diagnostics=(
+                    "Software coordinate settings unavailable: selection "
+                    "generation must be a non-negative integer.",
+                ),
+                _preserved_raw_section=deepcopy(raw),
+            )
         selection_generation = defaults.selection_generation
+    raw_pivot_present = "pivot" in raw
+    raw_pivot = raw.get("pivot")
+    if raw_pivot_present:
+        try:
+            pivot = _parse_pivot(raw_pivot)
+        except (TypeError, ValueError) as exc:
+            pivot = None
+            diagnostics.append(f"Rotation pivot unavailable: {exc}")
+    else:
+        pivot = defaults.pivot.clone()
     return SoftwareCoordinateSettings(
-        version=version,
+        version=SOFTWARE_COORDINATE_SETTINGS_VERSION,
         custom_frames=tuple(frames),
-        pivot=_parse_pivot(raw.get("pivot")),
+        pivot=pivot,
         last_selected_frame_id=selected,
         selection_generation=selection_generation,
-        max_rotation_segment_deg=_positive_finite_or_default(
-            raw.get("max_rotation_segment_deg", defaults.max_rotation_segment_deg),
-            defaults.max_rotation_segment_deg,
-            "Maximum rotation segment",
-        ),
-        max_rotation_chord_error_mm=_positive_finite_or_default(
-            raw.get(
-                "max_rotation_chord_error_mm",
-                defaults.max_rotation_chord_error_mm,
-            ),
-            defaults.max_rotation_chord_error_mm,
-            "Maximum rotation chord error",
-        ),
+        max_rotation_segment_deg=max_rotation_segment_deg,
+        max_rotation_chord_error_mm=max_rotation_chord_error_mm,
         diagnostics=tuple(diagnostics),
+        _raw_custom_frames=(
+            tuple(deepcopy(raw_frames))
+            if isinstance(raw_frames, (list, tuple))
+            else ()
+        ),
+        _accepted_custom_frame_slots=tuple(accepted_slots),
+        _raw_pivot_present=raw_pivot_present and pivot is None,
+        _raw_pivot=raw_pivot if pivot is None else None,
     )
 
 

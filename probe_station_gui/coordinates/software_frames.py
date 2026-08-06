@@ -21,6 +21,11 @@ def materialize_custom_frames(
     content changes.  Validation happens before returning any replacement set.
     """
 
+    if settings.materialization_blocked:
+        raise ValueError(
+            "Software coordinate settings are degraded and cannot update custom frames."
+        )
+
     existing = tuple(existing_records)
     custom_by_id = {frame.frame_id: frame for frame in settings.custom_frames}
     design_ids = {
@@ -45,6 +50,8 @@ def materialize_custom_frames(
 
 
 def _materialize_one(settings_frame, existing: CoordinateFrameRecord | None) -> CoordinateFrameRecord:
+    if settings_frame.a_zero_mm is not None and settings_frame.z_zero_mm is None:
+        raise ValueError("Frame A origin requires a Z origin.")
     transform = BFrameTransform(
         origin_xy_at_reference_b=(settings_frame.origin_x_mm, settings_frame.origin_y_mm),
         reference_b_deg=settings_frame.reference_b_deg,

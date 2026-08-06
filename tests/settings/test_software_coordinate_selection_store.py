@@ -561,6 +561,103 @@ def test_persisted_selection_document_overrides_settings_snapshot_on_load(
     assert settings.software_coordinates.last_selected_frame_id == FRAME_RESTORED
 
 
+@pytest.mark.parametrize("version", [None, 2])
+def test_selection_sidecar_requires_exact_supported_version(
+    tmp_path,
+    version: int | None,
+) -> None:
+    manager = _settings_manager(tmp_path)
+    settings = Settings()
+    settings.software_coordinates.last_selected_frame_id = FRAME_ONE
+    settings.software_coordinates.selection_generation = 4
+    sidecar = {
+        "last_selected_frame_id": FRAME_RESTORED,
+        "generation": 99,
+    }
+    if version is not None:
+        sidecar["version"] = version
+    manager._software_coordinate_selection_path().write_text(
+        json.dumps(sidecar),
+        encoding="utf-8",
+    )
+
+    manager._restore_software_coordinate_selection(settings)
+
+    assert settings.software_coordinates.last_selected_frame_id == FRAME_ONE
+    assert settings.software_coordinates.selection_generation == 4
+
+
+def test_future_selection_sidecar_is_preserved_and_blocks_rewrite(tmp_path) -> None:
+    manager = _settings_manager(tmp_path)
+    future_sidecar = {
+        "version": 2,
+        "last_selected_frame_id": FRAME_RESTORED,
+        "generation": 99,
+        "future_state": {"selection_scope": "operator"},
+    }
+    sidecar_path = manager._software_coordinate_selection_path()
+    sidecar_path.write_text(json.dumps(future_sidecar), encoding="utf-8")
+    manager._write_settings_file_atomic(Settings().to_dict())
+    manager._settings = manager._load()
+    snapshot = manager.set_software_coordinate_selection(FRAME_ONE)
+
+    with pytest.raises(ValueError, match="unsupported.*version"):
+        manager.persist_software_coordinate_selection(snapshot)
+
+    assert _read_json(sidecar_path) == future_sidecar
+
+
+@pytest.mark.parametrize(
+    "invalid_sidecar",
+    [
+        {
+            "version": 1,
+            "last_selected_frame_id": FRAME_RESTORED,
+            "generation": 9,
+            "future_field": True,
+        },
+        {
+            "version": 1,
+            "last_selected_frame_id": FRAME_RESTORED,
+            "generation": "9",
+        },
+    ],
+)
+def test_invalid_current_sidecar_schema_is_preserved_and_blocks_rewrite(
+    tmp_path,
+    invalid_sidecar: dict[str, object],
+) -> None:
+    manager = _settings_manager(tmp_path)
+    sidecar_path = manager._software_coordinate_selection_path()
+    sidecar_path.write_text(json.dumps(invalid_sidecar), encoding="utf-8")
+    snapshot = manager.set_software_coordinate_selection(FRAME_ONE)
+
+    with pytest.raises(ValueError, match="selection document"):
+        manager.persist_software_coordinate_selection(snapshot)
+
+    assert _read_json(sidecar_path) == invalid_sidecar
+
+
+def test_selection_save_preserves_rejected_custom_frame_record(tmp_path) -> None:
+    manager = _settings_manager(tmp_path)
+    raw = Settings().to_dict()
+    rejected = {
+        "frame_id": "future-frame-id",
+        "name": "future custom frame",
+        "schema_version": 2,
+        "geometry": {"origin": [1.0, 2.0]},
+    }
+    raw["software_coordinates"]["custom_frames"] = [rejected]
+    manager._write_settings_file_atomic(raw)
+    manager._settings = manager._load()
+
+    snapshot = manager.set_software_coordinate_selection(FRAME_ONE)
+    assert manager.persist_software_coordinate_selection(snapshot)
+
+    persisted = _read_json(manager._config_path)
+    assert persisted["software_coordinates"]["custom_frames"] == [rejected]
+
+
 @pytest.mark.parametrize(
     "invalid",
     ["", "   ", "chip display name", "not-a-uuid", None, 42],

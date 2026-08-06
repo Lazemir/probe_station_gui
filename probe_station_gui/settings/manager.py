@@ -401,6 +401,46 @@ class SettingsManager:
             return 0
         return value
 
+    def _decode_software_coordinate_selection_document(
+        self,
+        data: object,
+    ) -> SoftwareCoordinateSelectionSnapshot:
+        if not isinstance(data, dict):
+            raise ValueError("Software coordinate selection document must be an object.")
+        version = data.get("version")
+        if (
+            not isinstance(version, int)
+            or isinstance(version, bool)
+            or version != self.SOFTWARE_COORDINATE_SELECTION_VERSION
+        ):
+            raise ValueError(
+                "unsupported software coordinate selection "
+                f"version: {version!r}"
+            )
+        expected_fields = {
+            "version",
+            "last_selected_frame_id",
+            "generation",
+        }
+        if set(data) != expected_fields:
+            raise ValueError(
+                "Software coordinate selection document schema is unsupported."
+            )
+        selected = self._normalize_software_coordinate_selection(
+            data["last_selected_frame_id"]
+        )
+        generation = data["generation"]
+        if (
+            not isinstance(generation, int)
+            or isinstance(generation, bool)
+            or generation < 0
+        ):
+            raise ValueError(
+                "Software coordinate selection document generation must be a "
+                "non-negative integer."
+            )
+        return SoftwareCoordinateSelectionSnapshot(selected, generation)
+
     def _selection_snapshot_from_settings(
         self,
         settings: Settings,
@@ -456,6 +496,15 @@ class SettingsManager:
     ) -> None:
         path = self._software_coordinate_selection_path()
         path.parent.mkdir(parents=True, exist_ok=True)
+        if path.exists():
+            try:
+                with path.open("r", encoding="utf-8-sig") as handle:
+                    existing = json.load(handle)
+            except (OSError, json.JSONDecodeError) as exc:
+                raise ValueError(
+                    "Software coordinate selection document is unreadable."
+                ) from exc
+            self._decode_software_coordinate_selection_document(existing)
         temporary_path = path.with_name(
             f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
         )
@@ -494,13 +543,8 @@ class SettingsManager:
         try:
             with path.open("r", encoding="utf-8-sig") as handle:
                 data = json.load(handle)
-            if not isinstance(data, dict):
-                raise ValueError("Selection document must be an object.")
-            selected = self._normalize_software_coordinate_selection(
-                data.get("last_selected_frame_id")
-            )
-            generation = self._normalize_software_coordinate_selection_generation(
-                data.get("generation", 0)
+            sidecar_snapshot = (
+                self._decode_software_coordinate_selection_document(data)
             )
         except (OSError, ValueError, json.JSONDecodeError) as exc:
             self._logger.warning(
@@ -509,9 +553,8 @@ class SettingsManager:
                 exc,
             )
             return
-        sidecar_snapshot = SoftwareCoordinateSelectionSnapshot(selected, generation)
-        # The main document wins generation ties. This keeps a legacy generation-0
-        # sidecar from rolling back a main settings file edited or saved later.
+        # The main document wins generation ties so a stale sidecar cannot roll
+        # back a main settings file edited or saved later.
         winner = (
             sidecar_snapshot
             if sidecar_snapshot.generation > main_snapshot.generation
