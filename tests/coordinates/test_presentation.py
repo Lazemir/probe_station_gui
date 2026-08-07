@@ -11,6 +11,7 @@ from probe_station_gui.coordinates.model import (
     PhysicalMachinePose,
     ReadinessStatus,
 )
+from probe_station_gui.coordinates.lifecycle import FrameSelectionDecision
 from probe_station_gui.coordinates.presentation import (
     MACHINE_FRAME_ID,
     build_coordinate_display_plan,
@@ -223,6 +224,31 @@ def test_existing_selection_survives_temporary_b_authority_loss() -> None:
     assert plan.selection_reason
     assert all(update.value is None for update in plan.axis_updates)
     assert all(update.color_role == "unavailable" for update in plan.axis_updates)
+
+
+def test_display_plan_consumes_one_precomputed_selection_decision() -> None:
+    snapshot = _snapshot(_record(DESIGN_ID, FrameKind.DESIGN, "chip-a"))
+    decision = FrameSelectionDecision(
+        selected_frame_id=DESIGN_ID,
+        available=False,
+        reason="B coordinate is unavailable.",
+        persist_selection=False,
+    )
+
+    plan = build_coordinate_display_plan(
+        snapshot,
+        selected_frame_id=MACHINE_FRAME_ID,
+        physical_pose=_pose(),
+        pivot_machine_xy=(0.0, 0.0),
+        homed_axes={"X", "Y", "Z", "A"},
+        authority_axes={"X", "Y", "Z", "A"},
+        selection_decision=decision,
+    )
+
+    assert plan.selected_frame_id == DESIGN_ID
+    assert plan.selection_available is False
+    assert plan.selection_reason == "B coordinate is unavailable."
+    assert all(update.value is None for update in plan.axis_updates)
 
 
 def test_missing_selected_record_is_permanent_machine_fallback() -> None:

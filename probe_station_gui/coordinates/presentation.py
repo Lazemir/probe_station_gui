@@ -5,6 +5,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Iterable
 
+from .lifecycle import (
+    MACHINE_FRAME_ID,
+    CoordinateFrameLifecycle,
+    FrameSelectionContext,
+    FrameSelectionDecision,
+)
 from .model import (
     CoordinateFrameRecord,
     FrameKind,
@@ -14,9 +20,6 @@ from .model import (
 )
 from .registry import RegistrySnapshot
 from .provenance import design_frame_provenance_error
-
-
-MACHINE_FRAME_ID = "machine"
 
 
 @dataclass(frozen=True)
@@ -246,6 +249,7 @@ def build_coordinate_display_plan(
     homed_axes: Iterable[str],
     authority_axes: Iterable[str],
     allow_unavailable_selection_for_preview: bool = False,
+    selection_decision: FrameSelectionDecision | None = None,
 ) -> CoordinateDisplayPlan:
     """Build one immutable selector and axis-display snapshot without I/O."""
 
@@ -258,25 +262,23 @@ def build_coordinate_display_plan(
     )
     records = {record.frame_id: record for record in snapshot.records}
     requested = str(selected_frame_id or MACHINE_FRAME_ID)
-    record = records.get(requested)
-    selection_available = True
-    selection_reason = None
-    if requested == MACHINE_FRAME_ID:
-        selected = MACHINE_FRAME_ID
-        record = None
-    elif record is None:
-        selected = MACHINE_FRAME_ID
-    elif _permanent_frame_rejection_reason(record) is not None:
-        selected = MACHINE_FRAME_ID
-        record = None
-    else:
-        selection_reason = _frame_selection_reason(
-            record,
-            homed_axes=homed,
-            authority_axes=authority,
+    decision = selection_decision
+    if decision is None:
+        decision = CoordinateFrameLifecycle(
+            selected_frame_id=requested,
+        ).plan_selection(
+            FrameSelectionContext(
+                records=snapshot.records,
+                requested_frame_id=requested,
+                explicit=False,
+                homed_axes=homed,
+                authority_axes=authority,
+            )
         )
-        selection_available = not bool(selection_reason)
-        selected = requested
+    selected = decision.selected_frame_id
+    selection_available = decision.available
+    selection_reason = decision.reason
+    record = None if selected == MACHINE_FRAME_ID else records.get(selected)
 
     if record is None:
         axis_updates = tuple(

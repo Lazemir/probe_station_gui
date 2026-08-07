@@ -13,6 +13,10 @@ from probe_station_gui.coordinates.model import (
     STAGE_AXES,
     VISIBLE_STAGE_AXES,
 )
+from probe_station_gui.coordinates.lifecycle import (
+    CoordinateFrameLifecycle,
+    FrameSelectionContext,
+)
 from probe_station_gui.coordinates.presentation import (
     MACHINE_FRAME_ID,
     build_coordinate_display_plan,
@@ -90,6 +94,22 @@ def initialize_gui_coordinate_selection(owner: MainWindowStagePositionPanelOwner
     owner._pending_coordinate_frame_restore_id = (
         None if last_selected == MACHINE_FRAME_ID else last_selected
     )
+    owner._coordinate_frame_lifecycle = CoordinateFrameLifecycle(
+        selected_frame_id=last_selected,
+    )
+
+
+def _coordinate_frame_lifecycle(owner: object) -> CoordinateFrameLifecycle:
+    lifecycle = getattr(owner, "_coordinate_frame_lifecycle", None)
+    if lifecycle is None:
+        lifecycle = CoordinateFrameLifecycle(
+            selected_frame_id=str(
+                getattr(owner, "_selected_coordinate_frame_id", MACHINE_FRAME_ID)
+                or MACHINE_FRAME_ID
+            )
+        )
+        setattr(owner, "_coordinate_frame_lifecycle", lifecycle)
+    return lifecycle
 
 
 def _persist_gui_coordinate_selection(owner: object, frame_id: str) -> None:
@@ -165,6 +185,8 @@ def update_software_coordinate_display(
         if restore is not None:
             owner._selected_coordinate_frame_id = restore
             owner._pending_coordinate_frame_restore_id = None
+            if restore == MACHINE_FRAME_ID:
+                owner._coordinate_frame_lifecycle = CoordinateFrameLifecycle()
 
     selected = str(
         getattr(owner, "_selected_coordinate_frame_id", MACHINE_FRAME_ID)
@@ -175,10 +197,20 @@ def update_software_coordinate_display(
     except (AttributeError, TypeError, ValueError) as exc:
         selected = MACHINE_FRAME_ID
         owner._selected_coordinate_frame_id = MACHINE_FRAME_ID
+        owner._coordinate_frame_lifecycle = CoordinateFrameLifecycle()
         pivot = (float("nan"), float("nan"))
         show_status = getattr(owner, "_show_status", None)
         if callable(show_status):
             show_status(str(exc), 6000)
+    decision = _coordinate_frame_lifecycle(owner).plan_selection(
+        FrameSelectionContext(
+            records=snapshot.records,
+            requested_frame_id=selected,
+            explicit=False,
+            homed_axes=frozenset(homed_axes),
+            authority_axes=frozenset(authority_axes),
+        )
+    )
     plan = build_coordinate_display_plan(
         snapshot,
         selected_frame_id=selected,
@@ -186,9 +218,11 @@ def update_software_coordinate_display(
         pivot_machine_xy=pivot,
         homed_axes=homed_axes,
         authority_axes=authority_axes,
+        selection_decision=decision,
     )
     if plan.selected_frame_id != selected:
         owner._selected_coordinate_frame_id = plan.selected_frame_id
+    if decision.persist_selection:
         _persist_gui_coordinate_selection(owner, plan.selected_frame_id)
     owner._stage_axis_display_values = {
         update.axis: float(update.value)
@@ -218,44 +252,28 @@ def select_gui_coordinate_frame(
     pose = _coerce_physical_machine_pose(
         getattr(owner, "_latest_physical_machine_pose", None)
     )
-    if requested != MACHINE_FRAME_ID:
-        registry = getattr(owner, "_coordinate_frame_registry", None)
-        if (
-            registry is None
-            or registry.get(requested) is None
-            or pose is None
-        ):
-            requested = MACHINE_FRAME_ID
-        else:
-            homed_getter = getattr(owner.stage_controller, "homed_axes", None)
-            try:
-                pivot = _coordinate_pivot(owner)
-            except (AttributeError, TypeError, ValueError) as exc:
-                show_status = getattr(owner, "_show_status", None)
-                if callable(show_status):
-                    show_status(str(exc), 6000)
-                requested = MACHINE_FRAME_ID
-                pivot = (float("nan"), float("nan"))
-            plan = build_coordinate_display_plan(
-                registry.snapshot(),
-                selected_frame_id=requested,
-                physical_pose=pose,
-                pivot_machine_xy=pivot,
-                homed_axes=homed_getter() if callable(homed_getter) else set(),
-                authority_axes=set(pose.values),
-            )
-            entry = next(
-                (item for item in plan.selector_entries if item.frame_id == requested),
-                None,
-            )
-            if entry is not None and not entry.enabled:
-                return
-            requested = plan.selected_frame_id
+    registry = getattr(owner, "_coordinate_frame_registry", None)
+    snapshot = registry.snapshot() if registry is not None else None
+    homed_getter = getattr(getattr(owner, "stage_controller", None), "homed_axes", None)
+    decision = _coordinate_frame_lifecycle(owner).plan_selection(
+        FrameSelectionContext(
+            records=() if snapshot is None else snapshot.records,
+            requested_frame_id=requested,
+            explicit=True,
+            homed_axes=frozenset(
+                homed_getter() if callable(homed_getter) else set()
+            ),
+            authority_axes=frozenset(pose.values),
+        )
+    )
+    if not decision.available:
+        return
+    requested = decision.selected_frame_id
     owner._pending_coordinate_frame_restore_id = None
     owner._selected_coordinate_frame_id = requested
-    if pose is not None:
-        update_software_coordinate_display(owner, pose)
-    _persist_gui_coordinate_selection(owner, requested)
+    update_software_coordinate_display(owner, pose)
+    if decision.persist_selection:
+        _persist_gui_coordinate_selection(owner, requested)
 
 
 def gui_coordinate_motion_editing_enabled(owner: object) -> bool:

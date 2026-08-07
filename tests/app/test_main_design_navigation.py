@@ -29,6 +29,7 @@ from probe_station_gui.design.model import DesignRegistration
 from probe_station_gui.design.klayout_types import StructureBoundsResult
 from probe_station_gui.design.session import DesignSession
 from probe_station_gui.coordinates.registry import CoordinateFrameRegistry
+from probe_station_gui.coordinates.lifecycle import DesignUsabilityContext
 from probe_station_gui.coordinates.provenance import (
     RUNTIME_PROVENANCE_REASON,
     RUNTIME_PROVENANCE_STATUS,
@@ -1580,6 +1581,52 @@ def test_direct_design_conversion_rejects_stale_usability_snapshot(
         )
         is None
     )
+
+
+def test_main_design_usability_method_is_a_thin_lifecycle_adapter(
+    tmp_path: Path,
+) -> None:
+    document = _make_document(tmp_path)
+    registry = CoordinateFrameRegistry()
+    record = registry.add(new_design_frame_draft(document, existing_names=()))
+    session = DesignSession(document=document)
+    session.link_active_frame(record)
+    machine_snapshot = _machine_snapshot((12.0, 8.0, 0.0, 0.0, 10.0))
+    expected = object()
+    captured: list[DesignUsabilityContext] = []
+
+    class _Lifecycle:
+        def design_usability(self, context: DesignUsabilityContext) -> object:
+            captured.append(context)
+            return expected
+
+    window = Main.__new__(Main)
+    window._design_session = session
+    window._coordinate_frame_registry = registry
+    window._coordinate_frames_loaded = True
+    window._coordinate_frame_authority_blocked_axes = {"b"}
+    window._coordinate_frame_lifecycle = _Lifecycle()
+    window.stage_controller = types.SimpleNamespace(
+        latest_machine_coordinate_snapshot=lambda: machine_snapshot,
+    )
+    window._rotation_geometry_snapshot = lambda: types.SimpleNamespace(
+        pivot_machine_xy=(3.0, 4.0),
+    )
+    window._active_objective_xy_offset = lambda: (0.5, -0.25)
+
+    result = Main._snapshot_active_design_frame_usability(window)
+
+    assert result is expected
+    assert len(captured) == 1
+    context = captured[0]
+    assert context.frames_loaded is True
+    assert context.record is record
+    assert context.selected_frame_id == record.frame_id
+    assert context.authority_blocked_axes == frozenset({"B"})
+    assert context.pivot_machine_xy == (3.0, 4.0)
+    assert context.document is document
+    assert context.machine_coordinate_snapshot is machine_snapshot
+    assert context.objective_xy_offset == (0.5, -0.25)
 
 
 def test_gui_route_rejects_verified_missing_reference_draft_before_materializing(

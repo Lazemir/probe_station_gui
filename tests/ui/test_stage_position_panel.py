@@ -19,6 +19,10 @@ from probe_station_gui.coordinates.presentation import (
     CoordinateDisplayPlan,
     CoordinateSelectorEntry,
 )
+from probe_station_gui.coordinates.lifecycle import (
+    FrameSelectionContext,
+    FrameSelectionDecision,
+)
 from probe_station_gui.coordinates.model import (
     AxisReadiness,
     CoordinateFrameRecord,
@@ -351,6 +355,41 @@ def test_temporary_b_loss_does_not_persist_machine_selection() -> None:
     )
 
     assert owner._selected_coordinate_frame_id == frame_id
+    assert owner.persisted_selections == []
+
+
+def test_display_refresh_delegates_selection_policy_to_lifecycle() -> None:
+    frame_id = "11111111-1111-4111-8111-111111111111"
+    owner = _SelectionOwner(
+        selected=frame_id,
+        authority_axes={"X", "Y", "Z", "A"},
+    )
+    captured: list[FrameSelectionContext] = []
+
+    class _Lifecycle:
+        def plan_selection(
+            self,
+            context: FrameSelectionContext,
+        ) -> FrameSelectionDecision:
+            captured.append(context)
+            return FrameSelectionDecision(
+                selected_frame_id=frame_id,
+                available=False,
+                reason="B coordinate is unavailable.",
+                persist_selection=False,
+            )
+
+    owner._coordinate_frame_lifecycle = _Lifecycle()
+
+    panel_adapter.update_software_coordinate_display(
+        owner,
+        owner._latest_physical_machine_pose,
+    )
+
+    assert len(captured) == 1
+    assert captured[0].requested_frame_id == frame_id
+    assert captured[0].explicit is False
+    assert captured[0].authority_axes == frozenset({"X", "Y", "Z", "A"})
     assert owner.persisted_selections == []
 
 

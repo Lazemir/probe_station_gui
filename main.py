@@ -104,12 +104,15 @@ from probe_station_gui import (
     StageController,
 )
 from probe_station_gui.coordinates import (
-    AxisReadiness,
-    BFrameTransform,
     CoordinateFrameRegistry,
     CoordinateFrameStoreWorker,
     PhysicalMachinePose,
     rotate_xy,
+)
+from probe_station_gui.coordinates.lifecycle import (
+    CoordinateFrameLifecycle,
+    DesignFrameUsabilitySnapshot,
+    DesignUsabilityContext,
 )
 from probe_station_gui.coordinates.rotation_geometry import (
     RotationGeometrySnapshot,
@@ -493,31 +496,6 @@ logger = logging.getLogger(__name__)
 
 APP_ICON_RESOURCE = "assets/app_icon.ico"
 WINDOWS_APP_USER_MODEL_ID = "ProbeStationGUI.ProbeStationGUI"
-
-
-@dataclass(frozen=True)
-class _ActiveDesignFrameUsabilitySnapshot:
-    load_complete: bool
-    frame_id: str | None
-    frame_version: int | None
-    transform: BFrameTransform | None
-    readiness: tuple[tuple[str, AxisReadiness], ...]
-    provenance_error: str | None
-    authority_blocked_axes: frozenset[str]
-    rejection_reason: str | None
-    document: DesignDocument | None
-    metadata: DesignFrameMetadata | None
-    machine_coordinate_snapshot: MachineCoordinateSnapshot | None
-    pivot_machine_xy: tuple[float, float] | None
-    objective_xy_offset: tuple[float, float]
-
-    @property
-    def usable(self) -> bool:
-        return self.rejection_reason is None
-
-    def readiness_for(self, axis: str) -> AxisReadiness | None:
-        normalized = str(axis).strip().upper()
-        return dict(self.readiness).get(normalized)
 
 
 @dataclass(frozen=True)
@@ -1055,6 +1033,7 @@ class Main(QMainWindow):
         self._stage_position_panel: StagePositionPanel | None = None
         self._latest_physical_machine_pose: PhysicalMachinePose | None = None
         self._selected_coordinate_frame_id = "machine"
+        self._coordinate_frame_lifecycle = CoordinateFrameLifecycle()
         self._pending_coordinate_frame_restore_id: str | None = None
         self._design_snap_enabled = True
         self._last_reported_b_position: float | None = None
@@ -4304,7 +4283,7 @@ class Main(QMainWindow):
         *,
         scale: object,
         document: object | None,
-        frame_usability_snapshot: _ActiveDesignFrameUsabilitySnapshot | None = None,
+        frame_usability_snapshot: DesignFrameUsabilitySnapshot | None = None,
         registration: object | None = None,
     ) -> _MicroscopeScanLaunchSnapshot:
         objective_name, magnification = self._active_objective_metadata()
@@ -4511,35 +4490,13 @@ class Main(QMainWindow):
 
     def _snapshot_active_design_frame_usability(
         self,
-    ) -> _ActiveDesignFrameUsabilitySnapshot:
+    ) -> DesignFrameUsabilitySnapshot:
         load_complete = bool(getattr(self, "_coordinate_frames_loaded", False))
         session = getattr(self, "_design_session", None)
         document = getattr(session, "document", None)
         frame_id = getattr(session, "active_frame_id", None)
         registry = getattr(self, "_coordinate_frame_registry", None)
         record = registry.get(frame_id) if registry is not None and frame_id else None
-        record_readiness = getattr(record, "readiness", {}) if record is not None else {}
-        readiness = (
-            ()
-            if record is None
-            else tuple(
-                (axis, record_readiness[axis])
-                for axis in ("X", "Y", "Z", "A", "B")
-                if axis in record_readiness
-            )
-        )
-        transform = None if record is None else getattr(record, "transform", None)
-        record_version = None if record is None else getattr(record, "version", None)
-        frame_version = None if record_version is None else int(record_version)
-        provenance_error = (
-            "Design coordinate provenance is being checked."
-            if not load_complete
-            else (
-                None
-                if record is None
-                else design_frame_provenance_error(record)
-            )
-        )
         blocked_axes = frozenset(
             str(axis).strip().upper()
             for axis in getattr(
@@ -4548,86 +4505,58 @@ class Main(QMainWindow):
                 set(),
             )
         )
-        reason: str | None = None
-        metadata: DesignFrameMetadata | None = None
-        machine_snapshot: MachineCoordinateSnapshot | None = None
-        pivot: tuple[float, float] | None = None
-        objective_offset = (0.0, 0.0)
-        if not load_complete:
-            reason = provenance_error
-        elif frame_id is None or record is None:
-            reason = "A durable Design coordinate frame is required."
-        elif provenance_error is not None:
-            reason = provenance_error
-        elif document is None:
-            reason = "Load a design before using Design coordinates."
-        elif transform is None:
-            reason = "Design coordinate transform is unavailable."
-        else:
-            unavailable = [
-                record_readiness[axis]
-                for axis in ("X", "Y", "B")
-                if axis in record_readiness
-                and not record_readiness[axis].available
-            ]
-            if not all(axis in record_readiness for axis in ("X", "Y", "B")):
-                reason = "Design X/Y/B readiness is unavailable."
-            elif unavailable:
-                reason = next(
-                    (state.reason for state in unavailable if state.reason),
-                    "Design X/Y/B registration is required.",
+        controller = getattr(self, "stage_controller", None)
+        machine_snapshot_getter = getattr(
+            controller,
+            "latest_machine_coordinate_snapshot",
+            None,
+        )
+        try:
+            machine_snapshot = (
+                machine_snapshot_getter()
+                if callable(machine_snapshot_getter)
+                else None
+            )
+        except Exception:
+            machine_snapshot = None
+        try:
+            pivot_value = self._rotation_geometry_snapshot().pivot_machine_xy
+            pivot = (float(pivot_value[0]), float(pivot_value[1]))
+        except Exception:
+            pivot = None
+        try:
+            objective_offset_value = self._active_objective_xy_offset()
+            objective_offset = (
+                float(objective_offset_value[0]),
+                float(objective_offset_value[1]),
+            )
+        except Exception:
+            objective_offset = (float("nan"), float("nan"))
+        lifecycle = getattr(self, "_coordinate_frame_lifecycle", None)
+        if lifecycle is None:
+            lifecycle = CoordinateFrameLifecycle(
+                selected_frame_id=str(
+                    getattr(self, "_selected_coordinate_frame_id", "machine")
+                    or "machine"
                 )
-            elif {"X", "Y", "B"}.intersection(blocked_axes):
-                reason = "Controller coordinate authority is unavailable."
-        if reason is None:
-            try:
-                metadata = DesignFrameMetadata.from_mapping(record.metadata)
-                if (
-                    Path(metadata.source_path).expanduser().resolve()
-                    != document.path.expanduser().resolve()
-                    or metadata.top_cell_name != document.top_cell_name
-                ):
-                    raise DesignModelError(
-                        "Design coordinate frame belongs to a different document context."
-                    )
-                machine_snapshot = (
-                    self.stage_controller.latest_machine_coordinate_snapshot()
-                )
-                if machine_snapshot is None:
-                    raise DesignModelError(
-                        "A synchronized Machine-coordinate snapshot is unavailable."
-                    )
-                machine_snapshot.physical_machine_pose.require("B")
-                pivot_value = self._rotation_geometry_snapshot().pivot_machine_xy
-                pivot = (float(pivot_value[0]), float(pivot_value[1]))
-                offset_value = self._active_objective_xy_offset()
-                objective_offset = (
-                    float(offset_value[0]),
-                    float(offset_value[1]),
-                )
-                if not all(math.isfinite(value) for value in objective_offset):
-                    raise DesignModelError("Active objective offset is invalid.")
-            except Exception as exc:
-                reason = str(exc) or type(exc).__name__
-        return _ActiveDesignFrameUsabilitySnapshot(
-            load_complete=load_complete,
-            frame_id=None if frame_id is None else str(frame_id),
-            frame_version=frame_version,
-            transform=transform,
-            readiness=readiness,
-            provenance_error=provenance_error,
-            authority_blocked_axes=blocked_axes,
-            rejection_reason=reason,
-            document=document,
-            metadata=metadata,
-            machine_coordinate_snapshot=machine_snapshot,
-            pivot_machine_xy=pivot,
-            objective_xy_offset=objective_offset,
+            )
+            self._coordinate_frame_lifecycle = lifecycle
+        return lifecycle.design_usability(
+            DesignUsabilityContext(
+                frames_loaded=load_complete,
+                record=record,
+                selected_frame_id=None if frame_id is None else str(frame_id),
+                authority_blocked_axes=blocked_axes,
+                pivot_machine_xy=pivot,
+                document=document,
+                machine_coordinate_snapshot=machine_snapshot,
+                objective_xy_offset=objective_offset,
+            )
         )
 
     def _design_frame_usability_snapshot_is_current(
         self,
-        snapshot: _ActiveDesignFrameUsabilitySnapshot,
+        snapshot: DesignFrameUsabilitySnapshot,
     ) -> bool:
         if not snapshot.usable or not bool(getattr(self, "_coordinate_frames_loaded", False)):
             return False
@@ -4653,7 +4582,7 @@ class Main(QMainWindow):
 
     def _raw_stage_xy_from_design_usability_snapshot(
         self,
-        usability: _ActiveDesignFrameUsabilitySnapshot,
+        usability: DesignFrameUsabilitySnapshot,
         design_xy: tuple[float, float],
         *,
         require_current: bool = True,
@@ -4696,7 +4625,7 @@ class Main(QMainWindow):
 
     def _camera_stage_xy_from_design_usability_snapshot(
         self,
-        usability: _ActiveDesignFrameUsabilitySnapshot,
+        usability: DesignFrameUsabilitySnapshot,
         design_xy: tuple[float, float],
         *,
         require_current: bool = True,
@@ -9085,7 +9014,7 @@ class Main(QMainWindow):
 
     def _snapshot_active_route_design_frame(
         self,
-        usability: _ActiveDesignFrameUsabilitySnapshot | None = None,
+        usability: DesignFrameUsabilitySnapshot | None = None,
     ):
         active = usability or self._snapshot_active_design_frame_usability()
         if not active.usable:
@@ -9171,7 +9100,7 @@ class Main(QMainWindow):
         self,
         route: MeasurementRoute,
         *,
-        frame_usability_snapshot: _ActiveDesignFrameUsabilitySnapshot | None = None,
+        frame_usability_snapshot: DesignFrameUsabilitySnapshot | None = None,
     ) -> list[RouteMeasurementPoint]:
         usability = (
             frame_usability_snapshot
