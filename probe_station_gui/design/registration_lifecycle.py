@@ -79,6 +79,14 @@ class RegistrationSample:
 
 
 @dataclass(frozen=True)
+class RegistrationCaptureOutcome:
+    """Immutable hardware callback result accepted before adapter conversion."""
+
+    succeeded: bool
+    message: str | None = None
+
+
+@dataclass(frozen=True)
 class NormalizedRegistrationSample:
     """A captured sample expressed at the batch reference B position."""
 
@@ -108,6 +116,7 @@ class RegistrationEffects:
     captured_sample: RegistrationSample | None = None
     normalized_samples: tuple[NormalizedRegistrationSample, ...] = ()
     commit_requested: bool = False
+    rollback_effects: RegistrationEffects | None = None
 
 
 @dataclass
@@ -195,11 +204,19 @@ class DesignRegistrationLifecycle:
     def accept_sample(
         self,
         token: RegistrationCaptureToken,
-        sample: RegistrationSample,
+        sample: RegistrationSample | RegistrationCaptureOutcome,
     ) -> RegistrationEffects:
         pending = self._pending
         if pending is None or not self._token_is_current(token, pending):
             return RegistrationEffects(reason="Registration capture is stale.")
+        if isinstance(sample, RegistrationCaptureOutcome):
+            if sample.succeeded:
+                return RegistrationEffects(accepted=True)
+            pending.active_request_id = ""
+            return RegistrationEffects(
+                accepted=True,
+                reason=str(sample.message or "Machine coordinates are unavailable."),
+            )
         if (
             sample.mark_kind not in {"source", "check"}
             or sample.mark_kind != token.mark_kind
@@ -210,6 +227,7 @@ class DesignRegistrationLifecycle:
         pending.active_request_id = ""
         normalized = self._normalized_samples(pending.samples)
         complete = self._batch_is_complete(pending)
+        rollback_effects = self._baseline_effects(pending) if complete else None
         effects = RegistrationEffects(
             accepted=True,
             captured_sample=sample,
@@ -223,6 +241,7 @@ class DesignRegistrationLifecycle:
             baseline_registration_status=(
                 pending.context.baseline_registration_status
             ),
+            rollback_effects=rollback_effects,
         )
         if complete:
             self._pending = None
@@ -345,6 +364,7 @@ __all__ = [
     "NormalizedRegistrationSample",
     "RegistrationCancellation",
     "RegistrationCaptureContext",
+    "RegistrationCaptureOutcome",
     "RegistrationCaptureToken",
     "RegistrationEffects",
     "RegistrationSample",

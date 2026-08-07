@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 import math
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from probe_station_gui.design.frame_registration import DesignFrameMetadata
 from probe_station_gui.design.model import DesignDocument, DesignModelError
@@ -13,6 +14,10 @@ from probe_station_gui.stage.machine_coordinates import MachineCoordinateSnapsho
 from .model import AxisReadiness, CoordinateFrameRecord
 from .provenance import design_frame_provenance_error
 from .transforms import BFrameTransform
+
+
+if TYPE_CHECKING:
+    from probe_station_gui.design.registration_lifecycle import RegistrationEffects
 
 
 MACHINE_FRAME_ID = "machine"
@@ -102,6 +107,7 @@ class FramePublication:
     pivot_machine_xy: tuple[float, float] | None = None
     success_message: str | None = None
     operator_alignment: bool = False
+    registration_rollback_effects: RegistrationEffects | None = None
 
 
 @dataclass(frozen=True)
@@ -210,6 +216,10 @@ class CoordinateFrameLifecycle:
                     previous_record=chain.previous_record,
                     operator_alignment=(
                         chain.operator_alignment or publication.operator_alignment
+                    ),
+                    registration_rollback_effects=(
+                        chain.registration_rollback_effects
+                        or publication.registration_rollback_effects
                     ),
                 )
             rollback_by_frame[committed.frame_id] = publication

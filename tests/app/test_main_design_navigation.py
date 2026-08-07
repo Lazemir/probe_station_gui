@@ -1127,6 +1127,87 @@ def test_stage_mark_capture_busy_and_stale_callbacks_do_not_mutate_session(
     assert not hasattr(window, "_pending_registration_mark_capture")
 
 
+@pytest.mark.parametrize(
+    "callback_case",
+    ("successful", "failed", "conversion-failed", "legacy"),
+)
+def test_stale_registration_callback_is_inert_before_snapshot_processing(
+    monkeypatch,
+    tmp_path: Path,
+    callback_case: str,
+) -> None:
+    document = _make_document(tmp_path / callback_case)
+    registry = CoordinateFrameRegistry()
+    session = DesignSession(document=document)
+    if callback_case != "legacy":
+        draft = registry.add(new_design_frame_draft(document, existing_names=()))
+        session.link_active_frame(draft)
+    session.source_design_marks = ((0.0, 0.0),)
+    requests: list[object] = []
+    statuses: list[str] = []
+    refreshes: list[str] = []
+    applied_effects: list[RegistrationEffects] = []
+    conversion_calls: list[object] = []
+    window = Main.__new__(Main)
+    window._design_session = session
+    window._coordinate_frame_registry = registry
+    _set_rotation_settings(window)
+    window.stage_controller = types.SimpleNamespace(
+        request_machine_coordinate_snapshot=lambda token, *, axes: (
+            requests.append(token) or True
+        )
+    )
+    window._camera_stage_xy_from_raw_stage_xy = lambda point: point
+    window._refresh_design_panel = lambda: refreshes.append("panel")
+    window._refresh_design_position = lambda: refreshes.append("position")
+    window._show_status = lambda message, _timeout=0: statuses.append(str(message))
+    window._apply_registration_effects = lambda effects: applied_effects.append(
+        effects
+    )
+
+    Main._capture_stage_source_mark(window)
+    token = requests.pop()
+    Main._registration_capture_lifecycle(window).cancel(
+        RegistrationCancellation.FRAME_CHANGED
+    )
+    applied_effects.clear()
+    before_session = session.export_persisted_state()
+    before_records = registry.snapshot().records
+
+    def convert_stage_point(*args: object, **kwargs: object) -> tuple[float, float]:
+        conversion_calls.append((args, kwargs))
+        if callback_case == "conversion-failed":
+            raise RuntimeError("conversion failed")
+        return (1.0, 2.0)
+
+    monkeypatch.setattr(
+        main_module.offsets,
+        "raw_stage_to_camera_stage",
+        convert_stage_point,
+    )
+    success = callback_case != "failed"
+    snapshot = (
+        _machine_snapshot((1.0, 2.0, 0.0, 0.0, 3.0))
+        if success
+        else None
+    )
+
+    Main._on_registration_machine_coordinate_snapshot_finished(
+        window,
+        token,
+        success,
+        snapshot,
+        "coordinates unavailable" if not success else "",
+    )
+
+    assert conversion_calls == []
+    assert statuses == []
+    assert refreshes == []
+    assert applied_effects == []
+    assert session.export_persisted_state() == before_session
+    assert registry.snapshot().records == before_records
+
+
 def test_failed_registration_fit_discards_tentative_evidence_before_retry(
     monkeypatch,
     tmp_path: Path,
@@ -1307,6 +1388,119 @@ def test_registration_save_failure_rolls_back_before_success_is_announced(
     assert not restored.readiness["X"].available
     assert session.source_stage_marks_compact() == []
     assert all("captured" not in status.lower() for status in statuses[-2:])
+
+
+def test_deferred_registration_failure_applies_exact_capture_baseline_once(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    document = _make_document(tmp_path)
+    registry = CoordinateFrameRegistry()
+    draft = registry.add(new_design_frame_draft(document, existing_names=()))
+    session = DesignSession(document=document)
+    session.link_active_frame(draft)
+    session.source_design_marks = ((0.0, 0.0), (1000.0, 0.0))
+    baseline_registration = DesignRegistration.empty()
+    session.source_stage_marks = (None, (8.0, 9.0))
+    session.check_stage_marks = [(10.0, 11.0)]
+    session.registration = baseline_registration
+    session.registration_status = "Exact durable baseline."
+    requests: list[object] = []
+    tracked: list[FramePublication] = []
+    statuses: list[str] = []
+    lifecycle = CoordinateFrameLifecycle()
+    track_publication = lifecycle.track_publication
+
+    def track(publication: FramePublication) -> None:
+        tracked.append(publication)
+        track_publication(publication)
+
+    lifecycle.track_publication = track
+    window = Main.__new__(Main)
+    window._coordinate_frame_lifecycle = lifecycle
+    window._design_session = session
+    window._coordinate_frame_registry = registry
+    window.stage_controller = types.SimpleNamespace(
+        request_machine_coordinate_snapshot=lambda token, *, axes: (
+            requests.append(token) or True
+        ),
+        latest_machine_coordinate_snapshot=lambda: _machine_snapshot(
+            (50.0, 60.0, 0.0, 0.0, 75.0)
+        ),
+    )
+    _set_rotation_settings(window)
+    window._camera_stage_xy_from_raw_stage_xy = lambda point: (
+        point[0] - 100.0,
+        point[1] + 200.0,
+    )
+    window._design_navigation_xy_from_physical_machine_xy = lambda point: point
+    window._refresh_design_panel = lambda: None
+    window._refresh_design_position = lambda: None
+    window._show_status = lambda message, _timeout=0: statuses.append(str(message))
+    monkeypatch.setattr(
+        main_module.connection_flow,
+        "publish_coordinate_frames",
+        lambda _owner: 41,
+    )
+
+    for xy in ((1.0, 2.0), (2.0, 2.0)):
+        Main._capture_stage_source_mark(window)
+        Main._on_registration_machine_coordinate_snapshot_finished(
+            window,
+            requests.pop(),
+            True,
+            _machine_snapshot((*xy, 0.0, 0.0, 5.0)),
+            "",
+        )
+
+    assert len(tracked) == 1
+    saved_rollback = tracked[0].registration_rollback_effects
+    current = registry.get(draft.frame_id)
+    assert current is not None and current != draft
+    session.link_active_frame(
+        current,
+        machine_b_deg=75.0,
+        pivot_machine_xy=(50.0, 60.0),
+    )
+    session.source_stage_marks = ((901.0, 902.0),)
+    session.check_stage_marks = [(903.0, 904.0)]
+    session.registration = DesignRegistration.empty()
+    session.registration_status = "Changed after publication."
+    session.link_active_frame = lambda *_args, **_kwargs: pytest.fail(
+        "exact registration rollback must not reconstruct the session"
+    )
+    _set_rotation_settings(window, (50.0, 60.0))
+    window._camera_stage_xy_from_raw_stage_xy = lambda point: (
+        point[0] + 300.0,
+        point[1] - 400.0,
+    )
+    applied: list[RegistrationEffects] = []
+
+    def apply_registration_effects(effects: RegistrationEffects) -> None:
+        applied.append(effects)
+        Main._apply_registration_effects(window, effects)
+
+    window._apply_registration_effects = apply_registration_effects
+
+    Main._on_coordinate_frame_store_failed(
+        window,
+        types.SimpleNamespace(
+            request_id=41,
+            operation="save",
+            message="disk full",
+        ),
+    )
+
+    assert saved_rollback is not None
+    assert applied == [saved_rollback]
+    restored = registry.get(draft.frame_id)
+    assert restored is not None
+    assert restored.transform == draft.transform
+    assert restored.readiness == draft.readiness
+    assert session.source_stage_marks == (None, (8.0, 9.0))
+    assert session.check_stage_marks == [(10.0, 11.0)]
+    assert session.registration is baseline_registration
+    assert session.registration_status == "Exact durable baseline."
 
 
 def test_saved_callback_delegates_acknowledgement_to_coordinate_lifecycle(

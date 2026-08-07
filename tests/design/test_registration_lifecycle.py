@@ -8,6 +8,7 @@ from probe_station_gui.design.registration_lifecycle import (
     DesignRegistrationLifecycle,
     RegistrationCancellation,
     RegistrationCaptureContext,
+    RegistrationCaptureOutcome,
     RegistrationSample,
 )
 
@@ -66,6 +67,58 @@ def test_stale_sample_after_context_change_is_rejected_and_baseline_restored() -
     assert cancellation.restore_baseline is True
     assert cancellation.baseline_registration == "registered-baseline"
     assert stale.accepted is False
+
+
+@pytest.mark.parametrize("succeeded", (True, False))
+def test_stale_callback_outcome_is_rejected_before_adapter_processing(
+    succeeded: bool,
+) -> None:
+    lifecycle = DesignRegistrationLifecycle()
+    token = lifecycle.begin_capture(_context())
+    lifecycle.cancel(RegistrationCancellation.FRAME_CHANGED)
+
+    result = lifecycle.accept_sample(
+        token,
+        RegistrationCaptureOutcome(
+            succeeded=succeeded,
+            message="coordinates unavailable",
+        ),
+    )
+
+    assert result.accepted is False
+
+
+def test_current_successful_callback_authorizes_the_converted_sample() -> None:
+    lifecycle = DesignRegistrationLifecycle()
+    token = lifecycle.begin_capture(_context())
+
+    ready = lifecycle.accept_sample(
+        token,
+        RegistrationCaptureOutcome(succeeded=True),
+    )
+    captured = lifecycle.accept_sample(token, _sample())
+
+    assert ready.accepted is True
+    assert ready.reason is None
+    assert captured.accepted is True
+
+
+def test_current_failed_callback_returns_message_and_consumes_request() -> None:
+    lifecycle = DesignRegistrationLifecycle()
+    token = lifecycle.begin_capture(_context())
+
+    failure = lifecycle.accept_sample(
+        token,
+        RegistrationCaptureOutcome(
+            succeeded=False,
+            message="coordinates unavailable",
+        ),
+    )
+    repeated = lifecycle.accept_sample(token, _sample())
+
+    assert failure.accepted is True
+    assert failure.reason == "coordinates unavailable"
+    assert repeated.accepted is False
 
 
 def test_mixed_b_samples_are_normalized_about_captured_pivot() -> None:
@@ -197,6 +250,34 @@ def test_commit_waits_for_every_selected_source_and_check_mark() -> None:
     ]
 
 
+def test_completed_batch_carries_its_exact_failure_rollback_effect() -> None:
+    lifecycle = DesignRegistrationLifecycle()
+    baseline_registration = object()
+    context = replace(
+        _context(baseline_registration=baseline_registration),
+        baseline_source_stage_marks=((8.0, 9.0),),
+        baseline_check_stage_marks=((10.0, 11.0),),
+        baseline_registration_status="Exact durable baseline.",
+    )
+    first = lifecycle.begin_capture(context)
+    lifecycle.accept_sample(first, _sample(x=1.0))
+    second = lifecycle.begin_capture(context)
+
+    completed = lifecycle.accept_sample(second, _sample(x=2.0))
+
+    rollback = completed.rollback_effects
+    assert completed.commit_requested is True
+    assert rollback is not None
+    assert rollback.restore_baseline is True
+    assert rollback.captured_sample is None
+    assert rollback.baseline_session_identity == context.session_identity
+    assert rollback.baseline_frame_id == context.frame_id
+    assert rollback.baseline_source_stage_marks == ((8.0, 9.0),)
+    assert rollback.baseline_check_stage_marks == ((10.0, 11.0),)
+    assert rollback.baseline_registration is baseline_registration
+    assert rollback.baseline_registration_status == "Exact durable baseline."
+
+
 def test_design_package_exports_the_registration_lifecycle_interface() -> None:
     from probe_station_gui.design import (
         DesignRegistrationLifecycle as ExportedDesignRegistrationLifecycle,
@@ -206,6 +287,16 @@ def test_design_package_exports_the_registration_lifecycle_interface() -> None:
     assert ExportedDesignRegistrationLifecycle.__module__ == (
         "probe_station_gui.design.registration_lifecycle"
     )
+
+
+def test_registration_lifecycle_exposes_exactly_three_operations() -> None:
+    operations = {
+        name
+        for name, value in vars(DesignRegistrationLifecycle).items()
+        if callable(value) and not name.startswith("_")
+    }
+
+    assert operations == {"begin_capture", "accept_sample", "cancel"}
 
 
 def test_brief_context_fields_default_optional_adapter_metadata() -> None:

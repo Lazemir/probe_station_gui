@@ -27,6 +27,7 @@ from probe_station_gui.coordinates.model import (
 )
 from probe_station_gui.coordinates.transforms import BFrameTransform
 from probe_station_gui.design.model import DesignDocument
+from probe_station_gui.design.registration_lifecycle import RegistrationEffects
 
 
 DESIGN_ID = "11111111-1111-4111-8111-111111111111"
@@ -263,6 +264,38 @@ def test_deferred_older_failure_rolls_back_if_newest_publication_fails() -> None
     assert effects.rollback_publications[0].previous_record.version == 0
 
 
+def test_deferred_failure_returns_exact_registration_rollback_once() -> None:
+    lifecycle = _lifecycle_with_durable_v0()
+    rollback = RegistrationEffects(
+        restore_baseline=True,
+        baseline_session_identity=17,
+        baseline_frame_id=DESIGN_ID,
+        baseline_source_stage_marks=((8.0, 9.0),),
+        baseline_check_stage_marks=((10.0, 11.0),),
+        baseline_registration_status="Exact durable baseline.",
+    )
+    lifecycle.track_publication(
+        replace(
+            _registration_publication(41, before=0, after=1),
+            registration_rollback_effects=rollback,
+        )
+    )
+    lifecycle.track_publication(_ordinary_publication(42, version=2))
+
+    deferred = lifecycle.finish_publication(FramePublicationResult(41, False))
+    terminal = lifecycle.finish_publication(FramePublicationResult(42, False))
+    repeated = lifecycle.finish_publication(FramePublicationResult(42, False))
+
+    assert deferred.failure_deferred is True
+    assert deferred.rollback_publications == ()
+    assert len(terminal.rollback_publications) == 1
+    assert (
+        terminal.rollback_publications[0].registration_rollback_effects
+        is rollback
+    )
+    assert repeated.rollback_publications == ()
+
+
 def test_newer_success_acknowledges_coalesced_registration_publications() -> None:
     lifecycle = _lifecycle_with_durable_v0()
     registration = _registration_publication(41, before=0, after=1)
@@ -272,6 +305,26 @@ def test_newer_success_acknowledges_coalesced_registration_publications() -> Non
     effects = lifecycle.finish_publication(FramePublicationResult(42, True))
 
     assert effects.acknowledged_publications == (registration,)
+
+
+def test_success_acknowledges_then_discards_exact_registration_rollback() -> None:
+    lifecycle = _lifecycle_with_durable_v0()
+    rollback = RegistrationEffects(
+        restore_baseline=True,
+        baseline_session_identity=17,
+        baseline_frame_id=DESIGN_ID,
+    )
+    registration = replace(
+        _registration_publication(41, before=0, after=1),
+        registration_rollback_effects=rollback,
+    )
+    lifecycle.track_publication(registration)
+
+    acknowledged = lifecycle.finish_publication(FramePublicationResult(41, True))
+    repeated = lifecycle.finish_publication(FramePublicationResult(41, False))
+
+    assert acknowledged.acknowledged_publications == (registration,)
+    assert repeated.rollback_publications == ()
 
 
 def test_failed_chain_returns_latest_registration_context_with_earliest_record() -> None:

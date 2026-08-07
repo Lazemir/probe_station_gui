@@ -154,6 +154,7 @@ from probe_station_gui.design.registration_lifecycle import (
     DesignRegistrationLifecycle,
     RegistrationCancellation,
     RegistrationCaptureContext,
+    RegistrationCaptureOutcome,
     RegistrationCaptureToken,
     RegistrationEffects,
     RegistrationSample,
@@ -7790,34 +7791,42 @@ class Main(QMainWindow):
         restored_any = False
         for publication in effects.rollback_publications:
             rollback = publication.previous_record
-            if rollback is None:
-                continue
-            frame_id = rollback.frame_id
-            current = registry.get(frame_id)
-            if current is None:
-                continue
-            try:
-                restored = registry.replace(
-                    rollback,
-                    expected_version=current.version,
-                )
+            registration_effects = publication.registration_rollback_effects
+            if rollback is not None:
+                frame_id = rollback.frame_id
+                current = registry.get(frame_id)
+                if current is not None:
+                    try:
+                        restored = registry.replace(
+                            rollback,
+                            expected_version=current.version,
+                        )
+                        restored_any = True
+                        session = getattr(self, "_design_session", None)
+                        if (
+                            session is not None
+                            and session.active_frame_id == frame_id
+                            and registration_effects is None
+                        ):
+                            session.link_active_frame(
+                                restored,
+                                machine_point_for_navigation=(
+                                    self._design_navigation_xy_from_physical_machine_xy
+                                ),
+                                machine_b_deg=publication.machine_b_deg,
+                                pivot_machine_xy=(
+                                    publication.pivot_machine_xy or (0.0, 0.0)
+                                ),
+                            )
+                        if publication.operator_alignment:
+                            self._set_design_snap_enabled(True)
+                    except Exception:
+                        logger.exception(
+                            "Failed to roll back unsaved Design registration"
+                        )
+            if registration_effects is not None:
+                self._apply_registration_effects(registration_effects)
                 restored_any = True
-                session = getattr(self, "_design_session", None)
-                if session is not None and session.active_frame_id == frame_id:
-                    session.link_active_frame(
-                        restored,
-                        machine_point_for_navigation=(
-                            self._design_navigation_xy_from_physical_machine_xy
-                        ),
-                        machine_b_deg=publication.machine_b_deg,
-                        pivot_machine_xy=(
-                            publication.pivot_machine_xy or (0.0, 0.0)
-                        ),
-                    )
-                if publication.operator_alignment:
-                    self._set_design_snap_enabled(True)
-            except Exception:
-                logger.exception("Failed to roll back unsaved Design registration")
 
         if not restored_any:
             return
@@ -10191,9 +10200,29 @@ class Main(QMainWindow):
         if not isinstance(request_id, RegistrationCaptureToken):
             return
         token = request_id
-        if not success or not isinstance(snapshot, MachineCoordinateSnapshot):
-            self._show_status(str(message or "Machine coordinates are unavailable."), 6000)
+        callback_succeeded = bool(
+            success and isinstance(snapshot, MachineCoordinateSnapshot)
+        )
+        callback_effects = self._registration_capture_lifecycle().accept_sample(
+            token,
+            RegistrationCaptureOutcome(
+                succeeded=callback_succeeded,
+                message=(
+                    None
+                    if callback_succeeded
+                    else str(message or "Machine coordinates are unavailable.")
+                ),
+            ),
+        )
+        if not callback_effects.accepted:
             return
+        if not callback_succeeded:
+            self._show_status(
+                str(callback_effects.reason or "Machine coordinates are unavailable."),
+                6000,
+            )
+            return
+        assert isinstance(snapshot, MachineCoordinateSnapshot)
         try:
             physical_pose = snapshot.physical_machine_pose
             physical_xy = (
@@ -10210,17 +10239,17 @@ class Main(QMainWindow):
                 token.objective_xy_offset,
             )
         except Exception as exc:
-            self._show_status(str(exc), 6000)
+            failure_effects = self._registration_capture_lifecycle().accept_sample(
+                token,
+                RegistrationCaptureOutcome(
+                    succeeded=False,
+                    message=str(exc),
+                ),
+            )
+            if failure_effects.accepted:
+                self._show_status(str(failure_effects.reason or exc), 6000)
             return
 
-        if token.frame_id is None:
-            self._design_session.record_legacy_stage_coordinate_provenance(
-                {
-                    "position_reporting_mode": snapshot.position_reporting_mode,
-                    "coordinate_system": snapshot.coordinate_system,
-                    "work_offset": list(snapshot.work_offset),
-                }
-            )
         effects = self._registration_capture_lifecycle().accept_sample(
             token,
             RegistrationSample(
@@ -10232,6 +10261,14 @@ class Main(QMainWindow):
         )
         if not effects.accepted:
             return
+        if token.frame_id is None:
+            self._design_session.record_legacy_stage_coordinate_provenance(
+                {
+                    "position_reporting_mode": snapshot.position_reporting_mode,
+                    "coordinate_system": snapshot.coordinate_system,
+                    "work_offset": list(snapshot.work_offset),
+                }
+            )
         self._apply_registration_effects(effects)
         kind = token.mark_kind
         capture_message = (
@@ -10519,13 +10556,13 @@ class Main(QMainWindow):
             or document is None
             or not effects.commit_requested
             or not effects.normalized_samples
+            or effects.rollback_effects is None
         ):
             return "incomplete"
+        rollback_effects = effects.rollback_effects
         current = registry.get(frame_id)
         if current is None or current.version != token.frame_version:
-            self._apply_registration_effects(
-                replace(effects, restore_baseline=True, captured_sample=None)
-            )
+            self._apply_registration_effects(rollback_effects)
             return "failed"
         try:
             source_identity = (
@@ -10533,9 +10570,7 @@ class Main(QMainWindow):
                 str(document.source_load_id),
             )
         except OSError as exc:
-            self._apply_registration_effects(
-                replace(effects, restore_baseline=True, captured_sample=None)
-            )
+            self._apply_registration_effects(rollback_effects)
             self._show_status(str(exc), 6000)
             return "failed"
         if (
@@ -10546,9 +10581,7 @@ class Main(QMainWindow):
             or int(document.rotation_quarter_turns) % 4
             != token.rotation_quarter_turns
         ):
-            self._apply_registration_effects(
-                replace(effects, restore_baseline=True, captured_sample=None)
-            )
+            self._apply_registration_effects(rollback_effects)
             return "failed"
 
         current_metadata = DesignFrameMetadata.from_mapping(current.metadata)
@@ -10627,9 +10660,7 @@ class Main(QMainWindow):
                 expected_version=current.version,
             )
         except (DesignModelError, KeyError, RuntimeError, ValueError) as exc:
-            self._apply_registration_effects(
-                replace(effects, restore_baseline=True, captured_sample=None)
-            )
+            self._apply_registration_effects(rollback_effects)
             self._show_status(str(exc), 6000)
             return "failed"
         try:
@@ -10665,9 +10696,7 @@ class Main(QMainWindow):
                 )
             except Exception:
                 logger.exception("Failed to roll back Design registration publish")
-            self._apply_registration_effects(
-                replace(effects, restore_baseline=True, captured_sample=None)
-            )
+            self._apply_registration_effects(rollback_effects)
             self._show_status(str(exc) or type(exc).__name__, 7000)
             return "failed"
         if isinstance(publication_request_id, int):
@@ -10680,6 +10709,7 @@ class Main(QMainWindow):
                     machine_b_deg=target_b,
                     pivot_machine_xy=pivot,
                     success_message=str(success_message),
+                    registration_rollback_effects=rollback_effects,
                 )
             )
             return "deferred"
