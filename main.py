@@ -127,10 +127,7 @@ from probe_station_gui.coordinates.design_calibration import (
 )
 from probe_station_gui.coordinates.provenance import design_frame_provenance_error
 from probe_station_gui.coordinates.software_frames import materialize_custom_frames
-from probe_station_gui.design.focus_candidate import (
-    FocusCandidate,
-    select_central_focus_candidate,
-)
+from probe_station_gui.design.focus_candidate import select_central_focus_candidate
 from probe_station_gui.design.klayout_types import (
     KLayoutConfig,
     StructureBoundsFailure,
@@ -139,9 +136,7 @@ from probe_station_gui.design.klayout_types import (
 )
 from probe_station_gui.design.klayout_workers import KLayoutStructureBoundsWorker
 from probe_station_gui.design.frame_registration import (
-    ContactReferenceToken,
     DesignFrameMetadata,
-    RegistrationFocusToken,
     commit_contact_reference,
     commit_focus_reference,
     commit_xyb_registration,
@@ -151,11 +146,16 @@ from probe_station_gui.design.frame_registration import (
     update_check_registration,
 )
 from probe_station_gui.design.registration_lifecycle import (
+    ContactOperationToken,
     DesignRegistrationLifecycle,
+    FocusCompletion,
+    FocusCompletionKind,
+    FocusOperationToken,
     RegistrationCancellation,
     RegistrationCaptureContext,
     RegistrationCaptureOutcome,
     RegistrationCaptureToken,
+    RegistrationContext,
     RegistrationEffects,
     RegistrationSample,
 )
@@ -1088,9 +1088,6 @@ class Main(QMainWindow):
         self._alignment_physical_draft: list[
             _RegistrationEvidenceSample | None
         ] = []
-        self._pending_registration_focus_token: RegistrationFocusToken | None = None
-        self._pending_registration_focus_target_xy: tuple[float, float] | None = None
-        self._focus_candidate: FocusCandidate | None = None
         self._focus_structure_bounds_worker: KLayoutStructureBoundsWorker | None = None
         self._focus_structure_request_id = 0
         self._pending_focus_structure_request_id: int | None = None
@@ -8934,12 +8931,38 @@ class Main(QMainWindow):
         frame_version = getattr(frame_snapshot, "frame_version", None)
         if frame_id is None or frame_version is None:
             return None
-        token = ContactReferenceToken(str(frame_id), int(frame_version))
-        if self._active_design_contact_record(token) is None:
+        self._cancel_registration_capture(
+            RegistrationCancellation.ROUTE_CONTEXT_CHANGED
+        )
+        context = self._design_registration_context(
+            include_optical=False,
+            expected_frame_id=str(frame_id),
+            expected_frame_version=int(frame_version),
+        )
+        if context is None:
+            return None
+        eligibility = self._registration_capture_lifecycle().accept_first_contact(
+            context,
+            None,
+        )
+        token = eligibility.contact_token
+        if not eligibility.capture_contact or token is None:
             return None
 
         def capture(_placement: object) -> None:
-            if self._active_design_contact_record(token) is None:
+            current_context = self._design_registration_context(
+                include_optical=False,
+                expected_frame_id=token.frame_id,
+                expected_frame_version=token.frame_version,
+            )
+            if current_context is None:
+                return
+            current = self._registration_capture_lifecycle().accept_first_contact(
+                current_context,
+                None,
+                token=token,
+            )
+            if not current.capture_contact:
                 return
             try:
                 coordinates = (
@@ -8956,41 +8979,38 @@ class Main(QMainWindow):
 
         return capture
 
-    def _active_design_contact_record(self, token: ContactReferenceToken):
-        session = getattr(self, "_design_session", None)
-        if getattr(session, "active_frame_id", None) != token.frame_id:
-            return None
-        registry = getattr(self, "_coordinate_frame_registry", None)
-        if registry is None:
-            return None
-        current = registry.get(token.frame_id)
-        if (
-            current is None
-            or current.version != token.frame_version
-            or current.transform is None
-            or current.transform.z_zero_machine_mm is None
-            or not current.readiness["Z"].available
-            or current.transform.a_zero_machine_mm is not None
-            or current.readiness["A"].available
-        ):
-            return None
-        return current
-
     def _on_design_contact_reference_ready(
         self,
         token: object,
         physical_a_mm: float,
     ) -> None:
-        if not isinstance(token, ContactReferenceToken):
+        if not isinstance(token, ContactOperationToken):
             return
-        if self._active_design_contact_record(token) is None:
+        context = self._design_registration_context(
+            include_optical=False,
+            expected_frame_id=token.frame_id,
+            expected_frame_version=token.frame_version,
+        )
+        if context is None:
+            return
+        try:
+            physical_a = float(physical_a_mm)
+        except (TypeError, ValueError):
+            return
+        effects = self._registration_capture_lifecycle().accept_first_contact(
+            context,
+            physical_a,
+            token=token,
+        )
+        self._apply_registration_effects(effects)
+        if effects.commit_a_mm is None:
             return
         try:
             contacted = commit_contact_reference(
                 self._coordinate_frame_registry,
                 token,
                 success=True,
-                physical_machine_a_mm=float(physical_a_mm),
+                physical_machine_a_mm=effects.commit_a_mm,
             )
         except (KeyError, RuntimeError, TypeError, ValueError):
             logger.exception("Unable to store Design contact reference")
@@ -10085,6 +10105,14 @@ class Main(QMainWindow):
                 session.add_check_stage_mark(sample.stage_xy)
             else:
                 session.add_source_stage_mark(sample.stage_xy)
+        window = getattr(self, "design_layout_window", None)
+        if window is not None:
+            if effects.clear_focus_candidate:
+                window.set_focus_candidate(None)
+                window.set_selected_focus_point(None)
+            elif effects.focus_candidate is not None:
+                window.set_focus_candidate(effects.focus_candidate)
+                window.set_selected_focus_point(effects.focus_candidate.center)
 
     def _cancel_registration_capture(
         self,
@@ -10792,11 +10820,15 @@ class Main(QMainWindow):
         registry = getattr(self, "_coordinate_frame_registry", None)
         if frame_id is None or registry is None or registry.get(frame_id) is not None:
             return
-        self._cancel_registration_capture(RegistrationCancellation.FRAME_CHANGED)
+        cancellation = self._cancel_registration_capture(
+            RegistrationCancellation.FRAME_CHANGED
+        )
         self._design_session.clear_registration()
         self._pending_alignment_preparation = None
         self._last_selected_design_point = None
-        self._clear_design_focus_overlay_state()
+        self._clear_design_focus_overlay_state(
+            clear_window=not cancellation.clear_focus_candidate
+        )
 
     def _select_design_registration_instance(self, frame_id: str) -> None:
         if not self._design_edit_safe():
@@ -10817,7 +10849,9 @@ class Main(QMainWindow):
                 5000,
             )
             return
-        self._cancel_registration_capture(RegistrationCancellation.FRAME_CHANGED)
+        cancellation = self._cancel_registration_capture(
+            RegistrationCancellation.FRAME_CHANGED
+        )
         try:
             activation = design_navigation.activate_design_frame_for_document(
                 self._design_session,
@@ -10838,7 +10872,9 @@ class Main(QMainWindow):
             return
         self._pending_alignment_preparation = None
         self._last_selected_design_point = None
-        self._clear_design_focus_overlay_state()
+        self._clear_design_focus_overlay_state(
+            clear_window=not cancellation.clear_focus_candidate
+        )
         if activation.updated:
             connection_flow.publish_coordinate_frames(self)
         self._apply_coordinate_frame_authority_blocks()
@@ -11054,12 +11090,11 @@ class Main(QMainWindow):
         if candidate is None:
             self._show_status("No focus structure fits the current field of view.", 5000)
             return
-        self._focus_candidate = candidate
-        self._focus_candidate_context = pending_context
-        window = getattr(self, "design_layout_window", None)
-        if window is not None:
-            window.set_focus_candidate(candidate)
-            window.set_selected_focus_point(candidate.center)
+        effects = self._registration_capture_lifecycle().set_focus_candidate(
+            candidate,
+            pending_context,
+        )
+        self._apply_registration_effects(effects)
         self._show_status("Focus reference found. Review and use the selected point.", 5000)
 
     def _on_focus_structure_bounds_failed(
@@ -11073,25 +11108,63 @@ class Main(QMainWindow):
         self._pending_focus_structure_request_id = None
         self._show_status("Unable to inspect visible design structures.", 5000)
 
-    def _design_focus_overlay_context_key(self):
+    def _design_registration_context(
+        self,
+        *,
+        include_optical: bool = True,
+        expected_frame_id: str | None = None,
+        expected_frame_version: int | None = None,
+    ) -> RegistrationContext | None:
         document = getattr(self._design_session, "document", None)
         if document is None:
             return None
         record = self._active_design_frame_record()
-        fov_size = self._resolve_design_fov_size()
-        objective_name, optical_identity = self._design_focus_optical_context_key()
-        return (
-            str(Path(document.path).expanduser().resolve()),
-            document.source_load_id,
-            document.top_cell_name,
-            tuple(sorted(document.visible_layers)),
-            int(document.rotation_quarter_turns) % 4,
-            getattr(self._design_session, "active_frame_id", None),
-            None if record is None else record.version,
-            None if fov_size is None else tuple(float(value) for value in fov_size),
-            objective_name,
-            optical_identity,
+        frame_id = getattr(self._design_session, "active_frame_id", None)
+        frame_version = None if record is None else record.version
+        if (
+            expected_frame_id is not None
+            and (
+                frame_id != expected_frame_id
+                or record is None
+                or frame_version != expected_frame_version
+            )
+        ):
+            return None
+        try:
+            source_path = str(Path(document.path).expanduser().resolve())
+        except OSError:
+            return None
+        fov_size = self._resolve_design_fov_size() if include_optical else None
+        objective_name, optical_identity = (
+            self._design_focus_optical_context_key()
+            if include_optical
+            else ("", "")
         )
+        return RegistrationContext(
+            session_identity=id(self._design_session),
+            source_identity=(source_path, str(document.source_load_id)),
+            top_cell_name=str(document.top_cell_name),
+            visible_layers=tuple(sorted(document.visible_layers)),
+            rotation_quarter_turns=int(document.rotation_quarter_turns) % 4,
+            frame_id=frame_id,
+            frame_version=frame_version,
+            fov_size=(
+                None
+                if fov_size is None
+                else tuple(float(value) for value in fov_size)
+            ),
+            objective_name=objective_name,
+            optical_calibration_identity=optical_identity,
+            xyb_ready=bool(
+                record is not None
+                and all(record.readiness[axis].available for axis in ("X", "Y", "B"))
+            ),
+            z_ready=bool(record is not None and record.readiness["Z"].available),
+            a_ready=bool(record is not None and record.readiness["A"].available),
+        )
+
+    def _design_focus_overlay_context_key(self) -> RegistrationContext | None:
+        return self._design_registration_context(include_optical=True)
 
     def _design_focus_optical_context_key(self) -> tuple[str, str]:
         try:
@@ -11109,15 +11182,13 @@ class Main(QMainWindow):
             return "", ""
         return objective_name, identity
 
-    def _clear_design_focus_overlay_state(self) -> None:
-        self._focus_candidate = None
-        self._focus_candidate_context = None
+    def _clear_design_focus_overlay_state(self, *, clear_window: bool = True) -> None:
         self._pending_focus_structure_request_id = None
         self._pending_focus_structure_context = None
         self._pending_focus_structure_fov = None
         self._pending_focus_structure_design_bounds = None
         window = getattr(self, "design_layout_window", None)
-        if window is not None:
+        if window is not None and clear_window:
             window.set_focus_candidate(None)
             window.set_selected_focus_point(None)
 
@@ -11126,9 +11197,7 @@ class Main(QMainWindow):
         design_point: tuple[float, float],
     ) -> None:
         current_context = self._design_focus_overlay_context_key()
-        candidate = getattr(self, "_focus_candidate", None)
-        candidate_context = getattr(self, "_focus_candidate_context", None)
-        if candidate is None or candidate_context != current_context:
+        if current_context is None:
             self._clear_design_focus_overlay_state()
             self._design_focus_overlay_context = current_context
             self._show_status(
@@ -11136,47 +11205,88 @@ class Main(QMainWindow):
                 5000,
             )
             return
+        effects = self._registration_capture_lifecycle().accept_focus(current_context)
+        self._apply_registration_effects(effects)
+        if not effects.accepted or effects.focus_token is None:
+            if effects.clear_focus_candidate:
+                self._clear_design_focus_overlay_state(clear_window=False)
+                self._design_focus_overlay_context = current_context
+            self._show_status(
+                "Find a new focus reference for the current view.",
+                5000,
+            )
+            return
         self._start_design_focus_reference(
-            (float(design_point[0]), float(design_point[1]))
+            (float(design_point[0]), float(design_point[1])),
+            effects.focus_token,
         )
 
     def _synchronize_design_focus_overlay_context(self) -> None:
         context = self._design_focus_overlay_context_key()
         if context == getattr(self, "_design_focus_overlay_context", None):
             return
-        self._clear_design_focus_overlay_state()
+        if context is None:
+            effects = self._registration_capture_lifecycle().cancel(
+                RegistrationCancellation.DESIGN_CHANGED
+            )
+        else:
+            effects = self._registration_capture_lifecycle().accept_focus(context)
+        self._apply_registration_effects(effects)
+        self._clear_design_focus_overlay_state(
+            clear_window=not effects.clear_focus_candidate
+        )
         self._design_focus_overlay_context = context
 
-    def _start_design_focus_reference(self, design_point: tuple[float, float]) -> None:
-        record = self._active_design_frame_record()
-        if record is None or not all(
-            record.readiness[axis].available for axis in ("X", "Y", "B")
-        ):
-            self._show_status("Complete design alignment before setting focus.", 5000)
-            return
-        if record.readiness["Z"].available:
-            self._show_status("Reset focus reference before replacing it.", 5000)
-            return
-        token = RegistrationFocusToken(record.frame_id, record.version)
-        self._pending_registration_focus_token = token
-
+    def _start_design_focus_reference(
+        self,
+        design_point: tuple[float, float],
+        token: FocusOperationToken,
+    ) -> None:
         def request_move(target_x: float, target_y: float) -> bool:
             target = (float(target_x), float(target_y))
-            self._pending_registration_focus_target_xy = target
-            return self.stage_controller.request_token_bound_move_to_xy(
+            context = self._design_focus_overlay_context_key()
+            if context is None:
+                return False
+            bound = self._registration_capture_lifecycle().accept_focus(
+                context,
+                FocusCompletion(
+                    kind=FocusCompletionKind.TARGET_BOUND,
+                    token=token,
+                    target_xy=target,
+                ),
+            )
+            if not bound.accepted:
+                return False
+            started = self.stage_controller.request_token_bound_move_to_xy(
                 token,
                 target[0],
                 target[1],
                 self.design_registration_focus_move_finished.emit,
             )
+            if not started:
+                self._registration_capture_lifecycle().accept_focus(
+                    context,
+                    FocusCompletion(
+                        kind=FocusCompletionKind.CANCELLED,
+                        token=token,
+                    ),
+                )
+            return bool(started)
 
         if not self._move_to_design_coordinate(
             (float(design_point[0]), float(design_point[1])),
             source_label="focus reference",
             move_request=request_move,
         ):
-            self._pending_registration_focus_token = None
-            self._pending_registration_focus_target_xy = None
+            context = self._design_focus_overlay_context_key()
+            if context is not None:
+                self._registration_capture_lifecycle().accept_focus(
+                    context,
+                    FocusCompletion(
+                        kind=FocusCompletionKind.CANCELLED,
+                        token=token,
+                    ),
+                )
             return
         window = getattr(self, "design_layout_window", None)
         if window is not None:
@@ -11190,38 +11300,39 @@ class Main(QMainWindow):
         success: bool,
         message: str,
     ) -> None:
-        token = getattr(self, "_pending_registration_focus_token", None)
-        target = getattr(self, "_pending_registration_focus_target_xy", None)
-        try:
-            completed_target = tuple(float(value) for value in completed_target_xy)
-        except (TypeError, ValueError):
+        context = self._design_focus_overlay_context_key()
+        if context is None:
+            self._cancel_registration_capture(RegistrationCancellation.FRAME_CHANGED)
             return
-        if (
-            token is None
-            or completed_token != token
-            or target is None
-            or completed_target != tuple(target)
-        ):
+        effects = self._registration_capture_lifecycle().accept_focus(
+            context,
+            FocusCompletion(
+                kind=FocusCompletionKind.MOVE_FINISHED,
+                token=completed_token,
+                target_xy=completed_target_xy,
+                succeeded=bool(success),
+                message=str(message or ""),
+            ),
+        )
+        self._apply_registration_effects(effects)
+        if not effects.accepted:
             return
-        current = self._active_design_frame_record()
-        if (
-            not success
-            or current is None
-            or current.frame_id != token.frame_id
-            or current.version != token.frame_version
-        ):
-            self._pending_registration_focus_token = None
-            self._pending_registration_focus_target_xy = None
-            if not success and message:
-                self._show_status(message, 5000)
+        if not effects.start_autofocus or effects.focus_token is None:
+            if effects.reason:
+                self._show_status(effects.reason, 5000)
             return
         accepted = self.stage_controller.request_registration_autofocus(
-            token,
+            effects.focus_token,
             self.design_registration_autofocus_finished.emit,
         )
         if not accepted:
-            self._pending_registration_focus_token = None
-            self._pending_registration_focus_target_xy = None
+            self._registration_capture_lifecycle().accept_focus(
+                context,
+                FocusCompletion(
+                    kind=FocusCompletionKind.CANCELLED,
+                    token=effects.focus_token,
+                ),
+            )
 
     def _on_registration_focus_move_signal(
         self,
@@ -11245,25 +11356,33 @@ class Main(QMainWindow):
         physical_z_mm: object,
         message: str,
     ) -> None:
-        pending = getattr(self, "_pending_registration_focus_token", None)
-        if token != pending or not isinstance(token, RegistrationFocusToken):
-            return
-        self._pending_registration_focus_token = None
-        self._pending_registration_focus_target_xy = None
-        active = self._active_design_frame_record()
-        if (
-            active is None
-            or active.frame_id != token.frame_id
-            or active.version != token.frame_version
-        ):
+        context = self._design_focus_overlay_context_key()
+        if context is None:
+            self._cancel_registration_capture(RegistrationCancellation.FRAME_CHANGED)
             return
         try:
             physical_z = None if physical_z_mm is None else float(physical_z_mm)
+        except (TypeError, ValueError):
+            physical_z = None
+        effects = self._registration_capture_lifecycle().accept_focus(
+            context,
+            FocusCompletion(
+                kind=FocusCompletionKind.AUTOFOCUS_FINISHED,
+                token=token,
+                succeeded=bool(success),
+                physical_z_mm=physical_z,
+                message=str(message or ""),
+            ),
+        )
+        self._apply_registration_effects(effects)
+        if effects.commit_z_mm is None or effects.focus_token is None:
+            return
+        try:
             focused = commit_focus_reference(
                 self._coordinate_frame_registry,
-                token,
-                success=bool(success),
-                physical_machine_z_mm=physical_z,
+                effects.focus_token,
+                success=True,
+                physical_machine_z_mm=effects.commit_z_mm,
             )
         except (KeyError, RuntimeError, TypeError, ValueError):
             logger.exception("Unable to store Design focus reference")
@@ -11289,9 +11408,13 @@ class Main(QMainWindow):
         except (KeyError, RuntimeError, ValueError) as exc:
             self._show_status(str(exc), 5000)
             return
-        self._pending_registration_focus_token = None
-        self._pending_registration_focus_target_xy = None
-        self._clear_design_focus_overlay_state()
+        effects = self._registration_capture_lifecycle().cancel(
+            RegistrationCancellation.Z_CHANGED
+        )
+        self._apply_registration_effects(effects)
+        self._clear_design_focus_overlay_state(
+            clear_window=not effects.clear_focus_candidate
+        )
         connection_flow.publish_coordinate_frames(self)
         self._refresh_design_panel()
         self._show_status("Focus reference reset.", 4000)
@@ -11374,9 +11497,6 @@ class Main(QMainWindow):
             self.design_layout_window.set_registration_instances(
                 registration_instances,
                 selected_frame_id=active_frame_id,
-            )
-            self.design_layout_window.set_focus_candidate(
-                getattr(self, "_focus_candidate", None)
             )
         self._refresh_manual_alignment_ui()
         self._update_design_position(self._current_design_stage_xy)

@@ -4,9 +4,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 from enum import Enum
+import math
 import uuid
 
 from probe_station_gui.coordinates import rotate_xy
+from probe_station_gui.design.focus_candidate import FocusCandidate
 
 
 MachinePoint = tuple[float, float]
@@ -21,6 +23,40 @@ class RegistrationCancellation(str, Enum):
     TOP_CELL_CHANGED = "top_cell_changed"
     FRAME_CHANGED = "frame_changed"
     MARK_SET_CHANGED = "mark_set_changed"
+    Z_CHANGED = "z_changed"
+    ROUTE_CONTEXT_CHANGED = "route_context_changed"
+
+
+class FocusCompletionKind(str, Enum):
+    TARGET_BOUND = "target_bound"
+    MOVE_FINISHED = "move_finished"
+    AUTOFOCUS_FINISHED = "autofocus_finished"
+    CANCELLED = "cancelled"
+
+
+@dataclass(frozen=True)
+class FocusOperationToken:
+    request_id: str
+    frame_id: str | None
+    frame_version: int | None
+
+
+@dataclass(frozen=True)
+class ContactOperationToken:
+    request_id: str
+    session_identity: int
+    frame_id: str | None
+    frame_version: int | None
+
+
+@dataclass(frozen=True)
+class FocusCompletion:
+    kind: FocusCompletionKind
+    token: FocusOperationToken
+    target_xy: StagePoint | None = None
+    succeeded: bool | None = None
+    physical_z_mm: float | None = None
+    message: str | None = None
 
 
 @dataclass(frozen=True)
@@ -44,6 +80,25 @@ class RegistrationCaptureContext:
     baseline_registration_status: str = "No design registration."
     existing_source_machine_marks: tuple[MachinePoint, ...] = ()
     existing_check_machine_marks: tuple[MachinePoint, ...] = ()
+
+
+@dataclass(frozen=True)
+class RegistrationContext:
+    """Immutable design, optical, frame, and reference identity."""
+
+    session_identity: int
+    source_identity: tuple[str, str]
+    top_cell_name: str
+    visible_layers: tuple[tuple[int, int], ...]
+    rotation_quarter_turns: int
+    frame_id: str | None
+    frame_version: int | None
+    fov_size: tuple[float, float] | None
+    objective_name: str
+    optical_calibration_identity: str
+    xyb_ready: bool
+    z_ready: bool
+    a_ready: bool
 
 
 @dataclass(frozen=True)
@@ -117,6 +172,14 @@ class RegistrationEffects:
     normalized_samples: tuple[NormalizedRegistrationSample, ...] = ()
     commit_requested: bool = False
     rollback_effects: RegistrationEffects | None = None
+    focus_candidate: FocusCandidate | None = None
+    clear_focus_candidate: bool = False
+    commit_z_mm: float | None = None
+    commit_a_mm: float | None = None
+    focus_token: FocusOperationToken | None = None
+    start_autofocus: bool = False
+    contact_token: ContactOperationToken | None = None
+    capture_contact: bool = False
 
 
 @dataclass
@@ -129,11 +192,30 @@ class _PendingRegistrationEvidence:
     )
 
 
+@dataclass
+class _PendingFocus:
+    context: RegistrationContext
+    token: FocusOperationToken
+    target_xy: StagePoint | None = None
+    move_completed: bool = False
+
+
+@dataclass(frozen=True)
+class _PendingContact:
+    context: RegistrationContext
+    token: ContactOperationToken
+
+
 class DesignRegistrationLifecycle:
     """Own one transactional registration evidence batch at a time."""
 
     def __init__(self) -> None:
         self._pending: _PendingRegistrationEvidence | None = None
+        self._focus_candidate: FocusCandidate | None = None
+        self._focus_context: RegistrationContext | None = None
+        self._pending_focus: _PendingFocus | None = None
+        self._pending_contact: _PendingContact | None = None
+        self._accepted_contact_identity: tuple[int, str | None, int | None] | None = None
 
     def begin_capture(
         self,
@@ -247,12 +329,189 @@ class DesignRegistrationLifecycle:
             self._pending = None
         return effects
 
+    def set_focus_candidate(
+        self,
+        candidate: FocusCandidate,
+        context: RegistrationContext,
+    ) -> RegistrationEffects:
+        self._focus_candidate = candidate
+        self._focus_context = context
+        self._pending_focus = None
+        return RegistrationEffects(
+            accepted=True,
+            focus_candidate=candidate,
+        )
+
+    def accept_focus(
+        self,
+        context: RegistrationContext,
+        completion: FocusCompletion | None = None,
+    ) -> RegistrationEffects:
+        if completion is not None:
+            return self._accept_focus_completion(context, completion)
+        candidate = self._focus_candidate
+        if candidate is None:
+            return RegistrationEffects(reason="No focus candidate is available.")
+        if context != self._focus_context:
+            self._focus_candidate = None
+            self._focus_context = None
+            self._pending_focus = None
+            return RegistrationEffects(
+                reason="The focus candidate is stale.",
+                clear_focus_candidate=True,
+            )
+        if not context.xyb_ready or context.z_ready:
+            return RegistrationEffects(
+                reason="Ready X/Y/B and a missing Z reference are required."
+            )
+        token = FocusOperationToken(
+            request_id=str(uuid.uuid4()),
+            frame_id=context.frame_id,
+            frame_version=context.frame_version,
+        )
+        self._pending_focus = _PendingFocus(context=context, token=token)
+        return RegistrationEffects(
+            accepted=True,
+            focus_candidate=candidate,
+            focus_token=token,
+        )
+
+    def _accept_focus_completion(
+        self,
+        context: RegistrationContext,
+        completion: FocusCompletion,
+    ) -> RegistrationEffects:
+        pending = self._pending_focus
+        if pending is None or completion.token != pending.token:
+            return RegistrationEffects(reason="The focus operation is stale.")
+        if context != pending.context:
+            self._pending_focus = None
+            self._focus_candidate = None
+            self._focus_context = None
+            return RegistrationEffects(
+                reason="The focus operation context changed.",
+                clear_focus_candidate=True,
+            )
+        if completion.kind is FocusCompletionKind.CANCELLED:
+            self._pending_focus = None
+            return RegistrationEffects(accepted=True, reason=completion.message)
+        if completion.kind is FocusCompletionKind.TARGET_BOUND:
+            target = self._finite_point(completion.target_xy)
+            if target is None:
+                return RegistrationEffects(reason="The focus move target is invalid.")
+            pending.target_xy = target
+            pending.move_completed = False
+            return RegistrationEffects(accepted=True, focus_token=pending.token)
+        if completion.kind is FocusCompletionKind.MOVE_FINISHED:
+            target = self._finite_point(completion.target_xy)
+            if target is None or target != pending.target_xy:
+                return RegistrationEffects(reason="The focus move completion is stale.")
+            if not completion.succeeded:
+                self._pending_focus = None
+                return RegistrationEffects(
+                    accepted=True,
+                    reason=completion.message,
+                )
+            pending.move_completed = True
+            return RegistrationEffects(
+                accepted=True,
+                focus_token=pending.token,
+                start_autofocus=True,
+            )
+        if not pending.move_completed:
+            return RegistrationEffects(reason="The focus move is incomplete.")
+        self._pending_focus = None
+        if not completion.succeeded or completion.physical_z_mm is None:
+            return RegistrationEffects(accepted=True, reason=completion.message)
+        physical_z = float(completion.physical_z_mm)
+        if not math.isfinite(physical_z):
+            return RegistrationEffects(reason="The focus Z coordinate is invalid.")
+        self._focus_candidate = None
+        self._focus_context = None
+        return RegistrationEffects(
+            accepted=True,
+            clear_focus_candidate=True,
+            commit_z_mm=physical_z,
+            focus_token=pending.token,
+        )
+
+    def accept_first_contact(
+        self,
+        context: RegistrationContext,
+        a_mm: float | None,
+        *,
+        token: ContactOperationToken | None = None,
+    ) -> RegistrationEffects:
+        identity = (
+            context.session_identity,
+            context.frame_id,
+            context.frame_version,
+        )
+        pending = self._pending_contact
+        if token is not None and (
+            pending is None
+            or token != pending.token
+            or context != pending.context
+        ):
+            return RegistrationEffects(reason="The contact operation is stale.")
+        if (
+            not context.z_ready
+            or context.a_ready
+            or self._accepted_contact_identity == identity
+        ):
+            return RegistrationEffects(
+                reason="A ready focus reference without contact is required."
+            )
+        if a_mm is None:
+            if token is not None:
+                return RegistrationEffects(
+                    accepted=True,
+                    capture_contact=True,
+                    contact_token=token,
+                )
+            contact_token = ContactOperationToken(
+                request_id=str(uuid.uuid4()),
+                session_identity=context.session_identity,
+                frame_id=context.frame_id,
+                frame_version=context.frame_version,
+            )
+            self._pending_contact = _PendingContact(
+                context=context,
+                token=contact_token,
+            )
+            return RegistrationEffects(
+                accepted=True,
+                capture_contact=True,
+                contact_token=contact_token,
+            )
+        physical_a = float(a_mm)
+        if not math.isfinite(physical_a):
+            return RegistrationEffects(reason="The contact A coordinate is invalid.")
+        self._pending_contact = None
+        self._accepted_contact_identity = identity
+        return RegistrationEffects(
+            accepted=True,
+            commit_a_mm=physical_a,
+        )
+
     def cancel(self, reason: RegistrationCancellation) -> RegistrationEffects:
         pending = self._pending
         self._pending = None
+        clear_focus_candidate = self._focus_candidate is not None
+        self._focus_candidate = None
+        self._focus_context = None
+        self._pending_focus = None
+        self._pending_contact = None
+        self._accepted_contact_identity = None
         if pending is None:
-            return RegistrationEffects(cancellation=reason)
-        return self._baseline_effects(pending, cancellation=reason)
+            return RegistrationEffects(
+                cancellation=reason,
+                clear_focus_candidate=clear_focus_candidate,
+            )
+        return replace(
+            self._baseline_effects(pending, cancellation=reason),
+            clear_focus_candidate=clear_focus_candidate,
+        )
 
     @staticmethod
     def _baseline_effects(
@@ -358,14 +617,29 @@ class DesignRegistrationLifecycle:
             )
         return tuple(normalized)
 
+    @staticmethod
+    def _finite_point(value: object) -> StagePoint | None:
+        try:
+            point = tuple(float(item) for item in value)  # type: ignore[union-attr]
+        except (TypeError, ValueError):
+            return None
+        if len(point) != 2 or not all(math.isfinite(item) for item in point):
+            return None
+        return point[0], point[1]
+
 
 __all__ = [
     "DesignRegistrationLifecycle",
+    "ContactOperationToken",
+    "FocusCompletion",
+    "FocusCompletionKind",
+    "FocusOperationToken",
     "NormalizedRegistrationSample",
     "RegistrationCancellation",
     "RegistrationCaptureContext",
     "RegistrationCaptureOutcome",
     "RegistrationCaptureToken",
+    "RegistrationContext",
     "RegistrationEffects",
     "RegistrationSample",
 ]

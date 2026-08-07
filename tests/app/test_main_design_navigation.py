@@ -43,14 +43,17 @@ from probe_station_gui.coordinates.provenance import (
 )
 from probe_station_gui.design.frame_registration import (
     ContactReferenceToken,
-    RegistrationFocusToken,
     commit_xyb_registration,
     new_design_frame_draft,
     set_focus_reference,
 )
 from probe_station_gui.design.registration_lifecycle import (
+    ContactOperationToken,
     DesignRegistrationLifecycle,
+    FocusCompletion,
+    FocusCompletionKind,
     RegistrationCancellation,
+    RegistrationContext,
     RegistrationEffects,
 )
 from probe_station_gui.route.model import MeasurementRoute
@@ -136,6 +139,68 @@ def _make_document(tmp_path: Path) -> DesignDocument:
         library=_FakeLibrary(),
         top_cell_name="TOP",
     )
+
+
+def _lifecycle_context(
+    *,
+    objective: str = "X5",
+    frame_id: str = "design-frame",
+    frame_version: int = 1,
+    z_ready: bool = False,
+    a_ready: bool = False,
+) -> RegistrationContext:
+    return RegistrationContext(
+        session_identity=17,
+        source_identity=("C:/designs/device.gds", "load-1"),
+        top_cell_name="TOP",
+        visible_layers=((1, 0),),
+        rotation_quarter_turns=0,
+        frame_id=frame_id,
+        frame_version=frame_version,
+        fov_size=(20.0, 20.0),
+        objective_name=objective,
+        optical_calibration_identity=f"{objective}-calibration",
+        xyb_ready=True,
+        z_ready=z_ready,
+        a_ready=a_ready,
+    )
+
+
+def _pending_focus_operation(
+    lifecycle: DesignRegistrationLifecycle,
+    context: RegistrationContext,
+    *,
+    target_xy: tuple[float, float] = (4.0, 5.0),
+    move_completed: bool = False,
+):
+    lifecycle.set_focus_candidate(
+        types.SimpleNamespace(center=(5.0, 5.0)),
+        context,
+    )
+    started = lifecycle.accept_focus(context)
+    token = started.focus_token
+    assert token is not None
+    bound = lifecycle.accept_focus(
+        context,
+        FocusCompletion(
+            kind=FocusCompletionKind.TARGET_BOUND,
+            token=token,
+            target_xy=target_xy,
+        ),
+    )
+    assert bound.accepted is True
+    if move_completed:
+        moved = lifecycle.accept_focus(
+            context,
+            FocusCompletion(
+                kind=FocusCompletionKind.MOVE_FINISHED,
+                token=token,
+                target_xy=target_xy,
+                succeeded=True,
+            ),
+        )
+        assert moved.start_autofocus is True
+    return token
 
 
 def _make_window() -> tuple[Main, _FakeStageController, list[str]]:
@@ -2858,12 +2923,19 @@ def test_registration_focus_completion_publishes_only_after_matching_replace(
             pivot_machine_xy=(0.0, 0.0),
         )
     )
-    token = RegistrationFocusToken(registered.frame_id, registered.version)
+    context = _lifecycle_context(
+        frame_id=registered.frame_id,
+        frame_version=registered.version,
+    )
+    lifecycle = DesignRegistrationLifecycle()
+    token = _pending_focus_operation(lifecycle, context, move_completed=True)
     events: list[object] = []
     window = Main.__new__(Main)
     window._coordinate_frame_registry = registry
     window._design_session = types.SimpleNamespace(active_frame_id=registered.frame_id)
-    window._pending_registration_focus_token = token
+    window._design_registration_lifecycle = lifecycle
+    window._design_focus_overlay_context_key = lambda: context
+    window.design_layout_window = None
     window._refresh_design_panel = lambda: events.append("refresh")
     window._show_status = lambda message, _timeout: events.append(("status", message))
     monkeypatch.setattr(
@@ -2901,12 +2973,22 @@ def test_registration_focus_completion_ignores_inactive_frame(
             pivot_machine_xy=(0.0, 0.0),
         )
     )
-    token = RegistrationFocusToken(registered.frame_id, registered.version)
+    context = _lifecycle_context(
+        frame_id=registered.frame_id,
+        frame_version=registered.version,
+    )
+    lifecycle = DesignRegistrationLifecycle()
+    token = _pending_focus_operation(lifecycle, context, move_completed=True)
     events: list[str] = []
     window = Main.__new__(Main)
     window._coordinate_frame_registry = registry
     window._design_session = types.SimpleNamespace(active_frame_id="another-frame")
-    window._pending_registration_focus_token = token
+    window._design_registration_lifecycle = lifecycle
+    window._design_focus_overlay_context_key = lambda: replace(
+        context,
+        frame_id="another-frame",
+    )
+    window.design_layout_window = None
     window._refresh_design_panel = lambda: events.append("refresh")
     window._show_status = lambda *_args: events.append("status")
     monkeypatch.setattr(
@@ -2943,13 +3025,19 @@ def test_registration_focus_move_completion_requires_matching_token_target_and_f
             pivot_machine_xy=(0.0, 0.0),
         )
     )
-    token = RegistrationFocusToken(registered.frame_id, registered.version)
+    context = {"value": _lifecycle_context(
+        frame_id=registered.frame_id,
+        frame_version=registered.version,
+    )}
+    lifecycle = DesignRegistrationLifecycle()
+    token = _pending_focus_operation(lifecycle, context["value"])
     autofocus: list[object] = []
     window = Main.__new__(Main)
     window._coordinate_frame_registry = registry
     window._design_session = types.SimpleNamespace(active_frame_id=registered.frame_id)
-    window._pending_registration_focus_token = token
-    window._pending_registration_focus_target_xy = (4.0, 5.0)
+    window._design_registration_lifecycle = lifecycle
+    window._design_focus_overlay_context_key = lambda: context["value"]
+    window.design_layout_window = None
     window._show_status = lambda *_args: None
     window.design_registration_autofocus_finished = types.SimpleNamespace(emit=lambda *_args: None)
     window.stage_controller = types.SimpleNamespace(
@@ -2966,15 +3054,17 @@ def test_registration_focus_move_completion_requires_matching_token_target_and_f
     )
     assert autofocus == []
 
-    window._design_session.active_frame_id = "switched"
+    context["value"] = replace(context["value"], frame_id="switched")
     Main._on_registration_focus_move_finished(
         window, token, (4.0, 5.0), True, "arrived"
     )
     assert autofocus == []
 
-    window._design_session.active_frame_id = registered.frame_id
-    window._pending_registration_focus_token = token
-    window._pending_registration_focus_target_xy = (4.0, 5.0)
+    context["value"] = _lifecycle_context(
+        frame_id=registered.frame_id,
+        frame_version=registered.version,
+    )
+    token = _pending_focus_operation(lifecycle, context["value"])
     Main._on_registration_focus_move_finished(
         window, token, (4.0, 5.0), True, "arrived"
     )
@@ -2995,14 +3085,20 @@ def test_registration_focus_failed_specific_move_does_not_start_autofocus(
             pivot_machine_xy=(0.0, 0.0),
         )
     )
-    token = RegistrationFocusToken(registered.frame_id, registered.version)
+    context = _lifecycle_context(
+        frame_id=registered.frame_id,
+        frame_version=registered.version,
+    )
+    lifecycle = DesignRegistrationLifecycle()
+    token = _pending_focus_operation(lifecycle, context)
     autofocus: list[object] = []
     statuses: list[str] = []
     window = Main.__new__(Main)
     window._coordinate_frame_registry = registry
     window._design_session = types.SimpleNamespace(active_frame_id=registered.frame_id)
-    window._pending_registration_focus_token = token
-    window._pending_registration_focus_target_xy = (4.0, 5.0)
+    window._design_registration_lifecycle = lifecycle
+    window._design_focus_overlay_context_key = lambda: context
+    window.design_layout_window = None
     window._show_status = lambda message, _timeout: statuses.append(message)
     window.design_registration_autofocus_finished = types.SimpleNamespace(emit=lambda *_args: None)
     window.stage_controller = types.SimpleNamespace(
@@ -3015,7 +3111,7 @@ def test_registration_focus_failed_specific_move_does_not_start_autofocus(
 
     assert autofocus == []
     assert statuses == ["move failed"]
-    assert window._pending_registration_focus_token is None
+    assert not hasattr(window, "_pending_registration_focus_token")
 
 
 def test_stale_contact_completion_never_publishes_or_captures_a(
@@ -3058,6 +3154,64 @@ def test_stale_contact_completion_never_publishes_or_captures_a(
     assert events == []
 
 
+def test_invalid_contact_completion_fails_closed_before_registry_effects() -> None:
+    context = _lifecycle_context(z_ready=True)
+    lifecycle = DesignRegistrationLifecycle()
+    eligible = lifecycle.accept_first_contact(context, None)
+    token = eligible.contact_token
+    assert token is not None
+    window = Main.__new__(Main)
+    window._design_registration_lifecycle = lifecycle
+    window._design_session = types.SimpleNamespace()
+    window._coordinate_frame_registry = types.SimpleNamespace(
+        get=lambda _frame_id: pytest.fail("registry must not be read")
+    )
+    window._design_registration_context = lambda **_kwargs: context
+    window.design_layout_window = None
+
+    Main._on_design_contact_reference_ready(window, token, "invalid")
+
+    assert lifecycle.accept_first_contact(context, None, token=token).capture_contact
+
+
+def test_contact_callback_eligibility_delegates_to_registration_lifecycle() -> None:
+    context = _lifecycle_context(z_ready=True)
+    calls: list[tuple[RegistrationContext, object, object]] = []
+    lifecycle = types.SimpleNamespace(
+        cancel=lambda _reason: RegistrationEffects(),
+        accept_first_contact=lambda actual_context, a_mm, token=None: (
+            calls.append((actual_context, a_mm, token))
+            or RegistrationEffects(reason="Contact reference is unavailable.")
+        )
+    )
+    record = types.SimpleNamespace(
+        version=1,
+        transform=types.SimpleNamespace(
+            z_zero_machine_mm=6.0,
+            a_zero_machine_mm=None,
+        ),
+        readiness={
+            "Z": types.SimpleNamespace(available=True),
+            "A": types.SimpleNamespace(available=False),
+        },
+    )
+    window = Main.__new__(Main)
+    window._design_session = types.SimpleNamespace(active_frame_id="design-frame")
+    window._coordinate_frame_registry = types.SimpleNamespace(
+        get=lambda _frame_id: record
+    )
+    window._design_registration_lifecycle = lifecycle
+    window._design_registration_context = lambda **_kwargs: context
+
+    callback = Main._design_contact_success_callback(
+        window,
+        types.SimpleNamespace(frame_id="design-frame", frame_version=1),
+    )
+
+    assert callback is None
+    assert calls == [(context, None, None)]
+
+
 def test_contact_callback_never_captures_after_active_frame_switch(
     tmp_path: Path,
 ) -> None:
@@ -3078,7 +3232,8 @@ def test_contact_callback_never_captures_after_active_frame_switch(
     emitted: list[tuple[object, float]] = []
     window = Main.__new__(Main)
     window._coordinate_frame_registry = registry
-    window._design_session = types.SimpleNamespace(active_frame_id=focused.frame_id)
+    window._design_session = DesignSession(document=document)
+    window._design_session.link_active_frame(focused)
     window.stage_controller = types.SimpleNamespace(
         run_external_current_physical_machine_coordinates=lambda _axes: {"A": 8.0},
     )
@@ -3120,7 +3275,8 @@ def test_contact_callback_captures_synchronized_physical_machine_a(
     emitted: list[tuple[object, float]] = []
     window = Main.__new__(Main)
     window._coordinate_frame_registry = registry
-    window._design_session = types.SimpleNamespace(active_frame_id=focused.frame_id)
+    window._design_session = DesignSession(document=document)
+    window._design_session.link_active_frame(focused)
     window.stage_controller = types.SimpleNamespace(
         run_external_current_physical_machine_coordinates=lambda axes: (
             {"A": 9.25} if tuple(axes) == ("A",) else pytest.fail("wrong axes")
@@ -3140,7 +3296,14 @@ def test_contact_callback_captures_synchronized_physical_machine_a(
 
     callback(object())
 
-    assert emitted == [(ContactReferenceToken(focused.frame_id, focused.version), 9.25)]
+    assert len(emitted) == 1
+    token, physical_a = emitted[0]
+    assert isinstance(token, ContactOperationToken)
+    assert (token.frame_id, token.frame_version) == (
+        focused.frame_id,
+        focused.version,
+    )
+    assert physical_a == 9.25
 
 
 def test_later_route_does_not_recapture_established_contact_reference(
@@ -3164,7 +3327,8 @@ def test_later_route_does_not_recapture_established_contact_reference(
     reads: list[tuple[str, ...]] = []
     window = Main.__new__(Main)
     window._coordinate_frame_registry = registry
-    window._design_session = types.SimpleNamespace(active_frame_id=focused.frame_id)
+    window._design_session = DesignSession(document=document)
+    window._design_session.link_active_frame(focused)
     window.stage_controller = types.SimpleNamespace(
         run_external_current_physical_machine_coordinates=lambda axes: (
             reads.append(tuple(axes)) or {"A": 8.0}
@@ -3233,8 +3397,10 @@ def test_find_focus_submits_visible_fixture_geometry_and_waits_for_worker(
     document = _make_document(tmp_path)
     submitted: list[object] = []
     started: list[tuple[float, float]] = []
+    displayed: list[tuple[str, object]] = []
     window = Main.__new__(Main)
     window._design_session = types.SimpleNamespace(document=document, active_frame_id=None)
+    window._design_registration_lifecycle = DesignRegistrationLifecycle()
     window._resolve_design_fov_size = lambda: (20.0, 20.0)
     window._focus_structure_bounds_worker = types.SimpleNamespace(
         submit=submitted.append
@@ -3242,6 +3408,10 @@ def test_find_focus_submits_visible_fixture_geometry_and_waits_for_worker(
     window._focus_structure_request_id = 0
     window._start_design_focus_reference = started.append
     window._show_status = lambda *_args: None
+    window.design_layout_window = types.SimpleNamespace(
+        set_focus_candidate=lambda value: displayed.append(("candidate", value)),
+        set_selected_focus_point=lambda value: displayed.append(("selected", value)),
+    )
 
     Main._find_design_focus_reference(window)
 
@@ -3261,7 +3431,10 @@ def test_find_focus_submits_visible_fixture_geometry_and_waits_for_worker(
     )
 
     assert started == []
-    assert window._focus_candidate.center == (5.0, 5.0)
+    assert not hasattr(window, "_focus_candidate")
+    assert displayed[-2][0] == "candidate"
+    assert displayed[-2][1].center == (5.0, 5.0)
+    assert displayed[-1] == ("selected", (5.0, 5.0))
 
 
 def test_main_close_delegates_focus_retirement_to_transactional_shutdown(
@@ -3291,45 +3464,61 @@ def test_main_close_delegates_focus_retirement_to_transactional_shutdown(
 def test_focus_candidate_acceptance_rejects_stale_optical_context(
     changed_part: str,
 ) -> None:
-    started: list[tuple[float, float]] = []
+    started: list[tuple[tuple[float, float], object]] = []
     statuses: list[str] = []
-    context = {
-        "value": ("document", (20.0, 20.0), "X5", "optical-a"),
-    }
+    context = {"value": _lifecycle_context()}
+    lifecycle = DesignRegistrationLifecycle()
+    lifecycle.set_focus_candidate(
+        types.SimpleNamespace(center=(5.0, 5.0)),
+        context["value"],
+    )
     window = Main.__new__(Main)
-    window._focus_candidate = types.SimpleNamespace(center=(5.0, 5.0))
-    window._focus_candidate_context = context["value"]
+    window._design_registration_lifecycle = lifecycle
+    window._design_session = types.SimpleNamespace()
     window._design_focus_overlay_context_key = lambda: context["value"]
-    window._start_design_focus_reference = started.append
+    window._start_design_focus_reference = lambda point, token: started.append(
+        (point, token)
+    )
     window._show_status = lambda message, _timeout: statuses.append(str(message))
     window.design_layout_window = None
 
     replacements = {
-        "fov": ("document", (30.0, 20.0), "X5", "optical-a"),
-        "objective": ("document", (20.0, 20.0), "X20", "optical-b"),
-        "calibration": ("document", (20.0, 20.0), "X5", "optical-b"),
+        "fov": replace(context["value"], fov_size=(30.0, 20.0)),
+        "objective": replace(context["value"], objective_name="X20"),
+        "calibration": replace(
+            context["value"],
+            optical_calibration_identity="changed-calibration",
+        ),
     }
     context["value"] = replacements[changed_part]
 
     Main._use_selected_design_focus_reference(window, (5.0, 5.0))
 
     assert started == []
-    assert window._focus_candidate is None
+    assert not hasattr(window, "_focus_candidate")
     assert statuses == ["Find a new focus reference for the current view."]
 
 
 def test_focus_candidate_moves_only_after_explicit_current_context_acceptance() -> None:
-    started: list[tuple[float, float]] = []
-    context = ("document", (20.0, 20.0), "X5", "optical-a")
+    started: list[tuple[tuple[float, float], object]] = []
+    context = _lifecycle_context()
+    lifecycle = DesignRegistrationLifecycle()
+    lifecycle.set_focus_candidate(
+        types.SimpleNamespace(center=(5.0, 5.0)),
+        context,
+    )
     window = Main.__new__(Main)
-    window._focus_candidate = types.SimpleNamespace(center=(5.0, 5.0))
-    window._focus_candidate_context = context
+    window._design_registration_lifecycle = lifecycle
+    window._design_session = types.SimpleNamespace()
     window._design_focus_overlay_context_key = lambda: context
-    window._start_design_focus_reference = started.append
+    window._start_design_focus_reference = lambda point, token: started.append(
+        (point, token)
+    )
 
     Main._use_selected_design_focus_reference(window, (6.0, 7.0))
 
-    assert started == [(6.0, 7.0)]
+    assert started[0][0] == (6.0, 7.0)
+    assert started[0][1] is not None
 
 
 def test_focus_context_key_tracks_fov_objective_and_optical_calibration(
@@ -3417,11 +3606,16 @@ def test_stale_focus_structure_result_is_ignored_after_document_context_change(
 )
 def test_focus_overlays_clear_for_every_design_context_change(changed_context) -> None:
     cleared: list[object] = []
-    window = Main.__new__(Main)
-    window._design_focus_overlay_context = (
-        "document", "TOP", ((1, 0),), 0, "frame-a", 1
+    initial_context = ("document", "TOP", ((1, 0),), 0, "frame-a", 1)
+    lifecycle = DesignRegistrationLifecycle()
+    lifecycle.set_focus_candidate(
+        types.SimpleNamespace(center=(5.0, 5.0)),
+        initial_context,
     )
-    window._focus_candidate = object()
+    window = Main.__new__(Main)
+    window._design_registration_lifecycle = lifecycle
+    window._design_session = types.SimpleNamespace()
+    window._design_focus_overlay_context = initial_context
     window._pending_focus_structure_request_id = 4
     window.design_layout_window = types.SimpleNamespace(
         set_focus_candidate=lambda value: cleared.append(("candidate", value)),
@@ -3431,9 +3625,10 @@ def test_focus_overlays_clear_for_every_design_context_change(changed_context) -
 
     Main._synchronize_design_focus_overlay_context(window)
 
-    assert window._focus_candidate is None
+    assert not hasattr(window, "_focus_candidate")
     assert window._pending_focus_structure_request_id is None
     assert cleared == [("candidate", None), ("selected", None)]
+    assert lifecycle.accept_focus(initial_context).accepted is False
 
 
 def test_replacing_committed_source_marks_starts_fresh_draft_before_capture(
@@ -3726,7 +3921,6 @@ def test_registration_instance_switch_new_and_route_lineage_preserve_records(
         )
     )
     window._design_focus_overlay_context = object()
-    window._focus_candidate = object()
     window.design_layout_window = None
     _set_rotation_settings(window)
     window.stage_controller = types.SimpleNamespace(
@@ -3768,7 +3962,7 @@ def test_registration_instance_switch_new_and_route_lineage_preserve_records(
         )
     )
     assert registry.snapshot().records == original_records
-    assert window._focus_candidate is None
+    assert not hasattr(window, "_focus_candidate")
 
     Main._select_design_registration_instance(window, first.frame_id)
 
@@ -3807,14 +4001,13 @@ def test_missing_selected_registration_clears_session_without_deleting_others(
     window._design_session = session
     window._coordinate_frame_registry = registry
     window.design_layout_window = None
-    window._focus_candidate = object()
     registry.reset((second,))
 
     Main._reconcile_missing_design_registration_instance(window)
 
     assert session.active_frame_id is None
     assert registry.snapshot().records == (second,)
-    assert window._focus_candidate is None
+    assert not hasattr(window, "_focus_candidate")
 
 
 def _make_mixed_edit_window(tmp_path: Path) -> tuple[Main, list[str]]:

@@ -6,11 +6,15 @@ import pytest
 
 from probe_station_gui.design.registration_lifecycle import (
     DesignRegistrationLifecycle,
+    FocusCompletion,
+    FocusCompletionKind,
+    RegistrationContext,
     RegistrationCancellation,
     RegistrationCaptureContext,
     RegistrationCaptureOutcome,
     RegistrationSample,
 )
+from probe_station_gui.design.focus_candidate import FocusCandidate
 
 
 def _context(
@@ -55,6 +59,179 @@ def _sample(
         physical_b_deg=b,
         stage_xy=(x, y),
     )
+
+
+def _candidate() -> FocusCandidate:
+    return FocusCandidate(
+        center=(5.0, 6.0),
+        bounds=(4.0, 5.0, 6.0, 7.0),
+        distance_from_design_center=1.0,
+    )
+
+
+def _registration_context(
+    *,
+    objective: str = "5x",
+    frame_version: int = 3,
+    xyb_ready: bool = True,
+    z_ready: bool = False,
+    a_ready: bool = False,
+) -> RegistrationContext:
+    return RegistrationContext(
+        session_identity=17,
+        source_identity=("C:/designs/device.gds", "load-1"),
+        top_cell_name="TOP",
+        visible_layers=((1, 0),),
+        rotation_quarter_turns=0,
+        frame_id="design-frame",
+        frame_version=frame_version,
+        fov_size=(20.0, 30.0),
+        objective_name=objective,
+        optical_calibration_identity=f"{objective}-calibration",
+        xyb_ready=xyb_ready,
+        z_ready=z_ready,
+        a_ready=a_ready,
+    )
+
+
+def test_context_change_invalidates_focus_candidate_before_acceptance() -> None:
+    lifecycle = DesignRegistrationLifecycle()
+    offered = lifecycle.set_focus_candidate(
+        _candidate(),
+        _registration_context(objective="5x"),
+    )
+
+    result = lifecycle.accept_focus(_registration_context(objective="10x"))
+
+    assert offered.focus_candidate == _candidate()
+    assert result.accepted is False
+    assert result.clear_focus_candidate is True
+
+
+@pytest.mark.parametrize(
+    "context",
+    (
+        _registration_context(xyb_ready=False),
+        _registration_context(z_ready=True),
+    ),
+)
+def test_focus_requires_ready_xyb_and_missing_z(context: RegistrationContext) -> None:
+    lifecycle = DesignRegistrationLifecycle()
+    lifecycle.set_focus_candidate(_candidate(), context)
+
+    result = lifecycle.accept_focus(context)
+
+    assert result.accepted is False
+    assert result.focus_token is None
+
+
+def test_contact_is_first_write_wins_and_requires_ready_z() -> None:
+    lifecycle = DesignRegistrationLifecycle()
+
+    missing_z = lifecycle.accept_first_contact(
+        _registration_context(z_ready=False),
+        4.0,
+    )
+    first = lifecycle.accept_first_contact(
+        _registration_context(z_ready=True),
+        4.0,
+    )
+    second = lifecycle.accept_first_contact(
+        _registration_context(z_ready=True, a_ready=True),
+        5.0,
+    )
+
+    assert missing_z.accepted is False
+    assert first.commit_a_mm == 4.0
+    assert second.commit_a_mm is None
+
+
+def test_focus_move_and_autofocus_require_the_current_operation_and_target() -> None:
+    lifecycle = DesignRegistrationLifecycle()
+    context = _registration_context()
+    lifecycle.set_focus_candidate(_candidate(), context)
+    started = lifecycle.accept_focus(context)
+    token = started.focus_token
+    assert token is not None
+    lifecycle.accept_focus(
+        context,
+        FocusCompletion(
+            kind=FocusCompletionKind.TARGET_BOUND,
+            token=token,
+            target_xy=(4.0, 5.0),
+        ),
+    )
+
+    wrong_target = lifecycle.accept_focus(
+        context,
+        FocusCompletion(
+            kind=FocusCompletionKind.MOVE_FINISHED,
+            token=token,
+            target_xy=(40.0, 50.0),
+            succeeded=True,
+        ),
+    )
+    moved = lifecycle.accept_focus(
+        context,
+        FocusCompletion(
+            kind=FocusCompletionKind.MOVE_FINISHED,
+            token=token,
+            target_xy=(4.0, 5.0),
+            succeeded=True,
+        ),
+    )
+    focused = lifecycle.accept_focus(
+        context,
+        FocusCompletion(
+            kind=FocusCompletionKind.AUTOFOCUS_FINISHED,
+            token=token,
+            succeeded=True,
+            physical_z_mm=6.0,
+        ),
+    )
+    repeated = lifecycle.accept_focus(
+        context,
+        FocusCompletion(
+            kind=FocusCompletionKind.AUTOFOCUS_FINISHED,
+            token=token,
+            succeeded=True,
+            physical_z_mm=7.0,
+        ),
+    )
+
+    assert wrong_target.start_autofocus is False
+    assert moved.start_autofocus is True
+    assert focused.commit_z_mm == 6.0
+    assert focused.clear_focus_candidate is True
+    assert repeated.commit_z_mm is None
+
+
+def test_cancelled_contact_operation_cannot_commit_a() -> None:
+    lifecycle = DesignRegistrationLifecycle()
+    context = _registration_context(z_ready=True)
+    eligible = lifecycle.accept_first_contact(context, None)
+    token = eligible.contact_token
+    assert token is not None
+
+    lifecycle.cancel(RegistrationCancellation.ROUTE_CONTEXT_CHANGED)
+    stale = lifecycle.accept_first_contact(context, 4.0, token=token)
+
+    assert stale.accepted is False
+    assert stale.commit_a_mm is None
+
+
+def test_cancel_clears_focus_and_returns_capture_baseline_exactly_once() -> None:
+    lifecycle = DesignRegistrationLifecycle()
+    lifecycle.begin_capture(_context())
+    lifecycle.set_focus_candidate(_candidate(), _registration_context())
+
+    first = lifecycle.cancel(RegistrationCancellation.DESIGN_CHANGED)
+    second = lifecycle.cancel(RegistrationCancellation.DESIGN_CHANGED)
+
+    assert first.clear_focus_candidate is True
+    assert first.restore_baseline is True
+    assert second.clear_focus_candidate is False
+    assert second.restore_baseline is False
 
 
 def test_stale_sample_after_context_change_is_rejected_and_baseline_restored() -> None:
@@ -289,14 +466,21 @@ def test_design_package_exports_the_registration_lifecycle_interface() -> None:
     )
 
 
-def test_registration_lifecycle_exposes_exactly_three_operations() -> None:
+def test_registration_lifecycle_exposes_exactly_six_operations() -> None:
     operations = {
         name
         for name, value in vars(DesignRegistrationLifecycle).items()
         if callable(value) and not name.startswith("_")
     }
 
-    assert operations == {"begin_capture", "accept_sample", "cancel"}
+    assert operations == {
+        "begin_capture",
+        "accept_sample",
+        "set_focus_candidate",
+        "accept_focus",
+        "accept_first_contact",
+        "cancel",
+    }
 
 
 def test_brief_context_fields_default_optional_adapter_metadata() -> None:
