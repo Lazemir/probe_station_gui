@@ -566,18 +566,37 @@ class CoordinateFrameStoreWorker(QObject):
                 failed_operations = tuple(self._pending)
                 self._pending.clear()
                 self._active = False
-                if self._thread is threading.current_thread():
-                    self._thread = None
                 self._condition.notify_all()
-            for operation in failed_operations:
-                self._post_publication(
-                    "failed",
-                    CoordinateFrameStoreFailure(
-                        operation.request_id,
-                        operation.operation,
-                        f"{type(exc).__name__}: {exc}",
-                    ),
-                )
+            while True:
+                for operation in failed_operations:
+                    self._post_publication(
+                        "failed",
+                        CoordinateFrameStoreFailure(
+                            operation.request_id,
+                            operation.operation,
+                            f"{type(exc).__name__}: {exc}",
+                        ),
+                    )
+                with self._condition:
+                    stopping = self._stopping
+                    if stopping and self._pending:
+                        failed_operations = tuple(self._pending)
+                        self._pending.clear()
+                        continue
+                    if self._thread is threading.current_thread():
+                        self._thread = None
+                    if not stopping and self._pending:
+                        self._thread = threading.Thread(
+                            target=self._run,
+                            name="coordinate-frame-store",
+                            daemon=True,
+                        )
+                        self._thread.start()
+                    post_finished = stopping and self._thread is None
+                    self._condition.notify_all()
+                    break
+            if post_finished and not self._drop_publications.is_set():
+                self._finished_posted.emit()
             return
 
         try:

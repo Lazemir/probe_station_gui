@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import os
 from types import SimpleNamespace
 
@@ -310,10 +311,16 @@ class _SelectionSettingsManager:
 
 
 class _SelectionOwner:
-    def __init__(self, *, selected: str, authority_axes: set[str]) -> None:
+    def __init__(
+        self,
+        *,
+        selected: str,
+        authority_axes: set[str],
+        record: CoordinateFrameRecord | None = None,
+    ) -> None:
         frame_id = "11111111-1111-4111-8111-111111111111"
         registry = CoordinateFrameRegistry()
-        registry.add(_ready_frame_without_a(frame_id))
+        registry.add(record or _ready_frame_without_a(frame_id))
         self._stage_position_panel = None
         self._coordinate_frame_registry = registry
         self._coordinate_frames_loaded = True
@@ -345,6 +352,27 @@ def test_temporary_b_loss_does_not_persist_machine_selection() -> None:
 
     assert owner._selected_coordinate_frame_id == frame_id
     assert owner.persisted_selections == []
+
+
+def test_permanently_rejected_selection_falls_back_and_persists_machine() -> None:
+    frame_id = "11111111-1111-4111-8111-111111111111"
+    corrupt = replace(
+        _ready_frame_without_a(frame_id),
+        transform=BFrameTransform.identity(),
+    )
+    owner = _SelectionOwner(
+        selected=frame_id,
+        authority_axes={"X", "Y", "Z", "A", "B"},
+        record=corrupt,
+    )
+
+    panel_adapter.update_software_coordinate_display(
+        owner,
+        owner._latest_physical_machine_pose,
+    )
+
+    assert owner._selected_coordinate_frame_id == "machine"
+    assert owner.persisted_selections == ["machine"]
 
 
 def test_explicit_unavailable_selection_keeps_previous_selection() -> None:

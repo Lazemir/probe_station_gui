@@ -291,7 +291,7 @@ def test_restore_rejects_missing_z_or_deleted_frame_after_authority_is_known() -
     ) == MACHINE_FRAME_ID
 
 
-def test_semantically_invalid_ready_origins_remain_displayed_but_cannot_restore() -> None:
+def test_semantically_invalid_ready_origins_fall_back_to_machine() -> None:
     corrupt = _record(
         DESIGN_ID,
         FrameKind.DESIGN,
@@ -305,14 +305,31 @@ def test_semantically_invalid_ready_origins_remain_displayed_but_cannot_restore(
     entry = next(item for item in plan.selector_entries if item.frame_id == DESIGN_ID)
     assert entry.enabled is False
     assert "READY Z requires" in entry.reason
-    assert plan.selected_frame_id == DESIGN_ID
-    assert plan.selection_available is False
+    assert plan.selected_frame_id == MACHINE_FRAME_ID
+    assert plan.selection_available is True
+    assert plan.selection_reason is None
     assert decide_pending_frame_restore(
         snapshot,
         frame_id=DESIGN_ID,
         homed_axes={"X", "Y"},
         authority_axes={"X", "Y", "Z", "A", "B"},
     ) == MACHINE_FRAME_ID
+
+
+def test_missing_transform_is_a_permanent_machine_fallback() -> None:
+    rejected = replace(
+        _record(DESIGN_ID, FrameKind.DESIGN, "rejected"),
+        transform=None,
+    )
+
+    plan = _plan(_snapshot(rejected), selected_frame_id=DESIGN_ID)
+
+    assert plan.selected_frame_id == MACHINE_FRAME_ID
+    assert plan.selection_available is True
+    assert plan.selection_reason is None
+    entry = next(item for item in plan.selector_entries if item.frame_id == DESIGN_ID)
+    assert entry.enabled is False
+    assert entry.reason == "Coordinate transform is unavailable."
 
 
 @pytest.mark.parametrize("status", ["pending", "blocked"])
@@ -332,6 +349,9 @@ def test_unverified_design_provenance_cannot_select_or_restore(status: str) -> N
     entry = next(item for item in plan.selector_entries if item.frame_id == DESIGN_ID)
     assert entry.enabled is False
     assert entry.reason == "Design source changed."
+    assert plan.selected_frame_id == DESIGN_ID
+    assert plan.selection_available is False
+    assert plan.selection_reason == "Design source changed."
     assert decide_pending_frame_restore(
         snapshot,
         frame_id=DESIGN_ID,

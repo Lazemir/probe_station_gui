@@ -57,6 +57,14 @@ def _frame_group(kind: FrameKind) -> str:
     }[kind]
 
 
+def _permanent_frame_rejection_reason(
+    record: CoordinateFrameRecord,
+) -> str | None:
+    """Return only durable semantic rejection, not recoverable unavailability."""
+
+    return record.semantic_validation_error()
+
+
 def _frame_selection_reason(
     record: CoordinateFrameRecord,
     *,
@@ -66,7 +74,7 @@ def _frame_selection_reason(
     provenance_error = design_frame_provenance_error(record)
     if provenance_error is not None:
         return provenance_error
-    semantic_error = record.semantic_validation_error()
+    semantic_error = _permanent_frame_rejection_reason(record)
     if semantic_error is not None:
         return semantic_error
     if not {"X", "Y"}.issubset(homed_axes):
@@ -258,6 +266,9 @@ def build_coordinate_display_plan(
         record = None
     elif record is None:
         selected = MACHINE_FRAME_ID
+    elif _permanent_frame_rejection_reason(record) is not None:
+        selected = MACHINE_FRAME_ID
+        record = None
     else:
         selection_reason = _frame_selection_reason(
             record,

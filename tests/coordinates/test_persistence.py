@@ -444,6 +444,92 @@ def test_backend_factory_failure_fails_queue_and_next_submit_restarts(
     worker.stop()
 
 
+def test_submit_during_factory_failure_publication_starts_fresh_run(
+    qt_app: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attempts = 0
+    publication_started = threading.Event()
+    release_publication = threading.Event()
+    backend = _RecordingBackend(CoordinateFrameDocument())
+
+    def factory() -> _RecordingBackend:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("factory failed")
+        return backend
+
+    worker = CoordinateFrameStoreWorker(backend_factory=factory)
+    original_post = worker._post_publication
+
+    def post_publication(kind: str, value: object) -> None:
+        original_post(kind, value)
+        if kind == "failed":
+            publication_started.set()
+            assert release_publication.wait(timeout=1.0)
+
+    monkeypatch.setattr(worker, "_post_publication", post_publication)
+    failures: list[CoordinateFrameStoreFailure] = []
+    loaded: list[CoordinateFrameLoadResult] = []
+    worker.failed.connect(failures.append)
+    worker.loaded.connect(loaded.append)
+
+    worker.load(1)
+    assert publication_started.wait(timeout=1.0)
+    worker.load(2)
+    release_publication.set()
+    _wait_until(qt_app, lambda: bool(loaded) or len(failures) == 2)
+
+    assert [item.request_id for item in failures] == [1]
+    assert [item.request_id for item in loaded] == [2]
+    assert attempts == 2
+    worker.stop()
+
+
+def test_stop_during_backend_factory_failure_posts_failures_before_finished(
+    qt_app: QApplication,
+) -> None:
+    factory_entered = threading.Event()
+    release_failure = threading.Event()
+
+    def factory() -> _RecordingBackend:
+        factory_entered.set()
+        assert release_failure.wait(timeout=1.0)
+        raise RuntimeError("factory failed")
+
+    worker = CoordinateFrameStoreWorker(backend_factory=factory)
+    publications: list[tuple[str, int | None]] = []
+    worker.failed.connect(
+        lambda failure: publications.append(("failed", failure.request_id))
+    )
+    worker.finished.connect(lambda: publications.append(("finished", None)))
+
+    worker.load(1)
+    assert factory_entered.wait(timeout=1.0)
+    worker.publish(2, CoordinateFrameDocument())
+
+    def release_after_stop_begins() -> None:
+        with worker._condition:
+            while not worker._stopping:
+                worker._condition.wait()
+        release_failure.set()
+
+    releaser = threading.Thread(target=release_after_stop_begins)
+    releaser.start()
+    worker.stop(timeout_s=1.0)
+    releaser.join(timeout=1.0)
+    assert not releaser.is_alive()
+
+    _wait_until(qt_app, lambda: len(publications) == 3)
+
+    assert publications == [
+        ("failed", 1),
+        ("failed", 2),
+        ("finished", None),
+    ]
+
+
 def test_worker_coalesces_pending_publications_to_newest(
     qt_app: QApplication,
 ) -> None:
