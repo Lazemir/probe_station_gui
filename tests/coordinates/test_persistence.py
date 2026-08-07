@@ -179,6 +179,31 @@ def test_duplicate_valid_uuid_is_diagnosed_deterministically_and_preserved() -> 
     assert loaded.to_dict()["records"][1] == duplicate
 
 
+def test_explicit_delete_removes_rejected_duplicate_uuid_slot() -> None:
+    payload = CoordinateFrameDocument(records=(_record(),)).to_dict()
+    duplicate = deepcopy(payload["records"][0])
+    duplicate["future_field"] = {"schema": 2}
+    payload["records"].append(duplicate)
+    loaded = CoordinateFrameDocument.from_dict(payload)
+
+    deleted = loaded.without_frame_id(_record().frame_id)
+    reloaded = CoordinateFrameDocument.from_dict(deleted.to_dict())
+
+    assert reloaded.records == ()
+    assert deleted.to_dict()["records"] == []
+
+
+def test_delete_preserves_unrelated_unidentified_raw_slot() -> None:
+    payload = CoordinateFrameDocument(records=(_record(),)).to_dict()
+    payload["records"].append({"future_payload": [1, 2, 3]})
+
+    deleted = CoordinateFrameDocument.from_dict(payload).without_frame_id(
+        _record().frame_id
+    )
+
+    assert deleted.to_dict()["records"] == [{"future_payload": [1, 2, 3]}]
+
+
 @pytest.mark.parametrize(
     ("axis", "transform_field", "message"),
     [

@@ -1,3 +1,4 @@
+from copy import deepcopy
 import json
 import logging
 from importlib import resources
@@ -106,6 +107,18 @@ def test_parser_skips_one_invalid_custom_record_without_losing_valid_record() ->
 
     assert len(parsed.custom_frames) == 1
     assert len(parsed.diagnostics) == 1
+
+
+def test_custom_delete_removes_future_duplicate_uuid_slot() -> None:
+    raw = SoftwareCoordinateSettings(custom_frames=(_custom(),)).to_dict()
+    duplicate = deepcopy(raw["custom_frames"][0])
+    duplicate["future_field"] = True
+    raw["custom_frames"].append(duplicate)
+    settings = parse_software_coordinate_settings(raw, section_present=True)
+
+    deleted = settings.without_custom_frame(_custom().frame_id)
+
+    assert deleted.to_dict()["custom_frames"] == []
 
 
 def test_future_settings_schema_is_not_materialized_and_round_trips_losslessly() -> None:

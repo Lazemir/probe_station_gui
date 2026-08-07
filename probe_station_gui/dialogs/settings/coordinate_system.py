@@ -223,11 +223,7 @@ class CoordinateSystemSettingsWidget(QWidget):
             return False
         frame_ids = [frame.frame_id for frame in self._settings.custom_frames]
         index = frame_ids.index(self._current_frame_id)
-        self._settings.custom_frames = tuple(
-            frame
-            for frame in self._settings.custom_frames
-            if frame.frame_id != self._current_frame_id
-        )
+        self._settings = self._settings.without_custom_frame(self._current_frame_id)
         remaining = self._settings.custom_frames
         self._current_frame_id = (
             remaining[min(index, len(remaining) - 1)].frame_id if remaining else None

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 import os
 
 import pytest
@@ -19,6 +20,7 @@ from probe_station_gui.dialogs.settings.coordinate_system import (
 from probe_station_gui.dialogs.settings_dialog import SettingsDialog
 from probe_station_gui.settings.manager import Settings
 from probe_station_gui.settings.software_coordinates import (
+    CustomFrameSettings,
     SoftwareCoordinateSettings,
     parse_software_coordinate_settings,
 )
@@ -58,6 +60,32 @@ def test_custom_frame_crud_keeps_stable_identity_and_returns_cloned_settings() -
 
     saved.custom_frames = ()
     assert len(widget.settings().custom_frames) == 1
+    widget.deleteLater()
+
+
+def test_editor_delete_removes_rejected_duplicate_custom_frame_slot() -> None:
+    _qt_app()
+    frame = CustomFrameSettings(
+        frame_id="14c838bd-a9a5-47bd-9d22-6326ca63c469",
+        name="fixture",
+        origin_x_mm=1.0,
+        origin_y_mm=2.0,
+        reference_b_deg=3.0,
+        xy_angle_deg=4.0,
+        b_zero_deg=5.0,
+        z_zero_mm=6.0,
+        a_zero_mm=7.0,
+    )
+    raw = SoftwareCoordinateSettings(custom_frames=(frame,)).to_dict()
+    duplicate = deepcopy(raw["custom_frames"][0])
+    duplicate["future_field"] = True
+    raw["custom_frames"].append(duplicate)
+    widget = CoordinateSystemSettingsWidget(
+        parse_software_coordinate_settings(raw, section_present=True)
+    )
+
+    assert widget.delete_current_frame()
+    assert widget.settings().to_dict()["custom_frames"] == []
     widget.deleteLater()
 
 

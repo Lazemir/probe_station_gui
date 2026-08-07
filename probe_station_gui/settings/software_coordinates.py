@@ -394,6 +394,34 @@ class SoftwareCoordinateSettings:
             _preserved_raw_section=self._preserved_raw_section,
         )
 
+    def without_custom_frame(self, frame_id: str) -> "SoftwareCoordinateSettings":
+        """Remove a custom frame and every raw slot that names its UUID."""
+
+        canonical_frame_id = str(UUID(frame_id))
+        custom_frames = tuple(
+            frame
+            for frame in self.custom_frames
+            if _explicit_raw_frame_id({"frame_id": frame.frame_id})
+            != canonical_frame_id
+        )
+        accepted_by_slot = dict(self._accepted_custom_frame_slots)
+        raw_custom_frames: list[object] = []
+        accepted_custom_frame_slots: list[tuple[int, str]] = []
+        remaining_ids = {frame.frame_id for frame in custom_frames}
+        for index, raw_frame in enumerate(self._raw_custom_frames):
+            if _explicit_raw_frame_id(raw_frame) == canonical_frame_id:
+                continue
+            accepted_id = accepted_by_slot.get(index)
+            if accepted_id is not None and accepted_id in remaining_ids:
+                accepted_custom_frame_slots.append((len(raw_custom_frames), accepted_id))
+            raw_custom_frames.append(raw_frame)
+        return replace(
+            self,
+            custom_frames=custom_frames,
+            _raw_custom_frames=tuple(raw_custom_frames),
+            _accepted_custom_frame_slots=tuple(accepted_custom_frame_slots),
+        )
+
     def to_dict(self) -> object:
         if self._preserved_raw_section_present:
             return deepcopy(self._preserved_raw_section)
@@ -433,6 +461,18 @@ class SoftwareCoordinateSettings:
             "max_rotation_segment_deg": self.max_rotation_segment_deg,
             "max_rotation_chord_error_mm": self.max_rotation_chord_error_mm,
         }
+
+
+def _explicit_raw_frame_id(raw: object) -> str | None:
+    if not isinstance(raw, dict):
+        return None
+    value = raw.get("frame_id")
+    if not isinstance(value, str):
+        return None
+    try:
+        return str(UUID(value))
+    except ValueError:
+        return None
 
 
 def _positive_finite_float(value: object, name: str) -> float:

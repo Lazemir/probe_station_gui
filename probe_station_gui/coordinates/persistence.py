@@ -76,6 +76,34 @@ class CoordinateFrameDocument:
 
         return replace(self, records=tuple(records))
 
+    def without_frame_id(self, frame_id: str) -> CoordinateFrameDocument:
+        """Remove a frame and every raw slot that names its UUID."""
+
+        canonical_frame_id = str(uuid.UUID(frame_id))
+        records = tuple(
+            record
+            for record in self.records
+            if _explicit_raw_frame_id({"frame_id": record.frame_id})
+            != canonical_frame_id
+        )
+        accepted_by_slot = dict(self.accepted_record_slots)
+        raw_records: list[object] = []
+        accepted_record_slots: list[tuple[int, str]] = []
+        remaining_ids = {record.frame_id for record in records}
+        for index, raw_record in enumerate(self.raw_records):
+            if _explicit_raw_frame_id(raw_record) == canonical_frame_id:
+                continue
+            accepted_id = accepted_by_slot.get(index)
+            if accepted_id is not None and accepted_id in remaining_ids:
+                accepted_record_slots.append((len(raw_records), accepted_id))
+            raw_records.append(raw_record)
+        return replace(
+            self,
+            records=records,
+            raw_records=tuple(raw_records),
+            accepted_record_slots=tuple(accepted_record_slots),
+        )
+
     def to_dict(self) -> dict[str, object]:
         _require_document_version(self.version)
         design_records = tuple(
@@ -138,6 +166,18 @@ class CoordinateFrameDocument:
             raw_records=tuple(deepcopy(raw_records)),
             accepted_record_slots=tuple(accepted_slots),
         )
+
+
+def _explicit_raw_frame_id(raw: object) -> str | None:
+    if not isinstance(raw, dict):
+        return None
+    value = raw.get("frame_id")
+    if not isinstance(value, str):
+        return None
+    try:
+        return str(uuid.UUID(value))
+    except ValueError:
+        return None
 
 
 def _require_document_version(value: object) -> int:
