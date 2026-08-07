@@ -41,6 +41,8 @@ class CoordinateDisplayPlan:
     selected_frame_id: str
     selector_entries: tuple[CoordinateSelectorEntry, ...]
     axis_updates: tuple[CoordinateAxisDisplay, ...]
+    selection_available: bool = True
+    selection_reason: str | None = None
 
 
 def _normalized_axes(axes: Iterable[str]) -> frozenset[str]:
@@ -249,23 +251,21 @@ def build_coordinate_display_plan(
     records = {record.frame_id: record for record in snapshot.records}
     requested = str(selected_frame_id or MACHINE_FRAME_ID)
     record = records.get(requested)
+    selection_available = True
+    selection_reason = None
     if requested == MACHINE_FRAME_ID:
         selected = MACHINE_FRAME_ID
         record = None
     elif record is None:
         selected = MACHINE_FRAME_ID
     else:
-        selectable = next(
-            (entry.enabled for entry in entries if entry.frame_id == requested),
-            False,
+        selection_reason = _frame_selection_reason(
+            record,
+            homed_axes=homed,
+            authority_axes=authority,
         )
-        selected = (
-            requested
-            if selectable or allow_unavailable_selection_for_preview
-            else MACHINE_FRAME_ID
-        )
-        if selected == MACHINE_FRAME_ID:
-            record = None
+        selection_available = not bool(selection_reason)
+        selected = requested
 
     if record is None:
         axis_updates = tuple(
@@ -274,6 +274,16 @@ def build_coordinate_display_plan(
                 physical_pose=physical_pose,
                 homed_axes=homed,
                 authority_axes=authority,
+            )
+            for axis in VISIBLE_STAGE_AXES
+        )
+    elif not selection_available:
+        axis_updates = tuple(
+            CoordinateAxisDisplay(
+                axis,
+                None,
+                "unavailable",
+                selection_reason or "Coordinate system is unavailable.",
             )
             for axis in VISIBLE_STAGE_AXES
         )
@@ -288,7 +298,13 @@ def build_coordinate_display_plan(
             )
             for axis in VISIBLE_STAGE_AXES
         )
-    return CoordinateDisplayPlan(selected, entries, axis_updates)
+    return CoordinateDisplayPlan(
+        selected,
+        entries,
+        axis_updates,
+        selection_available=selection_available,
+        selection_reason=selection_reason or None,
+    )
 
 
 def decide_pending_frame_restore(

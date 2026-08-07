@@ -180,7 +180,7 @@ def test_missing_z_always_makes_dependent_a_unavailable() -> None:
     assert axes["A"].tooltip == "Focus reference changed."
 
 
-def test_frame_selection_requires_xy_homing_and_tracked_b_authority() -> None:
+def test_existing_selection_is_unavailable_until_xy_homing_and_b_authority() -> None:
     frame = _record(DESIGN_ID, FrameKind.DESIGN, "chip-a")
     snapshot = _snapshot(frame)
 
@@ -192,12 +192,14 @@ def test_frame_selection_requires_xy_homing_and_tracked_b_authority() -> None:
         authority_axes={"X", "Y", "Z", "A"},
     )
 
-    assert unhomed.selected_frame_id == MACHINE_FRAME_ID
+    assert unhomed.selected_frame_id == DESIGN_ID
+    assert unhomed.selection_available is False
     assert not next(item for item in unhomed.selector_entries if item.frame_id == DESIGN_ID).enabled
     assert "Home X and Y" in next(
         item for item in unhomed.selector_entries if item.frame_id == DESIGN_ID
     ).reason
-    assert missing_b.selected_frame_id == MACHINE_FRAME_ID
+    assert missing_b.selected_frame_id == DESIGN_ID
+    assert missing_b.selection_available is False
     assert "B coordinate is unavailable" in next(
         item for item in missing_b.selector_entries if item.frame_id == DESIGN_ID
     ).reason
@@ -207,6 +209,27 @@ def test_missing_selected_frame_falls_back_to_machine() -> None:
     plan = _plan(_snapshot(), selected_frame_id=DESIGN_ID)
 
     assert plan.selected_frame_id == MACHINE_FRAME_ID
+
+
+def test_existing_selection_survives_temporary_b_authority_loss() -> None:
+    plan = _plan(
+        _snapshot(_record(DESIGN_ID, FrameKind.DESIGN, "chip-a")),
+        selected_frame_id=DESIGN_ID,
+        authority_axes={"X", "Y", "Z", "A"},
+    )
+
+    assert plan.selected_frame_id == DESIGN_ID
+    assert plan.selection_available is False
+    assert plan.selection_reason
+    assert all(update.value is None for update in plan.axis_updates)
+    assert all(update.color_role == "unavailable" for update in plan.axis_updates)
+
+
+def test_missing_selected_record_is_permanent_machine_fallback() -> None:
+    plan = _plan(_snapshot(), selected_frame_id=DESIGN_ID)
+
+    assert plan.selected_frame_id == MACHINE_FRAME_ID
+    assert plan.selection_available is True
 
 
 def test_restore_waits_for_authority_then_allows_yellow_a() -> None:
@@ -268,7 +291,7 @@ def test_restore_rejects_missing_z_or_deleted_frame_after_authority_is_known() -
     ) == MACHINE_FRAME_ID
 
 
-def test_semantically_invalid_ready_origins_cannot_select_or_restore() -> None:
+def test_semantically_invalid_ready_origins_remain_displayed_but_cannot_restore() -> None:
     corrupt = _record(
         DESIGN_ID,
         FrameKind.DESIGN,
@@ -282,7 +305,8 @@ def test_semantically_invalid_ready_origins_cannot_select_or_restore() -> None:
     entry = next(item for item in plan.selector_entries if item.frame_id == DESIGN_ID)
     assert entry.enabled is False
     assert "READY Z requires" in entry.reason
-    assert plan.selected_frame_id == MACHINE_FRAME_ID
+    assert plan.selected_frame_id == DESIGN_ID
+    assert plan.selection_available is False
     assert decide_pending_frame_restore(
         snapshot,
         frame_id=DESIGN_ID,

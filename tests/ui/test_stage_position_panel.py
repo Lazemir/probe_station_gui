@@ -309,6 +309,57 @@ class _SelectionSettingsManager:
         raise AssertionError("selector callback must not synchronously save settings")
 
 
+class _SelectionOwner:
+    def __init__(self, *, selected: str, authority_axes: set[str]) -> None:
+        frame_id = "11111111-1111-4111-8111-111111111111"
+        registry = CoordinateFrameRegistry()
+        registry.add(_ready_frame_without_a(frame_id))
+        self._stage_position_panel = None
+        self._coordinate_frame_registry = registry
+        self._coordinate_frames_loaded = True
+        self._selected_coordinate_frame_id = selected
+        self._pending_coordinate_frame_restore_id = None
+        self._stage_axis_display_values: dict[str, float] = {}
+        self._latest_physical_machine_pose = PhysicalMachinePose(
+            {axis: 0.0 for axis in authority_axes}
+        )
+        self.settings_manager = _SelectionSettingsManager(selected)
+        self.stage_controller = SimpleNamespace(homed_axes=lambda: {"X", "Y"})
+
+    @property
+    def persisted_selections(self) -> list[str]:
+        return self.settings_manager.in_memory_updates
+
+
+def test_temporary_b_loss_does_not_persist_machine_selection() -> None:
+    frame_id = "11111111-1111-4111-8111-111111111111"
+    owner = _SelectionOwner(
+        selected=frame_id,
+        authority_axes={"X", "Y", "Z", "A"},
+    )
+
+    panel_adapter.update_software_coordinate_display(
+        owner,
+        owner._latest_physical_machine_pose,
+    )
+
+    assert owner._selected_coordinate_frame_id == frame_id
+    assert owner.persisted_selections == []
+
+
+def test_explicit_unavailable_selection_keeps_previous_selection() -> None:
+    frame_id = "11111111-1111-4111-8111-111111111111"
+    owner = _SelectionOwner(
+        selected="machine",
+        authority_axes={"X", "Y", "Z", "A"},
+    )
+
+    panel_adapter.select_gui_coordinate_frame(owner, frame_id)
+
+    assert owner._selected_coordinate_frame_id == "machine"
+    assert owner.persisted_selections == []
+
+
 def test_gui_restore_selects_ready_through_z_even_when_a_is_missing(
     qt_app: QApplication,
 ) -> None:

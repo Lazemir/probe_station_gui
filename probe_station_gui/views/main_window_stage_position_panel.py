@@ -214,7 +214,6 @@ def select_gui_coordinate_frame(
 ) -> None:
     """Apply one explicit GUI selection without touching API coordinate state."""
 
-    owner._pending_coordinate_frame_restore_id = None
     requested = str(frame_id or MACHINE_FRAME_ID)
     pose = _coerce_physical_machine_pose(
         getattr(owner, "_latest_physical_machine_pose", None)
@@ -245,7 +244,14 @@ def select_gui_coordinate_frame(
                 homed_axes=homed_getter() if callable(homed_getter) else set(),
                 authority_axes=set(pose.values),
             )
+            entry = next(
+                (item for item in plan.selector_entries if item.frame_id == requested),
+                None,
+            )
+            if entry is not None and not entry.enabled:
+                return
             requested = plan.selected_frame_id
+    owner._pending_coordinate_frame_restore_id = None
     owner._selected_coordinate_frame_id = requested
     if pose is not None:
         update_software_coordinate_display(owner, pose)
