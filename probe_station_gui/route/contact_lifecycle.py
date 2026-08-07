@@ -355,6 +355,7 @@ class RouteContactFlow:
             )
             self._raise_if_interrupted()
             self._notify_successful_contact(placement)
+            self._raise_if_interrupted()
             self._events.status(placement.message)
             return RouteContactFlowResult(placement=placement)
         except _ContactInterrupted as exc:
@@ -503,6 +504,7 @@ class RouteContactFlow:
                 needles_lowered = False
             placement_succeeded = placement.success
             self._notify_successful_contact(placement)
+            self._raise_if_interrupted()
             self._events.contact_photo(
                 request.point,
                 placement.record,

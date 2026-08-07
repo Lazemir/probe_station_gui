@@ -892,7 +892,7 @@ def test_stage_mark_capture_normalizes_mixed_b_samples_to_first_context(
     assert committed.transform.reference_b_deg == pytest.approx(0.0)
 
 
-def test_operator_align_captures_physical_machine_marks_and_publishes_frame(
+def test_operator_align_normalizes_physical_marks_captured_at_different_b_and_pivots(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -933,6 +933,10 @@ def test_operator_align_captures_physical_machine_marks_and_publishes_frame(
         request_rotate_b=lambda angle: rotations.append(float(angle)),
     )
     _set_rotation_settings(window)
+    current_pivot = [(0.0, 0.0)]
+    window._rotation_geometry_snapshot = lambda: types.SimpleNamespace(
+        pivot_machine_xy=current_pivot[0]
+    )
     window._camera_stage_xy_from_raw_stage_xy = lambda point: point
     window._design_navigation_xy_from_physical_machine_xy = lambda point: point
     window._set_alignment_panel_expanded = lambda: None
@@ -955,8 +959,11 @@ def test_operator_align_captures_physical_machine_marks_and_publishes_frame(
     )
     Main._request_alignment_capture(window, 0, "center")
     first_request, first_axes = requests.pop(0)
+    assert isinstance(first_request, RegistrationCaptureToken)
+    assert first_request.mark_index == 0
+    assert first_request.pivot_machine_xy == (0.0, 0.0)
     assert first_axes == ("X", "Y", "B")
-    first_snapshot = _machine_snapshot((10.0, 20.0, 0.0, 0.0, 5.0))
+    first_snapshot = _machine_snapshot((10.0, 20.0, 0.0, 0.0, 0.0))
     Main._on_registration_machine_coordinate_snapshot_finished(
         window,
         first_request,
@@ -965,10 +972,16 @@ def test_operator_align_captures_physical_machine_marks_and_publishes_frame(
         "",
     )
 
+    current_pivot[0] = (10.0, 20.0)
     Main._request_alignment_capture(window, 1, "center")
     second_request, second_axes = requests.pop(0)
+    assert isinstance(second_request, RegistrationCaptureToken)
+    assert second_request.mark_index == 1
+    assert second_request.pivot_machine_xy == (10.0, 20.0)
     assert second_axes == ("X", "Y", "B")
-    second_snapshot = _machine_snapshot((10.0, 21.0, 0.0, 0.0, 5.0))
+    # At B=90 around the captured pivot, (9, 20) normalizes to (10, 21)
+    # in the first sample's B=0 reference plane.
+    second_snapshot = _machine_snapshot((9.0, 20.0, 0.0, 0.0, 90.0))
     window.stage_controller.latest_machine_coordinate_snapshot = (
         lambda: second_snapshot
     )
@@ -987,14 +1000,19 @@ def test_operator_align_captures_physical_machine_marks_and_publishes_frame(
     metadata = main_module.DesignFrameMetadata.from_mapping(committed.metadata)
     assert metadata.source_design_marks == ((0.0, 0.0), (1000.0, 0.0))
     assert metadata.source_machine_marks == ((10.0, 20.0), (10.0, 21.0))
+    assert committed.transform is not None
+    assert committed.transform.reference_b_deg == pytest.approx(0.0)
     assert session.active_frame_id == committed.frame_id
     assert session.registration is not None and session.registration.valid
     assert publishes == [window]
     assert rotations == []
     assert "complete" in statuses[-1].lower()
+    assert not hasattr(window, "_pending_operator_alignment_capture")
+    assert not hasattr(window, "_alignment_physical_draft")
+    assert not hasattr(window, "_alignment_operation_id")
 
 
-def test_operator_alignment_fit_failure_discards_all_tentative_samples(
+def test_operator_alignment_fit_failure_restores_exact_capture_baseline(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -1003,36 +1021,40 @@ def test_operator_alignment_fit_failure_discards_all_tentative_samples(
     draft = registry.add(new_design_frame_draft(document, existing_names=()))
     session = DesignSession(document=document)
     session.link_active_frame(draft)
-    design_marks = ((0.0, 0.0), (1000.0, 0.0))
-    operation_id = "align-op"
-    source_identity = (str(document.path.resolve()), str(document.source_load_id))
-    samples = tuple(
-        main_module._RegistrationEvidenceSample(
-            slot=slot,
-            physical_machine_xy=physical_xy,
-            physical_b_deg=5.0,
-            pivot_machine_xy=(0.0, 0.0),
-            source_identity=source_identity,
-            top_cell_name=document.top_cell_name,
-            frame_id=draft.frame_id,
-            frame_version=draft.version,
-            design_mark_set=design_marks,
-            operation_id=operation_id,
-        )
-        for slot, physical_xy in enumerate(((1.0, 2.0), (2.0, 2.0)))
-    )
-    session.source_design_marks = design_marks
-    session.source_stage_marks = tuple(
-        sample.physical_machine_xy for sample in samples
-    )
+    requests: list[object] = []
     statuses: list[str] = []
     window = Main.__new__(Main)
     window._design_session = session
     window._coordinate_frame_registry = registry
-    window._alignment_design_draft = design_marks
-    window._alignment_stage_draft = list(session.source_stage_marks)
-    window._alignment_physical_draft = list(samples)
-    window._alignment_operation_id = operation_id
+    window._coordinate_frames_loaded = True
+    window._active_design_frame_metadata = main_module.DesignFrameMetadata.from_document(
+        document
+    )
+    window._manual_alignment_pick_slot = None
+    window._manual_alignment_capture_context = None
+    window._manual_alignment_points = [None, None]
+    window._pending_alignment_preparation = None
+    window._pending_quick_alignment_rotation = False
+    window._last_selected_design_point = None
+    window._design_snap_enabled = True
+    window.alignment_panel = None
+    window.alignment_dock = None
+    window.design_layout_window = None
+    window.stage_controller = types.SimpleNamespace(
+        request_machine_coordinate_snapshot=lambda token, *, axes: (
+            requests.append(token) or True
+        ),
+        latest_machine_coordinate_snapshot=lambda: None,
+    )
+    _set_rotation_settings(window)
+    window._camera_stage_xy_from_raw_stage_xy = lambda point: point
+    window._design_navigation_xy_from_physical_machine_xy = lambda point: point
+    window._set_alignment_panel_expanded = lambda: None
+    window._refresh_manual_alignment_ui = lambda: None
+    window._update_stage_coordinate_apply_state = lambda: None
+    window._refresh_design_panel = lambda: None
+    window._refresh_design_position = lambda: None
+    window._update_coordinate_display = lambda **_kwargs: None
     window._show_status = lambda message, _timeout=0: statuses.append(str(message))
     monkeypatch.setattr(
         main_module,
@@ -1042,13 +1064,24 @@ def test_operator_alignment_fit_failure_discards_all_tentative_samples(
         ),
     )
 
-    Main._commit_operator_alignment(window, samples)
+    Main._on_alignment_draft_accepted(
+        window,
+        ((0.0, 0.0), (1000.0, 0.0)),
+    )
+    for slot, point in enumerate(((1.0, 2.0), (2.0, 2.0))):
+        Main._request_alignment_capture(window, slot, "center")
+        Main._on_registration_machine_coordinate_snapshot_finished(
+            window,
+            requests.pop(0),
+            True,
+            _machine_snapshot((point[0], point[1], 0.0, 0.0, 5.0)),
+            "",
+        )
 
     assert registry.get(draft.frame_id) == draft
-    assert window._alignment_physical_draft == [None, None]
     assert window._alignment_stage_draft == [None, None]
     assert session.source_stage_marks_compact() == []
-    assert statuses == ["alignment fit failed"]
+    assert statuses[-1] == "alignment fit failed"
 
 
 def test_legacy_stage_mark_capture_persists_its_wco_provenance(tmp_path: Path) -> None:

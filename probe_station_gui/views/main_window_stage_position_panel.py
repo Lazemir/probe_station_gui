@@ -179,7 +179,7 @@ def update_software_coordinate_display(
             authority_axes=frozenset(authority_axes),
         )
     )
-    if not decision.available:
+    if explicit and not decision.available:
         return decision
     if physical_pose is None or snapshot is None:
         if decision.persist_selection:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import replace
+import threading
 
 import pytest
 
@@ -348,6 +349,45 @@ def test_contact_success_callback_runs_after_quality_and_interrupt_checkpoint() 
     assert result.require_placement().success is True
     assert events.index("quality:record") < events.index("reference:capture")
     assert events.index("contact:check") < events.index("reference:capture")
+
+
+def test_interrupt_requested_during_success_callback_stops_later_contact_work() -> None:
+    events: list[str] = []
+    interrupt = _InterruptAdapter()
+    callback_entered = threading.Event()
+    release_callback = threading.Event()
+    results = []
+
+    def blocking_callback(_placement) -> None:
+        events.append("reference:capture")
+        callback_entered.set()
+        assert release_callback.wait(2.0)
+
+    flow = RouteContactFlow(
+        stage=_StageAdapter(events),
+        meter=_MeterAdapter(events),
+        quality=_QualityAdapter(events),
+        interrupt=interrupt,
+        events=_EventAdapter(events),
+        post_success_contact=blocking_callback,
+        post_success_contact_eligible=lambda: True,
+    )
+    worker = threading.Thread(
+        target=lambda: results.append(flow.place_contact(_contact_request())),
+    )
+    worker.start()
+    assert callback_entered.wait(2.0)
+
+    interrupt.request()
+    release_callback.set()
+    worker.join(2.0)
+
+    assert not worker.is_alive()
+    assert len(results) == 1
+    assert results[0].interrupted is True
+    assert interrupt.requested() is True
+    assert "photo:contact:true" not in events
+    assert "status:Contact ready: ok" not in events
 
 
 def test_interrupt_at_quality_checkpoint_never_runs_contact_success_callback() -> None:

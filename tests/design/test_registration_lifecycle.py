@@ -319,6 +319,61 @@ def test_mixed_b_samples_are_normalized_about_captured_pivot() -> None:
     assert result.normalized_samples[1].machine_xy == pytest.approx((12.0, 3.0))
 
 
+def test_indexed_operator_samples_use_slot_order_for_mixed_pivot_normalization() -> None:
+    lifecycle = DesignRegistrationLifecycle()
+    context = replace(
+        _context(
+            pivot=(10.0, 20.0),
+            objective_offset=(0.25, -0.5),
+        ),
+        operator_alignment=True,
+        mark_index=1,
+    )
+    second_slot = lifecycle.begin_capture(context)
+    lifecycle.accept_sample(
+        second_slot,
+        replace(_sample(x=9.0, y=20.0, b=90.0), mark_index=1),
+    )
+    first_slot = lifecycle.begin_capture(
+        replace(
+            context,
+            pivot_machine_xy=(0.0, 0.0),
+            objective_xy_offset=(1.0, 2.0),
+            mark_index=0,
+        )
+    )
+
+    result = lifecycle.accept_sample(
+        first_slot,
+        replace(_sample(x=10.0, y=20.0, b=0.0), mark_index=0),
+    )
+
+    assert result.commit_requested is True
+    assert [sample.mark_index for sample in result.normalized_samples] == [0, 1]
+    assert {sample.reference_b_deg for sample in result.normalized_samples} == {0.0}
+    assert result.normalized_samples[0].machine_xy == pytest.approx((10.0, 20.0))
+    assert result.normalized_samples[1].machine_xy == pytest.approx((10.0, 21.0))
+    assert [
+        sample.captured_objective_xy_offset
+        for sample in result.normalized_samples
+    ] == [(1.0, 2.0), (0.25, -0.5)]
+
+
+def test_operator_capture_does_not_supersede_an_active_hardware_request() -> None:
+    lifecycle = DesignRegistrationLifecycle()
+    context = replace(_context(), operator_alignment=True, mark_index=0)
+    active = lifecycle.begin_capture(context)
+
+    blocked = lifecycle.begin_capture(replace(context, mark_index=1))
+    accepted = lifecycle.accept_sample(
+        active,
+        replace(_sample(), mark_index=0),
+    )
+
+    assert blocked.capture_allowed is False
+    assert accepted.accepted is True
+
+
 def test_exact_context_reuses_operation_but_only_latest_request_can_complete() -> None:
     lifecycle = DesignRegistrationLifecycle()
 

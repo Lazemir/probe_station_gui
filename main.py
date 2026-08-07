@@ -605,35 +605,6 @@ class _ManualAlignmentCaptureContext:
     cancelled: threading.Event
 
 
-@dataclass(frozen=True)
-class _OperatorAlignmentCaptureContext:
-    request_id: str
-    slot: int
-    source: str
-    configured_target_xy: tuple[float, float] | None
-    session_identity: int
-    frame_id: str
-    frame_version: int
-    source_identity: tuple[str, str]
-    top_cell_name: str
-    design_mark_set: tuple[tuple[float, float], ...]
-    operation_id: str
-
-
-@dataclass(frozen=True)
-class _RegistrationEvidenceSample:
-    slot: int
-    physical_machine_xy: tuple[float, float]
-    physical_b_deg: float
-    pivot_machine_xy: tuple[float, float]
-    source_identity: tuple[str, str]
-    top_cell_name: str
-    frame_id: str
-    frame_version: int
-    design_mark_set: tuple[tuple[float, float], ...]
-    operation_id: str
-
-
 @dataclass
 class _ApiStageCommandReservation:
     operation_id: str
@@ -1079,13 +1050,6 @@ class Main(QMainWindow):
         self._coordinate_frame_authority_blocked_axes: set[str] = set()
         self._active_route_design_frame_snapshot = None
         self._design_registration_lifecycle = DesignRegistrationLifecycle()
-        self._pending_operator_alignment_capture: (
-            _OperatorAlignmentCaptureContext | None
-        ) = None
-        self._alignment_operation_id: str | None = None
-        self._alignment_physical_draft: list[
-            _RegistrationEvidenceSample | None
-        ] = []
         self._focus_structure_bounds_worker: KLayoutStructureBoundsWorker | None = None
         self._focus_structure_request_id = 0
         self._pending_focus_structure_request_id: int | None = None
@@ -4842,10 +4806,7 @@ class Main(QMainWindow):
         self._design_session.clear_source_stage_marks()
         self._alignment_design_draft = normalized
         self._alignment_stage_draft = [None] * len(normalized)
-        self._alignment_physical_draft = [None] * len(normalized)
-        self._alignment_operation_id = str(uuid.uuid4())
         self._alignment_draft_fit_residuals = None
-        self._pending_operator_alignment_capture = None
         self._pending_alignment_preparation = None
         self._manual_alignment_pick_slot = None
         design_layout_window = getattr(self, "design_layout_window", None)
@@ -6225,16 +6186,15 @@ class Main(QMainWindow):
 
     def _reset_alignment_capture_points(self) -> None:
         if self._design_backed_alignment_active():
+            effects = self._design_registration_lifecycle.cancel(
+                RegistrationCancellation.MARK_SET_CHANGED
+            )
+            self._apply_registration_effects(effects)
             self._pending_alignment_preparation = None
             self._pending_quick_alignment_rotation = False
-            self._pending_operator_alignment_capture = None
             self._alignment_stage_draft = [None] * len(
                 self._alignment_design_draft
             )
-            self._alignment_physical_draft = [None] * len(
-                self._alignment_design_draft
-            )
-            self._alignment_operation_id = str(uuid.uuid4())
             self._alignment_draft_fit_residuals = None
             self._design_session.clear_source_stage_marks()
             self._set_design_snap_enabled(True)
@@ -6433,47 +6393,65 @@ class Main(QMainWindow):
         configured_target_xy: tuple[float, float] | None,
         source: str,
     ) -> None:
-        if getattr(self, "_pending_operator_alignment_capture", None) is not None:
-            self._show_status("Alignment point capture is already running.", 4000)
-            return
         session = self._design_session
         document = session.document
         frame_id = session.active_frame_id
         registry = getattr(self, "_coordinate_frame_registry", None)
         record = registry.get(frame_id) if registry is not None and frame_id else None
-        operation_id = getattr(self, "_alignment_operation_id", None)
-        if document is None or record is None or operation_id is None:
+        if document is None or record is None:
             self._show_status("Design coordinate frame is unavailable.", 6000)
             return
         try:
             source_path = str(document.path.expanduser().resolve())
-        except OSError as exc:
+            pivot_value = self._rotation_geometry_snapshot().pivot_machine_xy
+            pivot = (float(pivot_value[0]), float(pivot_value[1]))
+            camera_origin = self._camera_stage_xy_from_raw_stage_xy((0.0, 0.0))
+            objective_offset = (
+                -float(camera_origin[0]),
+                -float(camera_origin[1]),
+            )
+        except (DesignModelError, OSError, TypeError, ValueError) as exc:
             self._show_status(str(exc), 6000)
             return
-        context = _OperatorAlignmentCaptureContext(
-            request_id=str(uuid.uuid4()),
-            slot=int(slot),
-            source=str(source),
-            configured_target_xy=configured_target_xy,
+        context = RegistrationCaptureContext(
             session_identity=id(session),
             frame_id=record.frame_id,
             frame_version=record.version,
             source_identity=(source_path, str(document.source_load_id)),
             top_cell_name=str(document.top_cell_name),
-            design_mark_set=tuple(self._alignment_design_draft),
-            operation_id=str(operation_id),
+            rotation_quarter_turns=int(document.rotation_quarter_turns) % 4,
+            pivot_machine_xy=pivot,
+            objective_xy_offset=objective_offset,
+            mark_kind="source",
+            source_design_marks=tuple(self._alignment_design_draft),
+            check_design_marks=tuple(session.check_design_marks),
+            baseline_source_stage_marks=tuple(session.source_stage_marks),
+            baseline_check_stage_marks=tuple(session.check_stage_marks),
+            baseline_registration=session.registration,
+            baseline_registration_status=str(session.registration_status),
+            operator_alignment=True,
+            mark_index=int(slot),
+            configured_target_xy=configured_target_xy,
+            capture_source=str(source),
         )
-        self._pending_operator_alignment_capture = context
+        token = self._design_registration_lifecycle.begin_capture(context)
+        if not token.capture_allowed:
+            self._show_status("Alignment point capture is already running.", 4000)
+            return
+        self._apply_registration_effects(token.superseded_effects)
         accepted = self.stage_controller.request_machine_coordinate_snapshot(
-            context.request_id,
+            token,
             axes=("X", "Y", "B"),
         )
-        if not accepted and getattr(
-            self,
-            "_pending_operator_alignment_capture",
-            None,
-        ) == context:
-            self._pending_operator_alignment_capture = None
+        if not accepted:
+            effects = self._design_registration_lifecycle.accept_sample(
+                token,
+                RegistrationCaptureOutcome(
+                    succeeded=False,
+                    message="Stage is busy; alignment point capture not started.",
+                ),
+            )
+            self._apply_registration_effects(effects)
             self._show_status("Stage is busy; alignment point capture not started.", 5000)
             return
         self._refresh_manual_alignment_ui()
@@ -6519,9 +6497,6 @@ class Main(QMainWindow):
     def _finish_alignment_draft(self) -> None:
         self._alignment_design_draft = ()
         self._alignment_stage_draft = []
-        self._alignment_physical_draft = []
-        self._alignment_operation_id = None
-        self._pending_operator_alignment_capture = None
         self._alignment_draft_fit_residuals = None
         design_layout_window = getattr(self, "design_layout_window", None)
         if design_layout_window is not None:
@@ -10098,10 +10073,26 @@ class Main(QMainWindow):
                 effects.baseline_registration_status
                 or "No design registration."
             )
+            if effects.operator_alignment and self._design_backed_alignment_active():
+                baseline = list(effects.baseline_source_stage_marks)
+                self._alignment_stage_draft = baseline + [None] * max(
+                    0,
+                    len(self._alignment_design_draft) - len(baseline),
+                )
         sample = effects.captured_sample
         if sample is not None and sample.stage_xy is not None:
             if sample.mark_kind == "check":
                 session.add_check_stage_mark(sample.stage_xy)
+            elif sample.mark_index is not None:
+                session.set_source_stage_mark(sample.mark_index, sample.stage_xy)
+                if self._design_backed_alignment_active():
+                    if len(self._alignment_stage_draft) != len(
+                        self._alignment_design_draft
+                    ):
+                        self._alignment_stage_draft = [None] * len(
+                            self._alignment_design_draft
+                        )
+                    self._alignment_stage_draft[sample.mark_index] = sample.stage_xy
             else:
                 session.add_source_stage_mark(sample.stage_xy)
         window = getattr(self, "design_layout_window", None)
@@ -10119,10 +10110,7 @@ class Main(QMainWindow):
     ) -> None:
         effects = self._design_registration_lifecycle.cancel(reason)
         self._apply_registration_effects(effects)
-        self._pending_operator_alignment_capture = None
-        self._alignment_physical_draft = []
         self._alignment_stage_draft = []
-        self._alignment_operation_id = None
 
     def _capture_stage_registration_mark(self, *, check_mark: bool) -> None:
         session = self._design_session
@@ -10213,23 +10201,6 @@ class Main(QMainWindow):
         snapshot: object,
         message: str,
     ) -> None:
-        alignment_context = getattr(
-            self,
-            "_pending_operator_alignment_capture",
-            None,
-        )
-        if (
-            isinstance(alignment_context, _OperatorAlignmentCaptureContext)
-            and alignment_context.request_id == str(request_id)
-        ):
-            self._pending_operator_alignment_capture = None
-            self._complete_operator_alignment_machine_capture(
-                alignment_context,
-                success=success,
-                snapshot=snapshot,
-                message=message,
-            )
-            return
         if not isinstance(request_id, RegistrationCaptureToken):
             return
         token = request_id
@@ -10259,15 +10230,30 @@ class Main(QMainWindow):
         assert isinstance(snapshot, MachineCoordinateSnapshot)
         try:
             physical_pose = snapshot.physical_machine_pose
-            physical_xy = (
-                physical_pose.require("X"),
-                physical_pose.require("Y"),
-            )
             physical_b = physical_pose.require("B")
-            configured_xy = (
-                snapshot.physical_machine_to_configured_controller("X", physical_xy[0]),
-                snapshot.physical_machine_to_configured_controller("Y", physical_xy[1]),
-            )
+            if token.configured_target_xy is None:
+                physical_xy = (
+                    physical_pose.require("X"),
+                    physical_pose.require("Y"),
+                )
+                configured_xy = (
+                    snapshot.physical_machine_to_configured_controller(
+                        "X", physical_xy[0]
+                    ),
+                    snapshot.physical_machine_to_configured_controller(
+                        "Y", physical_xy[1]
+                    ),
+                )
+            else:
+                configured_xy = token.configured_target_xy
+                physical_xy = (
+                    snapshot.configured_controller_to_physical_machine(
+                        "X", configured_xy[0]
+                    ),
+                    snapshot.configured_controller_to_physical_machine(
+                        "Y", configured_xy[1]
+                    ),
+                )
             stage_xy = offsets.raw_stage_to_camera_stage(
                 configured_xy,
                 token.objective_xy_offset,
@@ -10292,6 +10278,7 @@ class Main(QMainWindow):
                 physical_machine_xy=(float(physical_xy[0]), float(physical_xy[1])),
                 physical_b_deg=float(physical_b),
                 stage_xy=(float(stage_xy[0]), float(stage_xy[1])),
+                mark_index=token.mark_index,
             ),
         )
         if not effects.accepted:
@@ -10305,17 +10292,31 @@ class Main(QMainWindow):
                 }
             )
         self._apply_registration_effects(effects)
-        kind = token.mark_kind
-        capture_message = (
-            f"Stage {kind} mark captured at X={physical_xy[0]:.3f}, "
-            f"Y={physical_xy[1]:.3f}."
-        )
+        if token.operator_alignment:
+            remaining = max(
+                0,
+                len(token.source_design_marks)
+                - len(self._design_session.source_stage_marks_compact()),
+            )
+            point_label = "point" if remaining == 1 else "points"
+            capture_message = (
+                f"Design alignment: point {int(token.mark_index or 0) + 1} "
+                f"captured from {token.capture_source or 'stage'}. "
+                f"Capture {remaining} remaining {point_label}."
+            )
+        else:
+            kind = token.mark_kind
+            capture_message = (
+                f"Stage {kind} mark captured at X={physical_xy[0]:.3f}, "
+                f"Y={physical_xy[1]:.3f}."
+            )
         commit_result = "incomplete"
         if effects.commit_requested:
             commit_result = self._commit_active_design_frame_registration(
                 token,
                 effects,
                 success_message=capture_message,
+                operator_alignment=token.operator_alignment,
             )
         self._refresh_design_panel()
         self._refresh_design_position()
@@ -10324,256 +10325,10 @@ class Main(QMainWindow):
         if commit_result == "deferred":
             self._show_status("Saving design registration.", 0)
             return
+        if commit_result == "presented":
+            return
         self._show_status(capture_message, 4000)
 
-    def _complete_operator_alignment_machine_capture(
-        self,
-        context: _OperatorAlignmentCaptureContext,
-        *,
-        success: bool,
-        snapshot: object,
-        message: str,
-    ) -> None:
-        if not success or not isinstance(snapshot, MachineCoordinateSnapshot):
-            self._show_status(str(message or "Machine coordinates are unavailable."), 6000)
-            self._refresh_manual_alignment_ui()
-            self._update_stage_coordinate_apply_state()
-            return
-        if not self._operator_alignment_capture_context_is_current(context):
-            self._refresh_manual_alignment_ui()
-            self._update_stage_coordinate_apply_state()
-            return
-        try:
-            physical_pose = snapshot.physical_machine_pose
-            physical_b = physical_pose.require("B")
-            if context.configured_target_xy is None:
-                physical_xy = (
-                    physical_pose.require("X"),
-                    physical_pose.require("Y"),
-                )
-                configured_xy = (
-                    snapshot.physical_machine_to_configured_controller(
-                        "X", physical_xy[0]
-                    ),
-                    snapshot.physical_machine_to_configured_controller(
-                        "Y", physical_xy[1]
-                    ),
-                )
-            else:
-                configured_xy = context.configured_target_xy
-                physical_xy = (
-                    snapshot.configured_controller_to_physical_machine(
-                        "X", configured_xy[0]
-                    ),
-                    snapshot.configured_controller_to_physical_machine(
-                        "Y", configured_xy[1]
-                    ),
-                )
-            stage_xy = self._camera_stage_xy_from_raw_stage_xy(configured_xy)
-            pivot = self._rotation_geometry_snapshot().pivot_machine_xy
-        except Exception as exc:
-            self._show_status(str(exc), 6000)
-            self._refresh_manual_alignment_ui()
-            self._update_stage_coordinate_apply_state()
-            return
-        sample = _RegistrationEvidenceSample(
-            slot=context.slot,
-            physical_machine_xy=(float(physical_xy[0]), float(physical_xy[1])),
-            physical_b_deg=float(physical_b),
-            pivot_machine_xy=(float(pivot[0]), float(pivot[1])),
-            source_identity=context.source_identity,
-            top_cell_name=context.top_cell_name,
-            frame_id=context.frame_id,
-            frame_version=context.frame_version,
-            design_mark_set=context.design_mark_set,
-            operation_id=context.operation_id,
-        )
-        count = len(context.design_mark_set)
-        samples = getattr(self, "_alignment_physical_draft", None)
-        if not isinstance(samples, list) or len(samples) != count:
-            samples = [None] * count
-            self._alignment_physical_draft = samples
-        samples[context.slot] = sample
-        if len(self._alignment_stage_draft) != count:
-            self._alignment_stage_draft = [None] * count
-        self._alignment_stage_draft[context.slot] = stage_xy
-        self._design_session.set_source_stage_mark(context.slot, stage_xy)
-        self._manual_alignment_pick_slot = None
-        self._refresh_manual_alignment_ui()
-        self._update_stage_coordinate_apply_state()
-        if any(item is None for item in samples):
-            remaining = sum(item is None for item in samples)
-            point_label = "point" if remaining == 1 else "points"
-            self._show_status(
-                f"Design alignment: point {context.slot + 1} captured from "
-                f"{context.source}. Capture {remaining} remaining {point_label}.",
-                6000,
-            )
-            return
-        self._commit_operator_alignment(tuple(samples))
-
-    def _operator_alignment_capture_context_is_current(
-        self,
-        context: _OperatorAlignmentCaptureContext,
-    ) -> bool:
-        session = self._design_session
-        document = session.document
-        if (
-            id(session) != context.session_identity
-            or document is None
-            or session.active_frame_id != context.frame_id
-            or tuple(getattr(self, "_alignment_design_draft", ()))
-            != context.design_mark_set
-            or getattr(self, "_alignment_operation_id", None) != context.operation_id
-        ):
-            return False
-        try:
-            source_identity = (
-                str(document.path.expanduser().resolve()),
-                str(document.source_load_id),
-            )
-        except OSError:
-            return False
-        if (
-            source_identity != context.source_identity
-            or str(document.top_cell_name) != context.top_cell_name
-        ):
-            return False
-        registry = getattr(self, "_coordinate_frame_registry", None)
-        current = registry.get(context.frame_id) if registry is not None else None
-        return current is not None and current.version == context.frame_version
-
-    def _commit_operator_alignment(
-        self,
-        samples: tuple[_RegistrationEvidenceSample | None, ...],
-    ) -> None:
-        completed = tuple(sample for sample in samples if sample is not None)
-        if len(completed) != len(samples) or len(completed) < 2:
-            return
-        first = completed[0]
-        if any(
-            sample.frame_id != first.frame_id
-            or sample.frame_version != first.frame_version
-            or sample.source_identity != first.source_identity
-            or sample.top_cell_name != first.top_cell_name
-            or sample.design_mark_set != first.design_mark_set
-            or sample.operation_id != first.operation_id
-            or not math.isclose(
-                sample.physical_b_deg,
-                first.physical_b_deg,
-                rel_tol=0.0,
-                abs_tol=1e-9,
-            )
-            or sample.pivot_machine_xy != first.pivot_machine_xy
-            for sample in completed[1:]
-        ):
-            self._discard_operator_alignment_evidence(
-                len(samples),
-                "Alignment captures used incompatible B-axis contexts. Capture them again.",
-            )
-            return
-        registry = getattr(self, "_coordinate_frame_registry", None)
-        current = registry.get(first.frame_id) if registry is not None else None
-        document = self._design_session.document
-        if current is None or current.version != first.frame_version or document is None:
-            return
-        turns = int(document.rotation_quarter_turns) % 4
-        design_marks = tuple(
-            document.rotate_point(point, -turns) for point in first.design_mark_set
-        )
-        try:
-            committed = commit_xyb_registration(
-                current,
-                design_points=design_marks,
-                physical_machine_points=tuple(
-                    sample.physical_machine_xy for sample in completed
-                ),
-                physical_b_deg=first.physical_b_deg,
-                pivot_machine_xy=first.pivot_machine_xy,
-            )
-            committed = registry.replace(
-                committed,
-                expected_version=current.version,
-            )
-            self._design_session.link_active_frame(
-                committed,
-                machine_point_for_navigation=(
-                    self._design_navigation_xy_from_physical_machine_xy
-                ),
-                machine_b_deg=first.physical_b_deg,
-                pivot_machine_xy=first.pivot_machine_xy,
-            )
-        except (DesignModelError, KeyError, RuntimeError, ValueError) as exc:
-            self._discard_operator_alignment_evidence(len(samples), str(exc))
-            return
-        metadata = DesignFrameMetadata.from_mapping(committed.metadata)
-        self._alignment_draft_fit_residuals = (
-            metadata.rms_residual_mm,
-            metadata.max_residual_mm,
-        )
-        try:
-            publication_request_id = connection_flow.publish_coordinate_frames(self)
-        except Exception as exc:
-            try:
-                restored = registry.replace(
-                    current,
-                    expected_version=committed.version,
-                )
-                self._design_session.link_active_frame(
-                    restored,
-                    machine_point_for_navigation=(
-                        self._design_navigation_xy_from_physical_machine_xy
-                    ),
-                    machine_b_deg=first.physical_b_deg,
-                    pivot_machine_xy=first.pivot_machine_xy,
-                )
-            except Exception:
-                logger.exception("Failed to roll back operator alignment publish")
-            self._discard_operator_alignment_evidence(
-                len(samples),
-                str(exc) or type(exc).__name__,
-            )
-            return
-        success_message = (
-            "Design alignment complete. "
-            f"RMS {float(metadata.rms_residual_mm or 0.0):.4f} mm, "
-            f"max {float(metadata.max_residual_mm or 0.0):.4f} mm."
-        )
-        deferred = isinstance(publication_request_id, int)
-        if deferred:
-            self._coordinate_frame_lifecycle.track_publication(
-                FramePublication(
-                    request_id=publication_request_id,
-                    records=tuple(registry.snapshot().records),
-                    previous_record=current,
-                    committed_record=committed,
-                    machine_b_deg=first.physical_b_deg,
-                    pivot_machine_xy=first.pivot_machine_xy,
-                    success_message=success_message,
-                    operator_alignment=True,
-                )
-            )
-        self._set_design_snap_enabled(False)
-        self._finish_alignment_draft()
-        self._refresh_design_panel()
-        self._refresh_design_position()
-        if deferred:
-            self._show_status("Saving design registration.", 0)
-            return
-        self._collapse_alignment_panel_if_ready()
-        self._show_status(success_message, 7000)
-
-    def _discard_operator_alignment_evidence(
-        self,
-        sample_count: int,
-        message: str,
-    ) -> None:
-        self._alignment_physical_draft = [None] * max(0, int(sample_count))
-        self._alignment_stage_draft = [None] * max(0, int(sample_count))
-        self._alignment_operation_id = str(uuid.uuid4())
-        self._pending_operator_alignment_capture = None
-        self._design_session.clear_source_stage_marks()
-        self._show_status(str(message), 7000)
 
     def _commit_active_design_frame_registration(
         self,
@@ -10581,6 +10336,7 @@ class Main(QMainWindow):
         effects: RegistrationEffects,
         *,
         success_message: str = "Design registration saved.",
+        operator_alignment: bool = False,
     ) -> str:
         registry = getattr(self, "_coordinate_frame_registry", None)
         frame_id = token.frame_id
@@ -10713,6 +10469,17 @@ class Main(QMainWindow):
                 machine_b_deg=target_b,
                 pivot_machine_xy=pivot,
             )
+        if operator_alignment:
+            metadata = DesignFrameMetadata.from_mapping(committed.metadata)
+            self._alignment_draft_fit_residuals = (
+                metadata.rms_residual_mm,
+                metadata.max_residual_mm,
+            )
+            success_message = (
+                "Design alignment complete. "
+                f"RMS {float(metadata.rms_residual_mm or 0.0):.4f} mm, "
+                f"max {float(metadata.max_residual_mm or 0.0):.4f} mm."
+            )
         try:
             publication_request_id = connection_flow.publish_coordinate_frames(self)
         except Exception as exc:
@@ -10744,10 +10511,20 @@ class Main(QMainWindow):
                     machine_b_deg=target_b,
                     pivot_machine_xy=pivot,
                     success_message=str(success_message),
+                    operator_alignment=operator_alignment,
                     registration_rollback_effects=rollback_effects,
                 )
             )
+            if operator_alignment:
+                self._set_design_snap_enabled(False)
+                self._finish_alignment_draft()
             return "deferred"
+        if operator_alignment:
+            self._set_design_snap_enabled(False)
+            self._finish_alignment_draft()
+            self._collapse_alignment_panel_if_ready()
+            self._show_status(success_message, 7000)
+            return "presented"
         return "committed"
 
     def _design_spacing_ratio_is_reasonable(self, ratio: float) -> bool:

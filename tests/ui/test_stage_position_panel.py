@@ -369,6 +369,33 @@ def test_temporary_b_loss_does_not_persist_machine_selection() -> None:
     assert owner.persisted_selections == []
 
 
+def test_temporary_b_loss_applies_unavailable_display_plan() -> None:
+    frame_id = "11111111-1111-4111-8111-111111111111"
+    owner = _SelectionOwner(
+        selected=frame_id,
+        authority_axes={"X", "Y", "Z", "A"},
+    )
+    owner._stage_axis_display_values = {"X": 12.0, "Y": 34.0}
+    plans: list[CoordinateDisplayPlan] = []
+    owner._stage_position_panel = SimpleNamespace(
+        set_coordinate_display_plan=plans.append
+    )
+
+    panel_adapter.update_software_coordinate_display(
+        owner,
+        owner._latest_physical_machine_pose,
+    )
+
+    assert owner._coordinate_frame_lifecycle.selected_frame_id == frame_id
+    assert owner.persisted_selections == []
+    assert len(plans) == 1
+    assert plans[0].selected_frame_id == frame_id
+    assert plans[0].selection_available is False
+    assert all(update.value is None for update in plans[0].axis_updates)
+    assert all(update.color_role == "unavailable" for update in plans[0].axis_updates)
+    assert owner._stage_axis_display_values == {}
+
+
 def test_display_refresh_delegates_selection_policy_to_lifecycle() -> None:
     frame_id = "11111111-1111-4111-8111-111111111111"
     owner = _SelectionOwner(

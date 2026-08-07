@@ -80,6 +80,10 @@ class RegistrationCaptureContext:
     baseline_registration_status: str = "No design registration."
     existing_source_machine_marks: tuple[MachinePoint, ...] = ()
     existing_check_machine_marks: tuple[MachinePoint, ...] = ()
+    operator_alignment: bool = False
+    mark_index: int | None = None
+    configured_target_xy: MachinePoint | None = None
+    capture_source: str | None = None
 
 
 @dataclass(frozen=True)
@@ -116,6 +120,11 @@ class RegistrationCaptureToken:
     check_design_marks: tuple[MachinePoint, ...]
     objective_xy_offset: MachinePoint = (0.0, 0.0)
     mark_kind: str = "source"
+    operator_alignment: bool = False
+    mark_index: int | None = None
+    configured_target_xy: MachinePoint | None = None
+    capture_source: str | None = None
+    capture_allowed: bool = True
     superseded_effects: RegistrationEffects = field(
         default_factory=lambda: RegistrationEffects(),
         compare=False,
@@ -131,6 +140,7 @@ class RegistrationSample:
     physical_machine_xy: MachinePoint
     physical_b_deg: float
     stage_xy: StagePoint | None = None
+    mark_index: int | None = None
 
 
 @dataclass(frozen=True)
@@ -151,7 +161,9 @@ class NormalizedRegistrationSample:
     captured_machine_xy: MachinePoint
     captured_b_deg: float
     captured_pivot_machine_xy: MachinePoint
+    captured_objective_xy_offset: MachinePoint
     stage_xy: StagePoint | None
+    mark_index: int | None = None
 
 
 @dataclass(frozen=True)
@@ -180,13 +192,14 @@ class RegistrationEffects:
     start_autofocus: bool = False
     contact_token: ContactOperationToken | None = None
     capture_contact: bool = False
+    operator_alignment: bool = False
 
 
 @dataclass
 class _PendingRegistrationEvidence:
     context: RegistrationCaptureContext
     operation_id: str
-    active_request_id: str
+    active_token: RegistrationCaptureToken | None
     samples: list[tuple[RegistrationCaptureToken, RegistrationSample]] = field(
         default_factory=list
     )
@@ -236,6 +249,12 @@ class DesignRegistrationLifecycle:
             if pending is None or context_matches
             else self._baseline_effects(pending)
         )
+        capture_allowed = not bool(
+            context_matches
+            and context.operator_alignment
+            and pending is not None
+            and pending.active_token is not None
+        )
         request_id = str(uuid.uuid4())
         token = RegistrationCaptureToken(
             request_id=request_id,
@@ -251,8 +270,15 @@ class DesignRegistrationLifecycle:
             mark_kind=context.mark_kind,
             source_design_marks=context.source_design_marks,
             check_design_marks=context.check_design_marks,
+            operator_alignment=context.operator_alignment,
+            mark_index=context.mark_index,
+            configured_target_xy=context.configured_target_xy,
+            capture_source=context.capture_source,
+            capture_allowed=capture_allowed,
             superseded_effects=superseded_effects,
         )
+        if not capture_allowed:
+            return token
         if pending is None or not context_matches:
             pending_context = context
             if (
@@ -277,10 +303,10 @@ class DesignRegistrationLifecycle:
             self._pending = _PendingRegistrationEvidence(
                 context=pending_context,
                 operation_id=operation_id,
-                active_request_id=request_id,
+                active_token=token,
             )
         else:
-            pending.active_request_id = request_id
+            pending.active_token = token
         return token
 
     def accept_sample(
@@ -294,7 +320,7 @@ class DesignRegistrationLifecycle:
         if isinstance(sample, RegistrationCaptureOutcome):
             if sample.succeeded:
                 return RegistrationEffects(accepted=True)
-            pending.active_request_id = ""
+            pending.active_token = None
             return RegistrationEffects(
                 accepted=True,
                 reason=str(sample.message or "Machine coordinates are unavailable."),
@@ -302,11 +328,20 @@ class DesignRegistrationLifecycle:
         if (
             sample.mark_kind not in {"source", "check"}
             or sample.mark_kind != token.mark_kind
+            or sample.mark_index != token.mark_index
         ):
             return RegistrationEffects(reason="Registration mark kind is invalid.")
 
-        pending.samples.append((token, sample))
-        pending.active_request_id = ""
+        if token.mark_index is None:
+            pending.samples.append((token, sample))
+        else:
+            pending.samples = [
+                item
+                for item in pending.samples
+                if item[0].mark_index != token.mark_index
+            ]
+            pending.samples.append((token, sample))
+        pending.active_token = None
         normalized = self._normalized_samples(pending.samples)
         complete = self._batch_is_complete(pending)
         rollback_effects = self._baseline_effects(pending) if complete else None
@@ -324,6 +359,7 @@ class DesignRegistrationLifecycle:
                 pending.context.baseline_registration_status
             ),
             rollback_effects=rollback_effects,
+            operator_alignment=pending.context.operator_alignment,
         )
         if complete:
             self._pending = None
@@ -529,6 +565,7 @@ class DesignRegistrationLifecycle:
             baseline_check_stage_marks=context.baseline_check_stage_marks,
             baseline_registration=context.baseline_registration,
             baseline_registration_status=context.baseline_registration_status,
+            operator_alignment=context.operator_alignment,
         )
 
     @staticmethod
@@ -536,7 +573,7 @@ class DesignRegistrationLifecycle:
         left: RegistrationCaptureContext,
         right: RegistrationCaptureContext,
     ) -> bool:
-        return bool(
+        shared_matches = bool(
             left.session_identity == right.session_identity
             and left.frame_id == right.frame_id
             and left.frame_version == right.frame_version
@@ -544,14 +581,24 @@ class DesignRegistrationLifecycle:
             and left.top_cell_name == right.top_cell_name
             and int(left.rotation_quarter_turns) % 4
             == int(right.rotation_quarter_turns) % 4
-            and left.pivot_machine_xy == right.pivot_machine_xy
-            and left.objective_xy_offset == right.objective_xy_offset
             and left.source_design_marks == right.source_design_marks
             and left.check_design_marks == right.check_design_marks
             and left.existing_source_machine_marks
             == right.existing_source_machine_marks
             and left.existing_check_machine_marks
             == right.existing_check_machine_marks
+            and left.operator_alignment == right.operator_alignment
+        )
+        if not shared_matches:
+            return False
+        if left.operator_alignment:
+            return True
+        return bool(
+            left.pivot_machine_xy == right.pivot_machine_xy
+            and left.objective_xy_offset == right.objective_xy_offset
+            and left.mark_index == right.mark_index
+            and left.configured_target_xy == right.configured_target_xy
+            and left.capture_source == right.capture_source
         )
 
     @staticmethod
@@ -559,26 +606,18 @@ class DesignRegistrationLifecycle:
         token: RegistrationCaptureToken,
         pending: _PendingRegistrationEvidence,
     ) -> bool:
-        context = pending.context
-        return bool(
-            token.request_id == pending.active_request_id
-            and token.operation_id == pending.operation_id
-            and token.session_identity == context.session_identity
-            and token.frame_id == context.frame_id
-            and token.frame_version == context.frame_version
-            and token.source_identity == context.source_identity
-            and token.top_cell_name == context.top_cell_name
-            and token.rotation_quarter_turns
-            == int(context.rotation_quarter_turns) % 4
-            and token.pivot_machine_xy == context.pivot_machine_xy
-            and token.objective_xy_offset == context.objective_xy_offset
-            and token.source_design_marks == context.source_design_marks
-            and token.check_design_marks == context.check_design_marks
-        )
+        return token == pending.active_token
 
     @staticmethod
     def _batch_is_complete(pending: _PendingRegistrationEvidence) -> bool:
         context = pending.context
+        if context.operator_alignment:
+            indices = {
+                token.mark_index
+                for token, sample in pending.samples
+                if sample.mark_kind == "source" and token.mark_index is not None
+            }
+            return indices == set(range(len(context.source_design_marks)))
         source_count = len(context.existing_source_machine_marks) + sum(
             sample.mark_kind == "source" for _token, sample in pending.samples
         )
@@ -595,9 +634,14 @@ class DesignRegistrationLifecycle:
     def _normalized_samples(
         samples: list[tuple[RegistrationCaptureToken, RegistrationSample]],
     ) -> tuple[NormalizedRegistrationSample, ...]:
-        reference_b = samples[0][1].physical_b_deg
+        ordered_samples = (
+            sorted(samples, key=lambda item: int(item[0].mark_index))
+            if all(token.mark_index is not None for token, _sample in samples)
+            else samples
+        )
+        reference_b = ordered_samples[0][1].physical_b_deg
         normalized: list[NormalizedRegistrationSample] = []
-        for token, sample in samples:
+        for token, sample in ordered_samples:
             pivot = token.pivot_machine_xy
             offset = (
                 sample.physical_machine_xy[0] - pivot[0],
@@ -612,7 +656,16 @@ class DesignRegistrationLifecycle:
                     captured_machine_xy=sample.physical_machine_xy,
                     captured_b_deg=sample.physical_b_deg,
                     captured_pivot_machine_xy=pivot,
+                    captured_objective_xy_offset=token.objective_xy_offset,
                     stage_xy=sample.stage_xy,
+                    mark_index=sample.mark_index,
+                )
+            )
+        if any(sample.mark_index is not None for sample in normalized):
+            normalized.sort(
+                key=lambda sample: (
+                    sample.mark_index is None,
+                    -1 if sample.mark_index is None else sample.mark_index,
                 )
             )
         return tuple(normalized)
