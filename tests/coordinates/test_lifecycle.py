@@ -30,6 +30,7 @@ from probe_station_gui.design.model import DesignDocument
 
 
 DESIGN_ID = "11111111-1111-4111-8111-111111111111"
+SECOND_DESIGN_ID = "22222222-2222-4222-8222-222222222222"
 
 
 def _design_document() -> DesignDocument:
@@ -93,8 +94,12 @@ def _draft_design_record() -> CoordinateFrameRecord:
     )
 
 
-def _record_version(version: int) -> CoordinateFrameRecord:
-    return replace(_ready_design_record(), version=version)
+def _record_version(
+    version: int,
+    *,
+    frame_id: str = DESIGN_ID,
+) -> CoordinateFrameRecord:
+    return replace(_ready_design_record(), frame_id=frame_id, version=version)
 
 
 def _lifecycle_with_durable_v0() -> CoordinateFrameLifecycle:
@@ -109,9 +114,10 @@ def _registration_publication(
     *,
     before: int,
     after: int,
+    frame_id: str = DESIGN_ID,
 ) -> FramePublication:
-    previous = _record_version(before)
-    committed = _record_version(after)
+    previous = _record_version(before, frame_id=frame_id)
+    committed = _record_version(after, frame_id=frame_id)
     return FramePublication(
         request_id=request_id,
         records=(committed,),
@@ -187,8 +193,44 @@ def test_failed_coalesced_registration_chain_rolls_to_earliest_predecessor(
         FramePublicationResult(request_id=43, succeeded=False)
     )
 
-    assert effects.rollback_record is not None
-    assert effects.rollback_record.version == 0
+    assert len(effects.rollback_publications) == 1
+    assert effects.rollback_publications[0].previous_record is not None
+    assert effects.rollback_publications[0].previous_record.version == 0
+
+
+def test_failed_document_returns_every_frame_rollback_in_frame_id_order() -> None:
+    lifecycle = CoordinateFrameLifecycle()
+    lifecycle.track_publication(
+        _registration_publication(
+            41,
+            before=0,
+            after=1,
+            frame_id=SECOND_DESIGN_ID,
+        )
+    )
+    lifecycle.track_publication(
+        _registration_publication(42, before=0, after=1)
+    )
+    lifecycle.track_publication(_ordinary_publication(43, version=2))
+    latest_second = _registration_publication(
+        44,
+        before=1,
+        after=2,
+        frame_id=SECOND_DESIGN_ID,
+    )
+    latest_first = _registration_publication(45, before=1, after=2)
+    lifecycle.track_publication(latest_second)
+    lifecycle.track_publication(latest_first)
+
+    effects = lifecycle.finish_publication(FramePublicationResult(45, False))
+
+    assert effects.rollback_publications == (
+        replace(latest_first, previous_record=_record_version(0)),
+        replace(
+            latest_second,
+            previous_record=_record_version(0, frame_id=SECOND_DESIGN_ID),
+        ),
+    )
 
 
 def test_older_failure_defers_while_newer_publication_is_pending() -> None:
@@ -199,11 +241,11 @@ def test_older_failure_defers_while_newer_publication_is_pending() -> None:
     lifecycle.track_publication(_ordinary_publication(42, version=2))
 
     deferred = lifecycle.finish_publication(FramePublicationResult(41, False))
-    assert deferred.rollback_record is None
+    assert deferred.rollback_publications == ()
     assert deferred.failure_deferred is True
     assert lifecycle.finish_publication(
         FramePublicationResult(42, True)
-    ).rollback_record is None
+    ).rollback_publications == ()
 
 
 def test_deferred_older_failure_rolls_back_if_newest_publication_fails() -> None:
@@ -216,8 +258,9 @@ def test_deferred_older_failure_rolls_back_if_newest_publication_fails() -> None
     lifecycle.finish_publication(FramePublicationResult(41, False))
     effects = lifecycle.finish_publication(FramePublicationResult(42, False))
 
-    assert effects.rollback_record is not None
-    assert effects.rollback_record.version == 0
+    assert len(effects.rollback_publications) == 1
+    assert effects.rollback_publications[0].previous_record is not None
+    assert effects.rollback_publications[0].previous_record.version == 0
 
 
 def test_newer_success_acknowledges_coalesced_registration_publications() -> None:
@@ -244,10 +287,12 @@ def test_failed_chain_returns_latest_registration_context_with_earliest_record()
 
     effects = lifecycle.finish_publication(FramePublicationResult(43, False))
 
-    assert effects.rollback_publication == replace(
-        latest,
-        previous_record=_record_version(0),
-        operator_alignment=True,
+    assert effects.rollback_publications == (
+        replace(
+            latest,
+            previous_record=_record_version(0),
+            operator_alignment=True,
+        ),
     )
 
 

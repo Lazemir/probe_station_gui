@@ -1400,8 +1400,7 @@ def test_failed_callback_executes_lifecycle_rollback_effect(
         ) -> FrameLifecycleEffects:
             calls.append(result)
             return FrameLifecycleEffects(
-                rollback_record=draft,
-                rollback_publication=publication,
+                rollback_publications=(publication,),
                 refresh_display=True,
             )
 
@@ -1437,6 +1436,111 @@ def test_failed_callback_executes_lifecycle_rollback_effect(
     assert restored.readiness == draft.readiness
     assert session.registration is None
     assert not hasattr(window, "_registration_persistence_transactions")
+
+
+def test_failed_callback_executes_every_lifecycle_rollback_effect(
+    tmp_path: Path,
+) -> None:
+    document = _make_document(tmp_path)
+    registry = CoordinateFrameRegistry()
+    first_draft = registry.add(
+        new_design_frame_draft(document, existing_names=())
+    )
+    second_draft = registry.add(
+        new_design_frame_draft(
+            document,
+            existing_names=(first_draft.name,),
+        )
+    )
+    first_committed = registry.replace(
+        commit_xyb_registration(
+            first_draft,
+            design_points=((0.0, 0.0), (1000.0, 0.0)),
+            physical_machine_points=((1.0, 2.0), (2.0, 2.0)),
+            physical_b_deg=5.0,
+            pivot_machine_xy=(0.0, 0.0),
+        ),
+        expected_version=first_draft.version,
+    )
+    second_committed = registry.replace(
+        commit_xyb_registration(
+            second_draft,
+            design_points=((0.0, 0.0), (1000.0, 0.0)),
+            physical_machine_points=((3.0, 4.0), (4.0, 4.0)),
+            physical_b_deg=7.0,
+            pivot_machine_xy=(0.5, 0.25),
+        ),
+        expected_version=second_draft.version,
+    )
+    publications = (
+        FramePublication(
+            request_id=41,
+            records=(first_committed,),
+            previous_record=first_draft,
+            committed_record=first_committed,
+            machine_b_deg=5.0,
+            pivot_machine_xy=(0.0, 0.0),
+        ),
+        FramePublication(
+            request_id=42,
+            records=(second_committed,),
+            previous_record=second_draft,
+            committed_record=second_committed,
+            machine_b_deg=7.0,
+            pivot_machine_xy=(0.5, 0.25),
+            operator_alignment=True,
+        ),
+    )
+    calls: list[FramePublicationResult] = []
+
+    class _Lifecycle:
+        def finish_publication(
+            self,
+            result: FramePublicationResult,
+        ) -> FrameLifecycleEffects:
+            calls.append(result)
+            return FrameLifecycleEffects(
+                rollback_publications=publications,
+                refresh_display=True,
+            )
+
+    session = DesignSession(document=document)
+    session.link_active_frame(
+        first_committed,
+        machine_b_deg=5.0,
+        pivot_machine_xy=(0.0, 0.0),
+    )
+    presentation: list[str] = []
+    snap_states: list[bool] = []
+    window = Main.__new__(Main)
+    window._coordinate_frame_lifecycle = _Lifecycle()
+    window._coordinate_frame_registry = registry
+    window._coordinate_frame_document = None
+    window._design_session = session
+    window._design_navigation_xy_from_physical_machine_xy = lambda point: point
+    window._refresh_design_panel = lambda: presentation.append("panel")
+    window._refresh_design_position = lambda: presentation.append("position")
+    window._set_design_snap_enabled = lambda enabled: snap_states.append(enabled)
+    window._show_status = lambda *_args: None
+
+    Main._on_coordinate_frame_store_failed(
+        window,
+        types.SimpleNamespace(
+            request_id=42,
+            operation="save",
+            message="disk full",
+        ),
+    )
+
+    assert calls == [FramePublicationResult(42, False)]
+    for draft in (first_draft, second_draft):
+        restored = registry.get(draft.frame_id)
+        assert restored is not None
+        assert restored.transform == draft.transform
+        assert restored.readiness == draft.readiness
+    assert session.registration is None
+    assert snap_states == [True]
+    assert presentation == ["panel", "position"]
 
 
 @pytest.mark.parametrize(

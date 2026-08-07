@@ -7838,43 +7838,55 @@ class Main(QMainWindow):
             if publication.success_message is not None:
                 self._show_status(publication.success_message, 7000)
 
-        rollback = effects.rollback_record
-        publication = effects.rollback_publication
-        if rollback is None or publication is None:
-            return
         registry = getattr(self, "_coordinate_frame_registry", None)
-        frame_id = rollback.frame_id
-        current = None if registry is None else registry.get(frame_id)
-        if current is None:
+        if registry is None:
+            return
+        restored_any = False
+        for publication in effects.rollback_publications:
+            rollback = publication.previous_record
+            if rollback is None:
+                continue
+            frame_id = rollback.frame_id
+            current = registry.get(frame_id)
+            if current is None:
+                continue
+            try:
+                restored = registry.replace(
+                    rollback,
+                    expected_version=current.version,
+                )
+                restored_any = True
+                session = getattr(self, "_design_session", None)
+                if session is not None and session.active_frame_id == frame_id:
+                    session.link_active_frame(
+                        restored,
+                        machine_point_for_navigation=(
+                            self._design_navigation_xy_from_physical_machine_xy
+                        ),
+                        machine_b_deg=publication.machine_b_deg,
+                        pivot_machine_xy=(
+                            publication.pivot_machine_xy or (0.0, 0.0)
+                        ),
+                    )
+                if publication.operator_alignment:
+                    self._set_design_snap_enabled(True)
+            except Exception:
+                logger.exception("Failed to roll back unsaved Design registration")
+
+        if not restored_any:
             return
         try:
-            restored = registry.replace(
-                rollback,
-                expected_version=current.version,
-            )
-            session = getattr(self, "_design_session", None)
-            if session is not None and session.active_frame_id == frame_id:
-                session.link_active_frame(
-                    restored,
-                    machine_point_for_navigation=(
-                        self._design_navigation_xy_from_physical_machine_xy
-                    ),
-                    machine_b_deg=publication.machine_b_deg,
-                    pivot_machine_xy=publication.pivot_machine_xy or (0.0, 0.0),
-                )
             document = getattr(self, "_coordinate_frame_document", None)
             with_records = getattr(document, "with_records", None)
             if callable(with_records):
                 self._coordinate_frame_document = with_records(
                     registry.snapshot().records
                 )
-            if publication.operator_alignment:
-                self._set_design_snap_enabled(True)
             if effects.refresh_display:
                 self._refresh_design_panel()
                 self._refresh_design_position()
         except Exception:
-            logger.exception("Failed to roll back unsaved Design registration")
+            logger.exception("Failed to present rolled-back Design registrations")
 
     def _on_coordinate_frame_store_failed(self, failure: object) -> None:
         operation = str(getattr(failure, "operation", "operation"))

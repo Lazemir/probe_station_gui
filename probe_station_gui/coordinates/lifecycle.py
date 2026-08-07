@@ -79,11 +79,10 @@ class DesignFrameUsabilitySnapshot:
 @dataclass(frozen=True)
 class FrameLifecycleEffects:
     replace_records: tuple[CoordinateFrameRecord, ...] | None = None
-    rollback_record: CoordinateFrameRecord | None = None
     invalidate_session_reason: str | None = None
     refresh_display: bool = False
     acknowledged_publications: tuple[FramePublication, ...] = ()
-    rollback_publication: FramePublication | None = None
+    rollback_publications: tuple[FramePublication, ...] = ()
     failure_deferred: bool = False
 
 
@@ -214,16 +213,13 @@ class CoordinateFrameLifecycle:
                     ),
                 )
             rollback_by_frame[committed.frame_id] = publication
-        rollback_publication = next(iter(rollback_by_frame.values()), None)
-        rollback = (
-            None
-            if rollback_publication is None
-            else rollback_publication.previous_record
+        rollback_publications = tuple(
+            rollback_by_frame[frame_id]
+            for frame_id in sorted(rollback_by_frame)
         )
         return FrameLifecycleEffects(
-            rollback_record=rollback,
-            refresh_display=rollback is not None,
-            rollback_publication=rollback_publication,
+            refresh_display=bool(rollback_publications),
+            rollback_publications=rollback_publications,
         )
 
     def plan_selection(
