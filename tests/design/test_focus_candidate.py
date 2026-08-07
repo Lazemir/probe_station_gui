@@ -70,3 +70,23 @@ def test_candidate_rejects_invalid_design_or_fov(
             structure_bounds=((0.0, 0.0, 1.0, 1.0),),
             fov_size=fov_size,
         )
+
+
+@pytest.mark.parametrize(
+    "fov_size",
+    [
+        (-10.0, 10.0),
+        (10.0, -10.0),
+        (0.0, 10.0),
+        (10.0, 0.0),
+    ],
+)
+def test_candidate_rejects_non_positive_fov_dimensions(
+    fov_size: tuple[float, float],
+) -> None:
+    with pytest.raises(ValueError, match="Field of view"):
+        select_central_focus_candidate(
+            design_bounds=(0.0, 0.0, 100.0, 100.0),
+            structure_bounds=((48.0, 48.0, 52.0, 52.0),),
+            fov_size=fov_size,
+        )

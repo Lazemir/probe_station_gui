@@ -78,11 +78,18 @@ def _optional_bounds(value: object) -> Bounds | None:
 
 def _required_size(value: object, label: str) -> tuple[float, float]:
     try:
-        width, height = (abs(float(item)) for item in value)  # type: ignore[arg-type]
+        width, height = (float(item) for item in value)  # type: ignore[arg-type]
     except (TypeError, ValueError) as exc:
-        raise ValueError(f"{label} must contain two finite positive values.") from exc
-    if not all(math.isfinite(item) and item > 0.0 for item in (width, height)):
-        raise ValueError(f"{label} must contain two finite positive values.")
+        raise ValueError(
+            f"{label} dimensions must be finite and greater than zero."
+        ) from exc
+    if (
+        not math.isfinite(width)
+        or not math.isfinite(height)
+        or width <= 0.0
+        or height <= 0.0
+    ):
+        raise ValueError(f"{label} dimensions must be finite and greater than zero.")
     return (width, height)
 
 
