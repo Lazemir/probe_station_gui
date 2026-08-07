@@ -427,6 +427,28 @@ def test_explicit_unavailable_selection_keeps_previous_selection() -> None:
     assert owner.persisted_selections == []
 
 
+def test_explicit_machine_selection_tolerates_missing_physical_pose(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frame_id = "11111111-1111-4111-8111-111111111111"
+    owner = _SelectionOwner(
+        selected=frame_id,
+        authority_axes=set(),
+    )
+    owner._latest_physical_machine_pose = None
+    monkeypatch.setattr(
+        panel_adapter,
+        "_coerce_physical_machine_pose",
+        lambda _value: None,
+    )
+
+    panel_adapter.select_gui_coordinate_frame(owner, "machine")
+
+    assert owner._selected_coordinate_frame_id == "machine"
+    assert owner._pending_coordinate_frame_restore_id is None
+    assert owner.persisted_selections == ["machine"]
+
+
 def test_gui_restore_selects_ready_through_z_even_when_a_is_missing(
     qt_app: QApplication,
 ) -> None:

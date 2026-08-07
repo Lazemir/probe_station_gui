@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from pathlib import Path
 
 from probe_station_gui.coordinates import (
     MACHINE_FRAME_ID,
@@ -17,9 +18,25 @@ from probe_station_gui.coordinates.model import (
     ReadinessStatus,
 )
 from probe_station_gui.coordinates.transforms import BFrameTransform
+from probe_station_gui.design.model import DesignDocument
 
 
 DESIGN_ID = "11111111-1111-4111-8111-111111111111"
+
+
+def _design_document() -> DesignDocument:
+    return DesignDocument(
+        path=Path("chip-a.gds"),
+        library=object(),
+        top_cell=object(),
+        top_cell_name="TOP",
+        cell_names=("TOP",),
+        dbu=0.001,
+        user_unit=1.0,
+        bounds=(0.0, 0.0, 1.0, 1.0),
+        polygons_by_layer={},
+        visible_layers=frozenset(),
+    )
 
 
 def _readiness(*ready_axes: str) -> dict[str, AxisReadiness]:
@@ -95,6 +112,7 @@ def test_usability_snapshot_requires_ready_current_durable_record() -> None:
             selected_frame_id=DESIGN_ID,
             authority_blocked_axes=frozenset(),
             pivot_machine_xy=(0.0, 0.0),
+            document=_design_document(),
         )
     )
 
@@ -102,6 +120,38 @@ def test_usability_snapshot_requires_ready_current_durable_record() -> None:
     assert result.usable is False
     assert result.rejection_reason is not None
     assert "registration" in result.rejection_reason.lower()
+
+
+def test_missing_document_precedes_transform_readiness_and_authority_reasons() -> None:
+    contexts = (
+        DesignUsabilityContext(
+            frames_loaded=True,
+            record=replace(_ready_design_record(), transform=None),
+            selected_frame_id=DESIGN_ID,
+            authority_blocked_axes=frozenset(),
+            pivot_machine_xy=(0.0, 0.0),
+        ),
+        DesignUsabilityContext(
+            frames_loaded=True,
+            record=_draft_design_record(),
+            selected_frame_id=DESIGN_ID,
+            authority_blocked_axes=frozenset(),
+            pivot_machine_xy=(0.0, 0.0),
+        ),
+        DesignUsabilityContext(
+            frames_loaded=True,
+            record=_ready_design_record(),
+            selected_frame_id=DESIGN_ID,
+            authority_blocked_axes=frozenset({"X", "Y", "B"}),
+            pivot_machine_xy=(0.0, 0.0),
+        ),
+    )
+
+    for context in contexts:
+        result = CoordinateFrameLifecycle().design_usability(context)
+        assert result.rejection_reason == (
+            "Load a design before using Design coordinates."
+        )
 
 
 def test_permanent_semantic_rejection_falls_back_and_persists_machine() -> None:
@@ -168,4 +218,65 @@ def test_explicit_permanently_rejected_frame_keeps_previous_selection() -> None:
     assert decision.available is False
     assert decision.reason is not None
     assert "READY Z requires" in decision.reason
+    assert decision.persist_selection is False
+
+
+def test_pending_restore_waits_without_changing_machine_intent() -> None:
+    lifecycle = CoordinateFrameLifecycle()
+
+    decision = lifecycle.plan_selection(
+        FrameSelectionContext(
+            records=(_ready_design_record(),),
+            requested_frame_id=DESIGN_ID,
+            explicit=False,
+            homed_axes=frozenset({"X", "Y"}),
+            authority_axes=frozenset({"X", "Y", "Z", "A"}),
+        )
+    )
+
+    assert decision.selected_frame_id == MACHINE_FRAME_ID
+    assert decision.available is False
+    assert decision.persist_selection is False
+
+
+def test_pending_restore_rejects_unverified_provenance_to_machine() -> None:
+    lifecycle = CoordinateFrameLifecycle()
+    blocked = replace(
+        _ready_design_record(),
+        metadata={
+            "_runtime_provenance_status": "blocked",
+            "_runtime_provenance_reason": "Design source changed.",
+        },
+    )
+
+    decision = lifecycle.plan_selection(
+        FrameSelectionContext(
+            records=(blocked,),
+            requested_frame_id=DESIGN_ID,
+            explicit=False,
+            homed_axes=frozenset({"X", "Y"}),
+            authority_axes=frozenset({"X", "Y", "Z", "A", "B"}),
+        )
+    )
+
+    assert decision.selected_frame_id == MACHINE_FRAME_ID
+    assert decision.available is True
+    assert decision.persist_selection is False
+
+
+def test_pending_restore_rejects_missing_registration_to_machine() -> None:
+    lifecycle = CoordinateFrameLifecycle()
+
+    decision = lifecycle.plan_selection(
+        FrameSelectionContext(
+            records=(_draft_design_record(),),
+            requested_frame_id=DESIGN_ID,
+            explicit=False,
+            homed_axes=frozenset({"X", "Y"}),
+            authority_axes=frozenset({"X", "Y", "Z", "A", "B"}),
+        )
+    )
+
+    assert decision.selected_frame_id == MACHINE_FRAME_ID
+    assert decision.available is True
     assert decision.persist_selection is False

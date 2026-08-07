@@ -4558,26 +4558,14 @@ class Main(QMainWindow):
         self,
         snapshot: DesignFrameUsabilitySnapshot,
     ) -> bool:
-        if not snapshot.usable or not bool(getattr(self, "_coordinate_frames_loaded", False)):
+        if not snapshot.usable:
             return False
-        session = getattr(self, "_design_session", None)
-        if getattr(session, "active_frame_id", None) != snapshot.frame_id:
-            return False
-        registry = getattr(self, "_coordinate_frame_registry", None)
-        record = (
-            registry.get(snapshot.frame_id)
-            if registry is not None and snapshot.frame_id is not None
-            else None
-        )
+        current = self._snapshot_active_design_frame_usability()
         return bool(
-            record is not None
-            and record.version == snapshot.frame_version
-            and record.transform == snapshot.transform
-            and design_frame_provenance_error(record) is None
-            and all(record.readiness[axis].available for axis in ("X", "Y", "B"))
-            and not {"X", "Y", "B"}.intersection(
-                getattr(self, "_coordinate_frame_authority_blocked_axes", set())
-            )
+            current.usable
+            and current.frame_id == snapshot.frame_id
+            and current.frame_version == snapshot.frame_version
+            and current.transform == snapshot.transform
         )
 
     def _raw_stage_xy_from_design_usability_snapshot(

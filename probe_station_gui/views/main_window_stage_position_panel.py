@@ -263,7 +263,9 @@ def select_gui_coordinate_frame(
             homed_axes=frozenset(
                 homed_getter() if callable(homed_getter) else set()
             ),
-            authority_axes=frozenset(pose.values),
+            authority_axes=(
+                frozenset() if pose is None else frozenset(pose.values)
+            ),
         )
     )
     if not decision.available:

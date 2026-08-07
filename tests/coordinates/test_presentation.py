@@ -4,6 +4,7 @@ from dataclasses import replace
 
 import pytest
 
+from probe_station_gui.coordinates import presentation as presentation_module
 from probe_station_gui.coordinates.model import (
     AxisReadiness,
     CoordinateFrameRecord,
@@ -11,7 +12,10 @@ from probe_station_gui.coordinates.model import (
     PhysicalMachinePose,
     ReadinessStatus,
 )
-from probe_station_gui.coordinates.lifecycle import FrameSelectionDecision
+from probe_station_gui.coordinates.lifecycle import (
+    FrameSelectionContext,
+    FrameSelectionDecision,
+)
 from probe_station_gui.coordinates.presentation import (
     MACHINE_FRAME_ID,
     build_coordinate_display_plan,
@@ -340,6 +344,57 @@ def test_semantically_invalid_ready_origins_fall_back_to_machine() -> None:
         homed_axes={"X", "Y"},
         authority_axes={"X", "Y", "Z", "A", "B"},
     ) == MACHINE_FRAME_ID
+
+
+def test_selector_entries_apply_lifecycle_decisions_without_rechecking_policy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    corrupt = _record(
+        DESIGN_ID,
+        FrameKind.DESIGN,
+        "corrupt",
+        transform=BFrameTransform.identity(),
+    )
+
+    class _AcceptingLifecycle:
+        def __init__(self, *, selected_frame_id: str = MACHINE_FRAME_ID) -> None:
+            self.selected_frame_id = selected_frame_id
+
+        def plan_selection(
+            self,
+            context: FrameSelectionContext,
+        ) -> FrameSelectionDecision:
+            return FrameSelectionDecision(
+                selected_frame_id=str(context.requested_frame_id),
+                available=True,
+                reason=None,
+                persist_selection=False,
+            )
+
+    monkeypatch.setattr(
+        presentation_module,
+        "CoordinateFrameLifecycle",
+        _AcceptingLifecycle,
+    )
+
+    plan = build_coordinate_display_plan(
+        _snapshot(corrupt),
+        selected_frame_id=MACHINE_FRAME_ID,
+        physical_pose=_pose(),
+        pivot_machine_xy=(0.0, 0.0),
+        homed_axes={"X", "Y", "Z", "A"},
+        authority_axes={"X", "Y", "Z", "A", "B"},
+        selection_decision=FrameSelectionDecision(
+            selected_frame_id=MACHINE_FRAME_ID,
+            available=True,
+            reason=None,
+            persist_selection=False,
+        ),
+    )
+
+    entry = next(item for item in plan.selector_entries if item.frame_id == DESIGN_ID)
+    assert entry.enabled is True
+    assert entry.reason == ""
 
 
 def test_missing_transform_is_a_permanent_machine_fallback() -> None:

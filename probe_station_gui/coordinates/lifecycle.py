@@ -85,10 +85,12 @@ def _temporary_selection_reason(
     *,
     homed_axes: frozenset[str],
     authority_axes: frozenset[str],
+    include_provenance: bool = True,
 ) -> str | None:
-    provenance_error = design_frame_provenance_error(record)
-    if provenance_error is not None:
-        return provenance_error
+    if include_provenance:
+        provenance_error = design_frame_provenance_error(record)
+        if provenance_error is not None:
+            return provenance_error
     if not {"X", "Y"}.issubset(homed_axes):
         return "Home X and Y to use this coordinate system."
     if "B" not in authority_axes:
@@ -108,6 +110,7 @@ class CoordinateFrameLifecycle:
     ) -> FrameSelectionDecision:
         records = {record.frame_id: record for record in context.records}
         requested = str(context.requested_frame_id or MACHINE_FRAME_ID)
+        restoring = not context.explicit and requested != self._selected_frame_id
         if requested == MACHINE_FRAME_ID:
             if context.explicit:
                 self._selected_frame_id = MACHINE_FRAME_ID
@@ -142,10 +145,42 @@ class CoordinateFrameLifecycle:
             )
 
         assert record is not None
+        homed_axes = _normalized_axes(context.homed_axes)
+        authority_axes = _normalized_axes(context.authority_axes)
+        if restoring:
+            if not {"X", "Y"}.issubset(authority_axes):
+                return FrameSelectionDecision(
+                    selected_frame_id=self._selected_frame_id,
+                    available=False,
+                    reason="Physical Machine X/Y coordinate authority is unavailable.",
+                    persist_selection=False,
+                )
+            physical_reason = _temporary_selection_reason(
+                record,
+                homed_axes=homed_axes,
+                authority_axes=authority_axes,
+                include_provenance=False,
+            )
+            if physical_reason is not None:
+                return FrameSelectionDecision(
+                    selected_frame_id=self._selected_frame_id,
+                    available=False,
+                    reason=physical_reason,
+                    persist_selection=False,
+                )
+            if design_frame_provenance_error(record) is not None or not all(
+                record.readiness[axis].available for axis in ("X", "Y", "Z", "B")
+            ):
+                return FrameSelectionDecision(
+                    selected_frame_id=self._selected_frame_id,
+                    available=True,
+                    reason=None,
+                    persist_selection=False,
+                )
         reason = _temporary_selection_reason(
             record,
-            homed_axes=_normalized_axes(context.homed_axes),
-            authority_axes=_normalized_axes(context.authority_axes),
+            homed_axes=homed_axes,
+            authority_axes=authority_axes,
         )
         if context.explicit and reason is not None:
             return FrameSelectionDecision(
@@ -205,6 +240,8 @@ class CoordinateFrameLifecycle:
             reason = "A durable Design coordinate frame is required."
         elif provenance_error is not None:
             reason = provenance_error
+        elif context.document is None:
+            reason = "Load a design before using Design coordinates."
         elif transform is None:
             reason = "Design coordinate transform is unavailable."
         else:
@@ -222,8 +259,6 @@ class CoordinateFrameLifecycle:
                 )
             elif {"X", "Y", "B"}.intersection(blocked_axes):
                 reason = "Controller coordinate authority is unavailable."
-            elif context.document is None:
-                reason = "Load a design before using Design coordinates."
 
         if reason is None:
             try:

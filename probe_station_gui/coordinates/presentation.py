@@ -19,7 +19,6 @@ from .model import (
     VISIBLE_STAGE_AXES,
 )
 from .registry import RegistrySnapshot
-from .provenance import design_frame_provenance_error
 
 
 @dataclass(frozen=True)
@@ -60,35 +59,6 @@ def _frame_group(kind: FrameKind) -> str:
     }[kind]
 
 
-def _permanent_frame_rejection_reason(
-    record: CoordinateFrameRecord,
-) -> str | None:
-    """Return only durable semantic rejection, not recoverable unavailability."""
-
-    return record.semantic_validation_error()
-
-
-def _frame_selection_reason(
-    record: CoordinateFrameRecord,
-    *,
-    homed_axes: frozenset[str],
-    authority_axes: frozenset[str],
-) -> str:
-    provenance_error = design_frame_provenance_error(record)
-    if provenance_error is not None:
-        return provenance_error
-    semantic_error = _permanent_frame_rejection_reason(record)
-    if semantic_error is not None:
-        return semantic_error
-    if not {"X", "Y"}.issubset(homed_axes):
-        return "Home X and Y to use this coordinate system."
-    if "B" not in authority_axes:
-        return "B coordinate is unavailable."
-    if record.transform is None:
-        return "Coordinate transform is unavailable."
-    return ""
-
-
 def _selector_entries(
     snapshot: RegistrySnapshot,
     *,
@@ -111,19 +81,24 @@ def _selector_entries(
             record.frame_id,
         ),
     )
+    lifecycle = CoordinateFrameLifecycle()
     for record in records:
-        reason = _frame_selection_reason(
-            record,
-            homed_axes=homed_axes,
-            authority_axes=authority_axes,
+        decision = lifecycle.plan_selection(
+            FrameSelectionContext(
+                records=snapshot.records,
+                requested_frame_id=record.frame_id,
+                explicit=True,
+                homed_axes=homed_axes,
+                authority_axes=authority_axes,
+            )
         )
         entries.append(
             CoordinateSelectorEntry(
                 frame_id=record.frame_id,
                 name=record.name,
                 group=_frame_group(record.kind),
-                enabled=not reason,
-                reason=reason,
+                enabled=decision.available,
+                reason=decision.reason or "",
             )
         )
     return tuple(entries)
@@ -330,30 +305,18 @@ def decide_pending_frame_restore(
     """Return a selected ID, Machine fallback, or ``None`` while authority is pending."""
 
     requested = str(frame_id or MACHINE_FRAME_ID)
-    if requested == MACHINE_FRAME_ID:
-        return MACHINE_FRAME_ID
     homed = _normalized_axes(homed_axes)
     authority = _normalized_axes(authority_axes)
-    if not {"X", "Y"}.issubset(homed) or not {"X", "Y", "B"}.issubset(authority):
-        return None
-    record = next(
-        (record for record in snapshot.records if record.frame_id == requested),
-        None,
+    decision = CoordinateFrameLifecycle().plan_selection(
+        FrameSelectionContext(
+            records=snapshot.records,
+            requested_frame_id=requested,
+            explicit=False,
+            homed_axes=homed,
+            authority_axes=authority,
+        )
     )
-    if record is None or record.transform is None:
-        return MACHINE_FRAME_ID
-    if _frame_selection_reason(
-        record,
-        homed_axes=homed,
-        authority_axes=authority,
-    ):
-        return MACHINE_FRAME_ID
-    if not all(
-        record.readiness[axis].status is ReadinessStatus.READY
-        for axis in ("X", "Y", "B", "Z")
-    ):
-        return MACHINE_FRAME_ID
-    return requested
+    return decision.selected_frame_id if decision.available else None
 
 
 __all__ = [
