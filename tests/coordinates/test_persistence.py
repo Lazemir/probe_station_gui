@@ -24,6 +24,7 @@ from probe_station_gui.coordinates.model import (
 from probe_station_gui.coordinates.persistence import (
     CoordinateFrameDocument,
     CoordinateFrameLoadResult,
+    CoordinateFrameStoreFailure,
     CoordinateFrameStoreSuccess,
     CoordinateFrameStoreWorker,
     FilesystemCoordinateFrameBackend,
@@ -393,6 +394,53 @@ def test_worker_loads_and_saves_off_creator_thread(
     assert backend.thread_ids
     assert set(backend.thread_ids) == {backend.thread_ids[0]}
     assert backend.thread_ids[0] != creator_thread
+    worker.stop()
+
+
+def test_backend_factory_failure_fails_queue_and_next_submit_restarts(
+    qt_app: QApplication,
+) -> None:
+    attempts = 0
+    factory_entered = threading.Event()
+    release_failure = threading.Event()
+    backend = _RecordingBackend(CoordinateFrameDocument())
+
+    def factory() -> _RecordingBackend:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            factory_entered.set()
+            assert release_failure.wait(timeout=1.0)
+            raise RuntimeError("factory failed")
+        return backend
+
+    worker = CoordinateFrameStoreWorker(backend_factory=factory)
+    failures: list[CoordinateFrameStoreFailure] = []
+    loaded: list[CoordinateFrameLoadResult] = []
+    finished: list[None] = []
+    worker.failed.connect(failures.append)
+    worker.loaded.connect(loaded.append)
+    worker.finished.connect(lambda: finished.append(None))
+
+    worker.load(1)
+    assert factory_entered.wait(timeout=1.0)
+    worker.publish(2, CoordinateFrameDocument())
+    release_failure.set()
+    _wait_until(qt_app, lambda: len(failures) == 2)
+
+    worker.load(3)
+    _wait_until(qt_app, lambda: [item.request_id for item in loaded] == [3])
+
+    assert [(item.request_id, item.operation) for item in failures] == [
+        (1, "load"),
+        (2, "save"),
+    ]
+    assert [item.message for item in failures] == [
+        "RuntimeError: factory failed",
+        "RuntimeError: factory failed",
+    ]
+    assert attempts == 2
+    assert finished == []
     worker.stop()
 
 

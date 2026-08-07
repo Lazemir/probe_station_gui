@@ -561,6 +561,26 @@ class CoordinateFrameStoreWorker(QObject):
     def _run(self) -> None:
         try:
             backend = self._backend_factory()
+        except Exception as exc:
+            with self._condition:
+                failed_operations = tuple(self._pending)
+                self._pending.clear()
+                self._active = False
+                if self._thread is threading.current_thread():
+                    self._thread = None
+                self._condition.notify_all()
+            for operation in failed_operations:
+                self._post_publication(
+                    "failed",
+                    CoordinateFrameStoreFailure(
+                        operation.request_id,
+                        operation.operation,
+                        f"{type(exc).__name__}: {exc}",
+                    ),
+                )
+            return
+
+        try:
             while True:
                 operation = self._take_pending()
                 if operation is None:
