@@ -14,6 +14,7 @@ from probe_station_gui.coordinates import (
     ReadinessStatus,
 )
 from probe_station_gui.coordinates.software_frames import materialize_custom_frames
+from probe_station_gui.coordinates.lifecycle import CoordinateFrameLifecycle
 from probe_station_gui.coordinates.persistence import (
     CoordinateFrameStoreFailure,
     CoordinateFrameStoreSuccess,
@@ -103,6 +104,9 @@ def _owner(*, busy: bool = False) -> SimpleNamespace:
     owner = SimpleNamespace(
         settings_manager=manager,
         stage_controller=_Stage(busy=busy),
+        _coordinate_frame_lifecycle=CoordinateFrameLifecycle(
+            selected_frame_id=frame_id,
+        ),
         _coordinate_frame_registry=registry,
         _coordinate_frames_loaded=True,
         _selected_coordinate_frame_id=frame_id,

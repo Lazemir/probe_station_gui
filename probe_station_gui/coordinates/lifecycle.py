@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import math
 from pathlib import Path
 
@@ -76,6 +76,41 @@ class DesignFrameUsabilitySnapshot:
         return dict(self.readiness).get(normalized)
 
 
+@dataclass(frozen=True)
+class FrameLifecycleEffects:
+    replace_records: tuple[CoordinateFrameRecord, ...] | None = None
+    rollback_record: CoordinateFrameRecord | None = None
+    invalidate_session_reason: str | None = None
+    refresh_display: bool = False
+    acknowledged_publications: tuple[FramePublication, ...] = ()
+    rollback_publication: FramePublication | None = None
+    failure_deferred: bool = False
+
+
+@dataclass(frozen=True)
+class FrameLoadResult:
+    request_id: int
+    records: tuple[CoordinateFrameRecord, ...]
+
+
+@dataclass(frozen=True)
+class FramePublication:
+    request_id: int
+    records: tuple[CoordinateFrameRecord, ...]
+    previous_record: CoordinateFrameRecord | None = None
+    committed_record: CoordinateFrameRecord | None = None
+    machine_b_deg: float | None = None
+    pivot_machine_xy: tuple[float, float] | None = None
+    success_message: str | None = None
+    operator_alignment: bool = False
+
+
+@dataclass(frozen=True)
+class FramePublicationResult:
+    request_id: int
+    succeeded: bool
+
+
 def _normalized_axes(axes: frozenset[str]) -> frozenset[str]:
     return frozenset(str(axis).strip().upper() for axis in axes)
 
@@ -103,6 +138,93 @@ class CoordinateFrameLifecycle:
 
     def __init__(self, *, selected_frame_id: str = MACHINE_FRAME_ID) -> None:
         self._selected_frame_id = str(selected_frame_id or MACHINE_FRAME_ID)
+        self._load_request_id: int | None = None
+        self._publications: dict[int, FramePublication] = {}
+        self._latest_publication_request_id: int | None = None
+        self._resolved_publication_request_id: int | None = None
+
+    def begin_load(self, request_id: int) -> FrameLifecycleEffects:
+        self._load_request_id = int(request_id)
+        return FrameLifecycleEffects(
+            invalidate_session_reason=(
+                "Design coordinate provenance is being checked."
+            ),
+            refresh_display=True,
+        )
+
+    def accept_load(self, result: FrameLoadResult) -> FrameLifecycleEffects:
+        if int(result.request_id) != self._load_request_id:
+            return FrameLifecycleEffects()
+        self._load_request_id = None
+        return FrameLifecycleEffects(
+            replace_records=tuple(result.records),
+            refresh_display=True,
+        )
+
+    def track_publication(self, publication: FramePublication) -> None:
+        request_id = int(publication.request_id)
+        resolved = self._resolved_publication_request_id
+        if resolved is not None and request_id <= resolved:
+            return
+        self._publications[request_id] = publication
+        latest = self._latest_publication_request_id
+        if latest is None or request_id > latest:
+            self._latest_publication_request_id = request_id
+
+    def finish_publication(
+        self,
+        result: FramePublicationResult,
+    ) -> FrameLifecycleEffects:
+        request_id = int(result.request_id)
+        latest = self._latest_publication_request_id
+        if not result.succeeded and latest is not None and request_id < latest:
+            return FrameLifecycleEffects(failure_deferred=True)
+
+        completed = tuple(
+            self._publications.pop(candidate_id)
+            for candidate_id in sorted(tuple(self._publications))
+            if candidate_id <= request_id
+        )
+        if completed:
+            self._resolved_publication_request_id = max(
+                publication.request_id for publication in completed
+            )
+        if result.succeeded:
+            return FrameLifecycleEffects(
+                acknowledged_publications=tuple(
+                    publication
+                    for publication in completed
+                    if publication.committed_record is not None
+                )
+            )
+
+        rollback_by_frame: dict[str, FramePublication] = {}
+        for publication in completed:
+            previous = publication.previous_record
+            committed = publication.committed_record
+            if previous is None or committed is None:
+                continue
+            chain = rollback_by_frame.get(committed.frame_id)
+            if chain is not None:
+                publication = replace(
+                    publication,
+                    previous_record=chain.previous_record,
+                    operator_alignment=(
+                        chain.operator_alignment or publication.operator_alignment
+                    ),
+                )
+            rollback_by_frame[committed.frame_id] = publication
+        rollback_publication = next(iter(rollback_by_frame.values()), None)
+        rollback = (
+            None
+            if rollback_publication is None
+            else rollback_publication.previous_record
+        )
+        return FrameLifecycleEffects(
+            rollback_record=rollback,
+            refresh_display=rollback is not None,
+            rollback_publication=rollback_publication,
+        )
 
     def plan_selection(
         self,
@@ -317,6 +439,10 @@ __all__ = [
     "CoordinateFrameLifecycle",
     "DesignFrameUsabilitySnapshot",
     "DesignUsabilityContext",
+    "FrameLifecycleEffects",
+    "FrameLoadResult",
+    "FramePublication",
+    "FramePublicationResult",
     "FrameSelectionContext",
     "FrameSelectionDecision",
 ]

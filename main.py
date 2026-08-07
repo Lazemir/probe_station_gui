@@ -113,6 +113,9 @@ from probe_station_gui.coordinates.lifecycle import (
     CoordinateFrameLifecycle,
     DesignFrameUsabilitySnapshot,
     DesignUsabilityContext,
+    FrameLifecycleEffects,
+    FramePublication,
+    FramePublicationResult,
 )
 from probe_station_gui.coordinates.rotation_geometry import (
     RotationGeometrySnapshot,
@@ -673,19 +676,6 @@ class _PendingRegistrationEvidence:
     check_samples: list[_CapturedRegistrationSample]
 
 
-@dataclass(frozen=True)
-class _RegistrationPersistenceTransaction:
-    request_id: int
-    previous_record: object
-    committed_record: object
-    machine_b_deg: float
-    pivot_machine_xy: tuple[float, float]
-    success_message: str
-    operator_alignment: bool = False
-    rms_residual_mm: float | None = None
-    max_residual_mm: float | None = None
-
-
 @dataclass
 class _ApiStageCommandReservation:
     operation_id: str
@@ -1126,8 +1116,6 @@ class Main(QMainWindow):
             path=self.settings_manager.coordinate_frames_path(),
         )
         self._coordinate_frame_request_id = 0
-        self._coordinate_frame_latest_save_request_id: int | None = None
-        self._coordinate_frame_load_request_id: int | None = None
         self._legacy_design_migration_request_id: int | None = None
         self._legacy_design_migration_state: dict[str, object] | None = None
         self._coordinate_frames_loaded = False
@@ -1147,10 +1135,6 @@ class Main(QMainWindow):
         self._pending_registration_physical_marks: dict[
             str,
             _PendingRegistrationEvidence,
-        ] = {}
-        self._registration_persistence_transactions: dict[
-            int,
-            _RegistrationPersistenceTransaction,
         ] = {}
         self._pending_registration_focus_token: RegistrationFocusToken | None = None
         self._pending_registration_focus_target_xy: tuple[float, float] | None = None
@@ -7825,20 +7809,20 @@ class Main(QMainWindow):
         request_id = getattr(result, "request_id", None)
         if not isinstance(request_id, int):
             return
-        transactions = getattr(
-            self,
-            "_registration_persistence_transactions",
-            None,
+        effects = self._coordinate_frame_lifecycle.finish_publication(
+            FramePublicationResult(request_id=request_id, succeeded=True)
         )
-        if not isinstance(transactions, dict):
-            return
-        completed = tuple(
-            transactions.pop(candidate_id)
-            for candidate_id in sorted(tuple(transactions))
-            if candidate_id <= request_id
-        )
-        for transaction in completed:
-            committed = transaction.committed_record
+        if effects != FrameLifecycleEffects():
+            self._apply_coordinate_frame_lifecycle_effects(effects)
+
+    def _apply_coordinate_frame_lifecycle_effects(
+        self,
+        effects: FrameLifecycleEffects,
+    ) -> None:
+        for publication in effects.acknowledged_publications:
+            committed = publication.committed_record
+            if committed is None:
+                continue
             frame_id = getattr(committed, "frame_id", None)
             registry = getattr(self, "_coordinate_frame_registry", None)
             session = getattr(self, "_design_session", None)
@@ -7849,79 +7833,24 @@ class Main(QMainWindow):
                 or getattr(session, "active_frame_id", None) != frame_id
             ):
                 continue
-            if transaction.operator_alignment:
+            if publication.operator_alignment:
                 self._collapse_alignment_panel_if_ready()
-            self._show_status(transaction.success_message, 7000)
+            if publication.success_message is not None:
+                self._show_status(publication.success_message, 7000)
 
-    def _on_coordinate_frame_store_failed(self, failure: object) -> None:
-        operation = str(getattr(failure, "operation", "operation"))
-        message = str(getattr(failure, "message", "Unknown persistence error."))
-        logger.warning("Coordinate frame %s failed: %s", operation, message)
-        request_id = getattr(failure, "request_id", None)
-        latest_save_request_id = getattr(
-            self,
-            "_coordinate_frame_latest_save_request_id",
-            None,
-        )
-        if (
-            operation == "save"
-            and isinstance(request_id, int)
-            and isinstance(latest_save_request_id, int)
-            and request_id < latest_save_request_id
-        ):
+        rollback = effects.rollback_record
+        publication = effects.rollback_publication
+        if rollback is None or publication is None:
             return
-        transactions = getattr(
-            self,
-            "_registration_persistence_transactions",
-            None,
-        )
-        if operation == "save" and isinstance(request_id, int) and isinstance(
-            transactions,
-            dict,
-        ):
-            failed = tuple(
-                transactions.pop(candidate_id)
-                for candidate_id in sorted(tuple(transactions))
-                if candidate_id <= request_id
-            )
-            rollback_by_frame: dict[object, _RegistrationPersistenceTransaction] = {}
-            for transaction in failed:
-                frame_id = getattr(transaction.committed_record, "frame_id", None)
-                chain = rollback_by_frame.get(frame_id)
-                if chain is not None:
-                    # Store coalescing is document-wide, so ordinary focus/contact
-                    # versions may sit between two unacknowledged registrations.
-                    transaction = replace(
-                        transaction,
-                        previous_record=chain.previous_record,
-                        operator_alignment=(
-                            chain.operator_alignment or transaction.operator_alignment
-                        ),
-                    )
-                rollback_by_frame[frame_id] = transaction
-            for transaction in rollback_by_frame.values():
-                self._rollback_registration_persistence_transaction(transaction)
-        action = "loaded" if operation == "load" else "saved"
-        self._show_status(f"Design coordinate frames could not be {action}.", 6000)
-
-    def _rollback_registration_persistence_transaction(
-        self,
-        transaction: _RegistrationPersistenceTransaction,
-    ) -> None:
         registry = getattr(self, "_coordinate_frame_registry", None)
-        committed = transaction.committed_record
-        previous = transaction.previous_record
-        frame_id = getattr(committed, "frame_id", None)
-        current = None if registry is None or frame_id is None else registry.get(frame_id)
-        if (
-            current is None
-            or getattr(current, "version", -1) < getattr(committed, "version", 0)
-        ):
+        frame_id = rollback.frame_id
+        current = None if registry is None else registry.get(frame_id)
+        if current is None:
             return
         try:
             restored = registry.replace(
-                previous,
-                expected_version=getattr(current, "version"),
+                rollback,
+                expected_version=current.version,
             )
             session = getattr(self, "_design_session", None)
             if session is not None and session.active_frame_id == frame_id:
@@ -7930,8 +7859,8 @@ class Main(QMainWindow):
                     machine_point_for_navigation=(
                         self._design_navigation_xy_from_physical_machine_xy
                     ),
-                    machine_b_deg=transaction.machine_b_deg,
-                    pivot_machine_xy=transaction.pivot_machine_xy,
+                    machine_b_deg=publication.machine_b_deg,
+                    pivot_machine_xy=publication.pivot_machine_xy or (0.0, 0.0),
                 )
             document = getattr(self, "_coordinate_frame_document", None)
             with_records = getattr(document, "with_records", None)
@@ -7939,12 +7868,29 @@ class Main(QMainWindow):
                 self._coordinate_frame_document = with_records(
                     registry.snapshot().records
                 )
-            if transaction.operator_alignment:
+            if publication.operator_alignment:
                 self._set_design_snap_enabled(True)
-            self._refresh_design_panel()
-            self._refresh_design_position()
+            if effects.refresh_display:
+                self._refresh_design_panel()
+                self._refresh_design_position()
         except Exception:
             logger.exception("Failed to roll back unsaved Design registration")
+
+    def _on_coordinate_frame_store_failed(self, failure: object) -> None:
+        operation = str(getattr(failure, "operation", "operation"))
+        message = str(getattr(failure, "message", "Unknown persistence error."))
+        logger.warning("Coordinate frame %s failed: %s", operation, message)
+        request_id = getattr(failure, "request_id", None)
+        if operation == "save" and isinstance(request_id, int):
+            effects = self._coordinate_frame_lifecycle.finish_publication(
+                FramePublicationResult(request_id=request_id, succeeded=False)
+            )
+            if effects.failure_deferred:
+                return
+            if effects != FrameLifecycleEffects():
+                self._apply_coordinate_frame_lifecycle_effects(effects)
+        action = "loaded" if operation == "load" else "saved"
+        self._show_status(f"Design coordinate frames could not be {action}.", 6000)
 
     def _activate_loaded_design_frame(
         self,
@@ -10613,25 +10559,16 @@ class Main(QMainWindow):
         )
         deferred = isinstance(publication_request_id, int)
         if deferred:
-            transactions = getattr(
-                self,
-                "_registration_persistence_transactions",
-                None,
-            )
-            if not isinstance(transactions, dict):
-                transactions = {}
-                self._registration_persistence_transactions = transactions
-            transactions[publication_request_id] = (
-                _RegistrationPersistenceTransaction(
+            self._coordinate_frame_lifecycle.track_publication(
+                FramePublication(
                     request_id=publication_request_id,
+                    records=tuple(registry.snapshot().records),
                     previous_record=current,
                     committed_record=committed,
                     machine_b_deg=first.physical_b_deg,
                     pivot_machine_xy=first.pivot_machine_xy,
                     success_message=success_message,
                     operator_alignment=True,
-                    rms_residual_mm=metadata.rms_residual_mm,
-                    max_residual_mm=metadata.max_residual_mm,
                 )
             )
         self._set_design_snap_enabled(False)
@@ -10978,17 +10915,10 @@ class Main(QMainWindow):
             rollback_session=False,
         )
         if isinstance(publication_request_id, int):
-            transactions = getattr(
-                self,
-                "_registration_persistence_transactions",
-                None,
-            )
-            if not isinstance(transactions, dict):
-                transactions = {}
-                self._registration_persistence_transactions = transactions
-            transactions[publication_request_id] = (
-                _RegistrationPersistenceTransaction(
+            self._coordinate_frame_lifecycle.track_publication(
+                FramePublication(
                     request_id=publication_request_id,
+                    records=tuple(registry.snapshot().records),
                     previous_record=current,
                     committed_record=committed,
                     machine_b_deg=target_b,

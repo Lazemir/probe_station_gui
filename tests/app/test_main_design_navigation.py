@@ -30,8 +30,12 @@ from probe_station_gui.design.klayout_types import StructureBoundsResult
 from probe_station_gui.design.session import DesignSession
 from probe_station_gui.coordinates.registry import CoordinateFrameRegistry
 from probe_station_gui.coordinates.lifecycle import (
+    CoordinateFrameLifecycle,
     DesignFrameUsabilitySnapshot,
     DesignUsabilityContext,
+    FrameLifecycleEffects,
+    FramePublication,
+    FramePublicationResult,
 )
 from probe_station_gui.coordinates.provenance import (
     RUNTIME_PROVENANCE_REASON,
@@ -1257,6 +1261,7 @@ def test_registration_save_failure_rolls_back_before_success_is_announced(
     requests: list[object] = []
     statuses: list[str] = []
     window = Main.__new__(Main)
+    window._coordinate_frame_lifecycle = CoordinateFrameLifecycle()
     window._design_session = session
     window._coordinate_frame_registry = registry
     window.stage_controller = types.SimpleNamespace(
@@ -1307,6 +1312,133 @@ def test_registration_save_failure_rolls_back_before_success_is_announced(
     assert all("captured" not in status.lower() for status in statuses[-2:])
 
 
+def test_saved_callback_delegates_acknowledgement_to_coordinate_lifecycle(
+    tmp_path: Path,
+) -> None:
+    document = _make_document(tmp_path)
+    registry = CoordinateFrameRegistry()
+    draft = registry.add(new_design_frame_draft(document, existing_names=()))
+    committed = registry.replace(
+        commit_xyb_registration(
+            draft,
+            design_points=((0.0, 0.0), (1000.0, 0.0)),
+            physical_machine_points=((1.0, 2.0), (2.0, 2.0)),
+            physical_b_deg=5.0,
+            pivot_machine_xy=(0.0, 0.0),
+        ),
+        expected_version=draft.version,
+    )
+    publication = FramePublication(
+        request_id=41,
+        records=(committed,),
+        previous_record=draft,
+        committed_record=committed,
+        machine_b_deg=5.0,
+        pivot_machine_xy=(0.0, 0.0),
+        success_message="registration saved",
+    )
+    calls: list[FramePublicationResult] = []
+
+    class _Lifecycle:
+        def finish_publication(
+            self,
+            result: FramePublicationResult,
+        ) -> FrameLifecycleEffects:
+            calls.append(result)
+            return FrameLifecycleEffects(
+                acknowledged_publications=(publication,),
+            )
+
+    statuses: list[str] = []
+    window = Main.__new__(Main)
+    window._coordinate_frame_lifecycle = _Lifecycle()
+    window._coordinate_frame_registry = registry
+    window._design_session = types.SimpleNamespace(active_frame_id=draft.frame_id)
+    window._show_status = lambda message, _timeout=0: statuses.append(str(message))
+
+    Main._on_coordinate_frames_saved(
+        window,
+        types.SimpleNamespace(request_id=41),
+    )
+
+    assert calls == [FramePublicationResult(41, True)]
+    assert statuses == ["registration saved"]
+    assert not hasattr(window, "_registration_persistence_transactions")
+
+
+def test_failed_callback_executes_lifecycle_rollback_effect(
+    tmp_path: Path,
+) -> None:
+    document = _make_document(tmp_path)
+    registry = CoordinateFrameRegistry()
+    draft = registry.add(new_design_frame_draft(document, existing_names=()))
+    committed = registry.replace(
+        commit_xyb_registration(
+            draft,
+            design_points=((0.0, 0.0), (1000.0, 0.0)),
+            physical_machine_points=((1.0, 2.0), (2.0, 2.0)),
+            physical_b_deg=5.0,
+            pivot_machine_xy=(0.0, 0.0),
+        ),
+        expected_version=draft.version,
+    )
+    publication = FramePublication(
+        request_id=41,
+        records=(committed,),
+        previous_record=draft,
+        committed_record=committed,
+        machine_b_deg=5.0,
+        pivot_machine_xy=(0.0, 0.0),
+        success_message="registration saved",
+    )
+    calls: list[FramePublicationResult] = []
+
+    class _Lifecycle:
+        def finish_publication(
+            self,
+            result: FramePublicationResult,
+        ) -> FrameLifecycleEffects:
+            calls.append(result)
+            return FrameLifecycleEffects(
+                rollback_record=draft,
+                rollback_publication=publication,
+                refresh_display=True,
+            )
+
+    session = DesignSession(document=document)
+    session.link_active_frame(
+        committed,
+        machine_b_deg=5.0,
+        pivot_machine_xy=(0.0, 0.0),
+    )
+    window = Main.__new__(Main)
+    window._coordinate_frame_lifecycle = _Lifecycle()
+    window._coordinate_frame_registry = registry
+    window._coordinate_frame_document = None
+    window._design_session = session
+    window._design_navigation_xy_from_physical_machine_xy = lambda point: point
+    window._refresh_design_panel = lambda: None
+    window._refresh_design_position = lambda: None
+    window._show_status = lambda *_args: None
+
+    Main._on_coordinate_frame_store_failed(
+        window,
+        types.SimpleNamespace(
+            request_id=41,
+            operation="save",
+            message="disk full",
+        ),
+    )
+
+    assert calls == [FramePublicationResult(41, False)]
+    restored = registry.get(draft.frame_id)
+    assert restored is not None
+    assert restored.transform == draft.transform
+    assert restored.readiness == draft.readiness
+    assert session.registration is None
+    assert not hasattr(window, "_registration_persistence_transactions")
+
+
 @pytest.mark.parametrize(
     "save_sequence",
     ("contiguous", "intervening-focus", "trailing-focus"),
@@ -1334,17 +1466,23 @@ def test_coalesced_registration_save_failure_restores_earliest_durable_record(
             set_focus_reference(first, physical_machine_z_mm=0.25),
             expected_version=first.version,
         )
-    transactions = {
-        41: main_module._RegistrationPersistenceTransaction(
+    lifecycle = CoordinateFrameLifecycle()
+    lifecycle.track_publication(
+        FramePublication(
             request_id=41,
+            records=(first,),
             previous_record=draft,
             committed_record=first,
             machine_b_deg=5.0,
             pivot_machine_xy=(0.0, 0.0),
             success_message="first saved",
         )
-    }
+    )
     failed_request_id = 42
+    if save_sequence != "contiguous":
+        lifecycle.track_publication(
+            FramePublication(request_id=42, records=(current,))
+        )
     if save_sequence != "trailing-focus":
         second_previous = current
         current = registry.replace(
@@ -1358,9 +1496,10 @@ def test_coalesced_registration_save_failure_restores_earliest_durable_record(
             expected_version=second_previous.version,
         )
         failed_request_id = 42 if save_sequence == "contiguous" else 43
-        transactions[failed_request_id] = (
-            main_module._RegistrationPersistenceTransaction(
+        lifecycle.track_publication(
+            FramePublication(
                 request_id=failed_request_id,
+                records=(current,),
                 previous_record=second_previous,
                 committed_record=current,
                 machine_b_deg=6.0,
@@ -1375,9 +1514,9 @@ def test_coalesced_registration_save_failure_restores_earliest_durable_record(
         pivot_machine_xy=(0.0, 0.0),
     )
     window = Main.__new__(Main)
+    window._coordinate_frame_lifecycle = lifecycle
     window._design_session = session
     window._coordinate_frame_registry = registry
-    window._registration_persistence_transactions = transactions
     window._design_navigation_xy_from_physical_machine_xy = lambda point: point
     window._refresh_design_panel = lambda: None
     window._refresh_design_position = lambda: None
@@ -1397,7 +1536,7 @@ def test_coalesced_registration_save_failure_restores_earliest_durable_record(
     assert restored.transform == draft.transform
     assert not restored.readiness["X"].available
     assert session.registration is None
-    assert window._registration_persistence_transactions == {}
+    assert not hasattr(window, "_registration_persistence_transactions")
 
 
 @pytest.mark.parametrize("newer_outcome", ("saved", "failed"))
@@ -1428,20 +1567,25 @@ def test_older_registration_save_failure_defers_to_newer_publication(
         machine_b_deg=5.0,
         pivot_machine_xy=(0.0, 0.0),
     )
-    window = Main.__new__(Main)
-    window._design_session = session
-    window._coordinate_frame_registry = registry
-    window._coordinate_frame_latest_save_request_id = 42
-    window._registration_persistence_transactions = {
-        41: main_module._RegistrationPersistenceTransaction(
+    lifecycle = CoordinateFrameLifecycle()
+    lifecycle.track_publication(
+        FramePublication(
             request_id=41,
+            records=(registered,),
             previous_record=draft,
             committed_record=registered,
             machine_b_deg=5.0,
             pivot_machine_xy=(0.0, 0.0),
             success_message="registration saved",
         )
-    }
+    )
+    lifecycle.track_publication(
+        FramePublication(request_id=42, records=(focused,))
+    )
+    window = Main.__new__(Main)
+    window._coordinate_frame_lifecycle = lifecycle
+    window._design_session = session
+    window._coordinate_frame_registry = registry
     window._design_navigation_xy_from_physical_machine_xy = lambda point: point
     window._refresh_design_panel = lambda: None
     window._refresh_design_position = lambda: None
@@ -1457,7 +1601,7 @@ def test_older_registration_save_failure_defers_to_newer_publication(
     )
 
     assert registry.get(draft.frame_id) == focused
-    assert tuple(window._registration_persistence_transactions) == (41,)
+    assert not hasattr(window, "_registration_persistence_transactions")
 
     if newer_outcome == "saved":
         Main._on_coordinate_frames_saved(
@@ -1478,7 +1622,7 @@ def test_older_registration_save_failure_defers_to_newer_publication(
         assert restored is not None
         assert restored.transform == draft.transform
         assert session.registration is None
-    assert window._registration_persistence_transactions == {}
+    assert not hasattr(window, "_registration_persistence_transactions")
 
 
 def test_design_navigation_inverts_universal_calibration_and_current_wco(

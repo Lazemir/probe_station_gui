@@ -6,9 +6,12 @@ import logging
 
 from PySide6.QtCore import QTimer
 
+from probe_station_gui.coordinates.lifecycle import (
+    FrameLoadResult,
+    FramePublication,
+)
 from probe_station_gui.coordinates.persistence import CoordinateFrameDocument
 from probe_station_gui.coordinates.provenance import (
-    design_frame_provenance_error,
     mark_design_frame_provenance_pending,
 )
 from probe_station_gui.design import navigation_adapter as design_navigation
@@ -30,7 +33,7 @@ def request_coordinate_frame_load(owner: object) -> int:
     """Start the durable-frame load independently from serial connection state."""
 
     request_id = _next_coordinate_frame_request_id(owner)
-    owner._coordinate_frame_load_request_id = request_id
+    effects = owner._coordinate_frame_lifecycle.begin_load(request_id)
     registry = getattr(owner, "_coordinate_frame_registry", None)
     if registry is not None:
         snapshot = registry.snapshot()
@@ -39,20 +42,16 @@ def request_coordinate_frame_load(owner: object) -> int:
     active_frame_id = getattr(session, "active_frame_id", None)
     invalidate_registration = getattr(session, "invalidate_registration", None)
     if active_frame_id and callable(invalidate_registration):
-        pending_record = registry.get(active_frame_id) if registry is not None else None
-        reason = (
-            design_frame_provenance_error(pending_record)
-            if pending_record is not None
-            else None
-        )
-        invalidate_registration(
-            reason or "Design coordinate provenance is being checked."
-        )
+        reason = effects.invalidate_session_reason
+        if reason is not None:
+            invalidate_registration(reason)
     owner._coordinate_frames_loaded = False
     profile_source = getattr(owner, "_current_machine_profile_id", None)
     profile_id = profile_source() if callable(profile_source) else "default"
     if not isinstance(profile_id, str) or not profile_id.strip():
         profile_id = "default"
+    if effects.refresh_display:
+        stage_position_panel.refresh_coordinate_frame_display(owner)
     owner._coordinate_frame_store.load(
         request_id,
         machine_profile_id=profile_id.strip(),
@@ -61,14 +60,18 @@ def request_coordinate_frame_load(owner: object) -> int:
 
 
 def handle_coordinate_frame_loaded(owner: object, result: object) -> None:
-    if result.request_id != getattr(owner, "_coordinate_frame_load_request_id", None):
-        return
-    owner._coordinate_frame_load_request_id = None
-    owner._coordinate_frame_document = result.document
     runtime_records = getattr(result, "runtime_records", None)
-    owner._coordinate_frame_registry.reset(
-        result.document.records if runtime_records is None else runtime_records
+    records = result.document.records if runtime_records is None else runtime_records
+    effects = owner._coordinate_frame_lifecycle.accept_load(
+        FrameLoadResult(
+            request_id=int(result.request_id),
+            records=tuple(records),
+        )
     )
+    if effects.replace_records is None:
+        return
+    owner._coordinate_frame_document = result.document
+    owner._coordinate_frame_registry.reset(effects.replace_records)
     owner._coordinate_frames_loaded = True
     diagnostics = (
         *result.document.diagnostics,
@@ -94,7 +97,8 @@ def handle_coordinate_frame_loaded(owner: object, result: object) -> None:
     if callable(apply_authority):
         apply_authority()
     owner._activate_loaded_design_frame()
-    stage_position_panel.refresh_coordinate_frame_display(owner)
+    if effects.refresh_display:
+        stage_position_panel.refresh_coordinate_frame_display(owner)
 
 
 def publish_coordinate_frames(
@@ -117,8 +121,13 @@ def publish_coordinate_frames(
         None,
     ) is not None:
         owner._legacy_design_migration_request_id = request_id
+    owner._coordinate_frame_lifecycle.track_publication(
+        FramePublication(
+            request_id=request_id,
+            records=tuple(document.records),
+        )
+    )
     owner._coordinate_frame_store.publish(request_id, document)
-    owner._coordinate_frame_latest_save_request_id = request_id
     return request_id
 
 

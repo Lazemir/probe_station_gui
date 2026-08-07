@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import replace
 from pathlib import Path
 
+import pytest
+
 from probe_station_gui.coordinates import (
     MACHINE_FRAME_ID,
     CoordinateFrameLifecycle,
@@ -10,6 +12,12 @@ from probe_station_gui.coordinates import (
     DesignUsabilityContext,
     FrameSelectionContext,
     FrameSelectionDecision,
+)
+from probe_station_gui.coordinates.lifecycle import (
+    FrameLifecycleEffects,
+    FrameLoadResult,
+    FramePublication,
+    FramePublicationResult,
 )
 from probe_station_gui.coordinates.model import (
     AxisReadiness,
@@ -83,6 +91,178 @@ def _draft_design_record() -> CoordinateFrameRecord:
             for axis in ("X", "Y", "Z", "A", "B")
         },
     )
+
+
+def _record_version(version: int) -> CoordinateFrameRecord:
+    return replace(_ready_design_record(), version=version)
+
+
+def _lifecycle_with_durable_v0() -> CoordinateFrameLifecycle:
+    lifecycle = CoordinateFrameLifecycle()
+    lifecycle.begin_load(1)
+    lifecycle.accept_load(FrameLoadResult(1, (_record_version(0),)))
+    return lifecycle
+
+
+def _registration_publication(
+    request_id: int,
+    *,
+    before: int,
+    after: int,
+) -> FramePublication:
+    previous = _record_version(before)
+    committed = _record_version(after)
+    return FramePublication(
+        request_id=request_id,
+        records=(committed,),
+        previous_record=previous,
+        committed_record=committed,
+        machine_b_deg=5.0,
+        pivot_machine_xy=(0.0, 0.0),
+        success_message=f"registration {after} saved",
+    )
+
+
+def _ordinary_publication(request_id: int, *, version: int) -> FramePublication:
+    return FramePublication(
+        request_id=request_id,
+        records=(_record_version(version),),
+    )
+
+
+def _track_registration_and_intervening_publications(
+    lifecycle: CoordinateFrameLifecycle,
+    intervening: str,
+) -> None:
+    lifecycle.track_publication(
+        _registration_publication(41, before=0, after=1)
+    )
+    if intervening == "none":
+        lifecycle.track_publication(
+            _registration_publication(43, before=1, after=2)
+        )
+    elif intervening == "focus":
+        lifecycle.track_publication(_ordinary_publication(42, version=2))
+        lifecycle.track_publication(
+            _registration_publication(43, before=2, after=3)
+        )
+    elif intervening == "trailing_focus":
+        lifecycle.track_publication(_ordinary_publication(43, version=2))
+    else:  # pragma: no cover - test helper guard
+        raise AssertionError(f"Unknown publication sequence {intervening!r}")
+
+
+def test_begin_load_invalidates_the_active_session_while_provenance_is_pending() -> None:
+    effects = CoordinateFrameLifecycle().begin_load(10)
+
+    assert effects.invalidate_session_reason == (
+        "Design coordinate provenance is being checked."
+    )
+
+
+def test_only_current_load_result_produces_registry_replacement() -> None:
+    lifecycle = CoordinateFrameLifecycle()
+    lifecycle.begin_load(10)
+    lifecycle.begin_load(11)
+
+    stale = lifecycle.accept_load(
+        FrameLoadResult(request_id=10, records=(_ready_design_record(),))
+    )
+    current = lifecycle.accept_load(
+        FrameLoadResult(request_id=11, records=(_ready_design_record(),))
+    )
+
+    assert stale == FrameLifecycleEffects()
+    assert current.replace_records == (_ready_design_record(),)
+
+
+@pytest.mark.parametrize("intervening", ["none", "focus", "trailing_focus"])
+def test_failed_coalesced_registration_chain_rolls_to_earliest_predecessor(
+    intervening: str,
+) -> None:
+    lifecycle = _lifecycle_with_durable_v0()
+    _track_registration_and_intervening_publications(lifecycle, intervening)
+
+    effects = lifecycle.finish_publication(
+        FramePublicationResult(request_id=43, succeeded=False)
+    )
+
+    assert effects.rollback_record is not None
+    assert effects.rollback_record.version == 0
+
+
+def test_older_failure_defers_while_newer_publication_is_pending() -> None:
+    lifecycle = _lifecycle_with_durable_v0()
+    lifecycle.track_publication(
+        _registration_publication(41, before=0, after=1)
+    )
+    lifecycle.track_publication(_ordinary_publication(42, version=2))
+
+    deferred = lifecycle.finish_publication(FramePublicationResult(41, False))
+    assert deferred.rollback_record is None
+    assert deferred.failure_deferred is True
+    assert lifecycle.finish_publication(
+        FramePublicationResult(42, True)
+    ).rollback_record is None
+
+
+def test_deferred_older_failure_rolls_back_if_newest_publication_fails() -> None:
+    lifecycle = _lifecycle_with_durable_v0()
+    lifecycle.track_publication(
+        _registration_publication(41, before=0, after=1)
+    )
+    lifecycle.track_publication(_ordinary_publication(42, version=2))
+
+    lifecycle.finish_publication(FramePublicationResult(41, False))
+    effects = lifecycle.finish_publication(FramePublicationResult(42, False))
+
+    assert effects.rollback_record is not None
+    assert effects.rollback_record.version == 0
+
+
+def test_newer_success_acknowledges_coalesced_registration_publications() -> None:
+    lifecycle = _lifecycle_with_durable_v0()
+    registration = _registration_publication(41, before=0, after=1)
+    lifecycle.track_publication(registration)
+    lifecycle.track_publication(_ordinary_publication(42, version=2))
+
+    effects = lifecycle.finish_publication(FramePublicationResult(42, True))
+
+    assert effects.acknowledged_publications == (registration,)
+
+
+def test_failed_chain_returns_latest_registration_context_with_earliest_record() -> None:
+    lifecycle = _lifecycle_with_durable_v0()
+    first = replace(
+        _registration_publication(41, before=0, after=1),
+        operator_alignment=True,
+    )
+    latest = _registration_publication(43, before=2, after=3)
+    lifecycle.track_publication(first)
+    lifecycle.track_publication(_ordinary_publication(42, version=2))
+    lifecycle.track_publication(latest)
+
+    effects = lifecycle.finish_publication(FramePublicationResult(43, False))
+
+    assert effects.rollback_publication == replace(
+        latest,
+        previous_record=_record_version(0),
+        operator_alignment=True,
+    )
+
+
+def test_late_registration_enrichment_cannot_reopen_finished_publication() -> None:
+    lifecycle = _lifecycle_with_durable_v0()
+    lifecycle.track_publication(_ordinary_publication(41, version=1))
+    lifecycle.finish_publication(FramePublicationResult(41, True))
+
+    lifecycle.track_publication(
+        _registration_publication(41, before=0, after=1)
+    )
+    lifecycle.track_publication(_ordinary_publication(42, version=2))
+    effects = lifecycle.finish_publication(FramePublicationResult(42, True))
+
+    assert effects.acknowledged_publications == ()
 
 
 def test_selection_decision_separates_intent_from_temporary_usability() -> None:
