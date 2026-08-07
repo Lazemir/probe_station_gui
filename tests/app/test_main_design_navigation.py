@@ -53,6 +53,8 @@ from probe_station_gui.design.registration_lifecycle import (
     FocusCompletion,
     FocusCompletionKind,
     RegistrationCancellation,
+    RegistrationCaptureOutcome,
+    RegistrationCaptureToken,
     RegistrationContext,
     RegistrationEffects,
 )
@@ -1114,6 +1116,181 @@ def test_legacy_stage_mark_captures_under_different_wcos_fail_closed(
     assert persisted["stage_coordinate_provenance"] == {
         "conflicting_capture_provenance": [first, second]
     }
+
+
+def _registration_failure_window(
+    tmp_path: Path,
+    *,
+    submission_accepted: bool,
+) -> tuple[
+    Main,
+    DesignSession,
+    DesignRegistrationLifecycle,
+    list[RegistrationCaptureToken],
+    list[RegistrationEffects],
+    list[str],
+    list[tuple[str, object]],
+]:
+    document = _make_document(tmp_path)
+    registry = CoordinateFrameRegistry()
+    draft = registry.add(new_design_frame_draft(document, existing_names=()))
+    session = DesignSession(document=document)
+    session.link_active_frame(draft)
+    session.source_design_marks = ((0.0, 0.0),)
+    session.source_stage_marks = ((9.0, 10.0),)
+    session.registration_status = "Baseline registration."
+    lifecycle = DesignRegistrationLifecycle()
+    requests: list[RegistrationCaptureToken] = []
+    applied: list[RegistrationEffects] = []
+    statuses: list[str] = []
+    overlay_events: list[tuple[str, object]] = []
+    window = Main.__new__(Main)
+    window._design_session = session
+    window._coordinate_frame_registry = registry
+    window._design_registration_lifecycle = lifecycle
+    _set_rotation_settings(window)
+
+    def submit(token: RegistrationCaptureToken, *, axes: tuple[str, ...]) -> bool:
+        assert axes == ("X", "Y", "B")
+        requests.append(token)
+        return submission_accepted
+
+    window.stage_controller = types.SimpleNamespace(
+        request_machine_coordinate_snapshot=submit
+    )
+    window._camera_stage_xy_from_raw_stage_xy = lambda point: point
+    window._refresh_design_panel = lambda: None
+    window._refresh_design_position = lambda: None
+    window._show_status = lambda message, _timeout=0: statuses.append(str(message))
+    window.design_layout_window = types.SimpleNamespace(
+        set_focus_candidate=lambda value: overlay_events.append(("candidate", value)),
+        set_selected_focus_point=lambda value: overlay_events.append(("point", value)),
+    )
+
+    def apply(effects: RegistrationEffects) -> None:
+        applied.append(effects)
+        Main._apply_registration_effects(window, effects)
+
+    window._apply_registration_effects = apply
+    return window, session, lifecycle, requests, applied, statuses, overlay_events
+
+
+def test_rejected_stage_snapshot_submission_applies_rejection_once_and_closes_request(
+    tmp_path: Path,
+) -> None:
+    window, session, lifecycle, requests, applied, statuses, overlay = (
+        _registration_failure_window(tmp_path, submission_accepted=False)
+    )
+    baseline = (
+        session.source_stage_marks,
+        session.registration,
+        session.registration_status,
+    )
+
+    Main._capture_stage_source_mark(window)
+
+    assert len(requests) == 1
+    assert len(applied) == 2
+    assert applied[-1].accepted is True
+    assert applied[-1].reason == "Machine coordinates are unavailable."
+    assert statuses == ["Machine coordinates are unavailable."]
+    assert overlay == []
+    assert (
+        session.source_stage_marks,
+        session.registration,
+        session.registration_status,
+    ) == baseline
+    already_closed = lifecycle.accept_sample(
+        requests[0],
+        RegistrationCaptureOutcome(succeeded=False),
+    )
+    assert already_closed.accepted is False
+
+
+def test_current_failed_snapshot_outcome_applies_effect_once_and_closes_request(
+    tmp_path: Path,
+) -> None:
+    window, session, lifecycle, requests, applied, statuses, overlay = (
+        _registration_failure_window(tmp_path, submission_accepted=True)
+    )
+    baseline = (
+        session.source_stage_marks,
+        session.registration,
+        session.registration_status,
+    )
+    Main._capture_stage_source_mark(window)
+    applied.clear()
+
+    Main._on_registration_machine_coordinate_snapshot_finished(
+        window,
+        requests[0],
+        False,
+        None,
+        "calibration unavailable",
+    )
+
+    assert len(applied) == 1
+    assert applied[0].accepted is True
+    assert applied[0].reason == "calibration unavailable"
+    assert statuses == ["calibration unavailable"]
+    assert overlay == []
+    assert (
+        session.source_stage_marks,
+        session.registration,
+        session.registration_status,
+    ) == baseline
+    already_closed = lifecycle.accept_sample(
+        requests[0],
+        RegistrationCaptureOutcome(succeeded=False),
+    )
+    assert already_closed.accepted is False
+
+
+def test_snapshot_conversion_failure_applies_each_returned_effect_once(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    window, session, lifecycle, requests, applied, statuses, overlay = (
+        _registration_failure_window(tmp_path, submission_accepted=True)
+    )
+    baseline = (
+        session.source_stage_marks,
+        session.registration,
+        session.registration_status,
+    )
+    Main._capture_stage_source_mark(window)
+    applied.clear()
+    monkeypatch.setattr(
+        main_module.offsets,
+        "raw_stage_to_camera_stage",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("conversion failed")
+        ),
+    )
+
+    Main._on_registration_machine_coordinate_snapshot_finished(
+        window,
+        requests[0],
+        True,
+        _machine_snapshot((1.0, 2.0, 0.0, 0.0, 3.0)),
+        "",
+    )
+
+    assert len(applied) == 2
+    assert [effects.reason for effects in applied] == [None, "conversion failed"]
+    assert all(effects.accepted for effects in applied)
+    assert statuses == ["conversion failed"]
+    assert overlay == []
+    assert (
+        session.source_stage_marks,
+        session.registration,
+        session.registration_status,
+    ) == baseline
+    already_closed = lifecycle.accept_sample(
+        requests[0],
+        RegistrationCaptureOutcome(succeeded=False),
+    )
+    assert already_closed.accepted is False
 
 
 def test_stage_mark_capture_rejects_calibration_failure_before_mutating_session(

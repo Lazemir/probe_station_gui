@@ -86,3 +86,52 @@ commit).
 - No hardware-dependent code was run.
 - The pre-existing untracked `.tmp/` directory was left untouched.
 - Task 6 final range-wide verification remains separate.
+
+## Fix Round 1: Authoritative Selection and Registration Effects
+
+Two review findings were reproduced and corrected with new interface-level
+REDs.
+
+### Selection adapter
+
+- RED proved that one explicit Design selection called `plan_selection` twice;
+  with an invalid rotation pivot the lifecycle and UI ended on Machine while
+  persistence incorrectly recorded the originally requested Design frame.
+- `update_software_coordinate_display` now owns the complete adapter operation:
+  it collects the pivot, registry, authority and homing context, requests one
+  final lifecycle decision, applies one display plan, and persists only that
+  decision's effect. `select_gui_coordinate_frame` supplies explicit intent to
+  this operation instead of planning first and refreshing afterward.
+- GREEN asserts one lifecycle call, one UI-plan application and one persistence
+  application. Invalid-pivot fallback now leaves lifecycle, UI and persistence
+  consistently on Machine.
+
+### Registration adapter
+
+- Three REDs showed that rejected snapshot submission left the lifecycle token
+  active, while current failed callbacks and conversion failures did not apply
+  accepted lifecycle effects.
+- Rejected submission now uses the existing failed
+  `RegistrationCaptureOutcome`, applies the returned effect once, reports the
+  reason, and closes the active token. Current callback authorization/failure
+  and conversion rejection effects are each applied exactly once.
+- Tests exercise the real `DesignRegistrationLifecycle` interface and prove a
+  second outcome for each completed token is stale. Baseline marks,
+  registration/status and focus-overlay presentation remain unchanged.
+
+### Fix-round verification
+
+- Selection/pivot gate: `106 passed, 4 subtests passed`.
+- Main design-navigation suite: `105 passed`.
+- Combined Task 3/5 gate: `242 passed, 4 subtests passed`.
+- Task 5 aggregate with the two already-documented argument-order provenance
+  cases separated: `1016 passed, 2 deselected, 5 subtests passed`; isolated
+  provenance remained `6 passed`.
+- Full C-locale rerun with only the documented headless clipboard assertion
+  deselected: `2886 passed, 1 deselected, 1 warning, 18 subtests passed` in
+  `59.53s`.
+- The first full run observed one camera monitor timing failure (`2` reads
+  instead of `1`). The unchanged camera test passed three consecutive isolated
+  reruns, and the fresh full rerun passed. No camera code was changed.
+- Ruff on every fix-round file, `compileall`, `git diff --check`, and obsolete
+  policy/static searches passed.

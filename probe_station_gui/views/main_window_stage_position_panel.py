@@ -16,6 +16,7 @@ from probe_station_gui.coordinates.model import (
 from probe_station_gui.coordinates.lifecycle import (
     CoordinateFrameLifecycle,
     FrameSelectionContext,
+    FrameSelectionDecision,
 )
 from probe_station_gui.coordinates.presentation import (
     MACHINE_FRAME_ID,
@@ -144,21 +145,23 @@ def _coerce_physical_machine_pose(value: object) -> PhysicalMachinePose:
 def update_software_coordinate_display(
     owner: MainWindowStagePositionPanelOwner,
     physical_pose: PhysicalMachinePose | object,
-) -> None:
+    *,
+    requested_frame_id: str | None = None,
+    explicit: bool = False,
+) -> FrameSelectionDecision | None:
     """Resolve GUI-local selection and apply one pure software-frame plan."""
 
     physical_pose = _coerce_physical_machine_pose(physical_pose)
-    if physical_pose is None:
-        return
     registry = getattr(owner, "_coordinate_frame_registry", None)
-    if registry is None or not bool(getattr(owner, "_coordinate_frames_loaded", False)):
-        return
-    snapshot = registry.snapshot()
+    frames_loaded = bool(getattr(owner, "_coordinate_frames_loaded", False))
+    if not explicit and (physical_pose is None or registry is None or not frames_loaded):
+        return None
+    snapshot = registry.snapshot() if registry is not None and frames_loaded else None
     homed_getter = getattr(getattr(owner, "stage_controller", None), "homed_axes", None)
     homed_axes = homed_getter() if callable(homed_getter) else set()
-    authority_axes = set(physical_pose.values)
+    authority_axes = set() if physical_pose is None else set(physical_pose.values)
 
-    requested: str | None = None
+    requested = requested_frame_id
     try:
         pivot = _coordinate_pivot(owner)
     except (AttributeError, TypeError, ValueError) as exc:
@@ -169,13 +172,19 @@ def update_software_coordinate_display(
             show_status(str(exc), 6000)
     decision = owner._coordinate_frame_lifecycle.plan_selection(
         FrameSelectionContext(
-            records=snapshot.records,
+            records=() if snapshot is None else snapshot.records,
             requested_frame_id=requested,
-            explicit=False,
+            explicit=explicit,
             homed_axes=frozenset(homed_axes),
             authority_axes=frozenset(authority_axes),
         )
     )
+    if not decision.available:
+        return decision
+    if physical_pose is None or snapshot is None:
+        if decision.persist_selection:
+            _persist_gui_coordinate_selection(owner, decision.selected_frame_id)
+        return decision
     plan = build_coordinate_display_plan(
         snapshot,
         selected_frame_id=decision.selected_frame_id,
@@ -195,6 +204,7 @@ def update_software_coordinate_display(
     panel = getattr(owner, "_stage_position_panel", None)
     if panel is not None:
         panel.set_coordinate_display_plan(plan)
+    return decision
 
 
 def refresh_coordinate_frame_display(owner: MainWindowStagePositionPanelOwner) -> None:
@@ -212,31 +222,12 @@ def select_gui_coordinate_frame(
     """Apply one explicit GUI selection without touching API coordinate state."""
 
     requested = str(frame_id or MACHINE_FRAME_ID)
-    pose = _coerce_physical_machine_pose(
-        getattr(owner, "_latest_physical_machine_pose", None)
+    update_software_coordinate_display(
+        owner,
+        getattr(owner, "_latest_physical_machine_pose", None),
+        requested_frame_id=requested,
+        explicit=True,
     )
-    registry = getattr(owner, "_coordinate_frame_registry", None)
-    snapshot = registry.snapshot() if registry is not None else None
-    homed_getter = getattr(getattr(owner, "stage_controller", None), "homed_axes", None)
-    decision = owner._coordinate_frame_lifecycle.plan_selection(
-        FrameSelectionContext(
-            records=() if snapshot is None else snapshot.records,
-            requested_frame_id=requested,
-            explicit=True,
-            homed_axes=frozenset(
-                homed_getter() if callable(homed_getter) else set()
-            ),
-            authority_axes=(
-                frozenset() if pose is None else frozenset(pose.values)
-            ),
-        )
-    )
-    if not decision.available:
-        return
-    requested = decision.selected_frame_id
-    update_software_coordinate_display(owner, pose)
-    if decision.persist_selection:
-        _persist_gui_coordinate_selection(owner, requested)
 
 
 def gui_coordinate_motion_editing_enabled(owner: object) -> bool:

@@ -438,6 +438,61 @@ def test_explicit_unavailable_selection_keeps_previous_selection() -> None:
     assert owner.persisted_selections == []
 
 
+def test_explicit_selection_with_invalid_pivot_persists_final_machine_fallback() -> None:
+    frame_id = "11111111-1111-4111-8111-111111111111"
+    owner = _SelectionOwner(
+        selected="machine",
+        authority_axes={"X", "Y", "Z", "A", "B"},
+    )
+    plans: list[CoordinateDisplayPlan] = []
+    owner._stage_position_panel = SimpleNamespace(
+        set_coordinate_display_plan=plans.append
+    )
+    owner.settings_manager.settings.software_coordinates.pivot.x_mm = float("nan")
+
+    panel_adapter.select_gui_coordinate_frame(owner, frame_id)
+
+    assert owner._coordinate_frame_lifecycle.selected_frame_id == "machine"
+    assert plans[-1].selected_frame_id == "machine"
+    assert owner.persisted_selections == ["machine"]
+
+
+def test_explicit_selection_plans_applies_and_persists_once() -> None:
+    frame_id = "11111111-1111-4111-8111-111111111111"
+    owner = _SelectionOwner(
+        selected="machine",
+        authority_axes={"X", "Y", "Z", "A", "B"},
+    )
+    contexts: list[FrameSelectionContext] = []
+
+    class _Lifecycle:
+        def plan_selection(
+            self,
+            context: FrameSelectionContext,
+        ) -> FrameSelectionDecision:
+            contexts.append(context)
+            return FrameSelectionDecision(
+                selected_frame_id=frame_id,
+                available=True,
+                reason=None,
+                persist_selection=True,
+            )
+
+    plans: list[CoordinateDisplayPlan] = []
+    owner._coordinate_frame_lifecycle = _Lifecycle()
+    owner._stage_position_panel = SimpleNamespace(
+        set_coordinate_display_plan=plans.append
+    )
+
+    panel_adapter.select_gui_coordinate_frame(owner, frame_id)
+
+    assert len(contexts) == 1
+    assert contexts[0].requested_frame_id == frame_id
+    assert contexts[0].explicit is True
+    assert [plan.selected_frame_id for plan in plans] == [frame_id]
+    assert owner.persisted_selections == [frame_id]
+
+
 def test_explicit_machine_selection_tolerates_missing_physical_pose(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

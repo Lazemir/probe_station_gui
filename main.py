@@ -10191,6 +10191,19 @@ class Main(QMainWindow):
             axes=("X", "Y", "B"),
         )
         if not accepted:
+            effects = self._design_registration_lifecycle.accept_sample(
+                token,
+                RegistrationCaptureOutcome(
+                    succeeded=False,
+                    message="Machine coordinates are unavailable.",
+                ),
+            )
+            if effects.accepted:
+                self._apply_registration_effects(effects)
+                self._show_status(
+                    str(effects.reason or "Machine coordinates are unavailable."),
+                    6000,
+                )
             return
 
     def _on_registration_machine_coordinate_snapshot_finished(
@@ -10236,6 +10249,7 @@ class Main(QMainWindow):
         )
         if not callback_effects.accepted:
             return
+        self._apply_registration_effects(callback_effects)
         if not callback_succeeded:
             self._show_status(
                 str(callback_effects.reason or "Machine coordinates are unavailable."),
@@ -10267,6 +10281,7 @@ class Main(QMainWindow):
                 ),
             )
             if failure_effects.accepted:
+                self._apply_registration_effects(failure_effects)
                 self._show_status(str(failure_effects.reason or exc), 6000)
             return
 
