@@ -19,7 +19,6 @@ from probe_station_gui.coordinates.lifecycle import (
 from probe_station_gui.coordinates.presentation import (
     MACHINE_FRAME_ID,
     build_coordinate_display_plan,
-    decide_pending_frame_restore,
 )
 from probe_station_gui.coordinates.registry import RegistrySnapshot, invalidate_axes
 from probe_station_gui.coordinates.transforms import BFrameTransform
@@ -262,65 +261,6 @@ def test_missing_selected_record_is_permanent_machine_fallback() -> None:
     assert plan.selection_available is True
 
 
-def test_restore_waits_for_authority_then_allows_yellow_a() -> None:
-    frame = _record(
-        DESIGN_ID,
-        FrameKind.DESIGN,
-        "chip-a",
-        ready_axes=("X", "Y", "Z", "B"),
-        transform=BFrameTransform(
-            origin_xy_at_reference_b=(0.0, 0.0),
-            reference_b_deg=0.0,
-            xy_angle_at_reference_b_deg=0.0,
-            b_zero_machine_deg=0.0,
-            z_zero_machine_mm=1.0,
-            a_zero_machine_mm=None,
-        ),
-    )
-    snapshot = _snapshot(frame)
-
-    assert decide_pending_frame_restore(
-        snapshot,
-        frame_id=DESIGN_ID,
-        homed_axes=set(),
-        authority_axes={"X", "Y", "Z", "A", "B"},
-    ) is None
-    assert decide_pending_frame_restore(
-        snapshot,
-        frame_id=DESIGN_ID,
-        homed_axes={"X", "Y"},
-        authority_axes={"X", "Y", "Z", "A"},
-    ) is None
-    assert decide_pending_frame_restore(
-        snapshot,
-        frame_id=DESIGN_ID,
-        homed_axes={"X", "Y"},
-        authority_axes={"X", "Y", "Z", "A", "B"},
-    ) == DESIGN_ID
-
-
-def test_restore_rejects_missing_z_or_deleted_frame_after_authority_is_known() -> None:
-    missing_z = _record(
-        DESIGN_ID,
-        FrameKind.DESIGN,
-        "chip-a",
-        ready_axes=("X", "Y", "B"),
-    )
-
-    assert decide_pending_frame_restore(
-        _snapshot(missing_z),
-        frame_id=DESIGN_ID,
-        homed_axes={"X", "Y"},
-        authority_axes={"X", "Y", "Z", "A", "B"},
-    ) == MACHINE_FRAME_ID
-    assert decide_pending_frame_restore(
-        _snapshot(),
-        frame_id=DESIGN_ID,
-        homed_axes={"X", "Y"},
-        authority_axes={"X", "Y", "Z", "A", "B"},
-    ) == MACHINE_FRAME_ID
-
-
 def test_semantically_invalid_ready_origins_fall_back_to_machine() -> None:
     corrupt = _record(
         DESIGN_ID,
@@ -338,12 +278,6 @@ def test_semantically_invalid_ready_origins_fall_back_to_machine() -> None:
     assert plan.selected_frame_id == MACHINE_FRAME_ID
     assert plan.selection_available is True
     assert plan.selection_reason is None
-    assert decide_pending_frame_restore(
-        snapshot,
-        frame_id=DESIGN_ID,
-        homed_axes={"X", "Y"},
-        authority_axes={"X", "Y", "Z", "A", "B"},
-    ) == MACHINE_FRAME_ID
 
 
 def test_selector_entries_apply_lifecycle_decisions_without_rechecking_policy(
@@ -433,12 +367,6 @@ def test_unverified_design_provenance_cannot_select_or_restore(status: str) -> N
     assert plan.selected_frame_id == DESIGN_ID
     assert plan.selection_available is False
     assert plan.selection_reason == "Design source changed."
-    assert decide_pending_frame_restore(
-        snapshot,
-        frame_id=DESIGN_ID,
-        homed_axes={"X", "Y"},
-        authority_axes={"X", "Y", "Z", "A", "B"},
-    ) == MACHINE_FRAME_ID
 
 
 def test_record_version_change_preserves_selection_by_frame_id() -> None:

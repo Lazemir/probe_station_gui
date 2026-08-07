@@ -26,7 +26,7 @@ MACHINE_FRAME_ID = "machine"
 @dataclass(frozen=True)
 class FrameSelectionContext:
     records: tuple[CoordinateFrameRecord, ...]
-    requested_frame_id: str
+    requested_frame_id: str | None
     explicit: bool
     homed_axes: frozenset[str]
     authority_axes: frozenset[str]
@@ -141,12 +141,25 @@ def _temporary_selection_reason(
 class CoordinateFrameLifecycle:
     """Own selection intent and Design-frame usability policy."""
 
-    def __init__(self, *, selected_frame_id: str = MACHINE_FRAME_ID) -> None:
+    def __init__(
+        self,
+        *,
+        selected_frame_id: str = MACHINE_FRAME_ID,
+        restore_frame_id: str | None = None,
+    ) -> None:
         self._selected_frame_id = str(selected_frame_id or MACHINE_FRAME_ID)
+        restore = str(restore_frame_id or MACHINE_FRAME_ID)
+        self._restore_frame_id = (
+            None if restore == MACHINE_FRAME_ID else restore
+        )
         self._load_request_id: int | None = None
         self._publications: dict[int, FramePublication] = {}
         self._latest_publication_request_id: int | None = None
         self._resolved_publication_request_id: int | None = None
+
+    @property
+    def selected_frame_id(self) -> str:
+        return self._selected_frame_id
 
     def begin_load(self, request_id: int) -> FrameLifecycleEffects:
         self._load_request_id = int(request_id)
@@ -237,11 +250,21 @@ class CoordinateFrameLifecycle:
         context: FrameSelectionContext,
     ) -> FrameSelectionDecision:
         records = {record.frame_id: record for record in context.records}
-        requested = str(context.requested_frame_id or MACHINE_FRAME_ID)
+        pending_restore = (
+            not context.explicit
+            and context.requested_frame_id is None
+            and self._restore_frame_id is not None
+        )
+        requested = str(
+            self._restore_frame_id
+            if pending_restore
+            else context.requested_frame_id or self._selected_frame_id
+        )
         restoring = not context.explicit and requested != self._selected_frame_id
         if requested == MACHINE_FRAME_ID:
-            if context.explicit:
+            if context.explicit or context.requested_frame_id is not None:
                 self._selected_frame_id = MACHINE_FRAME_ID
+                self._restore_frame_id = None
             return FrameSelectionDecision(
                 selected_frame_id=MACHINE_FRAME_ID,
                 available=True,
@@ -263,6 +286,14 @@ class CoordinateFrameLifecycle:
                     reason=permanent_reason,
                     persist_selection=False,
                 )
+            if pending_restore:
+                self._restore_frame_id = None
+                return FrameSelectionDecision(
+                    selected_frame_id=self._selected_frame_id,
+                    available=True,
+                    reason=None,
+                    persist_selection=False,
+                )
             persist = self._selected_frame_id != MACHINE_FRAME_ID
             self._selected_frame_id = MACHINE_FRAME_ID
             return FrameSelectionDecision(
@@ -277,6 +308,13 @@ class CoordinateFrameLifecycle:
         authority_axes = _normalized_axes(context.authority_axes)
         if restoring:
             if not {"X", "Y"}.issubset(authority_axes):
+                if pending_restore:
+                    return FrameSelectionDecision(
+                        selected_frame_id=self._selected_frame_id,
+                        available=True,
+                        reason=None,
+                        persist_selection=False,
+                    )
                 return FrameSelectionDecision(
                     selected_frame_id=self._selected_frame_id,
                     available=False,
@@ -290,6 +328,13 @@ class CoordinateFrameLifecycle:
                 include_provenance=False,
             )
             if physical_reason is not None:
+                if pending_restore:
+                    return FrameSelectionDecision(
+                        selected_frame_id=self._selected_frame_id,
+                        available=True,
+                        reason=None,
+                        persist_selection=False,
+                    )
                 return FrameSelectionDecision(
                     selected_frame_id=self._selected_frame_id,
                     available=False,
@@ -299,6 +344,8 @@ class CoordinateFrameLifecycle:
             if design_frame_provenance_error(record) is not None or not all(
                 record.readiness[axis].available for axis in ("X", "Y", "Z", "B")
             ):
+                if pending_restore:
+                    self._restore_frame_id = None
                 return FrameSelectionDecision(
                     selected_frame_id=self._selected_frame_id,
                     available=True,
@@ -319,6 +366,10 @@ class CoordinateFrameLifecycle:
             )
         if context.explicit:
             self._selected_frame_id = requested
+            self._restore_frame_id = None
+        elif pending_restore:
+            self._selected_frame_id = requested
+            self._restore_frame_id = None
         return FrameSelectionDecision(
             selected_frame_id=requested,
             available=reason is None,

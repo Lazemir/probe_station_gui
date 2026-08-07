@@ -30,6 +30,7 @@ from probe_station_gui.coordinates.model import (
     PhysicalMachinePose,
     ReadinessStatus,
 )
+from probe_station_gui.coordinates.lifecycle import CoordinateFrameLifecycle
 from probe_station_gui.coordinates.registry import CoordinateFrameRegistry
 from probe_station_gui.coordinates.transforms import BFrameTransform
 from probe_station_gui.settings.manager import (
@@ -150,8 +151,9 @@ class MainStageCoordinateControlsTest(unittest.TestCase):
         in_memory: list[str] = []
         published: list[SoftwareCoordinateSelectionSnapshot] = []
         window = Main.__new__(Main)
-        window._selected_coordinate_frame_id = "machine"
-        window._pending_coordinate_frame_restore_id = frame_id
+        window._coordinate_frame_lifecycle = CoordinateFrameLifecycle(
+            restore_frame_id=frame_id
+        )
         window._latest_physical_machine_pose = PhysicalMachinePose(
             {"X": 0.0, "Y": 0.0, "Z": 1.0, "A": 2.0, "B": 0.0}
         )
@@ -182,8 +184,10 @@ class MainStageCoordinateControlsTest(unittest.TestCase):
 
         Main._on_software_coordinate_system_changed(window, "machine")
 
-        self.assertEqual(window._selected_coordinate_frame_id, "machine")
-        self.assertIsNone(window._pending_coordinate_frame_restore_id)
+        self.assertEqual(
+            window._coordinate_frame_lifecycle.selected_frame_id,
+            "machine",
+        )
         self.assertEqual(in_memory, ["machine"])
         self.assertEqual(
             published,
@@ -194,7 +198,9 @@ class MainStageCoordinateControlsTest(unittest.TestCase):
         frame_id = "11111111-1111-4111-8111-111111111111"
         statuses: list[tuple[str, int]] = []
         window = Main.__new__(Main)
-        window._selected_coordinate_frame_id = frame_id
+        window._coordinate_frame_lifecycle = CoordinateFrameLifecycle(
+            selected_frame_id=frame_id
+        )
         window._show_status = lambda message, timeout: statuses.append(
             (message, timeout)
         )
@@ -207,7 +213,10 @@ class MainStageCoordinateControlsTest(unittest.TestCase):
             ),
         )
 
-        self.assertEqual(window._selected_coordinate_frame_id, frame_id)
+        self.assertEqual(
+            window._coordinate_frame_lifecycle.selected_frame_id,
+            frame_id,
+        )
         self.assertEqual(
             statuses,
             [("Coordinate selection could not be saved.", 6000)],
@@ -219,8 +228,9 @@ class MainStageCoordinateControlsTest(unittest.TestCase):
         original = registry.add(self._software_frame(frame_id))
         plans: list[object] = []
         window = Main.__new__(Main)
-        window._selected_coordinate_frame_id = frame_id
-        window._pending_coordinate_frame_restore_id = None
+        window._coordinate_frame_lifecycle = CoordinateFrameLifecycle(
+            selected_frame_id=frame_id
+        )
         window._latest_physical_machine_pose = PhysicalMachinePose(
             {"X": 0.0, "Y": 0.0, "Z": 1.0, "A": 2.0, "B": 0.0}
         )
@@ -239,15 +249,20 @@ class MainStageCoordinateControlsTest(unittest.TestCase):
         )
         Main._refresh_software_coordinate_display(window)
 
-        self.assertEqual(window._selected_coordinate_frame_id, frame_id)
+        self.assertEqual(
+            window._coordinate_frame_lifecycle.selected_frame_id,
+            frame_id,
+        )
         self.assertEqual(plans[-1].selected_frame_id, frame_id)
 
         registry.reset(())
         Main._refresh_software_coordinate_display(window)
 
-        self.assertEqual(window._selected_coordinate_frame_id, "machine")
+        self.assertEqual(
+            window._coordinate_frame_lifecycle.selected_frame_id,
+            "machine",
+        )
         self.assertEqual(plans[-1].selected_frame_id, "machine")
-        self.assertIsNone(window._pending_coordinate_frame_restore_id)
 
     def test_stage_position_display_updates_caches_while_panel_applies_ui_state(
         self,
@@ -785,7 +800,9 @@ class MainStageCoordinateControlsTest(unittest.TestCase):
                     )
                 )
                 window._coordinate_frame_registry = registry
-                window._selected_coordinate_frame_id = frame_id
+                window._coordinate_frame_lifecycle = CoordinateFrameLifecycle(
+                    selected_frame_id=frame_id
+                )
                 window._pending_stage_axis_targets = {"X": (99.0, 1.0)}
 
                 Main._apply_pending_stage_coordinate_targets(window)
@@ -830,7 +847,9 @@ class MainStageCoordinateControlsTest(unittest.TestCase):
                     )
                 )
                 window._coordinate_frame_registry = registry
-                window._selected_coordinate_frame_id = frame_id
+                window._coordinate_frame_lifecycle = CoordinateFrameLifecycle(
+                    selected_frame_id=frame_id
+                )
                 window._stage_axis_display_values["X"] = 1.0
 
                 Main._on_manual_axis_move_requested(window, "X", 0.001, "G91", 120.0)

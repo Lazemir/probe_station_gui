@@ -16,6 +16,10 @@ from tests.app.import_reset import restore_real_imports_for_main
 restore_real_imports_for_main()
 import main as main_module
 from main import Main
+from probe_station_gui.coordinates.lifecycle import CoordinateFrameLifecycle
+from probe_station_gui.design.registration_lifecycle import (
+    DesignRegistrationLifecycle,
+)
 from probe_station_gui.design.contact_navigation import api_route_adjusted_stage_xy
 from probe_station_gui.dialogs import (
     route_measurement_dialog as route_measurement_dialog_module,
@@ -617,6 +621,7 @@ def _make_main(current_feedrate: float = 120.0) -> tuple[
     list[str],
 ]:
     window = Main.__new__(Main)
+    window._coordinate_frame_lifecycle = CoordinateFrameLifecycle()
     stage_controller = _FakeStageController()
     joystick = _FakeJoystick(current_feedrate)
     timer = _FakeTimer()
@@ -794,6 +799,7 @@ def _make_route_start_main(
 ]:
     point = _route_start_point()
     window = Main.__new__(Main)
+    window._design_registration_lifecycle = DesignRegistrationLifecycle()
     statuses: list[tuple[str, int | None]] = []
     telegrams: list[tuple[str, tuple[object, ...], dict[str, object]]] = []
     camera_calls: list[float] = []

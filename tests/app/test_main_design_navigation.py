@@ -205,6 +205,7 @@ def _pending_focus_operation(
 
 def _make_window() -> tuple[Main, _FakeStageController, list[str]]:
     window = Main.__new__(Main)
+    window._design_registration_lifecycle = DesignRegistrationLifecycle()
     stage_controller = _FakeStageController()
     statuses: list[str] = []
     window.stage_controller = stage_controller
@@ -376,6 +377,8 @@ def _set_rotation_settings(
     window: object,
     pivot: tuple[float, float] = (0.0, 0.0),
 ) -> None:
+    if getattr(window, "_design_registration_lifecycle", None) is None:
+        window._design_registration_lifecycle = DesignRegistrationLifecycle()
     window.settings_manager = types.SimpleNamespace(
         settings=types.SimpleNamespace(
             software_coordinates=types.SimpleNamespace(
@@ -489,6 +492,7 @@ def test_legacy_migration_without_synchronized_provenance_preserves_legacy_paylo
     window = Main.__new__(Main)
     window._design_session = session
     window._coordinate_frame_registry = registry
+    window._design_registration_lifecycle = DesignRegistrationLifecycle()
     _set_rotation_settings(window)
     window._coordinate_frames_loaded = True
     window._active_design_frame_metadata = main_module.DesignFrameMetadata.from_document(
@@ -754,6 +758,7 @@ def test_stage_mark_capture_commits_active_frame_without_motion(
     requests: list[tuple[object, tuple[str, ...]]] = []
     events: list[object] = []
     window = Main.__new__(Main)
+    window._design_registration_lifecycle = DesignRegistrationLifecycle()
     window._design_session = session
     window._coordinate_frame_registry = registry
     window.settings_manager = types.SimpleNamespace(
@@ -1158,6 +1163,7 @@ def test_stage_mark_capture_busy_and_stale_callbacks_do_not_mutate_session(
     window = Main.__new__(Main)
     window._design_session = session
     window._coordinate_frame_registry = registry
+    window._design_registration_lifecycle = DesignRegistrationLifecycle()
     window._refresh_design_panel = lambda: None
     window._refresh_design_position = lambda: None
     window._show_status = lambda message, _timeout: statuses.append(str(message))
@@ -1176,7 +1182,10 @@ def test_stage_mark_capture_busy_and_stale_callbacks_do_not_mutate_session(
     )
     Main._capture_stage_source_mark(window)
     stale_token = requests.pop()
-    Main._cancel_registration_capture(window, RegistrationCancellation.FRAME_CHANGED)
+    cancellation = window._design_registration_lifecycle.cancel(
+        RegistrationCancellation.FRAME_CHANGED
+    )
+    Main._apply_registration_effects(window, cancellation)
     session.active_frame_id = "00000000-0000-0000-0000-000000000001"
     snapshot = _machine_snapshot((1.0, 2.0, 0.0, 0.0, 3.0))
     Main._on_registration_machine_coordinate_snapshot_finished(
@@ -1216,6 +1225,7 @@ def test_stale_registration_callback_is_inert_before_snapshot_processing(
     window = Main.__new__(Main)
     window._design_session = session
     window._coordinate_frame_registry = registry
+    window._design_registration_lifecycle = DesignRegistrationLifecycle()
     _set_rotation_settings(window)
     window.stage_controller = types.SimpleNamespace(
         request_machine_coordinate_snapshot=lambda token, *, axes: (
@@ -1232,7 +1242,7 @@ def test_stale_registration_callback_is_inert_before_snapshot_processing(
 
     Main._capture_stage_source_mark(window)
     token = requests.pop()
-    Main._registration_capture_lifecycle(window).cancel(
+    window._design_registration_lifecycle.cancel(
         RegistrationCancellation.FRAME_CHANGED
     )
     applied_effects.clear()
@@ -1620,6 +1630,44 @@ def test_saved_callback_delegates_acknowledgement_to_coordinate_lifecycle(
     assert calls == [FramePublicationResult(41, True)]
     assert statuses == ["registration saved"]
     assert not hasattr(window, "_registration_persistence_transactions")
+
+
+def test_main_coordinate_callback_executes_lifecycle_effects_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    effects = FrameLifecycleEffects(refresh_display=True)
+    calls: list[FramePublicationResult] = []
+    applied: list[FrameLifecycleEffects] = []
+
+    class _Lifecycle:
+        def finish_publication(
+            self,
+            result: FramePublicationResult,
+        ) -> FrameLifecycleEffects:
+            calls.append(result)
+            return effects
+
+    owner = Main.__new__(Main)
+    owner._coordinate_frame_lifecycle = _Lifecycle()
+    owner._apply_coordinate_frame_lifecycle_effects = applied.append
+    monkeypatch.setattr(
+        main_module.connection_flow,
+        "handle_coordinate_frame_saved",
+        lambda _owner, _result: None,
+    )
+
+    Main._on_coordinate_frames_saved(
+        owner,
+        types.SimpleNamespace(request_id=12),
+    )
+
+    assert calls == [FramePublicationResult(12, True)]
+    assert applied == [effects]
+
+
+def test_main_lifecycle_seams_have_no_policy_pass_through_helpers() -> None:
+    assert "_registration_capture_lifecycle" not in Main.__dict__
+    assert "_cancel_registration_capture" not in Main.__dict__
 
 
 def test_failed_callback_executes_lifecycle_rollback_effect(
@@ -3231,6 +3279,7 @@ def test_contact_callback_never_captures_after_active_frame_switch(
     )
     emitted: list[tuple[object, float]] = []
     window = Main.__new__(Main)
+    window._design_registration_lifecycle = DesignRegistrationLifecycle()
     window._coordinate_frame_registry = registry
     window._design_session = DesignSession(document=document)
     window._design_session.link_active_frame(focused)
@@ -3274,6 +3323,7 @@ def test_contact_callback_captures_synchronized_physical_machine_a(
     )
     emitted: list[tuple[object, float]] = []
     window = Main.__new__(Main)
+    window._design_registration_lifecycle = DesignRegistrationLifecycle()
     window._coordinate_frame_registry = registry
     window._design_session = DesignSession(document=document)
     window._design_session.link_active_frame(focused)
@@ -3326,6 +3376,7 @@ def test_later_route_does_not_recapture_established_contact_reference(
     )
     reads: list[tuple[str, ...]] = []
     window = Main.__new__(Main)
+    window._design_registration_lifecycle = DesignRegistrationLifecycle()
     window._coordinate_frame_registry = registry
     window._design_session = DesignSession(document=document)
     window._design_session.link_active_frame(focused)
@@ -3521,6 +3572,55 @@ def test_focus_candidate_moves_only_after_explicit_current_context_acceptance() 
     assert started[0][1] is not None
 
 
+def test_focus_move_rejection_applies_one_lifecycle_cancellation_effect() -> None:
+    context = _lifecycle_context()
+    token = types.SimpleNamespace(request_id="focus-token")
+    bound_effects = RegistrationEffects(accepted=True)
+    cancellation_effects = RegistrationEffects(
+        accepted=True,
+        reason="Move was rejected.",
+    )
+    completions: list[FocusCompletion] = []
+
+    class _Lifecycle:
+        def accept_focus(
+            self,
+            actual_context: RegistrationContext,
+            completion: FocusCompletion,
+        ) -> RegistrationEffects:
+            assert actual_context == context
+            completions.append(completion)
+            if completion.kind is FocusCompletionKind.TARGET_BOUND:
+                return bound_effects
+            assert completion.kind is FocusCompletionKind.CANCELLED
+            return cancellation_effects
+
+    window = Main.__new__(Main)
+    window._design_registration_lifecycle = _Lifecycle()
+    window._design_focus_overlay_context_key = lambda: context
+    window._move_to_design_coordinate = (
+        lambda _point, *, source_label, move_request: (
+            source_label == "focus reference" and move_request(4.0, 5.0)
+        )
+    )
+    window.stage_controller = types.SimpleNamespace(
+        request_token_bound_move_to_xy=lambda *_args: False
+    )
+    window.design_registration_focus_move_finished = types.SimpleNamespace(
+        emit=lambda *_args: None
+    )
+    applied: list[RegistrationEffects] = []
+    window._apply_registration_effects = applied.append
+
+    Main._start_design_focus_reference(window, (6.0, 7.0), token)
+
+    assert [completion.kind for completion in completions] == [
+        FocusCompletionKind.TARGET_BOUND,
+        FocusCompletionKind.CANCELLED,
+    ]
+    assert applied == [bound_effects, cancellation_effects]
+
+
 def test_focus_context_key_tracks_fov_objective_and_optical_calibration(
     tmp_path: Path,
 ) -> None:
@@ -3567,6 +3667,7 @@ def test_stale_focus_structure_result_is_ignored_after_document_context_change(
     started: list[tuple[float, float]] = []
     session = types.SimpleNamespace(document=document, active_frame_id="frame-a")
     window = Main.__new__(Main)
+    window._design_registration_lifecycle = DesignRegistrationLifecycle()
     window._design_session = session
     window._coordinate_frame_registry = types.SimpleNamespace(get=lambda _frame_id: None)
     window._resolve_design_fov_size = lambda: (20.0, 20.0)
@@ -3998,6 +4099,7 @@ def test_missing_selected_registration_clears_session_without_deleting_others(
     session = DesignSession(document=document)
     session.link_active_frame(first)
     window = Main.__new__(Main)
+    window._design_registration_lifecycle = DesignRegistrationLifecycle()
     window._design_session = session
     window._coordinate_frame_registry = registry
     window.design_layout_window = None
@@ -4504,7 +4606,9 @@ def test_start_empty_deletes_sidecar_even_with_pending_visibility(
     assert "publish_markup" not in statuses
 
 
-def test_explicit_unload_deletes_markup_sidecar(tmp_path: Path) -> None:
+def test_design_unload_delegates_registration_lifecycle_once_and_deletes_markup(
+    tmp_path: Path,
+) -> None:
     window, _stage, statuses = _make_window()
     document = _make_document(tmp_path)
     window._design_session.load_document(document)
@@ -4519,17 +4623,21 @@ def test_explicit_unload_deletes_markup_sidecar(tmp_path: Path) -> None:
         f"position:{value}"
     )
     cancellations: list[RegistrationCancellation] = []
+    lifecycle_effects = RegistrationEffects()
+    applied: list[RegistrationEffects] = []
     window._design_registration_lifecycle = types.SimpleNamespace(
         cancel=lambda reason: (
-            cancellations.append(reason) or RegistrationEffects()
+            cancellations.append(reason) or lifecycle_effects
         )
     )
+    window._apply_registration_effects = applied.append
 
     Main._unload_design_document(window)
 
     assert window._design_session.document is None
     assert window._design_markup is None
     assert cancellations == [RegistrationCancellation.DOCUMENT_UNLOADED]
+    assert applied == [lifecycle_effects]
     assert not hasattr(window, "_pending_registration_physical_marks")
     assert not hasattr(window, "_pending_registration_mark_capture")
     assert "delete:loaded.gds" in statuses

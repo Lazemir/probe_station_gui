@@ -34,9 +34,13 @@ from probe_station_gui.coordinates.provenance import (
     RUNTIME_PROVENANCE_STATUS,
 )
 from probe_station_gui.coordinates.transforms import BFrameTransform
+from probe_station_gui.design.registration_lifecycle import (
+    DesignRegistrationLifecycle,
+)
 
 
 def _install_usable_design_frame(window: Main) -> object:
+    window._design_registration_lifecycle = DesignRegistrationLifecycle()
     usability = types.SimpleNamespace(
         usable=True,
         rejection_reason=None,

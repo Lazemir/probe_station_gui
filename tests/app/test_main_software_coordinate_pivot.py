@@ -109,8 +109,6 @@ def _owner(*, busy: bool = False) -> SimpleNamespace:
         ),
         _coordinate_frame_registry=registry,
         _coordinate_frames_loaded=True,
-        _selected_coordinate_frame_id=frame_id,
-        _pending_coordinate_frame_restore_id=None,
         _stage_position_panel=None,
         _latest_physical_machine_pose=PhysicalMachinePose(
             {"X": 0.0, "Y": 0.0, "Z": 1.0, "A": 2.0, "B": 90.0}

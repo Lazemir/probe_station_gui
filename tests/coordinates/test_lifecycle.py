@@ -517,6 +517,106 @@ def test_pending_restore_waits_without_changing_machine_intent() -> None:
     assert decision.persist_selection is False
 
 
+def test_lifecycle_owns_pending_restore_without_caller_shadow_state() -> None:
+    lifecycle = CoordinateFrameLifecycle(
+        selected_frame_id=MACHINE_FRAME_ID,
+        restore_frame_id=DESIGN_ID,
+    )
+
+    decision = lifecycle.plan_selection(
+        FrameSelectionContext(
+            records=(_ready_design_record(),),
+            requested_frame_id=None,
+            explicit=False,
+            homed_axes=frozenset({"X", "Y"}),
+            authority_axes=frozenset({"X", "Y", "Z", "A", "B"}),
+        )
+    )
+
+    assert decision.selected_frame_id == DESIGN_ID
+    assert decision.available is True
+    assert decision.persist_selection is False
+
+
+def test_owned_restore_waits_for_authority_then_allows_missing_a() -> None:
+    lifecycle = CoordinateFrameLifecycle(
+        selected_frame_id=MACHINE_FRAME_ID,
+        restore_frame_id=DESIGN_ID,
+    )
+
+    for homed_axes, authority_axes in (
+        (frozenset(), frozenset({"X", "Y", "Z", "A", "B"})),
+        (frozenset({"X", "Y"}), frozenset({"X", "Y", "Z", "A"})),
+    ):
+        waiting = lifecycle.plan_selection(
+            FrameSelectionContext(
+                records=(_ready_design_record(),),
+                requested_frame_id=None,
+                explicit=False,
+                homed_axes=homed_axes,
+                authority_axes=authority_axes,
+            )
+        )
+        assert waiting.selected_frame_id == MACHINE_FRAME_ID
+        assert waiting.available is True
+
+    restored = lifecycle.plan_selection(
+        FrameSelectionContext(
+            records=(_ready_design_record(),),
+            requested_frame_id=None,
+            explicit=False,
+            homed_axes=frozenset({"X", "Y"}),
+            authority_axes=frozenset({"X", "Y", "Z", "A", "B"}),
+        )
+    )
+
+    assert restored.selected_frame_id == DESIGN_ID
+    assert restored.available is True
+
+
+@pytest.mark.parametrize("records", [(), (_draft_design_record(),)])
+def test_owned_restore_discards_deleted_or_unregistered_frame(
+    records: tuple[CoordinateFrameRecord, ...],
+) -> None:
+    lifecycle = CoordinateFrameLifecycle(
+        selected_frame_id=MACHINE_FRAME_ID,
+        restore_frame_id=DESIGN_ID,
+    )
+    context = FrameSelectionContext(
+        records=records,
+        requested_frame_id=None,
+        explicit=False,
+        homed_axes=frozenset({"X", "Y"}),
+        authority_axes=frozenset({"X", "Y", "Z", "A", "B"}),
+    )
+
+    discarded = lifecycle.plan_selection(context)
+    retry = lifecycle.plan_selection(
+        replace(context, records=(_ready_design_record(),))
+    )
+
+    assert discarded.selected_frame_id == MACHINE_FRAME_ID
+    assert retry.selected_frame_id == MACHINE_FRAME_ID
+
+
+def test_implicit_machine_fallback_updates_active_selection_without_persisting() -> None:
+    lifecycle = CoordinateFrameLifecycle(selected_frame_id=DESIGN_ID)
+
+    decision = lifecycle.plan_selection(
+        FrameSelectionContext(
+            records=(_ready_design_record(),),
+            requested_frame_id=MACHINE_FRAME_ID,
+            explicit=False,
+            homed_axes=frozenset(),
+            authority_axes=frozenset(),
+        )
+    )
+
+    assert decision.selected_frame_id == MACHINE_FRAME_ID
+    assert decision.persist_selection is False
+    assert lifecycle.selected_frame_id == MACHINE_FRAME_ID
+
+
 def test_pending_restore_rejects_unverified_provenance_to_machine() -> None:
     lifecycle = CoordinateFrameLifecycle()
     blocked = replace(

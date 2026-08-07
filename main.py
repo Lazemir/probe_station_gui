@@ -980,9 +980,7 @@ class Main(QMainWindow):
         self._exact_step_window_elapsed = False
         self._stage_position_panel: StagePositionPanel | None = None
         self._latest_physical_machine_pose: PhysicalMachinePose | None = None
-        self._selected_coordinate_frame_id = "machine"
         self._coordinate_frame_lifecycle = CoordinateFrameLifecycle()
-        self._pending_coordinate_frame_restore_id: str | None = None
         self._design_snap_enabled = True
         self._last_reported_b_position: float | None = None
         self._last_camera_frame_ui_timestamp: float | None = None
@@ -4467,12 +4465,7 @@ class Main(QMainWindow):
             objective_offset = (float("nan"), float("nan"))
         lifecycle = getattr(self, "_coordinate_frame_lifecycle", None)
         if lifecycle is None:
-            lifecycle = CoordinateFrameLifecycle(
-                selected_frame_id=str(
-                    getattr(self, "_selected_coordinate_frame_id", "machine")
-                    or "machine"
-                )
-            )
+            lifecycle = CoordinateFrameLifecycle()
             self._coordinate_frame_lifecycle = lifecycle
         return lifecycle.design_usability(
             DesignUsabilityContext(
@@ -4742,7 +4735,10 @@ class Main(QMainWindow):
         self._pending_alignment_preparation = None
         if not self._start_fresh_design_frame_for_source_replacement():
             return
-        self._cancel_registration_capture(RegistrationCancellation.MARK_SET_CHANGED)
+        effects = self._design_registration_lifecycle.cancel(
+            RegistrationCancellation.MARK_SET_CHANGED
+        )
+        self._apply_registration_effects(effects)
         self._design_session.clear_source_stage_marks()
         self._last_selected_design_point = snapped_point
         self._set_design_snap_enabled(True)
@@ -4838,7 +4834,10 @@ class Main(QMainWindow):
         if record is None:
             self._show_status("Design coordinate frame is unavailable.", 6000)
             return
-        self._cancel_registration_capture(RegistrationCancellation.MARK_SET_CHANGED)
+        effects = self._design_registration_lifecycle.cancel(
+            RegistrationCancellation.MARK_SET_CHANGED
+        )
+        self._apply_registration_effects(effects)
         self._design_session.source_design_marks = normalized
         self._design_session.clear_source_stage_marks()
         self._alignment_design_draft = normalized
@@ -8931,9 +8930,10 @@ class Main(QMainWindow):
         frame_version = getattr(frame_snapshot, "frame_version", None)
         if frame_id is None or frame_version is None:
             return None
-        self._cancel_registration_capture(
+        effects = self._design_registration_lifecycle.cancel(
             RegistrationCancellation.ROUTE_CONTEXT_CHANGED
         )
+        self._apply_registration_effects(effects)
         context = self._design_registration_context(
             include_optical=False,
             expected_frame_id=str(frame_id),
@@ -8941,7 +8941,7 @@ class Main(QMainWindow):
         )
         if context is None:
             return None
-        eligibility = self._registration_capture_lifecycle().accept_first_contact(
+        eligibility = self._design_registration_lifecycle.accept_first_contact(
             context,
             None,
         )
@@ -8957,7 +8957,7 @@ class Main(QMainWindow):
             )
             if current_context is None:
                 return
-            current = self._registration_capture_lifecycle().accept_first_contact(
+            current = self._design_registration_lifecycle.accept_first_contact(
                 current_context,
                 None,
                 token=token,
@@ -8997,7 +8997,7 @@ class Main(QMainWindow):
             physical_a = float(physical_a_mm)
         except (TypeError, ValueError):
             return
-        effects = self._registration_capture_lifecycle().accept_first_contact(
+        effects = self._design_registration_lifecycle.accept_first_contact(
             context,
             physical_a,
             token=token,
@@ -10053,7 +10053,10 @@ class Main(QMainWindow):
     def _add_design_source_mark(self, x_value: float, y_value: float) -> None:
         if not self._design_mutation_ready():
             return
-        self._cancel_registration_capture(RegistrationCancellation.MARK_SET_CHANGED)
+        effects = self._design_registration_lifecycle.cancel(
+            RegistrationCancellation.MARK_SET_CHANGED
+        )
+        self._apply_registration_effects(effects)
         self._design_session.add_source_design_mark((x_value, y_value))
         self._refresh_design_panel()
         self._show_status(
@@ -10064,7 +10067,10 @@ class Main(QMainWindow):
     def _add_design_check_mark(self, x_value: float, y_value: float) -> None:
         if not self._design_mutation_ready():
             return
-        self._cancel_registration_capture(RegistrationCancellation.MARK_SET_CHANGED)
+        effects = self._design_registration_lifecycle.cancel(
+            RegistrationCancellation.MARK_SET_CHANGED
+        )
+        self._apply_registration_effects(effects)
         self._design_session.add_check_design_mark((x_value, y_value))
         self._refresh_design_panel()
         self._show_status(
@@ -10077,13 +10083,6 @@ class Main(QMainWindow):
 
     def _capture_stage_check_mark(self) -> None:
         self._capture_stage_registration_mark(check_mark=True)
-
-    def _registration_capture_lifecycle(self) -> DesignRegistrationLifecycle:
-        lifecycle = getattr(self, "_design_registration_lifecycle", None)
-        if lifecycle is None:
-            lifecycle = DesignRegistrationLifecycle()
-            self._design_registration_lifecycle = lifecycle
-        return lifecycle
 
     def _apply_registration_effects(self, effects: RegistrationEffects) -> None:
         session = self._design_session
@@ -10114,19 +10113,12 @@ class Main(QMainWindow):
                 window.set_focus_candidate(effects.focus_candidate)
                 window.set_selected_focus_point(effects.focus_candidate.center)
 
-    def _cancel_registration_capture(
-        self,
-        reason: RegistrationCancellation,
-    ) -> RegistrationEffects:
-        effects = self._registration_capture_lifecycle().cancel(reason)
-        self._apply_registration_effects(effects)
-        return effects
-
     def _discard_all_registration_evidence(
         self,
         reason: RegistrationCancellation = RegistrationCancellation.DESIGN_CHANGED,
     ) -> None:
-        self._cancel_registration_capture(reason)
+        effects = self._design_registration_lifecycle.cancel(reason)
+        self._apply_registration_effects(effects)
         self._pending_operator_alignment_capture = None
         self._alignment_physical_draft = []
         self._alignment_stage_draft = []
@@ -10192,7 +10184,7 @@ class Main(QMainWindow):
                 else tuple(metadata.check_machine_marks)
             ),
         )
-        token = self._registration_capture_lifecycle().begin_capture(context)
+        token = self._design_registration_lifecycle.begin_capture(context)
         self._apply_registration_effects(token.superseded_effects)
         accepted = self.stage_controller.request_machine_coordinate_snapshot(
             token,
@@ -10231,7 +10223,7 @@ class Main(QMainWindow):
         callback_succeeded = bool(
             success and isinstance(snapshot, MachineCoordinateSnapshot)
         )
-        callback_effects = self._registration_capture_lifecycle().accept_sample(
+        callback_effects = self._design_registration_lifecycle.accept_sample(
             token,
             RegistrationCaptureOutcome(
                 succeeded=callback_succeeded,
@@ -10267,7 +10259,7 @@ class Main(QMainWindow):
                 token.objective_xy_offset,
             )
         except Exception as exc:
-            failure_effects = self._registration_capture_lifecycle().accept_sample(
+            failure_effects = self._design_registration_lifecycle.accept_sample(
                 token,
                 RegistrationCaptureOutcome(
                     succeeded=False,
@@ -10278,7 +10270,7 @@ class Main(QMainWindow):
                 self._show_status(str(failure_effects.reason or exc), 6000)
             return
 
-        effects = self._registration_capture_lifecycle().accept_sample(
+        effects = self._design_registration_lifecycle.accept_sample(
             token,
             RegistrationSample(
                 mark_kind=token.mark_kind,
@@ -10747,7 +10739,10 @@ class Main(QMainWindow):
         return abs(float(ratio) - 1.0) <= self.DESIGN_SPACING_RATIO_TOLERANCE
 
     def _clear_design_registration(self) -> None:
-        self._cancel_registration_capture(RegistrationCancellation.FRAME_CHANGED)
+        effects = self._design_registration_lifecycle.cancel(
+            RegistrationCancellation.FRAME_CHANGED
+        )
+        self._apply_registration_effects(effects)
         self._pending_alignment_preparation = None
         self._last_selected_design_point = None
         registry = getattr(self, "_coordinate_frame_registry", None)
@@ -10820,9 +10815,10 @@ class Main(QMainWindow):
         registry = getattr(self, "_coordinate_frame_registry", None)
         if frame_id is None or registry is None or registry.get(frame_id) is not None:
             return
-        cancellation = self._cancel_registration_capture(
+        cancellation = self._design_registration_lifecycle.cancel(
             RegistrationCancellation.FRAME_CHANGED
         )
+        self._apply_registration_effects(cancellation)
         self._design_session.clear_registration()
         self._pending_alignment_preparation = None
         self._last_selected_design_point = None
@@ -10849,9 +10845,10 @@ class Main(QMainWindow):
                 5000,
             )
             return
-        cancellation = self._cancel_registration_capture(
+        cancellation = self._design_registration_lifecycle.cancel(
             RegistrationCancellation.FRAME_CHANGED
         )
+        self._apply_registration_effects(cancellation)
         try:
             activation = design_navigation.activate_design_frame_for_document(
                 self._design_session,
@@ -11090,7 +11087,7 @@ class Main(QMainWindow):
         if candidate is None:
             self._show_status("No focus structure fits the current field of view.", 5000)
             return
-        effects = self._registration_capture_lifecycle().set_focus_candidate(
+        effects = self._design_registration_lifecycle.set_focus_candidate(
             candidate,
             pending_context,
         )
@@ -11205,7 +11202,7 @@ class Main(QMainWindow):
                 5000,
             )
             return
-        effects = self._registration_capture_lifecycle().accept_focus(current_context)
+        effects = self._design_registration_lifecycle.accept_focus(current_context)
         self._apply_registration_effects(effects)
         if not effects.accepted or effects.focus_token is None:
             if effects.clear_focus_candidate:
@@ -11226,11 +11223,11 @@ class Main(QMainWindow):
         if context == getattr(self, "_design_focus_overlay_context", None):
             return
         if context is None:
-            effects = self._registration_capture_lifecycle().cancel(
+            effects = self._design_registration_lifecycle.cancel(
                 RegistrationCancellation.DESIGN_CHANGED
             )
         else:
-            effects = self._registration_capture_lifecycle().accept_focus(context)
+            effects = self._design_registration_lifecycle.accept_focus(context)
         self._apply_registration_effects(effects)
         self._clear_design_focus_overlay_state(
             clear_window=not effects.clear_focus_candidate
@@ -11247,7 +11244,7 @@ class Main(QMainWindow):
             context = self._design_focus_overlay_context_key()
             if context is None:
                 return False
-            bound = self._registration_capture_lifecycle().accept_focus(
+            bound = self._design_registration_lifecycle.accept_focus(
                 context,
                 FocusCompletion(
                     kind=FocusCompletionKind.TARGET_BOUND,
@@ -11255,6 +11252,7 @@ class Main(QMainWindow):
                     target_xy=target,
                 ),
             )
+            self._apply_registration_effects(bound)
             if not bound.accepted:
                 return False
             started = self.stage_controller.request_token_bound_move_to_xy(
@@ -11263,14 +11261,6 @@ class Main(QMainWindow):
                 target[1],
                 self.design_registration_focus_move_finished.emit,
             )
-            if not started:
-                self._registration_capture_lifecycle().accept_focus(
-                    context,
-                    FocusCompletion(
-                        kind=FocusCompletionKind.CANCELLED,
-                        token=token,
-                    ),
-                )
             return bool(started)
 
         if not self._move_to_design_coordinate(
@@ -11280,13 +11270,14 @@ class Main(QMainWindow):
         ):
             context = self._design_focus_overlay_context_key()
             if context is not None:
-                self._registration_capture_lifecycle().accept_focus(
+                effects = self._design_registration_lifecycle.accept_focus(
                     context,
                     FocusCompletion(
                         kind=FocusCompletionKind.CANCELLED,
                         token=token,
                     ),
                 )
+                self._apply_registration_effects(effects)
             return
         window = getattr(self, "design_layout_window", None)
         if window is not None:
@@ -11302,9 +11293,12 @@ class Main(QMainWindow):
     ) -> None:
         context = self._design_focus_overlay_context_key()
         if context is None:
-            self._cancel_registration_capture(RegistrationCancellation.FRAME_CHANGED)
+            effects = self._design_registration_lifecycle.cancel(
+                RegistrationCancellation.FRAME_CHANGED
+            )
+            self._apply_registration_effects(effects)
             return
-        effects = self._registration_capture_lifecycle().accept_focus(
+        effects = self._design_registration_lifecycle.accept_focus(
             context,
             FocusCompletion(
                 kind=FocusCompletionKind.MOVE_FINISHED,
@@ -11326,13 +11320,14 @@ class Main(QMainWindow):
             self.design_registration_autofocus_finished.emit,
         )
         if not accepted:
-            self._registration_capture_lifecycle().accept_focus(
+            cancellation = self._design_registration_lifecycle.accept_focus(
                 context,
                 FocusCompletion(
                     kind=FocusCompletionKind.CANCELLED,
                     token=effects.focus_token,
                 ),
             )
+            self._apply_registration_effects(cancellation)
 
     def _on_registration_focus_move_signal(
         self,
@@ -11358,13 +11353,16 @@ class Main(QMainWindow):
     ) -> None:
         context = self._design_focus_overlay_context_key()
         if context is None:
-            self._cancel_registration_capture(RegistrationCancellation.FRAME_CHANGED)
+            effects = self._design_registration_lifecycle.cancel(
+                RegistrationCancellation.FRAME_CHANGED
+            )
+            self._apply_registration_effects(effects)
             return
         try:
             physical_z = None if physical_z_mm is None else float(physical_z_mm)
         except (TypeError, ValueError):
             physical_z = None
-        effects = self._registration_capture_lifecycle().accept_focus(
+        effects = self._design_registration_lifecycle.accept_focus(
             context,
             FocusCompletion(
                 kind=FocusCompletionKind.AUTOFOCUS_FINISHED,
@@ -11408,7 +11406,7 @@ class Main(QMainWindow):
         except (KeyError, RuntimeError, ValueError) as exc:
             self._show_status(str(exc), 5000)
             return
-        effects = self._registration_capture_lifecycle().cancel(
+        effects = self._design_registration_lifecycle.cancel(
             RegistrationCancellation.Z_CHANGED
         )
         self._apply_registration_effects(effects)

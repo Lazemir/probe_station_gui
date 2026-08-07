@@ -20,7 +20,6 @@ from probe_station_gui.coordinates.lifecycle import (
 from probe_station_gui.coordinates.presentation import (
     MACHINE_FRAME_ID,
     build_coordinate_display_plan,
-    decide_pending_frame_restore,
 )
 from probe_station_gui.coordinates.rotation_geometry import rotation_geometry_snapshot
 from probe_station_gui.stage.position_presenter import (
@@ -47,6 +46,7 @@ class MainWindowStagePositionPanelOwner(Protocol):
     _stage_motion_axes: set[str]
     _stage_motion_blink_dimmed: bool
     _stage_motion_blink_timer: Any
+    _coordinate_frame_lifecycle: CoordinateFrameLifecycle
     stage_controller: Any
 
     def _on_stage_axis_escape_pressed(self, axis_name: str) -> None: ...
@@ -84,32 +84,16 @@ def create_stage_position_widget(
 def initialize_gui_coordinate_selection(owner: MainWindowStagePositionPanelOwner) -> None:
     """Start in Machine while retaining an eligible persisted restore candidate."""
 
-    owner._selected_coordinate_frame_id = MACHINE_FRAME_ID
     settings = getattr(getattr(owner, "settings_manager", None), "settings", None)
     software = getattr(settings, "software_coordinates", None)
     last_selected = str(
         getattr(software, "last_selected_frame_id", MACHINE_FRAME_ID)
         or MACHINE_FRAME_ID
     )
-    owner._pending_coordinate_frame_restore_id = (
-        None if last_selected == MACHINE_FRAME_ID else last_selected
-    )
     owner._coordinate_frame_lifecycle = CoordinateFrameLifecycle(
-        selected_frame_id=last_selected,
+        selected_frame_id=MACHINE_FRAME_ID,
+        restore_frame_id=last_selected,
     )
-
-
-def _coordinate_frame_lifecycle(owner: object) -> CoordinateFrameLifecycle:
-    lifecycle = getattr(owner, "_coordinate_frame_lifecycle", None)
-    if lifecycle is None:
-        lifecycle = CoordinateFrameLifecycle(
-            selected_frame_id=str(
-                getattr(owner, "_selected_coordinate_frame_id", MACHINE_FRAME_ID)
-                or MACHINE_FRAME_ID
-            )
-        )
-        setattr(owner, "_coordinate_frame_lifecycle", lifecycle)
-    return lifecycle
 
 
 def _persist_gui_coordinate_selection(owner: object, frame_id: str) -> None:
@@ -174,38 +158,19 @@ def update_software_coordinate_display(
     homed_axes = homed_getter() if callable(homed_getter) else set()
     authority_axes = set(physical_pose.values)
 
-    pending = getattr(owner, "_pending_coordinate_frame_restore_id", None)
-    if isinstance(pending, str) and pending:
-        restore = decide_pending_frame_restore(
-            snapshot,
-            frame_id=pending,
-            homed_axes=homed_axes,
-            authority_axes=authority_axes,
-        )
-        if restore is not None:
-            owner._selected_coordinate_frame_id = restore
-            owner._pending_coordinate_frame_restore_id = None
-            if restore == MACHINE_FRAME_ID:
-                owner._coordinate_frame_lifecycle = CoordinateFrameLifecycle()
-
-    selected = str(
-        getattr(owner, "_selected_coordinate_frame_id", MACHINE_FRAME_ID)
-        or MACHINE_FRAME_ID
-    )
+    requested: str | None = None
     try:
         pivot = _coordinate_pivot(owner)
     except (AttributeError, TypeError, ValueError) as exc:
-        selected = MACHINE_FRAME_ID
-        owner._selected_coordinate_frame_id = MACHINE_FRAME_ID
-        owner._coordinate_frame_lifecycle = CoordinateFrameLifecycle()
+        requested = MACHINE_FRAME_ID
         pivot = (float("nan"), float("nan"))
         show_status = getattr(owner, "_show_status", None)
         if callable(show_status):
             show_status(str(exc), 6000)
-    decision = _coordinate_frame_lifecycle(owner).plan_selection(
+    decision = owner._coordinate_frame_lifecycle.plan_selection(
         FrameSelectionContext(
             records=snapshot.records,
-            requested_frame_id=selected,
+            requested_frame_id=requested,
             explicit=False,
             homed_axes=frozenset(homed_axes),
             authority_axes=frozenset(authority_axes),
@@ -213,15 +178,13 @@ def update_software_coordinate_display(
     )
     plan = build_coordinate_display_plan(
         snapshot,
-        selected_frame_id=selected,
+        selected_frame_id=decision.selected_frame_id,
         physical_pose=physical_pose,
         pivot_machine_xy=pivot,
         homed_axes=homed_axes,
         authority_axes=authority_axes,
         selection_decision=decision,
     )
-    if plan.selected_frame_id != selected:
-        owner._selected_coordinate_frame_id = plan.selected_frame_id
     if decision.persist_selection:
         _persist_gui_coordinate_selection(owner, plan.selected_frame_id)
     owner._stage_axis_display_values = {
@@ -255,7 +218,7 @@ def select_gui_coordinate_frame(
     registry = getattr(owner, "_coordinate_frame_registry", None)
     snapshot = registry.snapshot() if registry is not None else None
     homed_getter = getattr(getattr(owner, "stage_controller", None), "homed_axes", None)
-    decision = _coordinate_frame_lifecycle(owner).plan_selection(
+    decision = owner._coordinate_frame_lifecycle.plan_selection(
         FrameSelectionContext(
             records=() if snapshot is None else snapshot.records,
             requested_frame_id=requested,
@@ -271,8 +234,6 @@ def select_gui_coordinate_frame(
     if not decision.available:
         return
     requested = decision.selected_frame_id
-    owner._pending_coordinate_frame_restore_id = None
-    owner._selected_coordinate_frame_id = requested
     update_software_coordinate_display(owner, pose)
     if decision.persist_selection:
         _persist_gui_coordinate_selection(owner, requested)
@@ -281,10 +242,10 @@ def select_gui_coordinate_frame(
 def gui_coordinate_motion_editing_enabled(owner: object) -> bool:
     """Return whether legacy position-field/Step targets are Machine-valued."""
 
-    return str(
-        getattr(owner, "_selected_coordinate_frame_id", MACHINE_FRAME_ID)
-        or MACHINE_FRAME_ID
-    ) == MACHINE_FRAME_ID
+    lifecycle = getattr(owner, "_coordinate_frame_lifecycle", None)
+    if lifecycle is None:
+        return True
+    return lifecycle.selected_frame_id == MACHINE_FRAME_ID
 
 
 def display_axis_value_from_raw(

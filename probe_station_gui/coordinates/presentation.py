@@ -295,35 +295,10 @@ def build_coordinate_display_plan(
     )
 
 
-def decide_pending_frame_restore(
-    snapshot: RegistrySnapshot,
-    *,
-    frame_id: str,
-    homed_axes: Iterable[str],
-    authority_axes: Iterable[str],
-) -> str | None:
-    """Return a selected ID, Machine fallback, or ``None`` while authority is pending."""
-
-    requested = str(frame_id or MACHINE_FRAME_ID)
-    homed = _normalized_axes(homed_axes)
-    authority = _normalized_axes(authority_axes)
-    decision = CoordinateFrameLifecycle().plan_selection(
-        FrameSelectionContext(
-            records=snapshot.records,
-            requested_frame_id=requested,
-            explicit=False,
-            homed_axes=homed,
-            authority_axes=authority,
-        )
-    )
-    return decision.selected_frame_id if decision.available else None
-
-
 __all__ = [
     "MACHINE_FRAME_ID",
     "CoordinateAxisDisplay",
     "CoordinateDisplayPlan",
     "CoordinateSelectorEntry",
     "build_coordinate_display_plan",
-    "decide_pending_frame_restore",
 ]

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import inspect
 import os
 from types import SimpleNamespace
 
@@ -20,6 +21,7 @@ from probe_station_gui.coordinates.presentation import (
     CoordinateSelectorEntry,
 )
 from probe_station_gui.coordinates.lifecycle import (
+    CoordinateFrameLifecycle,
     FrameSelectionContext,
     FrameSelectionDecision,
 )
@@ -328,8 +330,9 @@ class _SelectionOwner:
         self._stage_position_panel = None
         self._coordinate_frame_registry = registry
         self._coordinate_frames_loaded = True
-        self._selected_coordinate_frame_id = selected
-        self._pending_coordinate_frame_restore_id = None
+        self._coordinate_frame_lifecycle = CoordinateFrameLifecycle(
+            selected_frame_id=selected
+        )
         self._stage_axis_display_values: dict[str, float] = {}
         self._latest_physical_machine_pose = PhysicalMachinePose(
             {axis: 0.0 for axis in authority_axes}
@@ -340,6 +343,14 @@ class _SelectionOwner:
     @property
     def persisted_selections(self) -> list[str]:
         return self.settings_manager.in_memory_updates
+
+
+def test_stage_adapter_has_no_coordinate_lifecycle_shadow_fields() -> None:
+    source = inspect.getsource(panel_adapter)
+
+    assert "_selected_coordinate_frame_id" not in source
+    assert "_pending_coordinate_frame_restore_id" not in source
+    assert "decide_pending_frame_restore" not in source
 
 
 def test_temporary_b_loss_does_not_persist_machine_selection() -> None:
@@ -354,7 +365,7 @@ def test_temporary_b_loss_does_not_persist_machine_selection() -> None:
         owner._latest_physical_machine_pose,
     )
 
-    assert owner._selected_coordinate_frame_id == frame_id
+    assert owner._coordinate_frame_lifecycle.selected_frame_id == frame_id
     assert owner.persisted_selections == []
 
 
@@ -387,7 +398,7 @@ def test_display_refresh_delegates_selection_policy_to_lifecycle() -> None:
     )
 
     assert len(captured) == 1
-    assert captured[0].requested_frame_id == frame_id
+    assert captured[0].requested_frame_id is None
     assert captured[0].explicit is False
     assert captured[0].authority_axes == frozenset({"X", "Y", "Z", "A"})
     assert owner.persisted_selections == []
@@ -410,7 +421,7 @@ def test_permanently_rejected_selection_falls_back_and_persists_machine() -> Non
         owner._latest_physical_machine_pose,
     )
 
-    assert owner._selected_coordinate_frame_id == "machine"
+    assert owner._coordinate_frame_lifecycle.selected_frame_id == "machine"
     assert owner.persisted_selections == ["machine"]
 
 
@@ -423,7 +434,7 @@ def test_explicit_unavailable_selection_keeps_previous_selection() -> None:
 
     panel_adapter.select_gui_coordinate_frame(owner, frame_id)
 
-    assert owner._selected_coordinate_frame_id == "machine"
+    assert owner._coordinate_frame_lifecycle.selected_frame_id == "machine"
     assert owner.persisted_selections == []
 
 
@@ -444,8 +455,7 @@ def test_explicit_machine_selection_tolerates_missing_physical_pose(
 
     panel_adapter.select_gui_coordinate_frame(owner, "machine")
 
-    assert owner._selected_coordinate_frame_id == "machine"
-    assert owner._pending_coordinate_frame_restore_id is None
+    assert owner._coordinate_frame_lifecycle.selected_frame_id == "machine"
     assert owner.persisted_selections == ["machine"]
 
 
@@ -460,8 +470,9 @@ def test_gui_restore_selects_ready_through_z_even_when_a_is_missing(
         _stage_position_panel=panel,
         _coordinate_frame_registry=registry,
         _coordinate_frames_loaded=True,
-        _selected_coordinate_frame_id="machine",
-        _pending_coordinate_frame_restore_id=frame_id,
+        _coordinate_frame_lifecycle=CoordinateFrameLifecycle(
+            restore_frame_id=frame_id
+        ),
         settings_manager=_SelectionSettingsManager(frame_id),
         stage_controller=SimpleNamespace(homed_axes=lambda: {"X", "Y"}),
     )
@@ -469,8 +480,7 @@ def test_gui_restore_selects_ready_through_z_even_when_a_is_missing(
 
     panel_adapter.update_software_coordinate_display(owner, pose)
 
-    assert owner._selected_coordinate_frame_id == frame_id
-    assert owner._pending_coordinate_frame_restore_id is None
+    assert owner._coordinate_frame_lifecycle.selected_frame_id == frame_id
     assert panel.coordinate_system_combo.currentData() == frame_id
     assert "background-color: #1565c0" in panel.axis_fields["Z"].styleSheet()
     assert "background-color: #f0b429" in panel.axis_fields["A"].styleSheet()
@@ -486,8 +496,9 @@ def test_explicit_gui_selection_cancels_pending_restore_and_persists_locally() -
     owner = SimpleNamespace(
         _coordinate_frame_registry=registry,
         _coordinate_frames_loaded=True,
-        _selected_coordinate_frame_id="machine",
-        _pending_coordinate_frame_restore_id=frame_id,
+        _coordinate_frame_lifecycle=CoordinateFrameLifecycle(
+            restore_frame_id=frame_id
+        ),
         _api_coordinate_frame_id="api-frame-must-not-change",
         _latest_physical_machine_pose=PhysicalMachinePose(
             {"X": 0.0, "Y": 0.0, "Z": 1.0, "A": 2.0, "B": 0.0}
@@ -500,8 +511,7 @@ def test_explicit_gui_selection_cancels_pending_restore_and_persists_locally() -
 
     panel_adapter.select_gui_coordinate_frame(owner, "machine")
 
-    assert owner._selected_coordinate_frame_id == "machine"
-    assert owner._pending_coordinate_frame_restore_id is None
+    assert owner._coordinate_frame_lifecycle.selected_frame_id == "machine"
     assert owner.settings_manager.in_memory_updates == ["machine"]
     assert manager.in_memory_updates == ["machine"]
     assert published == [SoftwareCoordinateSelectionSnapshot("machine", 1)]
@@ -513,8 +523,9 @@ def test_deleted_selected_frame_falls_back_safely_without_rearming_restore() -> 
         _stage_position_panel=None,
         _coordinate_frame_registry=CoordinateFrameRegistry(),
         _coordinate_frames_loaded=True,
-        _selected_coordinate_frame_id="11111111-1111-4111-8111-111111111111",
-        _pending_coordinate_frame_restore_id=None,
+        _coordinate_frame_lifecycle=CoordinateFrameLifecycle(
+            selected_frame_id="11111111-1111-4111-8111-111111111111"
+        ),
         settings_manager=_SelectionSettingsManager("11111111-1111-4111-8111-111111111111"),
         stage_controller=SimpleNamespace(homed_axes=lambda: {"X", "Y"}),
     )
@@ -524,8 +535,7 @@ def test_deleted_selected_frame_falls_back_safely_without_rearming_restore() -> 
         PhysicalMachinePose({"X": 0.0, "Y": 0.0, "Z": 1.0, "A": 2.0, "B": 0.0}),
     )
 
-    assert owner._selected_coordinate_frame_id == "machine"
-    assert owner._pending_coordinate_frame_restore_id is None
+    assert owner._coordinate_frame_lifecycle.selected_frame_id == "machine"
     assert owner.settings_manager.in_memory_updates == ["machine"]
 
 
@@ -537,8 +547,7 @@ def test_missing_fresh_machine_axis_clears_stale_value_and_shows_exact_yellow_re
         _stage_position_panel=panel,
         _coordinate_frame_registry=CoordinateFrameRegistry(),
         _coordinate_frames_loaded=True,
-        _selected_coordinate_frame_id="machine",
-        _pending_coordinate_frame_restore_id=None,
+        _coordinate_frame_lifecycle=CoordinateFrameLifecycle(),
         _stage_axis_display_values={},
         settings_manager=_SelectionSettingsManager("machine"),
         stage_controller=SimpleNamespace(homed_axes=lambda: {"X", "Y", "Z", "A"}),
@@ -599,8 +608,7 @@ def test_same_wpos_missing_wco_clears_previous_blue_machine_values(
         _stage_position_panel=panel,
         _coordinate_frame_registry=CoordinateFrameRegistry(),
         _coordinate_frames_loaded=True,
-        _selected_coordinate_frame_id="machine",
-        _pending_coordinate_frame_restore_id=None,
+        _coordinate_frame_lifecycle=CoordinateFrameLifecycle(),
         _stage_axis_display_values={},
         settings_manager=_SelectionSettingsManager("machine"),
         stage_controller=controller,
@@ -634,8 +642,9 @@ def test_same_wpos_new_synchronized_snapshot_completes_pending_restore() -> None
         _stage_position_panel=SimpleNamespace(set_coordinate_display_plan=plans.append),
         _coordinate_frame_registry=registry,
         _coordinate_frames_loaded=True,
-        _selected_coordinate_frame_id="machine",
-        _pending_coordinate_frame_restore_id=frame_id,
+        _coordinate_frame_lifecycle=CoordinateFrameLifecycle(
+            restore_frame_id=frame_id
+        ),
         _stage_axis_display_values={},
         settings_manager=_SelectionSettingsManager(frame_id),
         stage_controller=controller,
@@ -645,15 +654,13 @@ def test_same_wpos_new_synchronized_snapshot_completes_pending_restore() -> None
     _connect_synchronized_snapshot_presentation(owner, controller)
     try:
         controller._update_cached_positions(_status_with_synchronized_machine(None))
-        assert owner._pending_coordinate_frame_restore_id == frame_id
-        assert owner._selected_coordinate_frame_id == "machine"
+        assert owner._coordinate_frame_lifecycle.selected_frame_id == "machine"
 
         controller._update_cached_positions(
             _status_with_synchronized_machine((0.0, 0.0, 1.0, 2.0, 0.0))
         )
 
-        assert owner._pending_coordinate_frame_restore_id is None
-        assert owner._selected_coordinate_frame_id == frame_id
+        assert owner._coordinate_frame_lifecycle.selected_frame_id == frame_id
         assert plans[-1].selected_frame_id == frame_id
     finally:
         controller.shutdown()
@@ -668,8 +675,7 @@ def test_same_wpos_changed_machine_snapshot_refreshes_displayed_value(
         _stage_position_panel=panel,
         _coordinate_frame_registry=CoordinateFrameRegistry(),
         _coordinate_frames_loaded=True,
-        _selected_coordinate_frame_id="machine",
-        _pending_coordinate_frame_restore_id=None,
+        _coordinate_frame_lifecycle=CoordinateFrameLifecycle(),
         _stage_axis_display_values={},
         settings_manager=_SelectionSettingsManager("machine"),
         stage_controller=controller,
@@ -706,8 +712,7 @@ def test_refresh_accepts_valid_pose_value_across_module_reload_boundary(
         _stage_position_panel=SimpleNamespace(set_coordinate_display_plan=plans.append),
         _coordinate_frame_registry=CoordinateFrameRegistry(),
         _coordinate_frames_loaded=True,
-        _selected_coordinate_frame_id="machine",
-        _pending_coordinate_frame_restore_id=None,
+        _coordinate_frame_lifecycle=CoordinateFrameLifecycle(),
         _stage_axis_display_values={},
         _latest_physical_machine_pose=reloaded_pose,
         settings_manager=_SelectionSettingsManager("machine"),
@@ -785,8 +790,7 @@ def test_malformed_reloaded_pose_clears_stale_blue_values_without_raising(
         _stage_position_panel=panel,
         _coordinate_frame_registry=CoordinateFrameRegistry(),
         _coordinate_frames_loaded=True,
-        _selected_coordinate_frame_id="machine",
-        _pending_coordinate_frame_restore_id=None,
+        _coordinate_frame_lifecycle=CoordinateFrameLifecycle(),
         _stage_axis_display_values={},
         _latest_physical_machine_pose=None,
         settings_manager=_SelectionSettingsManager("machine"),
