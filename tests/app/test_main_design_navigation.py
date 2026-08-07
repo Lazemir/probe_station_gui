@@ -905,6 +905,12 @@ def test_operator_align_normalizes_physical_marks_captured_at_different_b_and_pi
     rotations: list[float] = []
     publishes: list[object] = []
     statuses: list[str] = []
+    manual_ui_states: list[
+        tuple[int | None, tuple[tuple[float, float] | None, ...]]
+    ] = []
+    apply_states: list[
+        tuple[int | None, tuple[tuple[float, float] | None, ...]]
+    ] = []
     window = Main.__new__(Main)
     window._design_session = session
     window._coordinate_frame_registry = registry
@@ -941,8 +947,18 @@ def test_operator_align_normalizes_physical_marks_captured_at_different_b_and_pi
     window._design_navigation_xy_from_physical_machine_xy = lambda point: point
     window._set_alignment_panel_expanded = lambda: None
     window._set_design_snap_enabled = lambda _enabled: None
-    window._refresh_manual_alignment_ui = lambda: None
-    window._update_stage_coordinate_apply_state = lambda: None
+    window._refresh_manual_alignment_ui = lambda: manual_ui_states.append(
+        (
+            window._manual_alignment_pick_slot,
+            tuple(window._alignment_stage_draft),
+        )
+    )
+    window._update_stage_coordinate_apply_state = lambda: apply_states.append(
+        (
+            window._manual_alignment_pick_slot,
+            tuple(window._alignment_stage_draft),
+        )
+    )
     window._refresh_design_panel = lambda: None
     window._refresh_design_position = lambda: None
     window._update_coordinate_display = lambda **_kwargs: None
@@ -957,12 +973,25 @@ def test_operator_align_normalizes_physical_marks_captured_at_different_b_and_pi
         window,
         ((0.0, 0.0), (1000.0, 0.0)),
     )
-    Main._request_alignment_capture(window, 0, "center")
+    Main._request_alignment_capture(window, 0, "image")
+    Main._capture_manual_alignment_point(
+        window,
+        0,
+        (10.0, 20.0),
+        source="image",
+    )
     first_request, first_axes = requests.pop(0)
     assert isinstance(first_request, RegistrationCaptureToken)
     assert first_request.mark_index == 0
+    assert first_request.capture_source == "image"
+    assert first_request.configured_target_xy == (10.0, 20.0)
     assert first_request.pivot_machine_xy == (0.0, 0.0)
     assert first_axes == ("X", "Y", "B")
+    assert window._manual_alignment_pick_slot == 0
+    Main._arm_manual_alignment_pick(window, 1)
+    assert window._manual_alignment_pick_slot == 1
+    manual_ui_states.clear()
+    apply_states.clear()
     first_snapshot = _machine_snapshot((10.0, 20.0, 0.0, 0.0, 0.0))
     Main._on_registration_machine_coordinate_snapshot_finished(
         window,
@@ -971,12 +1000,18 @@ def test_operator_align_normalizes_physical_marks_captured_at_different_b_and_pi
         first_snapshot,
         "",
     )
+    assert window._manual_alignment_pick_slot == 1
+    assert window._alignment_stage_draft == [(10.0, 20.0), None]
+    assert manual_ui_states == []
+    assert apply_states == []
 
     current_pivot[0] = (10.0, 20.0)
-    Main._request_alignment_capture(window, 1, "center")
+    Main._capture_manual_alignment_center_shortcut(window)
     second_request, second_axes = requests.pop(0)
     assert isinstance(second_request, RegistrationCaptureToken)
     assert second_request.mark_index == 1
+    assert second_request.capture_source == "center"
+    assert second_request.configured_target_xy is None
     assert second_request.pivot_machine_xy == (10.0, 20.0)
     assert second_axes == ("X", "Y", "B")
     # At B=90 around the captured pivot, (9, 20) normalizes to (10, 21)
@@ -985,6 +1020,8 @@ def test_operator_align_normalizes_physical_marks_captured_at_different_b_and_pi
     window.stage_controller.latest_machine_coordinate_snapshot = (
         lambda: second_snapshot
     )
+    manual_ui_states.clear()
+    apply_states.clear()
     Main._on_registration_machine_coordinate_snapshot_finished(
         window,
         second_request,
@@ -992,6 +1029,13 @@ def test_operator_align_normalizes_physical_marks_captured_at_different_b_and_pi
         second_snapshot,
         "",
     )
+    assert window._manual_alignment_pick_slot is None
+    assert manual_ui_states == [
+        (None, ((10.0, 20.0), (9.0, 20.0)))
+    ]
+    assert apply_states == [
+        (None, ((10.0, 20.0), (9.0, 20.0)))
+    ]
 
     committed = registry.get(draft.frame_id)
     assert committed is not None

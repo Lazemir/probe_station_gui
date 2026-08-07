@@ -10293,6 +10293,11 @@ class Main(QMainWindow):
             )
         self._apply_registration_effects(effects)
         if token.operator_alignment:
+            active_pick = getattr(self, "_manual_alignment_pick_slot", None)
+            if active_pick is None or active_pick == token.mark_index:
+                self._manual_alignment_pick_slot = None
+                self._refresh_manual_alignment_ui()
+                self._update_stage_coordinate_apply_state()
             remaining = max(
                 0,
                 len(token.source_design_marks)
