@@ -908,6 +908,7 @@ class Main(QMainWindow):
         self._alignment_draft_fit_residuals: tuple[float, float] | None = None
         self._pending_quick_alignment_rotation = False
         self._manual_alignment_pick_slot: int | None = None
+        self._manual_alignment_pick_generation = 0
         self._manual_alignment_points: list[tuple[float, float] | None] = [None, None]
         self._manual_alignment_capture_context: (
             _ManualAlignmentCaptureContext | None
@@ -6150,6 +6151,9 @@ class Main(QMainWindow):
         if getattr(self, "_manual_alignment_capture_context", None) is not None:
             self._show_status("Alignment point capture is already running.", 4000)
             return
+        self._manual_alignment_pick_generation = (
+            getattr(self, "_manual_alignment_pick_generation", 0) + 1
+        )
         self._manual_alignment_pick_slot = slot
         self._set_alignment_panel_expanded()
         self._refresh_manual_alignment_ui()
@@ -6433,6 +6437,11 @@ class Main(QMainWindow):
             mark_index=int(slot),
             configured_target_xy=configured_target_xy,
             capture_source=str(source),
+            operator_pick_generation=(
+                getattr(self, "_manual_alignment_pick_generation", 0)
+                if getattr(self, "_manual_alignment_pick_slot", None) == slot
+                else None
+            ),
         )
         token = self._design_registration_lifecycle.begin_capture(context)
         if not token.capture_allowed:
@@ -10294,7 +10303,21 @@ class Main(QMainWindow):
         self._apply_registration_effects(effects)
         if token.operator_alignment:
             active_pick = getattr(self, "_manual_alignment_pick_slot", None)
-            if active_pick is None or active_pick == token.mark_index:
+            active_generation = getattr(
+                self,
+                "_manual_alignment_pick_generation",
+                0,
+            )
+            matching_unarmed_capture = bool(
+                active_pick is None
+                and token.operator_pick_generation is None
+            )
+            matching_armed_capture = bool(
+                active_pick == token.mark_index
+                and token.operator_pick_generation is not None
+                and active_generation == token.operator_pick_generation
+            )
+            if matching_unarmed_capture or matching_armed_capture:
                 self._manual_alignment_pick_slot = None
                 self._refresh_manual_alignment_ui()
                 self._update_stage_coordinate_apply_state()

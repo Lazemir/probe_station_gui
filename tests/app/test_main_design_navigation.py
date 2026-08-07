@@ -988,8 +988,8 @@ def test_operator_align_normalizes_physical_marks_captured_at_different_b_and_pi
     assert first_request.pivot_machine_xy == (0.0, 0.0)
     assert first_axes == ("X", "Y", "B")
     assert window._manual_alignment_pick_slot == 0
-    Main._arm_manual_alignment_pick(window, 1)
-    assert window._manual_alignment_pick_slot == 1
+    Main._arm_manual_alignment_pick(window, 0)
+    assert window._manual_alignment_pick_slot == 0
     manual_ui_states.clear()
     apply_states.clear()
     first_snapshot = _machine_snapshot((10.0, 20.0, 0.0, 0.0, 0.0))
@@ -1000,8 +1000,22 @@ def test_operator_align_normalizes_physical_marks_captured_at_different_b_and_pi
         first_snapshot,
         "",
     )
-    assert window._manual_alignment_pick_slot == 1
+    assert window._manual_alignment_pick_slot == 0
     assert window._alignment_stage_draft == [(10.0, 20.0), None]
+    assert manual_ui_states == []
+    assert apply_states == []
+
+    Main._arm_manual_alignment_pick(window, 1)
+    manual_ui_states.clear()
+    apply_states.clear()
+    Main._on_registration_machine_coordinate_snapshot_finished(
+        window,
+        first_request,
+        True,
+        first_snapshot,
+        "",
+    )
+    assert window._manual_alignment_pick_slot == 1
     assert manual_ui_states == []
     assert apply_states == []
 

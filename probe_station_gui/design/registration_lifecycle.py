@@ -84,6 +84,7 @@ class RegistrationCaptureContext:
     mark_index: int | None = None
     configured_target_xy: MachinePoint | None = None
     capture_source: str | None = None
+    operator_pick_generation: int | None = None
 
 
 @dataclass(frozen=True)
@@ -124,6 +125,7 @@ class RegistrationCaptureToken:
     mark_index: int | None = None
     configured_target_xy: MachinePoint | None = None
     capture_source: str | None = None
+    operator_pick_generation: int | None = None
     capture_allowed: bool = True
     superseded_effects: RegistrationEffects = field(
         default_factory=lambda: RegistrationEffects(),
@@ -274,6 +276,7 @@ class DesignRegistrationLifecycle:
             mark_index=context.mark_index,
             configured_target_xy=context.configured_target_xy,
             capture_source=context.capture_source,
+            operator_pick_generation=context.operator_pick_generation,
             capture_allowed=capture_allowed,
             superseded_effects=superseded_effects,
         )
