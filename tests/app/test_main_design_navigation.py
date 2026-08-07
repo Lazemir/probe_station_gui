@@ -48,6 +48,11 @@ from probe_station_gui.design.frame_registration import (
     new_design_frame_draft,
     set_focus_reference,
 )
+from probe_station_gui.design.registration_lifecycle import (
+    DesignRegistrationLifecycle,
+    RegistrationCancellation,
+    RegistrationEffects,
+)
 from probe_station_gui.route.model import MeasurementRoute
 from probe_station_gui.stage import position_update
 from probe_station_gui.stage.axis_calibration import StageAxisCalibrationMapper
@@ -747,7 +752,9 @@ def test_stage_mark_capture_commits_active_frame_without_motion(
     assert committed.transform.reference_b_deg == 42.0
     assert session.source_stage_marks_compact() == [(-97.0, 204.0), (-96.0, 204.0)]
     assert events == [("publish",)]
-    assert window._pending_registration_physical_marks == {}
+    assert isinstance(window._design_registration_lifecycle, DesignRegistrationLifecycle)
+    assert not hasattr(window, "_pending_registration_physical_marks")
+    assert not hasattr(window, "_pending_registration_mark_capture")
     assert "captured" in statuses[-1].lower()
 
 
@@ -791,17 +798,10 @@ def test_stage_mark_capture_normalizes_mixed_b_samples_to_first_context(
         first,
         "",
     )
-    pending = window._pending_registration_physical_marks[draft.frame_id]
-    first_sample = pending.source_samples[0]
-    assert first_sample.physical_machine_xy == (10.0, 0.0)
-    assert first_sample.physical_b_deg == 0.0
-    assert first_sample.pivot_machine_xy == (0.0, 0.0)
-    assert first_sample.frame_id == draft.frame_id
-    assert first_sample.frame_version == draft.version
-    assert first_sample.top_cell_name == document.top_cell_name
-    assert first_sample.source_identity[1] == str(document.source_load_id)
-    assert first_sample.source_design_marks == session.source_design_marks
-    assert first_sample.operation_id
+    assert session.source_stage_marks_compact() == [(10.0, 0.0)]
+    assert isinstance(window._design_registration_lifecycle, DesignRegistrationLifecycle)
+    assert not hasattr(window, "_pending_registration_physical_marks")
+    assert not hasattr(window, "_pending_registration_mark_capture")
 
     Main._capture_stage_source_mark(window)
     second = _machine_snapshot((0.0, 11.0, 0.0, 0.0, 90.0))
@@ -845,8 +845,6 @@ def test_operator_align_captures_physical_machine_marks_and_publishes_frame(
     window._manual_alignment_points = [None, None]
     window._pending_alignment_preparation = None
     window._pending_quick_alignment_rotation = False
-    window._pending_registration_mark_capture = None
-    window._pending_registration_physical_marks = {}
     window._last_selected_design_point = None
     window._design_snap_enabled = True
     window.alignment_panel = None
@@ -1113,9 +1111,7 @@ def test_stage_mark_capture_busy_and_stale_callbacks_do_not_mutate_session(
     )
     Main._capture_stage_source_mark(window)
     stale_token = requests.pop()
-    window._pending_registration_physical_marks = {
-        draft.frame_id: {"source": [(9.0, 9.0)], "check": []}
-    }
+    Main._cancel_registration_capture(window, RegistrationCancellation.FRAME_CHANGED)
     session.active_frame_id = "00000000-0000-0000-0000-000000000001"
     snapshot = _machine_snapshot((1.0, 2.0, 0.0, 0.0, 3.0))
     Main._on_registration_machine_coordinate_snapshot_finished(
@@ -1127,7 +1123,8 @@ def test_stage_mark_capture_busy_and_stale_callbacks_do_not_mutate_session(
     )
 
     assert session.source_stage_marks_compact() == []
-    assert window._pending_registration_physical_marks == {}
+    assert not hasattr(window, "_pending_registration_physical_marks")
+    assert not hasattr(window, "_pending_registration_mark_capture")
 
 
 def test_failed_registration_fit_discards_tentative_evidence_before_retry(
@@ -1176,7 +1173,7 @@ def test_failed_registration_fit_discards_tentative_evidence_before_retry(
         )
 
     assert registry.get(draft.frame_id) == draft
-    assert window._pending_registration_physical_marks == {}
+    assert not hasattr(window, "_pending_registration_physical_marks")
     assert session.source_stage_marks_compact() == []
     assert statuses[-1] == "fit failed"
     assert "captured" not in statuses[-1].lower()
@@ -1191,8 +1188,8 @@ def test_failed_registration_fit_discards_tentative_evidence_before_retry(
         "",
     )
 
-    retry = window._pending_registration_physical_marks[draft.frame_id]
-    assert len(retry.source_samples) == 1
+    assert session.source_stage_marks_compact() == [(3.0, 2.0)]
+    assert not hasattr(window, "_pending_registration_physical_marks")
     assert registry.get(draft.frame_id) == draft
 
 
@@ -1242,7 +1239,7 @@ def test_registration_publish_failure_rolls_back_and_does_not_announce_success(
     assert restored is not None
     assert restored.transform == draft.transform
     assert not restored.readiness["X"].available
-    assert window._pending_registration_physical_marks == {}
+    assert not hasattr(window, "_pending_registration_physical_marks")
     assert session.source_stage_marks_compact() == []
     assert statuses[-1] == "save unavailable"
     assert "captured" not in statuses[-1].lower()
@@ -2404,16 +2401,21 @@ def test_source_capture_at_changed_b_retains_existing_check_evidence(
         pivot_machine_xy=pivot,
     )
     session.add_source_design_mark(third_design)
-    session.add_source_stage_mark(third_machine)
     statuses: list[str] = []
+    requests: list[object] = []
     window = Main.__new__(Main)
     window._design_session = session
     window._coordinate_frame_registry = registry
     _set_rotation_settings(window, pivot)
-    window._pending_registration_physical_marks = {
-        committed.frame_id: {"source": [third_machine], "check": []}
-    }
+    window.stage_controller = types.SimpleNamespace(
+        request_machine_coordinate_snapshot=lambda token, *, axes: (
+            requests.append(token) or True
+        )
+    )
+    window._camera_stage_xy_from_raw_stage_xy = lambda point: point
     window._design_navigation_xy_from_physical_machine_xy = lambda point: point
+    window._refresh_design_panel = lambda: None
+    window._refresh_design_position = lambda: None
     window._show_status = lambda message, _timeout: statuses.append(str(message))
     monkeypatch.setattr(
         main_module.connection_flow,
@@ -2421,7 +2423,14 @@ def test_source_capture_at_changed_b_retains_existing_check_evidence(
         lambda _owner: None,
     )
 
-    Main._commit_active_design_frame_registration(window, current_b)
+    Main._capture_stage_source_mark(window)
+    Main._on_registration_machine_coordinate_snapshot_finished(
+        window,
+        requests.pop(),
+        True,
+        _machine_snapshot((*third_machine, 0.0, 0.0, current_b)),
+        "",
+    )
 
     updated = registry.get(committed.frame_id)
     assert updated is not None
@@ -2436,7 +2445,7 @@ def test_source_capture_at_changed_b_retains_existing_check_evidence(
     assert metadata.check_machine_marks[0] == pytest.approx(
         existing_check_at_current_b
     )
-    assert statuses == []
+    assert statuses and "captured" in statuses[-1].lower()
 
 
 def test_source_capture_at_changed_b_rotates_measured_source_evidence(
@@ -2507,16 +2516,21 @@ def test_source_capture_at_changed_b_rotates_measured_source_evidence(
         pivot_machine_xy=pivot,
     )
     session.add_source_design_mark(fourth_design)
-    session.add_source_stage_mark(fourth_machine)
     statuses: list[str] = []
+    requests: list[object] = []
     window = Main.__new__(Main)
     window._design_session = session
     window._coordinate_frame_registry = registry
     _set_rotation_settings(window, pivot)
-    window._pending_registration_physical_marks = {
-        committed.frame_id: {"source": [fourth_machine], "check": []}
-    }
+    window.stage_controller = types.SimpleNamespace(
+        request_machine_coordinate_snapshot=lambda token, *, axes: (
+            requests.append(token) or True
+        )
+    )
+    window._camera_stage_xy_from_raw_stage_xy = lambda point: point
     window._design_navigation_xy_from_physical_machine_xy = lambda point: point
+    window._refresh_design_panel = lambda: None
+    window._refresh_design_position = lambda: None
     window._show_status = lambda message, _timeout: statuses.append(str(message))
     monkeypatch.setattr(
         main_module.connection_flow,
@@ -2524,7 +2538,14 @@ def test_source_capture_at_changed_b_rotates_measured_source_evidence(
         lambda _owner: None,
     )
 
-    Main._commit_active_design_frame_registration(window, current_b)
+    Main._capture_stage_source_mark(window)
+    Main._on_registration_machine_coordinate_snapshot_finished(
+        window,
+        requests.pop(),
+        True,
+        _machine_snapshot((*fourth_machine, 0.0, 0.0, current_b)),
+        "",
+    )
 
     updated = registry.get(committed.frame_id)
     assert updated is not None
@@ -2535,7 +2556,7 @@ def test_source_capture_at_changed_b_rotates_measured_source_evidence(
     )
     assert metadata.max_residual_mm is not None
     assert metadata.max_residual_mm > 0.0
-    assert statuses == []
+    assert statuses and "captured" in statuses[-1].lower()
 
 
 def test_legacy_migration_projection_failure_leaves_registry_and_link_unchanged(
@@ -3328,7 +3349,6 @@ def test_changing_source_mark_discards_unpaired_physical_capture(
     session.set_source_design_mark(0, (0.0, 0.0))
     session.set_source_design_mark(1, (1000.0, 0.0))
     stale_physical = (10.0, 20.0)
-    session.add_source_stage_mark(stale_physical)
     requests: list[object] = []
     window = Main.__new__(Main)
     window._design_session = session
@@ -3341,10 +3361,6 @@ def test_changing_source_mark_discards_unpaired_physical_capture(
     window._manual_alignment_points = [None, None]
     window._pending_alignment_preparation = None
     window._last_selected_design_point = None
-    window._pending_registration_mark_capture = None
-    window._pending_registration_physical_marks = {
-        draft.frame_id: {"source": [stale_physical], "check": []}
-    }
     _set_rotation_settings(window)
     window.stage_controller = types.SimpleNamespace(
         request_machine_coordinate_snapshot=lambda token, *, axes: (
@@ -3364,6 +3380,16 @@ def test_changing_source_mark_discards_unpaired_physical_capture(
         lambda _owner: None,
     )
 
+    Main._capture_stage_source_mark(window)
+    Main._on_registration_machine_coordinate_snapshot_finished(
+        window,
+        requests.pop(),
+        True,
+        _machine_snapshot((*stale_physical, 0.0, 0.0, 5.0)),
+        "",
+    )
+    assert session.source_stage_marks == (stale_physical,)
+
     Main._on_design_layout_point_selected(window, 0, 100.0, 200.0)
     Main._capture_stage_source_mark(window)
     fresh_snapshot = _machine_snapshot((11.0, 20.0, 0.0, 0.0, 5.0))
@@ -3381,10 +3407,8 @@ def test_changing_source_mark_discards_unpaired_physical_capture(
     assert metadata.source_machine_marks == ()
     assert not unchanged.readiness["X"].available
     assert session.source_stage_marks == ((11.0, 20.0),)
-    pending = window._pending_registration_physical_marks[draft.frame_id]
-    assert len(pending.source_samples) == 1
-    assert pending.source_samples[0].physical_machine_xy == (11.0, 20.0)
-    assert pending.check_samples == []
+    assert not hasattr(window, "_pending_registration_physical_marks")
+    assert not hasattr(window, "_pending_registration_mark_capture")
 
 
 def test_top_cell_switch_links_the_matching_persistent_frame(
@@ -3436,10 +3460,12 @@ def test_top_cell_switch_links_the_matching_persistent_frame(
     window._design_load_pending = False
     window._route_measurement_thread = None
     window._route_measurement_session_active = False
-    window._pending_registration_physical_marks = {
-        top_frame.frame_id: {"source": [(1.0, 2.0)], "check": []}
-    }
-    window._pending_registration_mark_capture = object()
+    cancellations: list[RegistrationCancellation] = []
+    window._design_registration_lifecycle = types.SimpleNamespace(
+        cancel=lambda reason: (
+            cancellations.append(reason) or RegistrationEffects()
+        )
+    )
     window._refresh_design_panel = lambda: None
     window._refresh_design_position = lambda: None
     window._show_navigation_status = lambda _plan: None
@@ -3457,8 +3483,9 @@ def test_top_cell_switch_links_the_matching_persistent_frame(
     assert session.document.top_cell_name == "ALT"
     assert session.active_frame_id == alt_frame.frame_id
     assert window._active_design_frame_metadata.top_cell_name == "ALT"
-    assert window._pending_registration_physical_marks == {}
-    assert window._pending_registration_mark_capture is None
+    assert cancellations == [RegistrationCancellation.TOP_CELL_CHANGED]
+    assert not hasattr(window, "_pending_registration_physical_marks")
+    assert not hasattr(window, "_pending_registration_mark_capture")
 
 
 def test_registration_instance_switch_new_and_route_lineage_preserve_records(
@@ -3498,7 +3525,12 @@ def test_registration_instance_switch_new_and_route_lineage_preserve_records(
     window._route_measurement_thread = None
     window._pending_alignment_preparation = None
     window._last_selected_design_point = None
-    window._pending_registration_physical_marks = {}
+    cancellations: list[RegistrationCancellation] = []
+    window._design_registration_lifecycle = types.SimpleNamespace(
+        cancel=lambda reason: (
+            cancellations.append(reason) or RegistrationEffects()
+        )
+    )
     window._design_focus_overlay_context = object()
     window._focus_candidate = object()
     window.design_layout_window = None
@@ -3526,16 +3558,14 @@ def test_registration_instance_switch_new_and_route_lineage_preserve_records(
     Main._new_design_registration_instance(window)
     assert session.active_frame_id == first.frame_id
     assert registry.snapshot().records == original_records
+    assert cancellations == []
     window._route_measurement_thread = None
 
-    window._pending_registration_physical_marks = {
-        first.frame_id: {"source": [(30.0, 40.0)], "check": []},
-        second.frame_id: {"source": [], "check": [(31.0, 41.0)]},
-    }
     Main._select_design_registration_instance(window, second.frame_id)
 
     assert session.active_frame_id == second.frame_id
-    assert window._pending_registration_physical_marks == {}
+    assert cancellations == [RegistrationCancellation.FRAME_CHANGED]
+    assert not hasattr(window, "_pending_registration_physical_marks")
     assert np.allclose(session.source_stage_marks, ((10.0, 20.0), (11.0, 20.0)))
     assert Main._snapshot_active_route_design_frame(window) == (
         main_module.snapshot_route_design_frame(
@@ -3551,15 +3581,21 @@ def test_registration_instance_switch_new_and_route_lineage_preserve_records(
     assert session.active_frame_id == first.frame_id
     assert np.allclose(session.source_stage_marks, ((1.0, 2.0), (2.0, 2.0)))
     assert registry.snapshot().records == original_records
+    assert cancellations == [
+        RegistrationCancellation.FRAME_CHANGED,
+        RegistrationCancellation.FRAME_CHANGED,
+    ]
 
-    window._pending_registration_physical_marks = {
-        first.frame_id: {"source": [(32.0, 42.0)], "check": []}
-    }
     Main._new_design_registration_instance(window)
 
     assert len(registry.snapshot().records) == 3
     assert session.active_frame_id not in {first.frame_id, second.frame_id}
-    assert window._pending_registration_physical_marks == {}
+    assert cancellations == [
+        RegistrationCancellation.FRAME_CHANGED,
+        RegistrationCancellation.FRAME_CHANGED,
+        RegistrationCancellation.FRAME_CHANGED,
+    ]
+    assert not hasattr(window, "_pending_registration_physical_marks")
 
 
 def test_missing_selected_registration_clears_session_without_deleting_others(
@@ -4095,17 +4131,20 @@ def test_explicit_unload_deletes_markup_sidecar(tmp_path: Path) -> None:
     window._update_design_position = lambda value: statuses.append(
         f"position:{value}"
     )
-    window._pending_registration_physical_marks = {
-        "design-a": {"source": [(1.0, 2.0)], "check": []}
-    }
-    window._pending_registration_mark_capture = object()
+    cancellations: list[RegistrationCancellation] = []
+    window._design_registration_lifecycle = types.SimpleNamespace(
+        cancel=lambda reason: (
+            cancellations.append(reason) or RegistrationEffects()
+        )
+    )
 
     Main._unload_design_document(window)
 
     assert window._design_session.document is None
     assert window._design_markup is None
-    assert window._pending_registration_physical_marks == {}
-    assert window._pending_registration_mark_capture is None
+    assert cancellations == [RegistrationCancellation.DOCUMENT_UNLOADED]
+    assert not hasattr(window, "_pending_registration_physical_marks")
+    assert not hasattr(window, "_pending_registration_mark_capture")
     assert "delete:loaded.gds" in statuses
 
 
