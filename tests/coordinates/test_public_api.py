@@ -1,3 +1,6 @@
+import subprocess
+import sys
+
 import probe_station_gui.coordinates as coordinates
 from probe_station_gui.coordinates.model import (
     STAGE_AXES,
@@ -103,3 +106,17 @@ def test_software_coordinate_settings_types_remain_importable() -> None:
     assert RotationPivotSettings.__module__ == software_coordinates.__name__
     assert SoftwareCoordinateSettings.__module__ == software_coordinates.__name__
     assert parse_software_coordinate_settings.__module__ == software_coordinates.__name__
+
+
+def test_design_and_coordinates_packages_are_import_order_independent() -> None:
+    for script in (
+        "import probe_station_gui.design.session; import probe_station_gui.coordinates",
+        "import probe_station_gui.coordinates; import probe_station_gui.design.session",
+    ):
+        completed = subprocess.run(
+            [sys.executable, "-c", script],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        assert completed.returncode == 0, completed.stderr

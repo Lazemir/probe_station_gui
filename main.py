@@ -107,10 +107,22 @@ from probe_station_gui.coordinates import (
     CoordinateFrameRegistry,
     CoordinateFrameStoreWorker,
     CoordinateSystemCoordinator,
-    DesignSessionCheckpoint,
     FrameRecordsPublication,
     PhysicalMachinePose,
-    rotate_xy,
+)
+from probe_station_gui.coordinates.coordinator_model import (
+    AutofocusResult as CoordinateAutofocusResult,
+    CoordinateAdapterCompletion,
+    FocusCandidateRequest,
+    FocusMoveResult,
+    FocusReferenceRequest,
+    FocusReferenceResetRequest,
+    FirstContactRequest,
+    MachinePoseCaptureResult,
+    PhysicalAReadResult,
+    ReadPhysicalAIntent,
+    RegistrationCaptureRequest,
+    RegistrationOpticalObservation,
 )
 from probe_station_gui.coordinates.lifecycle import (
     CoordinateFrameLifecycle,
@@ -137,28 +149,9 @@ from probe_station_gui.design.klayout_types import (
 from probe_station_gui.design.klayout_workers import KLayoutStructureBoundsWorker
 from probe_station_gui.design.frame_registration import (
     DesignFrameMetadata,
-    commit_xyb_registration,
-    find_equivalent_migrated_frame,
-    migrate_legacy_design_state,
-    new_design_frame_draft,
-    reset_focus_reference,
-    set_contact_reference,
-    set_focus_reference,
-    update_check_registration,
 )
 from probe_station_gui.design.registration_lifecycle import (
-    ContactOperationToken,
-    DesignRegistrationLifecycle,
-    FocusCompletion,
-    FocusCompletionKind,
-    FocusOperationToken,
     RegistrationCancellation,
-    RegistrationCaptureContext,
-    RegistrationCaptureOutcome,
-    RegistrationCaptureToken,
-    RegistrationContext,
-    RegistrationEffects,
-    RegistrationSample,
 )
 from probe_station_gui.design.model import DesignDocument, DesignModelError
 from probe_station_gui.design.contact_navigation import (
@@ -192,7 +185,6 @@ from probe_station_gui.design.session import (
     AlignmentPreparation,
     DesignSession,
 )
-from probe_station_gui.stage.machine_coordinates import MachineCoordinateSnapshot
 from probe_station_gui.shared.diagnostics import configure_crash_diagnostics
 from probe_station_gui.api.request_bridge import ApiRequestBridge, DeferredApiResponse
 from probe_station_gui.api.server import ProbeStationApiServer
@@ -615,6 +607,12 @@ class _ApiStageCommandReservation:
     state: str = "reserved"
 
 
+@dataclass
+class _DesignContactArmDispatch:
+    request: FirstContactRequest
+    read_intent: ReadPhysicalAIntent | None = None
+
+
 def _application_icon() -> QIcon:
     icon_path = resources.files("probe_station_gui").joinpath(APP_ICON_RESOURCE)
     icon = QIcon(str(icon_path))
@@ -693,8 +691,8 @@ class Main(QMainWindow):
         bool,
         str,
     )
-    design_contact_reference_ready: Signal = Signal(object, float)
-
+    design_contact_a_read_finished: Signal = Signal(object)
+    design_contact_arm_requested: Signal = Signal(object)
     ALIGNMENT_CAPTURE_SHORTCUT = "Space"
     ALIGNMENT_TARGET_ANGLES = (-180.0, -90.0, 0.0, 90.0, 180.0)
     DESIGN_POSITION_REFRESH_MS = 800
@@ -1040,19 +1038,15 @@ class Main(QMainWindow):
         self._contact_seek_stop_requested = threading.Event()
         self._design_session = DesignSession()
         self._coordinate_frame_registry = CoordinateFrameRegistry()
-        self._design_registration_lifecycle = DesignRegistrationLifecycle()
         self._coordinate_system_coordinator = CoordinateSystemCoordinator(
             registry=self._coordinate_frame_registry,
             session=self._design_session,
             lifecycle=self._coordinate_frame_lifecycle,
-            registration_lifecycle=self._design_registration_lifecycle,
         )
         self._coordinate_frame_store = CoordinateFrameStoreWorker(
             self,
             path=self.settings_manager.coordinate_frames_path(),
         )
-        self._legacy_design_migration_request_id: int | None = None
-        self._legacy_design_migration_state: dict[str, object] | None = None
         self._coordinate_frames_loaded = False
         self._active_design_frame_metadata: DesignFrameMetadata | None = None
         self._coordinate_frame_authority_blocked_axes: set[str] = set()
@@ -1063,7 +1057,6 @@ class Main(QMainWindow):
         self._pending_focus_structure_context: object | None = None
         self._pending_focus_structure_fov: tuple[float, float] | None = None
         self._pending_focus_structure_design_bounds: tuple[float, float, float, float] | None = None
-        self._design_focus_overlay_context: object | None = None
         self._design_focus_signals_connected = False
         self._coordinate_frame_store.loaded.connect(
             self._on_coordinate_frames_loaded
@@ -1230,8 +1223,13 @@ class Main(QMainWindow):
         self.design_registration_focus_move_finished.connect(
             self._on_registration_focus_move_signal
         )
-        self.design_contact_reference_ready.connect(
-            self._on_design_contact_reference_ready
+        self.design_contact_a_read_finished.connect(
+            self._on_design_contact_a_read_finished,
+            Qt.ConnectionType.QueuedConnection,
+        )
+        self.design_contact_arm_requested.connect(
+            self._on_design_contact_arm_requested,
+            Qt.ConnectionType.BlockingQueuedConnection,
         )
         self.stage_controller.stage_position_changed.connect(
             lambda position: stage_position_update.on_stage_position_changed(
@@ -4701,15 +4699,15 @@ class Main(QMainWindow):
         if slot not in (0, 1):
             return
         snapped_point = (float(x_value), float(y_value))
+        if not self._start_fresh_design_frame_for_source_replacement():
+            return
         self._manual_alignment_pick_slot = None
         self._manual_alignment_points = [None, None]
         self._pending_alignment_preparation = None
-        if not self._start_fresh_design_frame_for_source_replacement():
-            return
-        effects = self._design_registration_lifecycle.cancel(
-            RegistrationCancellation.MARK_SET_CHANGED
+        transition = self._coordinate_system_coordinator.cancel_registration(
+            RegistrationCancellation.MARK_SET_CHANGED,
         )
-        self._apply_registration_effects(effects)
+        connection_flow.apply_coordinate_transition(self, transition)
         self._design_session.clear_source_stage_marks()
         self._last_selected_design_point = snapped_point
         self._set_design_snap_enabled(True)
@@ -4723,61 +4721,11 @@ class Main(QMainWindow):
         )
 
     def _start_fresh_design_frame_for_source_replacement(self) -> bool:
-        registry = getattr(self, "_coordinate_frame_registry", None)
-        frame_id = self._design_session.active_frame_id
-        document = self._design_session.document
-        metadata = getattr(self, "_active_design_frame_metadata", None)
-        if (
-            registry is None
-            or frame_id is None
-            or document is None
-            or metadata is None
-            or not bool(getattr(self, "_coordinate_frames_loaded", False))
-        ):
-            return True
-        current = registry.get(frame_id)
-        if current is None:
-            return True
-        current_metadata = DesignFrameMetadata.from_mapping(current.metadata)
-        if not (
-            current_metadata.source_design_marks
-            or current_metadata.source_machine_marks
-        ):
-            return True
-        try:
-            snapshot = self.stage_controller.latest_machine_coordinate_snapshot()
-            candidate = new_design_frame_draft(
-                document,
-                existing_names=(
-                    record.name for record in registry.snapshot().records
-                ),
-                metadata=self._design_metadata_with_calibration_fingerprints(
-                    metadata
-                ),
-            )
-            publication = design_navigation.prepare_design_frame_publication(
-                self._design_session,
-                registry.snapshot().records,
-                candidate,
-                machine_point_for_navigation=(
-                    self._design_navigation_xy_from_physical_machine_xy
-                ),
-                machine_b_deg=(
-                    None
-                    if snapshot is None
-                    else snapshot.physical_machine_pose.require("B")
-                ),
-                pivot_machine_xy=self._rotation_geometry_snapshot().pivot_machine_xy,
-            )
-        except DesignModelError as exc:
-            self._show_status(str(exc), 6000)
-            return False
-        transition = self._coordinate_system_coordinator.publish_frame_records(
-            publication
+        transition = connection_flow.activate_current_design(
+            self,
+            create_new_if_registered=True,
         )
-        connection_flow.apply_coordinate_transition(self, transition)
-        self._apply_coordinate_frame_authority_blocks()
-        return True
+        return transition is not None and transition.accepted
 
     def _on_alignment_draft_accepted(self, points: object) -> None:
         if not isinstance(points, (list, tuple)):
@@ -4813,10 +4761,10 @@ class Main(QMainWindow):
         if record is None:
             self._show_status("Design coordinate frame is unavailable.", 6000)
             return
-        effects = self._design_registration_lifecycle.cancel(
-            RegistrationCancellation.MARK_SET_CHANGED
+        transition = self._coordinate_system_coordinator.cancel_registration(
+            RegistrationCancellation.MARK_SET_CHANGED,
         )
-        self._apply_registration_effects(effects)
+        connection_flow.apply_coordinate_transition(self, transition)
         self._design_session.source_design_marks = normalized
         self._design_session.clear_source_stage_marks()
         self._alignment_design_draft = normalized
@@ -6206,10 +6154,10 @@ class Main(QMainWindow):
 
     def _reset_alignment_capture_points(self) -> None:
         if self._design_backed_alignment_active():
-            effects = self._design_registration_lifecycle.cancel(
-                RegistrationCancellation.MARK_SET_CHANGED
+            transition = self._coordinate_system_coordinator.cancel_registration(
+                RegistrationCancellation.MARK_SET_CHANGED,
             )
-            self._apply_registration_effects(effects)
+            connection_flow.apply_coordinate_transition(self, transition)
             self._pending_alignment_preparation = None
             self._pending_quick_alignment_rotation = False
             self._alignment_stage_draft = [None] * len(
@@ -6413,16 +6361,7 @@ class Main(QMainWindow):
         configured_target_xy: tuple[float, float] | None,
         source: str,
     ) -> None:
-        session = self._design_session
-        document = session.document
-        frame_id = session.active_frame_id
-        registry = getattr(self, "_coordinate_frame_registry", None)
-        record = registry.get(frame_id) if registry is not None and frame_id else None
-        if document is None or record is None:
-            self._show_status("Design coordinate frame is unavailable.", 6000)
-            return
         try:
-            source_path = str(document.path.expanduser().resolve())
             pivot_value = self._rotation_geometry_snapshot().pivot_machine_xy
             pivot = (float(pivot_value[0]), float(pivot_value[1]))
             camera_origin = self._camera_stage_xy_from_raw_stage_xy((0.0, 0.0))
@@ -6430,57 +6369,25 @@ class Main(QMainWindow):
                 -float(camera_origin[0]),
                 -float(camera_origin[1]),
             )
-        except (DesignModelError, OSError, TypeError, ValueError) as exc:
+        except (DesignModelError, TypeError, ValueError) as exc:
             self._show_status(str(exc), 6000)
             return
-        context = RegistrationCaptureContext(
-            session_identity=id(session),
-            frame_id=record.frame_id,
-            frame_version=record.version,
-            source_identity=(source_path, str(document.source_load_id)),
-            top_cell_name=str(document.top_cell_name),
-            rotation_quarter_turns=int(document.rotation_quarter_turns) % 4,
-            pivot_machine_xy=pivot,
-            objective_xy_offset=objective_offset,
-            mark_kind="source",
-            source_design_marks=tuple(self._alignment_design_draft),
-            check_design_marks=tuple(session.check_design_marks),
-            baseline_source_stage_marks=tuple(session.source_stage_marks),
-            baseline_check_stage_marks=tuple(session.check_stage_marks),
-            baseline_registration=session.registration,
-            baseline_registration_status=str(session.registration_status),
-            operator_alignment=True,
-            mark_index=int(slot),
-            configured_target_xy=configured_target_xy,
-            capture_source=str(source),
-            operator_pick_generation=(
-                getattr(self, "_manual_alignment_pick_generation", 0)
-                if getattr(self, "_manual_alignment_pick_slot", None) == slot
-                else None
-            ),
-        )
-        token = self._design_registration_lifecycle.begin_capture(context)
-        if not token.capture_allowed:
-            self._show_status("Alignment point capture is already running.", 4000)
-            return
-        self._apply_registration_effects(token.superseded_effects)
-        accepted = self.stage_controller.request_machine_coordinate_snapshot(
-            token,
-            axes=("X", "Y", "B"),
-        )
-        if not accepted:
-            effects = self._design_registration_lifecycle.accept_sample(
-                token,
-                RegistrationCaptureOutcome(
-                    succeeded=False,
-                    message="Stage is busy; alignment point capture not started.",
+        transition = self._coordinate_system_coordinator.capture_registration_mark(
+            RegistrationCaptureRequest(
+                pivot_machine_xy=pivot,
+                objective_xy_offset=objective_offset,
+                operator_alignment=True,
+                mark_index=int(slot),
+                configured_target_xy=configured_target_xy,
+                capture_source=str(source),
+                operator_pick_generation=(
+                    getattr(self, "_manual_alignment_pick_generation", 0)
+                    if getattr(self, "_manual_alignment_pick_slot", None) == slot
+                    else None
                 ),
             )
-            self._apply_registration_effects(effects)
-            self._show_status("Stage is busy; alignment point capture not started.", 5000)
-            return
-        self._refresh_manual_alignment_ui()
-        self._update_stage_coordinate_apply_state()
+        )
+        connection_flow.apply_coordinate_transition(self, transition)
 
     def _apply_alignment_capture_plan(self, plan) -> None:
         if plan.points is not None:
@@ -7314,7 +7221,10 @@ class Main(QMainWindow):
     def _start_design_document_load(
         self, design_path: str, *, restore_state: dict[str, object] | None, show_window: bool
     ) -> None:
-        self._discard_all_registration_evidence(RegistrationCancellation.DESIGN_CHANGED)
+        transition = self._coordinate_system_coordinator.cancel_registration(
+            RegistrationCancellation.DESIGN_CHANGED
+        )
+        connection_flow.apply_coordinate_transition(self, transition)
         self._invalidate_pending_design_markup_load()
         self._design_load_generation += 1
         generation = self._design_load_generation
@@ -7393,21 +7303,9 @@ class Main(QMainWindow):
             self._begin_design_markup_load(plan.document, **load_arguments)
 
     def _snapshot_design_session(self) -> DesignSession:
-        session = self._design_session
-        return DesignSession(
-            document=session.document,
-            registration=session.registration,
-            source_design_marks=list(session.source_design_marks),
-            source_stage_marks=list(session.source_stage_marks),
-            check_design_marks=list(session.check_design_marks),
-            check_stage_marks=list(session.check_stage_marks),
-            targets=list(session.targets),
-            selected_target_index=session.selected_target_index,
-            route=session.route,
-            selected_route_point_index=session.selected_route_point_index,
-            registration_status=session.registration_status,
-            active_frame_id=session.active_frame_id,
-        )
+        candidate = DesignSession()
+        candidate.apply_state(self._design_session.snapshot_state())
+        return candidate
 
     def _apply_design_load_success_plan(self, plan: design_navigation.DesignLoadResultPlan, show_window: bool) -> None:
         self._reset_manual_alignment(cancel_pick=True)
@@ -7494,13 +7392,22 @@ class Main(QMainWindow):
         context: _PendingDesignMarkupLoad,
         markup: MarkupDocument,
     ) -> None:
-        self._design_session = context.session
-        self._active_design_frame_metadata = self._design_metadata_with_calibration_fingerprints(
+        frame_metadata = self._design_metadata_with_calibration_fingerprints(
             context.frame_metadata
         )
-        self._activate_loaded_design_frame(
-            frame_metadata=self._active_design_frame_metadata
+        transition = connection_flow.activate_current_design(
+            self,
+            session_state=context.session.snapshot_state(),
+            frame_metadata=frame_metadata,
         )
+        if transition is None or not transition.accepted:
+            self._design_markup_pending_visibility = None
+            self._finish_design_markup_load_ui(
+                self._design_session.document,
+                show_window=context.show_window,
+            )
+            return
+        self._active_design_frame_metadata = frame_metadata
         self._design_markup = markup
         self._design_markup_direct_guide_ids = []
         self._design_markup_pending_visibility = None
@@ -7756,138 +7663,6 @@ class Main(QMainWindow):
         logger.warning("Coordinate frame %s failed: %s", operation, message)
         connection_flow.handle_coordinate_frame_failed(self, failure)
 
-    def _activate_loaded_design_frame(
-        self,
-        *,
-        frame_metadata: DesignFrameMetadata | None = None,
-        stage_position: tuple[float, ...] | None = None,
-    ) -> None:
-        registry = getattr(self, "_coordinate_frame_registry", None)
-        if (
-            registry is None
-            or not bool(getattr(self, "_coordinate_frames_loaded", False))
-            or self._design_session.document is None
-        ):
-            return
-        metadata = frame_metadata or getattr(
-            self,
-            "_active_design_frame_metadata",
-            None,
-        )
-        if metadata is None:
-            return
-
-        legacy_state = self._design_session.export_persisted_state()
-        is_legacy_registration = bool(
-            self._design_session.active_frame_id is None
-            and isinstance(legacy_state, dict)
-            and len(self._design_session.source_design_marks_compact()) >= 2
-            and len(self._design_session.source_stage_marks_compact()) >= 2
-        )
-        if is_legacy_registration:
-            snapshot = self.stage_controller.latest_machine_coordinate_snapshot()
-            if snapshot is None:
-                self._design_session.block_legacy_registration_until_b(
-                    "Design registration requires a current B position."
-                )
-                return
-            try:
-                physical_b = snapshot.physical_machine_pose.require("B")
-                pivot = self._rotation_geometry_snapshot().pivot_machine_xy
-            except Exception as exc:
-                self._design_session.block_legacy_registration_until_b(
-                    "Design registration requires a current B position."
-                )
-                self._show_status(str(exc), 6000)
-                return
-            try:
-                migration_state = self._legacy_design_state_for_frame_migration(
-                    legacy_state
-                )
-            except Exception as exc:
-                reason = str(exc) or "Legacy Design registration is unavailable."
-                self._design_session.block_legacy_registration(reason)
-                self._show_status(reason, 6000)
-                return
-            try:
-                migrated = migrate_legacy_design_state(
-                    migration_state,
-                    design_document=self._design_session.document,
-                    physical_b_deg=physical_b,
-                    pivot_machine_xy=pivot,
-                    existing_names=(
-                        record.name for record in registry.snapshot().records
-                    ),
-                    metadata=self._design_metadata_with_calibration_fingerprints(
-                        metadata
-                    ),
-                )
-            except (DesignModelError, ValueError) as exc:
-                self._show_status(str(exc), 6000)
-                return
-            if migrated is not None:
-                existing = find_equivalent_migrated_frame(
-                    registry.snapshot().records,
-                    migrated,
-                )
-                selected = existing or migrated
-                try:
-                    publication = design_navigation.prepare_design_frame_publication(
-                        self._design_session,
-                        registry.snapshot().records,
-                        selected,
-                        previous_record=existing,
-                        machine_point_for_navigation=(
-                            self._design_navigation_xy_from_physical_machine_xy
-                        ),
-                        machine_b_deg=physical_b,
-                        pivot_machine_xy=pivot,
-                        success_message="",
-                        success_code="legacy_migration_saved",
-                    )
-                except DesignModelError as exc:
-                    self._show_status(str(exc), 6000)
-                    return
-                self._legacy_design_migration_state = dict(legacy_state)
-                transition = self._coordinate_system_coordinator.publish_frame_records(
-                    publication
-                )
-                self._legacy_design_migration_request_id = transition.intents[0].intent_id
-                connection_flow.apply_coordinate_transition(self, transition)
-                self._apply_coordinate_frame_authority_blocks()
-            return
-
-        try:
-            prepared = design_navigation.prepare_design_frame_activation(
-                self._design_session,
-                registry,
-                self._design_session.document,
-                requested_frame_id=self._design_session.active_frame_id,
-                current_metadata=self._design_metadata_with_calibration_fingerprints(
-                    metadata
-                ),
-                machine_point_for_navigation=(
-                    self._design_navigation_xy_from_physical_machine_xy
-                ),
-                machine_b_deg=self._tracked_physical_b_for_design_frame(),
-                pivot_machine_xy=self._rotation_geometry_snapshot().pivot_machine_xy,
-            )
-        except DesignModelError as exc:
-            self._show_status(str(exc), 6000)
-            return
-        activation = prepared.activation
-        if prepared.publication is not None:
-            transition = self._coordinate_system_coordinator.publish_frame_records(
-                prepared.publication
-            )
-            connection_flow.apply_coordinate_transition(self, transition)
-        else:
-            self._design_session.apply_active_frame_link(
-                activation.record,
-                prepared.projection,
-            )
-        self._apply_coordinate_frame_authority_blocks()
-
     def _apply_coordinate_frame_authority_blocks(
         self,
         stage_position: tuple[float, ...] | None = None,
@@ -7921,7 +7696,7 @@ class Main(QMainWindow):
                 physical_b is not None
                 and session.legacy_registration_waiting_for_b
             ):
-                self._activate_loaded_design_frame(stage_position=stage_position)
+                connection_flow.activate_current_design(self)
             return
         record = registry.get(session.active_frame_id)
         if record is None:
@@ -7967,105 +7742,6 @@ class Main(QMainWindow):
             return None
         return physical_b if math.isfinite(physical_b) else None
 
-    def _legacy_design_state_for_frame_migration(
-        self,
-        legacy_state: Mapping[str, object],
-    ) -> dict[str, object]:
-        document = self._design_session.document
-        if document is None:
-            raise DesignModelError("Load a design before migrating its registration.")
-        snapshot = self.stage_controller.latest_machine_coordinate_snapshot()
-        if snapshot is None:
-            raise DesignModelError(
-                "Legacy registration requires same-generation Machine and work coordinates."
-            )
-        capture_mode, capture_work_offset = (
-            self._verified_legacy_stage_coordinate_provenance(
-                legacy_state.get("stage_coordinate_provenance"),
-                snapshot,
-            )
-        )
-        converted = dict(legacy_state)
-        turns = int(document.rotation_quarter_turns) % 4
-        for key in ("source_design_marks", "check_design_marks"):
-            converted[key] = [
-                list(document.rotate_point((float(point[0]), float(point[1])), -turns))
-                for point in legacy_state.get(key, ())
-            ]
-        for key in ("source_stage_marks", "check_stage_marks"):
-            physical_marks: list[list[float]] = []
-            for point in legacy_state.get(key, ()):
-                configured_xy = self._raw_stage_xy_from_camera_stage_xy(
-                    (float(point[0]), float(point[1]))
-                )
-                raw_machine_xy = []
-                for axis, configured_value in zip(("X", "Y"), configured_xy):
-                    axis_index = snapshot.axis_index[axis]
-                    offset = (
-                        capture_work_offset[axis_index]
-                        if capture_mode == "work"
-                        else 0.0
-                    )
-                    raw_machine_xy.append(float(configured_value) + offset)
-                physical_marks.append(
-                    [
-                        snapshot.mapper.controller_to_physical(
-                            "X", raw_machine_xy[0]
-                        ),
-                        snapshot.mapper.controller_to_physical(
-                            "Y", raw_machine_xy[1]
-                        ),
-                    ]
-                )
-            converted[key] = physical_marks
-        return converted
-
-    @staticmethod
-    def _verified_legacy_stage_coordinate_provenance(
-        value: object,
-        snapshot: MachineCoordinateSnapshot,
-    ) -> tuple[str, tuple[float, ...]]:
-        message = "Legacy registration requires verified capture-time WCO provenance."
-        if not isinstance(value, Mapping) or set(value) != {
-            "position_reporting_mode",
-            "coordinate_system",
-            "work_offset",
-        }:
-            raise DesignModelError(message)
-        mode = value.get("position_reporting_mode")
-        if not isinstance(mode, str) or mode not in {"machine", "work"}:
-            raise DesignModelError(message)
-        coordinate_system = value.get("coordinate_system")
-        if mode == "work":
-            if not isinstance(coordinate_system, str) or not coordinate_system.strip():
-                raise DesignModelError(message)
-        elif coordinate_system is not None:
-            raise DesignModelError(message)
-        raw_offsets = value.get("work_offset")
-        if not isinstance(raw_offsets, (list, tuple)):
-            raise DesignModelError(message)
-        try:
-            offsets = tuple(
-                float(offset)
-                for offset in raw_offsets
-                if not isinstance(offset, bool)
-            )
-        except (TypeError, ValueError) as exc:
-            raise DesignModelError(message) from exc
-        if len(offsets) != len(raw_offsets) or not all(
-            math.isfinite(offset) for offset in offsets
-        ):
-            raise DesignModelError(message)
-        required_indices = tuple(snapshot.axis_index[axis] for axis in ("X", "Y"))
-        if any(index < 0 or index >= len(offsets) for index in required_indices):
-            raise DesignModelError(message)
-        if mode == "machine" and any(
-            not math.isclose(offsets[index], 0.0, rel_tol=0.0, abs_tol=1e-12)
-            for index in required_indices
-        ):
-            raise DesignModelError(message)
-        return mode, offsets
-
     def _show_navigation_status(self, plan: object) -> None:
         message = getattr(plan, "status_message", None)
         if message is not None:
@@ -8086,14 +7762,15 @@ class Main(QMainWindow):
     def _unload_design_document(self) -> None:
         if not self._design_mutation_ready():
             return
-        self._discard_all_registration_evidence(
-            RegistrationCancellation.DOCUMENT_UNLOADED
-        )
         self._design_load_generation += 1
         loaded_document = self._design_session.document
         plan = design_navigation.unload_design_document(self._design_session)
         if not plan.accepted:
             return
+        connection_flow.apply_coordinate_transition(
+            self,
+            self._coordinate_system_coordinator.close_design(),
+        )
         if loaded_document is not None:
             self._delete_persisted_design_markup(loaded_document.path)
         self._design_markup_load_request_id = None
@@ -8111,9 +7788,10 @@ class Main(QMainWindow):
     def _set_design_top_cell(self, top_cell_name: str) -> None:
         if not self._design_mutation_ready():
             return
-        self._discard_all_registration_evidence(
-            RegistrationCancellation.TOP_CELL_CHANGED
+        transition = self._coordinate_system_coordinator.cancel_registration(
+            RegistrationCancellation.TOP_CELL_CHANGED,
         )
+        connection_flow.apply_coordinate_transition(self, transition)
         try:
             plan = design_navigation.set_design_top_cell(self._design_session, top_cell_name)
         except DesignModelError as exc:
@@ -8126,9 +7804,7 @@ class Main(QMainWindow):
                 top_cell_name=self._design_session.document.top_cell_name,
                 design_unit_mm=float(self._design_session.document.dbu) * 1e3,
             )
-            self._activate_loaded_design_frame(
-                frame_metadata=self._active_design_frame_metadata
-            )
+            connection_flow.activate_current_design(self)
         self._pending_alignment_preparation = None
         self._last_selected_design_point = None
         self._refresh_design_panel()
@@ -8173,7 +7849,10 @@ class Main(QMainWindow):
         if route_measurement_thread is not None and route_measurement_thread.is_alive():
             self._show_status("Stop route measurement before rotating the design.", 5000)
             return
-        self._discard_all_registration_evidence(RegistrationCancellation.DESIGN_CHANGED)
+        transition = self._coordinate_system_coordinator.cancel_registration(
+            RegistrationCancellation.DESIGN_CHANGED
+        )
+        connection_flow.apply_coordinate_transition(self, transition)
         delta = int(quarter_turn_delta) % 4
         if delta == 0:
             delta = 1
@@ -8844,40 +8523,14 @@ class Main(QMainWindow):
         frame_version = getattr(frame_snapshot, "frame_version", None)
         if frame_id is None or frame_version is None:
             return None
-        effects = self._design_registration_lifecycle.cancel(
-            RegistrationCancellation.ROUTE_CONTEXT_CHANGED
+        read = Main._request_design_contact_arm(
+            self,
+            FirstContactRequest(str(frame_id), int(frame_version))
         )
-        self._apply_registration_effects(effects)
-        context = self._design_registration_context(
-            include_optical=False,
-            expected_frame_id=str(frame_id),
-            expected_frame_version=int(frame_version),
-        )
-        if context is None:
-            return None
-        eligibility = self._design_registration_lifecycle.accept_first_contact(
-            context,
-            None,
-        )
-        token = eligibility.contact_token
-        if not eligibility.capture_contact or token is None:
+        if read is None:
             return None
 
-        def capture(_placement: object) -> None:
-            current_context = self._design_registration_context(
-                include_optical=False,
-                expected_frame_id=token.frame_id,
-                expected_frame_version=token.frame_version,
-            )
-            if current_context is None:
-                return
-            current = self._design_registration_lifecycle.accept_first_contact(
-                current_context,
-                None,
-                token=token,
-            )
-            if not current.capture_contact:
-                return
+        def capture(_placement: object):
             try:
                 coordinates = (
                     self.stage_controller.run_external_current_physical_machine_coordinates(
@@ -8885,65 +8538,75 @@ class Main(QMainWindow):
                     )
                 )
                 physical_a = float(coordinates["A"])
-                pose = PhysicalMachinePose.from_mapping({"A": physical_a})
-            except (KeyError, TypeError, ValueError, RuntimeError):
+                result = PhysicalAReadResult(
+                    read.intent_id,
+                    succeeded=True,
+                    physical_a_mm=physical_a,
+                )
+            except (KeyError, TypeError, ValueError, RuntimeError) as exc:
                 logger.exception("Unable to read physical A for Design contact reference")
-                return
-            self.design_contact_reference_ready.emit(token, pose.require("A"))
+                result = PhysicalAReadResult(
+                    read.intent_id,
+                    succeeded=False,
+                    message=str(exc),
+                )
+
+            def finalize() -> None:
+                self.design_contact_a_read_finished.emit(result)
+
+            return finalize
 
         return capture
 
-    def _on_design_contact_reference_ready(
+    def _request_design_contact_arm(
         self,
-        token: object,
-        physical_a_mm: float,
+        request: FirstContactRequest,
+    ) -> ReadPhysicalAIntent | None:
+        signal = getattr(self, "design_contact_arm_requested", None)
+        application = QApplication.instance()
+        if (
+            signal is None
+            or application is None
+            or QThread.currentThread() == application.thread()
+        ):
+            return Main._arm_design_contact_on_gui(self, request)
+        dispatch = _DesignContactArmDispatch(request)
+        signal.emit(dispatch)
+        return dispatch.read_intent
+
+    def _on_design_contact_arm_requested(
+        self,
+        dispatch: object,
     ) -> None:
-        if not isinstance(token, ContactOperationToken):
+        if not isinstance(dispatch, _DesignContactArmDispatch):
             return
-        context = self._design_registration_context(
-            include_optical=False,
-            expected_frame_id=token.frame_id,
-            expected_frame_version=token.frame_version,
+        dispatch.read_intent = Main._arm_design_contact_on_gui(
+            self,
+            dispatch.request,
         )
-        if context is None:
-            return
-        try:
-            physical_a = float(physical_a_mm)
-        except (TypeError, ValueError):
-            return
-        effects = self._design_registration_lifecycle.accept_first_contact(
-            context,
-            physical_a,
-            token=token,
-        )
-        self._apply_registration_effects(effects)
-        if effects.commit_a_mm is None:
-            return
-        try:
-            current = self._coordinate_frame_registry.get(token.frame_id)
-            if current is None or current.version != token.frame_version:
-                return
-            contacted = replace(
-                set_contact_reference(
-                    current,
-                    physical_machine_a_mm=effects.commit_a_mm,
-                ),
-                version=current.version + 1,
-            )
-        except (KeyError, RuntimeError, TypeError, ValueError):
-            logger.exception("Unable to store Design contact reference")
-            return
-        transition = self._coordinate_system_coordinator.publish_frame_records(
-            FrameRecordsPublication.for_committed_record(
-                self._coordinate_frame_registry.snapshot().records,
-                contacted,
-                previous_record=current,
-                success_message="Contact reference ready.",
-                success_duration_ms=5000,
-            )
-        )
+
+    def _arm_design_contact_on_gui(
+        self,
+        request: FirstContactRequest,
+    ) -> ReadPhysicalAIntent | None:
+        transition = self._coordinate_system_coordinator.arm_first_contact(request)
         connection_flow.apply_coordinate_transition(self, transition)
-        self._refresh_design_panel()
+        return next(
+            (
+                intent
+                for intent in transition.intents
+                if isinstance(intent, ReadPhysicalAIntent)
+            ),
+            None,
+        )
+
+    def _on_design_contact_a_read_finished(self, result: object) -> None:
+        if not isinstance(result, PhysicalAReadResult):
+            return
+        completed = self._coordinate_system_coordinator.complete(
+            CoordinateAdapterCompletion(result.intent_id, result)
+        )
+        connection_flow.apply_coordinate_transition(self, completed)
 
     def _route_measurement_points(
         self,
@@ -9977,10 +9640,10 @@ class Main(QMainWindow):
     def _add_design_source_mark(self, x_value: float, y_value: float) -> None:
         if not self._design_mutation_ready():
             return
-        effects = self._design_registration_lifecycle.cancel(
-            RegistrationCancellation.MARK_SET_CHANGED
+        transition = self._coordinate_system_coordinator.cancel_registration(
+            RegistrationCancellation.MARK_SET_CHANGED,
         )
-        self._apply_registration_effects(effects)
+        connection_flow.apply_coordinate_transition(self, transition)
         self._design_session.add_source_design_mark((x_value, y_value))
         self._refresh_design_panel()
         self._show_status(
@@ -9991,10 +9654,10 @@ class Main(QMainWindow):
     def _add_design_check_mark(self, x_value: float, y_value: float) -> None:
         if not self._design_mutation_ready():
             return
-        effects = self._design_registration_lifecycle.cancel(
-            RegistrationCancellation.MARK_SET_CHANGED
+        transition = self._coordinate_system_coordinator.cancel_registration(
+            RegistrationCancellation.MARK_SET_CHANGED,
         )
-        self._apply_registration_effects(effects)
+        connection_flow.apply_coordinate_transition(self, transition)
         self._design_session.add_check_design_mark((x_value, y_value))
         self._refresh_design_panel()
         self._show_status(
@@ -10008,140 +9671,26 @@ class Main(QMainWindow):
     def _capture_stage_check_mark(self) -> None:
         self._capture_stage_registration_mark(check_mark=True)
 
-    def _apply_registration_effects(self, effects: RegistrationEffects) -> None:
-        session = self._design_session
-        if (
-            effects.restore_baseline
-            and effects.baseline_session_identity == id(session)
-            and effects.baseline_frame_id == session.active_frame_id
-        ):
-            session.source_stage_marks = tuple(effects.baseline_source_stage_marks)
-            session.check_stage_marks = list(effects.baseline_check_stage_marks)
-            session.registration = effects.baseline_registration
-            session.registration_status = str(
-                effects.baseline_registration_status
-                or "No design registration."
-            )
-            if effects.operator_alignment and self._design_backed_alignment_active():
-                baseline = list(effects.baseline_source_stage_marks)
-                self._alignment_stage_draft = baseline + [None] * max(
-                    0,
-                    len(self._alignment_design_draft) - len(baseline),
-                )
-        sample = effects.captured_sample
-        if sample is not None and sample.stage_xy is not None:
-            if sample.mark_kind == "check":
-                session.add_check_stage_mark(sample.stage_xy)
-            elif sample.mark_index is not None:
-                session.set_source_stage_mark(sample.mark_index, sample.stage_xy)
-                if self._design_backed_alignment_active():
-                    if len(self._alignment_stage_draft) != len(
-                        self._alignment_design_draft
-                    ):
-                        self._alignment_stage_draft = [None] * len(
-                            self._alignment_design_draft
-                        )
-                    self._alignment_stage_draft[sample.mark_index] = sample.stage_xy
-            else:
-                session.add_source_stage_mark(sample.stage_xy)
-        window = getattr(self, "design_layout_window", None)
-        if window is not None:
-            if effects.clear_focus_candidate:
-                window.set_focus_candidate(None)
-                window.set_selected_focus_point(None)
-            elif effects.focus_candidate is not None:
-                window.set_focus_candidate(effects.focus_candidate)
-                window.set_selected_focus_point(effects.focus_candidate.center)
-
-    def _discard_all_registration_evidence(
-        self,
-        reason: RegistrationCancellation = RegistrationCancellation.DESIGN_CHANGED,
-    ) -> None:
-        effects = self._design_registration_lifecycle.cancel(reason)
-        self._apply_registration_effects(effects)
-        self._alignment_stage_draft = []
-
     def _capture_stage_registration_mark(self, *, check_mark: bool) -> None:
-        session = self._design_session
-        document = session.document
-        if document is None:
-            self._show_status("Load a design before capturing a stage mark.", 5000)
-            return
-        frame_id = session.active_frame_id
-        registry = getattr(self, "_coordinate_frame_registry", None)
-        record = registry.get(frame_id) if registry is not None and frame_id else None
         try:
-            source_identity = (
-                str(document.path.expanduser().resolve()),
-                str(document.source_load_id),
-            )
             pivot_value = self._rotation_geometry_snapshot().pivot_machine_xy
             pivot = (float(pivot_value[0]), float(pivot_value[1]))
-        except (DesignModelError, OSError, TypeError, ValueError) as exc:
-            self._show_status(str(exc), 6000)
-            return
-        try:
             camera_origin = self._camera_stage_xy_from_raw_stage_xy((0.0, 0.0))
             objective_offset = (
                 -float(camera_origin[0]),
                 -float(camera_origin[1]),
             )
-            metadata = (
-                None
-                if record is None
-                else DesignFrameMetadata.from_mapping(record.metadata)
-            )
-        except (KeyError, TypeError, ValueError) as exc:
+        except (DesignModelError, TypeError, ValueError) as exc:
             self._show_status(str(exc), 6000)
             return
-        context = RegistrationCaptureContext(
-            session_identity=id(session),
-            frame_id=frame_id,
-            frame_version=None if record is None else record.version,
-            source_identity=source_identity,
-            top_cell_name=str(document.top_cell_name),
-            rotation_quarter_turns=int(document.rotation_quarter_turns) % 4,
-            pivot_machine_xy=pivot,
-            objective_xy_offset=objective_offset,
-            mark_kind="check" if check_mark else "source",
-            source_design_marks=tuple(session.source_design_marks_compact()),
-            check_design_marks=tuple(session.check_design_marks),
-            baseline_source_stage_marks=tuple(session.source_stage_marks),
-            baseline_check_stage_marks=tuple(session.check_stage_marks),
-            baseline_registration=session.registration,
-            baseline_registration_status=str(session.registration_status),
-            existing_source_machine_marks=(
-                ()
-                if record is None or record.transform is None or metadata is None
-                else tuple(metadata.source_machine_marks)
-            ),
-            existing_check_machine_marks=(
-                ()
-                if record is None or record.transform is None or metadata is None
-                else tuple(metadata.check_machine_marks)
-            ),
-        )
-        token = self._design_registration_lifecycle.begin_capture(context)
-        self._apply_registration_effects(token.superseded_effects)
-        accepted = self.stage_controller.request_machine_coordinate_snapshot(
-            token,
-            axes=("X", "Y", "B"),
-        )
-        if not accepted:
-            effects = self._design_registration_lifecycle.accept_sample(
-                token,
-                RegistrationCaptureOutcome(
-                    succeeded=False,
-                    message="Machine coordinates are unavailable.",
-                ),
+        transition = self._coordinate_system_coordinator.capture_registration_mark(
+            RegistrationCaptureRequest(
+                pivot_machine_xy=pivot,
+                objective_xy_offset=objective_offset,
+                check_mark=check_mark,
             )
-            if effects.accepted:
-                self._apply_registration_effects(effects)
-                self._show_status(
-                    str(effects.reason or "Machine coordinates are unavailable."),
-                    6000,
-                )
-            return
+        )
+        connection_flow.apply_coordinate_transition(self, transition)
 
     def _on_registration_machine_coordinate_snapshot_finished(
         self,
@@ -10150,397 +9699,39 @@ class Main(QMainWindow):
         snapshot: object,
         message: str,
     ) -> None:
-        if not isinstance(request_id, RegistrationCaptureToken):
+        if not isinstance(request_id, int):
             return
-        token = request_id
-        publication_checkpoint = DesignSessionCheckpoint.capture(
-            self._design_session
-        )
-        callback_succeeded = bool(
-            success and isinstance(snapshot, MachineCoordinateSnapshot)
-        )
-        callback_effects = self._design_registration_lifecycle.accept_sample(
-            token,
-            RegistrationCaptureOutcome(
-                succeeded=callback_succeeded,
-                message=(
-                    None
-                    if callback_succeeded
-                    else str(message or "Machine coordinates are unavailable.")
-                ),
-            ),
-        )
-        if not callback_effects.accepted:
-            return
-        self._apply_registration_effects(callback_effects)
-        if not callback_succeeded:
-            self._show_status(
-                str(callback_effects.reason or "Machine coordinates are unavailable."),
-                6000,
-            )
-            return
-        assert isinstance(snapshot, MachineCoordinateSnapshot)
-        try:
-            physical_pose = snapshot.physical_machine_pose
-            physical_b = physical_pose.require("B")
-            if token.configured_target_xy is None:
-                physical_xy = (
-                    physical_pose.require("X"),
-                    physical_pose.require("Y"),
-                )
-                configured_xy = (
-                    snapshot.physical_machine_to_configured_controller(
-                        "X", physical_xy[0]
+        transition = self._coordinate_system_coordinator.complete(
+            CoordinateAdapterCompletion(
+                intent_id=request_id,
+                result=MachinePoseCaptureResult(
+                    request_id,
+                    succeeded=bool(success),
+                    snapshot=snapshot,
+                    message=str(message or ""),
+                    active_operator_pick_slot=getattr(
+                        self,
+                        "_manual_alignment_pick_slot",
+                        None,
                     ),
-                    snapshot.physical_machine_to_configured_controller(
-                        "Y", physical_xy[1]
+                    active_operator_pick_generation=getattr(
+                        self,
+                        "_manual_alignment_pick_generation",
+                        None,
                     ),
-                )
-            else:
-                configured_xy = token.configured_target_xy
-                physical_xy = (
-                    snapshot.configured_controller_to_physical_machine(
-                        "X", configured_xy[0]
-                    ),
-                    snapshot.configured_controller_to_physical_machine(
-                        "Y", configured_xy[1]
-                    ),
-                )
-            stage_xy = offsets.raw_stage_to_camera_stage(
-                configured_xy,
-                token.objective_xy_offset,
-            )
-        except Exception as exc:
-            failure_effects = self._design_registration_lifecycle.accept_sample(
-                token,
-                RegistrationCaptureOutcome(
-                    succeeded=False,
-                    message=str(exc),
-                ),
-            )
-            if failure_effects.accepted:
-                self._apply_registration_effects(failure_effects)
-                self._show_status(str(failure_effects.reason or exc), 6000)
-            return
-
-        effects = self._design_registration_lifecycle.accept_sample(
-            token,
-            RegistrationSample(
-                mark_kind=token.mark_kind,
-                physical_machine_xy=(float(physical_xy[0]), float(physical_xy[1])),
-                physical_b_deg=float(physical_b),
-                stage_xy=(float(stage_xy[0]), float(stage_xy[1])),
-                mark_index=token.mark_index,
-            ),
-        )
-        if not effects.accepted:
-            return
-        if token.frame_id is None:
-            self._design_session.record_legacy_stage_coordinate_provenance(
-                {
-                    "position_reporting_mode": snapshot.position_reporting_mode,
-                    "coordinate_system": snapshot.coordinate_system,
-                    "work_offset": list(snapshot.work_offset),
-                }
-            )
-        self._apply_registration_effects(effects)
-        if token.operator_alignment:
-            active_pick = getattr(self, "_manual_alignment_pick_slot", None)
-            active_generation = getattr(
-                self,
-                "_manual_alignment_pick_generation",
-                0,
-            )
-            matching_unarmed_capture = bool(
-                active_pick is None
-                and token.operator_pick_generation is None
-            )
-            matching_armed_capture = bool(
-                active_pick == token.mark_index
-                and token.operator_pick_generation is not None
-                and active_generation == token.operator_pick_generation
-            )
-            if matching_unarmed_capture or matching_armed_capture:
-                self._manual_alignment_pick_slot = None
-                self._refresh_manual_alignment_ui()
-                self._update_stage_coordinate_apply_state()
-            remaining = max(
-                0,
-                len(token.source_design_marks)
-                - len(self._design_session.source_stage_marks_compact()),
-            )
-            point_label = "point" if remaining == 1 else "points"
-            capture_message = (
-                f"Design alignment: point {int(token.mark_index or 0) + 1} "
-                f"captured from {token.capture_source or 'stage'}. "
-                f"Capture {remaining} remaining {point_label}."
-            )
-        else:
-            kind = token.mark_kind
-            capture_message = (
-                f"Stage {kind} mark captured at X={physical_xy[0]:.3f}, "
-                f"Y={physical_xy[1]:.3f}."
-            )
-        commit_result = "incomplete"
-        if effects.commit_requested:
-            commit_result = self._commit_active_design_frame_registration(
-                token,
-                effects,
-                publication_checkpoint=publication_checkpoint,
-                success_message=capture_message,
-                operator_alignment=token.operator_alignment,
-            )
-        self._refresh_design_panel()
-        self._refresh_design_position()
-        if commit_result == "failed":
-            return
-        if commit_result == "deferred":
-            self._show_status("Saving design registration.", 0)
-            return
-        if commit_result == "presented":
-            return
-        self._show_status(capture_message, 4000)
-
-
-    def _commit_active_design_frame_registration(
-        self,
-        token: RegistrationCaptureToken,
-        effects: RegistrationEffects,
-        *,
-        publication_checkpoint: DesignSessionCheckpoint,
-        success_message: str = "Design registration saved.",
-        operator_alignment: bool = False,
-    ) -> str:
-        registry = getattr(self, "_coordinate_frame_registry", None)
-        frame_id = token.frame_id
-        document = self._design_session.document
-        if (
-            registry is None
-            or frame_id is None
-            or document is None
-            or not effects.commit_requested
-            or not effects.normalized_samples
-            or effects.rollback_effects is None
-        ):
-            return "incomplete"
-        rollback_effects = effects.rollback_effects
-        publication_checkpoint = publication_checkpoint.with_registration_baseline(
-            rollback_effects
-        )
-        current = registry.get(frame_id)
-        if current is None or current.version != token.frame_version:
-            self._apply_registration_effects(rollback_effects)
-            return "failed"
-        try:
-            source_identity = (
-                str(document.path.expanduser().resolve()),
-                str(document.source_load_id),
-            )
-        except OSError as exc:
-            self._apply_registration_effects(rollback_effects)
-            self._show_status(str(exc), 6000)
-            return "failed"
-        if (
-            id(self._design_session) != token.session_identity
-            or self._design_session.active_frame_id != token.frame_id
-            or source_identity != token.source_identity
-            or str(document.top_cell_name) != token.top_cell_name
-            or int(document.rotation_quarter_turns) % 4
-            != token.rotation_quarter_turns
-        ):
-            self._apply_registration_effects(rollback_effects)
-            return "failed"
-
-        current_metadata = DesignFrameMetadata.from_mapping(current.metadata)
-        first_sample = effects.normalized_samples[0]
-        target_b = first_sample.reference_b_deg
-        pivot = first_sample.captured_pivot_machine_xy
-        turns = token.rotation_quarter_turns
-        design_marks = tuple(
-            document.rotate_point(point, -turns)
-            for point in token.source_design_marks
-        )
-        check_design_marks = tuple(
-            document.rotate_point(point, -turns)
-            for point in token.check_design_marks
-        )
-        new_physical_source_marks = tuple(
-            sample.machine_xy
-            for sample in effects.normalized_samples
-            if sample.mark_kind == "source"
-        )
-        new_physical_check_marks = tuple(
-            sample.machine_xy
-            for sample in effects.normalized_samples
-            if sample.mark_kind == "check"
-        )
-        existing_source_at_current_b: tuple[tuple[float, float], ...] = ()
-        existing_checks_at_current_b: tuple[tuple[float, float], ...] = ()
-        if current.transform is not None:
-            delta_b = target_b - current.transform.reference_b_deg
-
-            def at_reference_b(point: tuple[float, float]) -> tuple[float, float]:
-                rotated = rotate_xy(
-                    (point[0] - pivot[0], point[1] - pivot[1]),
-                    delta_b,
-                )
-                return (pivot[0] + rotated[0], pivot[1] + rotated[1])
-
-            existing_source_at_current_b = tuple(
-                at_reference_b(point)
-                for point in current_metadata.source_machine_marks
-            )
-            existing_checks_at_current_b = tuple(
-                at_reference_b(point)
-                for point in current_metadata.check_machine_marks
-            )
-        source_physical_marks = (
-            existing_source_at_current_b + new_physical_source_marks
-        )
-        check_physical_marks = (
-            existing_checks_at_current_b + new_physical_check_marks
-        )
-        try:
-            if (
-                len(current_metadata.source_machine_marks) >= 2
-                and not new_physical_source_marks
-            ):
-                committed = update_check_registration(
-                    current,
-                    check_design_points=check_design_marks,
-                    physical_check_machine_points=check_physical_marks,
-                    physical_b_deg=target_b,
-                    pivot_machine_xy=pivot,
-                )
-            else:
-                committed = commit_xyb_registration(
-                    current,
-                    design_points=design_marks,
-                    physical_machine_points=source_physical_marks,
-                    physical_b_deg=target_b,
-                    pivot_machine_xy=pivot,
-                    check_design_points=check_design_marks,
-                    check_machine_points=check_physical_marks,
-                )
-            committed = replace(committed, version=current.version + 1)
-        except (DesignModelError, KeyError, RuntimeError, ValueError) as exc:
-            self._apply_registration_effects(rollback_effects)
-            self._show_status(str(exc), 6000)
-            return "failed"
-        runtime_record = committed
-        try:
-            projection = self._design_session.prepare_active_frame_link(
-                committed,
-                machine_point_for_navigation=(
-                    self._design_navigation_xy_from_physical_machine_xy
-                ),
-                machine_b_deg=target_b,
-                pivot_machine_xy=pivot,
-            )
-        except DesignModelError as exc:
-            runtime_record = committed.with_authority_block(
-                {"X", "Y", "B"},
-                str(exc),
-            )
-            projection = self._design_session.prepare_active_frame_link(
-                runtime_record,
-                machine_b_deg=target_b,
-                pivot_machine_xy=pivot,
-            )
-        if operator_alignment:
-            metadata = DesignFrameMetadata.from_mapping(committed.metadata)
-            self._alignment_draft_fit_residuals = (
-                metadata.rms_residual_mm,
-                metadata.max_residual_mm,
-            )
-            success_message = (
-                "Design alignment complete. "
-                f"RMS {float(metadata.rms_residual_mm or 0.0):.4f} mm, "
-                f"max {float(metadata.max_residual_mm or 0.0):.4f} mm."
-            )
-        transition = self._coordinate_system_coordinator.publish_frame_records(
-            FrameRecordsPublication.for_committed_record(
-                registry.snapshot().records,
-                committed,
-                previous_record=current,
-                previous_session=publication_checkpoint,
-                projection=projection,
-                runtime_record=runtime_record,
-                success_message=str(success_message),
-                success_duration_ms=7000,
-                success_code=(
-                    "operator_alignment_saved" if operator_alignment else None
                 ),
             )
         )
         connection_flow.apply_coordinate_transition(self, transition)
-        if registry.get(committed.frame_id) != committed:
-            return "failed"
-        if operator_alignment:
-            self._set_design_snap_enabled(False)
-            self._finish_alignment_draft()
-        return "deferred"
+
 
     def _design_spacing_ratio_is_reasonable(self, ratio: float) -> bool:
         return abs(float(ratio) - 1.0) <= self.DESIGN_SPACING_RATIO_TOLERANCE
 
     def _clear_design_registration(self) -> None:
-        registry = getattr(self, "_coordinate_frame_registry", None)
-        metadata = getattr(self, "_active_design_frame_metadata", None)
-        if (
-            registry is not None
-            and bool(getattr(self, "_coordinate_frames_loaded", False))
-            and self._design_session.document is not None
-            and metadata is not None
-        ):
-            try:
-                snapshot = self.stage_controller.latest_machine_coordinate_snapshot()
-                candidate = new_design_frame_draft(
-                    self._design_session.document,
-                    existing_names=(
-                        record.name for record in registry.snapshot().records
-                    ),
-                    metadata=self._design_metadata_with_calibration_fingerprints(
-                        metadata
-                    ),
-                )
-                publication = design_navigation.prepare_design_frame_publication(
-                    self._design_session,
-                    registry.snapshot().records,
-                    candidate,
-                    machine_point_for_navigation=(
-                        self._design_navigation_xy_from_physical_machine_xy
-                    ),
-                    machine_b_deg=(
-                        None
-                        if snapshot is None
-                        else snapshot.physical_machine_pose.require("B")
-                    ),
-                    pivot_machine_xy=(
-                        self._rotation_geometry_snapshot().pivot_machine_xy
-                    ),
-                )
-            except DesignModelError as exc:
-                self._show_status(str(exc), 6000)
-                return
-            transition = self._coordinate_system_coordinator.publish_frame_records(
-                publication
-            )
-            connection_flow.apply_coordinate_transition(self, transition)
-            if registry.get(candidate.frame_id) != candidate:
-                return
-            cancellation = self._design_registration_lifecycle.cancel(
-                RegistrationCancellation.FRAME_CHANGED
-            )
-            if cancellation.clear_focus_candidate:
-                self._clear_design_focus_overlay_state()
-            self._apply_coordinate_frame_authority_blocks()
-        else:
-            effects = self._design_registration_lifecycle.cancel(
-                RegistrationCancellation.FRAME_CHANGED
-            )
-            self._apply_registration_effects(effects)
-            self._design_session.clear_registration()
+        transition = connection_flow.activate_current_design(self, create_new=True)
+        if transition is None or not transition.accepted:
+            return
         self._pending_alignment_preparation = None
         self._last_selected_design_point = None
         self._set_design_snap_enabled(True)
@@ -10549,104 +9740,33 @@ class Main(QMainWindow):
         self._show_status("Design calibration restarted.", 4000)
 
     def _design_registration_instances(self) -> tuple[tuple[str, str], ...]:
-        document = getattr(self._design_session, "document", None)
-        registry = getattr(self, "_coordinate_frame_registry", None)
-        if document is None or registry is None:
-            return ()
-        try:
-            source_path = document.path.expanduser().resolve()
-        except OSError:
-            return ()
-        instances: list[tuple[str, str]] = []
-        for record in registry.snapshot().records:
-            try:
-                metadata = DesignFrameMetadata.from_mapping(record.metadata)
-                matches = (
-                    Path(metadata.source_path).expanduser().resolve() == source_path
-                    and metadata.top_cell_name == document.top_cell_name
-                )
-            except (KeyError, TypeError, ValueError, OSError):
-                matches = False
-            if matches:
-                instances.append((record.frame_id, record.name))
-        return tuple(instances)
+        return self._coordinate_system_coordinator.snapshot().registration.registration_instances
 
     def _reconcile_missing_design_registration_instance(self) -> None:
-        frame_id = getattr(self._design_session, "active_frame_id", None)
-        registry = getattr(self, "_coordinate_frame_registry", None)
-        if frame_id is None or registry is None or registry.get(frame_id) is not None:
+        snapshot = self._coordinate_system_coordinator.snapshot().registration
+        if snapshot.active_frame_id == self._design_session.active_frame_id:
             return
-        cancellation = self._design_registration_lifecycle.cancel(
-            RegistrationCancellation.FRAME_CHANGED
-        )
-        self._apply_registration_effects(cancellation)
-        self._design_session.clear_registration()
-        self._pending_alignment_preparation = None
-        self._last_selected_design_point = None
-        self._clear_design_focus_overlay_state(
-            clear_window=not cancellation.clear_focus_candidate
-        )
+        connection_flow.activate_current_design(self)
 
     def _select_design_registration_instance(self, frame_id: str) -> None:
         if not self._design_edit_safe():
             self._show_status("Design editing is locked.", 4000)
             return
-        document = self._design_session.document
-        registry = getattr(self, "_coordinate_frame_registry", None)
-        metadata = getattr(self, "_active_design_frame_metadata", None)
-        if document is None or registry is None or metadata is None:
-            return
         selected_id = str(frame_id).strip()
         if selected_id == self._design_session.active_frame_id:
             return
-        physical_b = self._tracked_physical_b_for_design_frame()
-        if physical_b is None:
-            self._show_status(
-                "Current Machine B position is unavailable.",
-                5000,
-            )
-            return
-        try:
-            prepared = design_navigation.prepare_design_frame_activation(
-                self._design_session,
-                registry,
-                document,
-                requested_frame_id=selected_id,
-                current_metadata=self._design_metadata_with_calibration_fingerprints(
-                    metadata
-                ),
-                machine_point_for_navigation=(
-                    self._design_navigation_xy_from_physical_machine_xy
-                ),
-                machine_b_deg=physical_b,
-                pivot_machine_xy=self._rotation_geometry_snapshot().pivot_machine_xy,
-            )
-        except DesignModelError as exc:
-            self._show_status(str(exc), 6000)
-            return
-        activation = prepared.activation
-        if prepared.publication is not None:
-            transition = self._coordinate_system_coordinator.publish_frame_records(
-                prepared.publication
-            )
-            connection_flow.apply_coordinate_transition(self, transition)
-            if registry.get(activation.record.frame_id) != activation.record:
-                return
-        else:
-            self._design_session.apply_active_frame_link(
-                activation.record,
-                prepared.projection,
-            )
-        self._design_registration_lifecycle.cancel(
-            RegistrationCancellation.FRAME_CHANGED
+        transition = connection_flow.activate_current_design(
+            self,
+            requested_frame_id=selected_id,
         )
+        if transition is None or not transition.accepted or transition.notices:
+            return
         self._pending_alignment_preparation = None
         self._last_selected_design_point = None
         self._clear_design_focus_overlay_state()
-        self._apply_coordinate_frame_authority_blocks()
         self._refresh_design_panel()
         self._refresh_design_position()
-        self._show_status(f"Selected registration {activation.record.name}.", 4000)
+        self._show_status("Registration selected.", 4000)
 
     def _new_design_registration_instance(self) -> None:
         if not self._design_edit_safe():
@@ -10778,12 +9898,16 @@ class Main(QMainWindow):
         if document is None or fov_size is None:
             self._show_status("Current field of view is unavailable.", 5000)
             return
-        self._synchronize_design_focus_overlay_context()
+        self._observe_design_focus_context()
         self._focus_structure_request_id = int(
             getattr(self, "_focus_structure_request_id", 0)
         ) + 1
         request_id = self._focus_structure_request_id
-        context = self._design_focus_overlay_context_key()
+        optical = self._registration_optical_observation()
+        context = self._coordinate_system_coordinator.focus_search_lease(optical)
+        if context is None:
+            self._show_status("Design focus context is unavailable.", 5000)
+            return
         if document.file_backed:
             config = KLayoutConfig(
                 path=Path(document.path).expanduser().resolve(),
@@ -10836,7 +9960,10 @@ class Main(QMainWindow):
         if (
             result.request_id != pending_id
             or result.generation != pending_id
-            or pending_context != self._design_focus_overlay_context_key()
+            or pending_context
+            != self._coordinate_system_coordinator.focus_search_lease(
+                self._registration_optical_observation()
+            )
         ):
             return
         self._pending_focus_structure_request_id = None
@@ -10856,11 +9983,14 @@ class Main(QMainWindow):
         if candidate is None:
             self._show_status("No focus structure fits the current field of view.", 5000)
             return
-        effects = self._design_registration_lifecycle.set_focus_candidate(
-            candidate,
-            pending_context,
+        transition = self._coordinate_system_coordinator.offer_focus_candidate(
+            FocusCandidateRequest(
+                candidate=candidate,
+                optical=self._registration_optical_observation(),
+                lease=pending_context,
+            )
         )
-        self._apply_registration_effects(effects)
+        connection_flow.apply_coordinate_transition(self, transition)
         self._show_status("Focus reference found. Review and use the selected point.", 5000)
 
     def _on_focus_structure_bounds_failed(
@@ -10873,64 +10003,6 @@ class Main(QMainWindow):
             return
         self._pending_focus_structure_request_id = None
         self._show_status("Unable to inspect visible design structures.", 5000)
-
-    def _design_registration_context(
-        self,
-        *,
-        include_optical: bool = True,
-        expected_frame_id: str | None = None,
-        expected_frame_version: int | None = None,
-    ) -> RegistrationContext | None:
-        document = getattr(self._design_session, "document", None)
-        if document is None:
-            return None
-        record = self._active_design_frame_record()
-        frame_id = getattr(self._design_session, "active_frame_id", None)
-        frame_version = None if record is None else record.version
-        if (
-            expected_frame_id is not None
-            and (
-                frame_id != expected_frame_id
-                or record is None
-                or frame_version != expected_frame_version
-            )
-        ):
-            return None
-        try:
-            source_path = str(Path(document.path).expanduser().resolve())
-        except OSError:
-            return None
-        fov_size = self._resolve_design_fov_size() if include_optical else None
-        objective_name, optical_identity = (
-            self._design_focus_optical_context_key()
-            if include_optical
-            else ("", "")
-        )
-        return RegistrationContext(
-            session_identity=id(self._design_session),
-            source_identity=(source_path, str(document.source_load_id)),
-            top_cell_name=str(document.top_cell_name),
-            visible_layers=tuple(sorted(document.visible_layers)),
-            rotation_quarter_turns=int(document.rotation_quarter_turns) % 4,
-            frame_id=frame_id,
-            frame_version=frame_version,
-            fov_size=(
-                None
-                if fov_size is None
-                else tuple(float(value) for value in fov_size)
-            ),
-            objective_name=objective_name,
-            optical_calibration_identity=optical_identity,
-            xyb_ready=bool(
-                record is not None
-                and all(record.readiness[axis].available for axis in ("X", "Y", "B"))
-            ),
-            z_ready=bool(record is not None and record.readiness["Z"].available),
-            a_ready=bool(record is not None and record.readiness["A"].available),
-        )
-
-    def _design_focus_overlay_context_key(self) -> RegistrationContext | None:
-        return self._design_registration_context(include_optical=True)
 
     def _design_focus_optical_context_key(self) -> tuple[str, str]:
         try:
@@ -10962,96 +10034,35 @@ class Main(QMainWindow):
         self,
         design_point: tuple[float, float],
     ) -> None:
-        current_context = self._design_focus_overlay_context_key()
-        if current_context is None:
-            self._clear_design_focus_overlay_state()
-            self._design_focus_overlay_context = current_context
-            self._show_status(
-                "Find a new focus reference for the current view.",
-                5000,
-            )
+        snapshot = self.stage_controller.latest_machine_coordinate_snapshot()
+        if snapshot is None:
+            self._show_status("Current Machine coordinates are unavailable.", 5000)
             return
-        effects = self._design_registration_lifecycle.accept_focus(current_context)
-        self._apply_registration_effects(effects)
-        if not effects.accepted or effects.focus_token is None:
-            if effects.clear_focus_candidate:
-                self._clear_design_focus_overlay_state(clear_window=False)
-                self._design_focus_overlay_context = current_context
-            self._show_status(
-                "Find a new focus reference for the current view.",
-                5000,
-            )
+        try:
+            pivot = self._rotation_geometry_snapshot().pivot_machine_xy
+            objective_offset = self._active_objective_xy_offset()
+        except (DesignModelError, TypeError, ValueError) as exc:
+            self._show_status(str(exc), 5000)
             return
-        self._start_design_focus_reference(
-            (float(design_point[0]), float(design_point[1])),
-            effects.focus_token,
-        )
-
-    def _synchronize_design_focus_overlay_context(self) -> None:
-        context = self._design_focus_overlay_context_key()
-        if context == getattr(self, "_design_focus_overlay_context", None):
-            return
-        if context is None:
-            effects = self._design_registration_lifecycle.cancel(
-                RegistrationCancellation.DESIGN_CHANGED
-            )
-        else:
-            effects = self._design_registration_lifecycle.accept_focus(context)
-        self._apply_registration_effects(effects)
-        self._clear_design_focus_overlay_state(
-            clear_window=not effects.clear_focus_candidate
-        )
-        self._design_focus_overlay_context = context
-
-    def _start_design_focus_reference(
-        self,
-        design_point: tuple[float, float],
-        token: FocusOperationToken,
-    ) -> None:
-        def request_move(target_x: float, target_y: float) -> bool:
-            target = (float(target_x), float(target_y))
-            context = self._design_focus_overlay_context_key()
-            if context is None:
-                return False
-            bound = self._design_registration_lifecycle.accept_focus(
-                context,
-                FocusCompletion(
-                    kind=FocusCompletionKind.TARGET_BOUND,
-                    token=token,
-                    target_xy=target,
+        transition = self._coordinate_system_coordinator.use_focus_reference(
+            FocusReferenceRequest(
+                design_point=(float(design_point[0]), float(design_point[1])),
+                optical=self._registration_optical_observation(),
+                machine_snapshot=snapshot,
+                pivot_machine_xy=(float(pivot[0]), float(pivot[1])),
+                objective_xy_offset=(
+                    float(objective_offset[0]),
+                    float(objective_offset[1]),
                 ),
             )
-            self._apply_registration_effects(bound)
-            if not bound.accepted:
-                return False
-            started = self.stage_controller.request_token_bound_move_to_xy(
-                token,
-                target[0],
-                target[1],
-                self.design_registration_focus_move_finished.emit,
-            )
-            return bool(started)
+        )
+        connection_flow.apply_coordinate_transition(self, transition)
 
-        if not self._move_to_design_coordinate(
-            (float(design_point[0]), float(design_point[1])),
-            source_label="focus reference",
-            move_request=request_move,
-        ):
-            context = self._design_focus_overlay_context_key()
-            if context is not None:
-                effects = self._design_registration_lifecycle.accept_focus(
-                    context,
-                    FocusCompletion(
-                        kind=FocusCompletionKind.CANCELLED,
-                        token=token,
-                    ),
-                )
-                self._apply_registration_effects(effects)
-            return
-        window = getattr(self, "design_layout_window", None)
-        if window is not None:
-            window.set_selected_focus_point(design_point)
-        self._show_status("Moving to focus reference.", 4000)
+    def _observe_design_focus_context(self) -> None:
+        transition = self._coordinate_system_coordinator.observe_focus_context(
+            self._registration_optical_observation()
+        )
+        connection_flow.apply_coordinate_transition(self, transition)
 
     def _on_registration_focus_move_finished(
         self,
@@ -11060,43 +10071,27 @@ class Main(QMainWindow):
         success: bool,
         message: str,
     ) -> None:
-        context = self._design_focus_overlay_context_key()
-        if context is None:
-            effects = self._design_registration_lifecycle.cancel(
-                RegistrationCancellation.FRAME_CHANGED
+        if not isinstance(completed_token, int):
+            return
+        try:
+            completed_target = (
+                float(completed_target_xy[0]),
+                float(completed_target_xy[1]),
             )
-            self._apply_registration_effects(effects)
-            return
-        effects = self._design_registration_lifecycle.accept_focus(
-            context,
-            FocusCompletion(
-                kind=FocusCompletionKind.MOVE_FINISHED,
-                token=completed_token,
-                target_xy=completed_target_xy,
-                succeeded=bool(success),
-                message=str(message or ""),
-            ),
-        )
-        self._apply_registration_effects(effects)
-        if not effects.accepted:
-            return
-        if not effects.start_autofocus or effects.focus_token is None:
-            if effects.reason:
-                self._show_status(effects.reason, 5000)
-            return
-        accepted = self.stage_controller.request_registration_autofocus(
-            effects.focus_token,
-            self.design_registration_autofocus_finished.emit,
-        )
-        if not accepted:
-            cancellation = self._design_registration_lifecycle.accept_focus(
-                context,
-                FocusCompletion(
-                    kind=FocusCompletionKind.CANCELLED,
-                    token=effects.focus_token,
+        except (IndexError, TypeError, ValueError):
+            completed_target = None
+        transition = self._coordinate_system_coordinator.complete(
+            CoordinateAdapterCompletion(
+                completed_token,
+                FocusMoveResult(
+                    completed_token,
+                    succeeded=bool(success),
+                    message=str(message or ""),
+                    completed_target_xy=completed_target,
                 ),
             )
-            self._apply_registration_effects(cancellation)
+        )
+        connection_flow.apply_coordinate_transition(self, transition)
 
     def _on_registration_focus_move_signal(
         self,
@@ -11120,97 +10115,56 @@ class Main(QMainWindow):
         physical_z_mm: object,
         message: str,
     ) -> None:
-        context = self._design_focus_overlay_context_key()
-        if context is None:
-            effects = self._design_registration_lifecycle.cancel(
-                RegistrationCancellation.FRAME_CHANGED
-            )
-            self._apply_registration_effects(effects)
+        if not isinstance(token, int):
             return
         try:
             physical_z = None if physical_z_mm is None else float(physical_z_mm)
         except (TypeError, ValueError):
             physical_z = None
-        effects = self._design_registration_lifecycle.accept_focus(
-            context,
-            FocusCompletion(
-                kind=FocusCompletionKind.AUTOFOCUS_FINISHED,
-                token=token,
+        transition = self._coordinate_system_coordinator.complete(
+            CoordinateAdapterCompletion(
+                token,
+                CoordinateAutofocusResult(
+                    token,
                 succeeded=bool(success),
                 physical_z_mm=physical_z,
                 message=str(message or ""),
+                ),
             ),
         )
-        self._apply_registration_effects(effects)
-        if effects.commit_z_mm is None or effects.focus_token is None:
-            return
-        try:
-            current = self._coordinate_frame_registry.get(effects.focus_token.frame_id)
-            if current is None or current.version != effects.focus_token.frame_version:
-                return
-            focused = replace(
-                set_focus_reference(
-                    current,
-                    physical_machine_z_mm=effects.commit_z_mm,
-                ),
-                version=current.version + 1,
-            )
-        except (KeyError, RuntimeError, TypeError, ValueError):
-            logger.exception("Unable to store Design focus reference")
-            return
-        transition = self._coordinate_system_coordinator.publish_frame_records(
-            FrameRecordsPublication.for_committed_record(
-                self._coordinate_frame_registry.snapshot().records,
-                focused,
-                previous_record=current,
-                success_message="Focus reference ready.",
-                success_duration_ms=5000,
-            )
-        )
         connection_flow.apply_coordinate_transition(self, transition)
-        self._refresh_design_panel()
+
+    def _registration_optical_observation(self) -> RegistrationOpticalObservation:
+        fov_size = self._resolve_design_fov_size() or (0.0, 0.0)
+        objective_name, identity = self._design_focus_optical_context_key()
+        return RegistrationOpticalObservation(
+            fov_size=(float(fov_size[0]), float(fov_size[1])),
+            objective_name=objective_name,
+            optical_calibration_identity=identity,
+        )
 
     def _reset_design_focus_reference(self) -> None:
-        record = self._active_design_frame_record()
-        if record is None:
+        snapshot = self.stage_controller.latest_machine_coordinate_snapshot()
+        if snapshot is None:
+            self._show_status("Current Machine coordinates are unavailable.", 5000)
             return
         try:
-            reset = replace(
-                reset_focus_reference(
-                    record,
-                    reason="Focus reference reset.",
-                ),
-                version=record.version + 1,
-            )
-            publication = design_navigation.prepare_design_frame_publication(
-                self._design_session,
-                self._coordinate_frame_registry.snapshot().records,
-                reset,
-                previous_record=record,
-                machine_point_for_navigation=(
-                    self._design_navigation_xy_from_physical_machine_xy
-                ),
-                machine_b_deg=self._tracked_physical_b_for_design_frame(),
-                pivot_machine_xy=self._rotation_geometry_snapshot().pivot_machine_xy,
-                success_message="Focus reference reset.",
-                success_duration_ms=4000,
-            )
-        except (DesignModelError, KeyError, RuntimeError, ValueError) as exc:
+            pivot = self._rotation_geometry_snapshot().pivot_machine_xy
+            objective_offset = self._active_objective_xy_offset()
+        except (DesignModelError, TypeError, ValueError) as exc:
             self._show_status(str(exc), 5000)
             return
-        transition = self._coordinate_system_coordinator.publish_frame_records(
-            publication
+        transition = self._coordinate_system_coordinator.reset_focus_reference(
+            FocusReferenceResetRequest(
+                machine_snapshot=snapshot,
+                pivot_machine_xy=(float(pivot[0]), float(pivot[1])),
+                objective_xy_offset=(
+                    float(objective_offset[0]),
+                    float(objective_offset[1]),
+                ),
+            )
         )
         connection_flow.apply_coordinate_transition(self, transition)
-        if self._coordinate_frame_registry.get(reset.frame_id) != reset:
-            return
-        effects = self._design_registration_lifecycle.cancel(
-            RegistrationCancellation.Z_CHANGED
-        )
-        self._clear_design_focus_overlay_state(
-            clear_window=not effects.clear_focus_candidate
-        )
-        self._refresh_design_panel()
 
     def _connect_design_focus_signals(self) -> None:
         window = getattr(self, "design_layout_window", None)
@@ -11237,7 +10191,7 @@ class Main(QMainWindow):
 
     def _refresh_design_panel(self) -> None:
         self._reconcile_missing_design_registration_instance()
-        self._synchronize_design_focus_overlay_context()
+        self._observe_design_focus_context()
         panel = self.design_navigator_panel
         self._connect_design_focus_signals()
         route_measurement_thread = getattr(self, "_route_measurement_thread", None)

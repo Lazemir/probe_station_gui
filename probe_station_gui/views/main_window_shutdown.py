@@ -166,7 +166,7 @@ def _stop_microscope_scan(owner: MainWindowShutdownOwner) -> None:
 
 def _stop_api_stage_command_workers(owner: MainWindowShutdownOwner) -> None:
     wait = getattr(owner, "_wait_for_api_stage_command_workers", None)
-    if callable(wait) and not wait(timeout_s=2.0):
+    if callable(wait) and not wait(timeout_s=0.0):
         raise RuntimeError("API stage command is still stopping.")
 
 

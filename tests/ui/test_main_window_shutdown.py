@@ -80,12 +80,17 @@ def test_shutdown_fails_closed_when_runtime_does_not_drain() -> None:
 
 
 def test_shutdown_fails_closed_while_api_stage_worker_is_running() -> None:
+    waits: list[float] = []
     owner = SimpleNamespace(
-        _wait_for_api_stage_command_workers=lambda *, timeout_s: False,
+        _wait_for_api_stage_command_workers=lambda *, timeout_s: (
+            waits.append(timeout_s) or False
+        ),
     )
 
     with pytest.raises(RuntimeError, match="API stage command is still stopping"):
         shutdown_ui._stop_api_stage_command_workers(owner)
+
+    assert waits == [0.0]
 
 
 def test_shutdown_cancels_and_drains_manual_alignment_capture() -> None:
@@ -263,7 +268,7 @@ def test_close_event_preserves_shutdown_order(monkeypatch) -> None:
         ("persist_lcr", True),
         ("persist_controller",),
         ("bridge_stop_accepting",),
-        ("api_workers", 2.0),
+        ("api_workers", 0.0),
         ("bridge_wait", 2.0),
         ("route_runner_stop",),
         ("route_thread", "join", 2.0),

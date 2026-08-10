@@ -7,7 +7,7 @@ from enum import Enum
 import math
 import uuid
 
-from probe_station_gui.coordinates import rotate_xy
+from probe_station_gui.coordinates.transforms import rotate_xy
 from probe_station_gui.design.focus_candidate import FocusCandidate
 
 
@@ -381,6 +381,24 @@ class DesignRegistrationLifecycle:
         return RegistrationEffects(
             accepted=True,
             focus_candidate=candidate,
+        )
+
+    def observe_focus_context(
+        self,
+        context: RegistrationContext | None,
+    ) -> RegistrationEffects:
+        """Invalidate only focus work when its exact optical context changes."""
+
+        if context == self._focus_context:
+            return RegistrationEffects()
+        if self._focus_candidate is None and self._pending_focus is None:
+            return RegistrationEffects()
+        self._focus_candidate = None
+        self._focus_context = None
+        self._pending_focus = None
+        return RegistrationEffects(
+            reason="The focus operation context changed.",
+            clear_focus_candidate=True,
         )
 
     def accept_focus(

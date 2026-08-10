@@ -217,27 +217,48 @@ git commit -m "refactor: centralize coordinate frame persistence"
 ### Task 2: Move registration, focus, and contact workflows
 
 **Files:**
+- Modify: `docs/superpowers/plans/2026-08-10-coordinate-system-coordinator.md`
+- Modify: `main.py`
 - Modify: `probe_station_gui/coordinates/coordinator.py`
 - Modify: `probe_station_gui/coordinates/coordinator_model.py`
+- Modify: `probe_station_gui/coordinates/coordinator_persistence.py`
+- Create: `probe_station_gui/coordinates/coordinator_activation.py`
+- Create: `probe_station_gui/coordinates/coordinator_contact.py`
+- Create: `probe_station_gui/coordinates/coordinator_focus.py`
 - Create: `probe_station_gui/coordinates/coordinator_registration.py`
+- Create: `probe_station_gui/coordinates/coordinator_registration_capture.py`
 - Modify: `probe_station_gui/design/registration_lifecycle.py`
-- Modify: `probe_station_gui/design/navigation_adapter.py`
-- Modify: `probe_station_gui/views/main_window_connection_flow.py:62-104,175-390`
-- Modify: `main.py:4387-4446,4700-4815,6190-6505,8912-9006,10040-11238`
-- Create: `tests/coordinates/test_coordinator_registration.py`
-- Modify: `tests/design/test_registration_lifecycle.py`
+- Modify: `probe_station_gui/design/session.py`
+- Create: `probe_station_gui/design/session_state.py`
+- Modify: `probe_station_gui/route/contact_lifecycle.py`
+- Modify: `probe_station_gui/route/external_session.py`
+- Modify: `probe_station_gui/route/measurement.py`
+- Modify: `probe_station_gui/route/point_execution_adapters.py`
+- Modify: `probe_station_gui/views/main_window_connection_flow.py`
+- Modify: `probe_station_gui/views/main_window_shutdown.py`
+- Modify: `tests/app/main_coordinate_feedrate_support.py`
 - Modify: `tests/app/test_main_design_navigation.py`
-- Modify: `tests/design/test_workflow.py`
 - Modify: `tests/app/test_main_route_measurement_session.py`
+- Create: `tests/coordinates/coordinator_registration_support.py`
+- Create: `tests/coordinates/test_coordinator_registration_activation.py`
+- Create: `tests/coordinates/test_coordinator_registration_capture.py`
+- Create: `tests/coordinates/test_coordinator_registration_focus_contact.py`
+- Create: `tests/coordinates/test_coordinator_registration_operator_cancel.py`
+- Create: `tests/coordinates/test_coordinator_registration_rollback_rendering.py`
+- Modify: `tests/coordinates/test_coordinator_persistence.py`
+- Modify: `tests/coordinates/test_public_api.py`
+- Modify: `tests/design/test_registration_lifecycle.py`
+- Modify: `tests/design/test_workflow.py`
 - Modify: `tests/route/test_contact_lifecycle_interface.py`
-- Modify: `tests/route/test_measurement_api_route_control.py`
-- Modify: `tests/route/test_point_execution.py`
+- Modify: `tests/ui/test_main_window_connection_flow.py`
+- Modify: `tests/ui/test_main_window_docks.py`
+- Modify: `tests/ui/test_main_window_shutdown.py`
 
 **Owned after this task:** active Design frame link, registration instance
 selection, capture tokens/evidence/normalization, fit/commit, exact rollback,
 focus candidate/move/autofocus/Z commit, and Z-gated first-contact/A commit.
 
-- [ ] **Step 1: Add workflow RED tests**
+- [x] **Step 1: Add workflow RED tests**
 
 Through explicit coordinator methods, prove:
 
@@ -260,13 +281,13 @@ Through explicit coordinator methods, prove:
 - pause request remains Interrupt until `pause_ack`, then Resume preserves the
   existing safe contact checkpoint semantics.
 
-- [ ] **Step 2: Run the strict RED gate**
+- [x] **Step 2: Run the strict RED gate**
 
 ```powershell
 C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m pytest tests\coordinates\test_coordinator_registration.py -q --basetemp $env:TEMP\coordinate-coordinator-task2-red
 ```
 
-- [ ] **Step 3: Add explicit workflow operations**
+- [x] **Step 3: Add explicit workflow operations**
 
 Implement `activate_design()`, `close_design()`,
 `capture_registration_mark()`, `offer_focus_candidate()`,
@@ -282,7 +303,7 @@ do not retain `_activate_loaded_design_frame` or an authority forwarding shim.
 Add typed intents for synchronized Machine pose, focus move, autofocus, and
 physical A read. Only `complete()` accepts their results.
 
-- [ ] **Step 4: Replace Main registration policy**
+- [x] **Step 4: Replace Main registration policy**
 
 Convert the Main methods in the listed ranges into signal/result translation
 and intent execution. Delete `_apply_registration_effects()`,
@@ -291,20 +312,30 @@ replace/add policy, publication enrichment, context-currentness policy, and
 session baseline reconstruction. Do not leave private forwarding methods with
 the deleted names.
 
-- [ ] **Step 5: Move tests to the workflow boundary**
+- [x] **Step 5: Move tests to the workflow boundary**
 
 Move pure registration/focus/contact cases from the 5,008-line Main test into
 `test_coordinator_registration.py`. Keep real Main adapter tests for one image
 capture, one armed-crosshair capture, focus signal wiring, first-contact
 callback, stale callback inertness, and route interrupt propagation.
 
-- [ ] **Step 6: Verify, measure, review, commit**
+- [x] **Step 6: Verify, measure, review, commit**
 
 ```powershell
 C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m pytest tests\coordinates\test_coordinator_registration.py tests\design\test_registration_lifecycle.py tests\app\test_main_design_navigation.py tests\design\test_workflow.py tests\design\test_frame_references.py tests\app\test_main_route_measurement_session.py tests\route -q --basetemp $env:TEMP\coordinate-coordinator-task2-green
 ```
 
 Run Ruff, compileall, diff-check, per-file MI/CC, and independent review.
+
+**Outcome (2026-08-11):** Registration, activation, focus, and contact now
+run through explicit coordinator workflows and typed adapter intents. The pure
+workflow tests were split by concern so every new test module retains positive
+maintainability. Final verification completed with 727 focused tests plus 5
+subtests, and 2,905 no-hardware tests plus 18 subtests; the two pre-existing
+camera-exposure failures were explicitly deselected. Ruff, compileall, both
+package import orders, diff-check, and Radon passed. Every new production and
+test module has MI greater than zero; production CC averaged A (4.61). An
+independent final review reported no Critical or Important findings.
 
 ```powershell
 git add probe_station_gui/coordinates/coordinator.py probe_station_gui/coordinates/coordinator_model.py probe_station_gui/coordinates/coordinator_registration.py probe_station_gui/design/registration_lifecycle.py probe_station_gui/design/navigation_adapter.py probe_station_gui/views/main_window_connection_flow.py main.py tests/coordinates/test_coordinator_registration.py tests/design/test_registration_lifecycle.py tests/app/test_main_design_navigation.py tests/design/test_workflow.py tests/app/test_main_route_measurement_session.py tests/route/test_contact_lifecycle_interface.py tests/route/test_measurement_api_route_control.py tests/route/test_point_execution.py

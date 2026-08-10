@@ -1,6 +1,6 @@
 import tempfile
 import unittest
-from dataclasses import replace
+from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
 
 import numpy as np
@@ -17,7 +17,6 @@ from probe_station_gui.design.model import (
     MeasurementTarget,
 )
 from probe_station_gui.design.session import (
-    AlignmentPreparation,
     DesignSession,
     MeasurementRoute,
 )
@@ -205,6 +204,216 @@ class DesignSessionTest(unittest.TestCase):
             polygons_by_layer={(1, 0): (np.asarray([[0.0, 0.0], [1.0, 0.0]]),)},
             visible_layers=frozenset({(1, 0)}),
         )
+
+    def test_snapshot_state_detaches_all_mutable_session_data(self) -> None:
+        document = self._make_document()
+        session = DesignSession(document=document)
+        session.source_design_marks = ((0.0, 0.0), (10.0, 0.0))
+        session.source_stage_marks = ((1.0, 2.0), (21.0, 2.0))
+        session.check_design_marks = [(5.0, 0.0)]
+        session.check_stage_marks = [(11.0, 2.0)]
+        session._rebuild_registration()
+        session.targets = [
+            MeasurementTarget(
+                id="target",
+                label="Target",
+                design_center=(3.0, 4.0),
+                metadata={"groups": ["source"]},
+            )
+        ]
+        session.selected_target_index = 0
+        route = MeasurementRoute.default_for_document(document, name="Snapshot")
+        route_point = route.add_point((8.0, 9.0))
+        route.points[0] = replace(route_point, metadata={"tags": ["original"]})
+        session.route = route
+        session.selected_route_point_index = 0
+        session.registration_status = "Ready."
+        session.active_frame_id = "design:frame-1"
+        session._runtime_blocked_persisted_state = {
+            "route": {"point_ids": ["p001"]}
+        }
+        session._legacy_stage_coordinate_provenance = {
+            "axes": ["X", "Y", "B"]
+        }
+        session._legacy_stage_coordinate_provenance_present = True
+
+        state = session.snapshot_state()
+
+        self.assertIs(state.document, document)
+        self.assertEqual(state.registration, session.registration)
+        self.assertEqual(state.source_design_marks, ((0.0, 0.0), (10.0, 0.0)))
+        self.assertEqual(state.source_stage_marks, ((1.0, 2.0), (21.0, 2.0)))
+        self.assertEqual(state.check_design_marks, ((5.0, 0.0),))
+        self.assertEqual(state.check_stage_marks, ((11.0, 2.0),))
+        self.assertEqual(state.targets[0].metadata, {"groups": ["source"]})
+        self.assertEqual(state.selected_target_index, 0)
+        self.assertEqual(state.route.points[0].metadata, {"tags": ["original"]})
+        self.assertEqual(state.selected_route_point_index, 0)
+        self.assertEqual(state.registration_status, "Ready.")
+        self.assertEqual(state.active_frame_id, "design:frame-1")
+        self.assertEqual(
+            state._runtime_blocked_persisted_state,
+            {"route": {"point_ids": ["p001"]}},
+        )
+        self.assertEqual(
+            state._legacy_stage_coordinate_provenance,
+            {"axes": ["X", "Y", "B"]},
+        )
+        self.assertTrue(state._legacy_stage_coordinate_provenance_present)
+        with self.assertRaises(FrozenInstanceError):
+            state.active_frame_id = "changed"  # type: ignore[misc]
+
+        session.check_design_marks.append((6.0, 0.0))
+        session.check_stage_marks.append((12.0, 2.0))
+        session.targets[0].metadata["groups"].append("changed")
+        session.route.points[0].metadata["tags"].append("changed")
+        session._runtime_blocked_persisted_state["route"]["point_ids"].append(
+            "p002"
+        )
+        session._legacy_stage_coordinate_provenance["axes"].append("A")
+
+        self.assertEqual(state.check_design_marks, ((5.0, 0.0),))
+        self.assertEqual(state.check_stage_marks, ((11.0, 2.0),))
+        self.assertEqual(state.targets[0].metadata, {"groups": ["source"]})
+        self.assertEqual(state.route.points[0].metadata, {"tags": ["original"]})
+        self.assertEqual(
+            state._runtime_blocked_persisted_state,
+            {"route": {"point_ids": ["p001"]}},
+        )
+        self.assertEqual(
+            state._legacy_stage_coordinate_provenance,
+            {"axes": ["X", "Y", "B"]},
+        )
+
+    def test_apply_state_restores_every_field_without_replacing_session(self) -> None:
+        document = self._make_document()
+        source = DesignSession(document=document)
+        source.source_design_marks = ((0.0, 0.0), (10.0, 0.0))
+        source.source_stage_marks = ((1.0, 2.0), (21.0, 2.0))
+        source.check_design_marks = [(5.0, 0.0)]
+        source.check_stage_marks = [(11.0, 2.0)]
+        source._rebuild_registration()
+        source.targets = [
+            MeasurementTarget(
+                id="target",
+                label="Target",
+                design_center=(3.0, 4.0),
+                metadata={"groups": ["source"]},
+            )
+        ]
+        source.selected_target_index = 0
+        route = MeasurementRoute.default_for_document(document, name="Applied")
+        route_point = route.add_point((8.0, 9.0))
+        route.points[0] = replace(route_point, metadata={"tags": ["original"]})
+        source.route = route
+        source.selected_route_point_index = 0
+        source.registration_status = "Ready."
+        source.active_frame_id = "design:frame-1"
+        source._runtime_blocked_persisted_state = {"blocked": ["registration"]}
+        source._legacy_stage_coordinate_provenance = {"axes": ["X", "Y", "B"]}
+        source._legacy_stage_coordinate_provenance_present = True
+        state = source.snapshot_state()
+        session = DesignSession(
+            check_design_marks=[(-1.0, -1.0)],
+            registration_status="Previous state.",
+        )
+        observer = session
+        session_identity = id(session)
+
+        session.apply_state(state)
+
+        self.assertIs(observer, session)
+        self.assertEqual(id(session), session_identity)
+        self.assertIs(session.document, document)
+        self.assertEqual(session.registration, source.registration)
+        self.assertEqual(session.source_design_marks, ((0.0, 0.0), (10.0, 0.0)))
+        self.assertEqual(session.source_stage_marks, ((1.0, 2.0), (21.0, 2.0)))
+        self.assertEqual(session.check_design_marks, [(5.0, 0.0)])
+        self.assertEqual(session.check_stage_marks, [(11.0, 2.0)])
+        self.assertEqual(session.targets[0].metadata, {"groups": ["source"]})
+        self.assertEqual(session.selected_target_index, 0)
+        self.assertEqual(session.route.points[0].metadata, {"tags": ["original"]})
+        self.assertEqual(session.selected_route_point_index, 0)
+        self.assertEqual(session.registration_status, "Ready.")
+        self.assertEqual(session.active_frame_id, "design:frame-1")
+        self.assertEqual(
+            session._runtime_blocked_persisted_state,
+            {"blocked": ["registration"]},
+        )
+        self.assertEqual(
+            session._legacy_stage_coordinate_provenance,
+            {"axes": ["X", "Y", "B"]},
+        )
+        self.assertTrue(session._legacy_stage_coordinate_provenance_present)
+        self.assertIsNot(session.targets, state.targets)
+        self.assertIsNot(session.route, state.route)
+        self.assertIsNot(
+            session._runtime_blocked_persisted_state,
+            state._runtime_blocked_persisted_state,
+        )
+        self.assertIsNot(
+            session._legacy_stage_coordinate_provenance,
+            state._legacy_stage_coordinate_provenance,
+        )
+
+        state.targets[0].metadata["groups"].append("changed")
+        state.route.points[0].metadata["tags"].append("changed")
+        state._runtime_blocked_persisted_state["blocked"].append("changed")
+        state._legacy_stage_coordinate_provenance["axes"].append("A")
+
+        self.assertEqual(session.targets[0].metadata, {"groups": ["source"]})
+        self.assertEqual(session.route.points[0].metadata, {"tags": ["original"]})
+        self.assertEqual(
+            session._runtime_blocked_persisted_state,
+            {"blocked": ["registration"]},
+        )
+        self.assertEqual(
+            session._legacy_stage_coordinate_provenance,
+            {"axes": ["X", "Y", "B"]},
+        )
+
+    def test_apply_state_failure_leaves_existing_state_untouched(self) -> None:
+        class ExplodingDeepcopy:
+            def __deepcopy__(self, _memo):
+                raise RuntimeError("copy failed")
+
+        incoming = DesignSession(
+            document=self._make_document(),
+            source_design_marks=((0.0, 0.0),),
+            check_design_marks=[(1.0, 1.0)],
+            registration_status="Incoming state.",
+        ).snapshot_state()
+        failing_state = replace(
+            incoming,
+            _legacy_stage_coordinate_provenance=ExplodingDeepcopy(),
+        )
+        session = DesignSession(
+            source_design_marks=((99.0, 98.0),),
+            check_design_marks=[(97.0, 96.0)],
+            targets=[
+                MeasurementTarget(
+                    id="kept",
+                    label="Kept",
+                    design_center=(95.0, 94.0),
+                )
+            ],
+            registration_status="Existing state.",
+        )
+        session._runtime_blocked_persisted_state = {"kept": ["runtime"]}
+        session._legacy_stage_coordinate_provenance = {"kept": ["provenance"]}
+        session._legacy_stage_coordinate_provenance_present = True
+        before = session.snapshot_state()
+        check_marks = session.check_design_marks
+        targets = session.targets
+        runtime_state = session._runtime_blocked_persisted_state
+
+        with self.assertRaisesRegex(RuntimeError, "copy failed"):
+            session.apply_state(failing_state)
+
+        self.assertEqual(session.snapshot_state(), before)
+        self.assertIs(session.check_design_marks, check_marks)
+        self.assertIs(session.targets, targets)
+        self.assertIs(session._runtime_blocked_persisted_state, runtime_state)
 
     def test_registration_invalidation_marks_registration_stale(self) -> None:
         session = DesignSession()

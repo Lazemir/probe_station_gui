@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+import json
 from typing import Protocol
 
 from probe_station_gui.design.session import DesignSession
@@ -50,6 +51,7 @@ class _JournalEntry:
     publication: FrameRecordsPublication
     previous_records: tuple[CoordinateFrameRecord, ...]
     contact_rollback: _ContactCommitRollback | None
+    applied_session_lease: _SessionRollbackLease | None = None
 
 
 @dataclass(frozen=True)
@@ -57,6 +59,18 @@ class _ContactCommitRollback:
     session_identity: int
     frame_id: str
     frame_version: int
+
+
+@dataclass(frozen=True)
+class _SessionRollbackLease:
+    session_identity: int
+    source_path: str
+    source_load_id: str
+    top_cell_name: str
+    visible_layers: tuple[tuple[int, int], ...]
+    rotation_quarter_turns: int
+    active_frame_id: str
+    coordinate_fingerprint: tuple[object, ...]
 
 
 _Completion = tuple[CoordinateTransition, tuple[_ContactCommitRollback, ...]]
@@ -151,6 +165,12 @@ class CoordinatePersistenceReducer:
         try:
             self._registry.reset(records)
             self._apply_session_link(publication)
+            self._journal[request_id] = replace(
+                entry,
+                applied_session_lease=self._capture_session_rollback_lease(
+                    publication
+                ),
+            )
         except Exception:
             self._registry.reset(previous_records)
             if publication.previous_session is not None:
@@ -164,6 +184,8 @@ class CoordinatePersistenceReducer:
         return CoordinateTransition(
             snapshot=self.snapshot(),
             intents=(SaveCoordinateFramesIntent(request_id, document),),
+            view_changed=True,
+            ui_effects=publication.ui_effects,
         )
 
     def complete(
@@ -302,27 +324,186 @@ class CoordinatePersistenceReducer:
                         code=failure_code,
                     ),
                 ),
+                view_changed=True,
+                ui_effects=tuple(
+                    effect
+                    for entry in completed
+                    for effect in entry.publication.rollback_ui_effects
+                ),
             ),
             publication_outcomes,
         )
 
     def _roll_back(self, completed: tuple[_JournalEntry, ...]) -> None:
         checkpoint = None
+        applied_session_lease = None
         for entry in completed:
             publication = entry.publication
-            if (
-                checkpoint is None
-                and publication.proposed_session_link is not None
-                and publication.previous_session is not None
-            ):
-                checkpoint = publication.previous_session
+            if publication.proposed_session_link is not None:
+                if checkpoint is None and publication.previous_session is not None:
+                    checkpoint = publication.previous_session
+                applied_session_lease = entry.applied_session_lease
         previous_records = completed[0].previous_records if completed else ()
         self._registry.reset(previous_records)
-        if checkpoint is not None:
-            checkpoint.restore(self._session)
+        if (
+            checkpoint is not None
+            and applied_session_lease is not None
+            and self._session_rollback_lease_is_current(applied_session_lease)
+        ):
+            if self._checkpoint_matches_applied_document(
+                checkpoint,
+                applied_session_lease,
+            ):
+                checkpoint.restore_coordinate_state(self._session)
+            else:
+                checkpoint.restore(self._session)
         assert self._document is not None
         self._document = self._document.with_records(
             self._registry.snapshot().records
+        )
+
+    def _capture_session_rollback_lease(
+        self,
+        publication: FrameRecordsPublication,
+    ) -> _SessionRollbackLease | None:
+        if publication.proposed_session_link is None:
+            return None
+        document = self._session.document
+        frame_id = self._session.active_frame_id
+        if document is None or frame_id is None:
+            return None
+        try:
+            source_path = str(document.path.expanduser().resolve())
+        except OSError:
+            return None
+        return _SessionRollbackLease(
+            session_identity=id(self._session),
+            source_path=source_path,
+            source_load_id=str(document.source_load_id),
+            top_cell_name=str(document.top_cell_name),
+            visible_layers=tuple(sorted(document.visible_layers)),
+            rotation_quarter_turns=int(document.rotation_quarter_turns) % 4,
+            active_frame_id=str(frame_id),
+            coordinate_fingerprint=self._coordinate_state_fingerprint(
+                self._session
+            ),
+        )
+
+    def _session_rollback_lease_is_current(
+        self,
+        lease: _SessionRollbackLease,
+    ) -> bool:
+        document = self._session.document
+        if document is None:
+            return False
+        try:
+            source_path = str(document.path.expanduser().resolve())
+        except OSError:
+            return False
+        return bool(
+            id(self._session) == lease.session_identity
+            and source_path == lease.source_path
+            and str(document.source_load_id) == lease.source_load_id
+            and str(document.top_cell_name) == lease.top_cell_name
+            and tuple(sorted(document.visible_layers)) == lease.visible_layers
+            and int(document.rotation_quarter_turns) % 4
+            == lease.rotation_quarter_turns
+            and self._session.active_frame_id == lease.active_frame_id
+            and self._coordinate_state_fingerprint(self._session)
+            == lease.coordinate_fingerprint
+        )
+
+    @classmethod
+    def _coordinate_state_fingerprint(
+        cls,
+        session: DesignSession,
+    ) -> tuple[object, ...]:
+        return (
+            session.active_frame_id,
+            cls._point_fingerprint(session.source_design_marks),
+            cls._point_fingerprint(session.source_stage_marks),
+            cls._point_fingerprint(session.check_design_marks),
+            cls._point_fingerprint(session.check_stage_marks),
+            cls._registration_fingerprint(session.registration),
+            str(session.registration_status),
+            cls._json_fingerprint(session._runtime_blocked_persisted_state),
+            cls._json_fingerprint(session._legacy_stage_coordinate_provenance),
+            bool(session._legacy_stage_coordinate_provenance_present),
+        )
+
+    @staticmethod
+    def _point_fingerprint(points) -> tuple[tuple[float, float], ...]:
+        return tuple((float(point[0]), float(point[1])) for point in points)
+
+    @classmethod
+    def _registration_fingerprint(cls, registration) -> object:
+        if registration is None:
+            return None
+        try:
+            source_summary = registration.source_residual_summary
+            check_summary = registration.residual_summary
+            return (
+                cls._point_fingerprint(registration.source_design_marks),
+                cls._point_fingerprint(registration.source_stage_marks),
+                cls._point_fingerprint(registration.check_design_marks),
+                cls._point_fingerprint(registration.check_stage_marks),
+                tuple(
+                    tuple(float(value) for value in row)
+                    for row in registration.matrix
+                ),
+                tuple(float(value) for value in registration.offset),
+                float(registration.design_unit_mm),
+                float(registration.distance_scale_ratio),
+                tuple(float(value) for value in registration.source_residuals),
+                (
+                    int(source_summary.count),
+                    float(source_summary.rms),
+                    float(source_summary.max_error),
+                ),
+                tuple(float(value) for value in registration.residuals),
+                (
+                    int(check_summary.count),
+                    float(check_summary.rms),
+                    float(check_summary.max_error),
+                ),
+                bool(registration.valid),
+                str(registration.stale_reason),
+            )
+        except (AttributeError, TypeError, ValueError):
+            return (type(registration).__qualname__, repr(registration))
+
+    @staticmethod
+    def _json_fingerprint(value: object) -> str:
+        try:
+            return json.dumps(
+                value,
+                allow_nan=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+        except (TypeError, ValueError):
+            return repr(value)
+
+    @staticmethod
+    def _checkpoint_matches_applied_document(
+        checkpoint: DesignSessionCheckpoint,
+        lease: _SessionRollbackLease,
+    ) -> bool:
+        state = checkpoint.state
+        document = None if state is None else state.document
+        if document is None:
+            return False
+        try:
+            source_path = str(document.path.expanduser().resolve())
+        except OSError:
+            return False
+        return bool(
+            source_path == lease.source_path
+            and str(document.source_load_id) == lease.source_load_id
+            and str(document.top_cell_name) == lease.top_cell_name
+            and tuple(sorted(document.visible_layers)) == lease.visible_layers
+            and int(document.rotation_quarter_turns) % 4
+            == lease.rotation_quarter_turns
         )
 
     def _success_notice_is_current(
@@ -335,6 +516,13 @@ class CoordinatePersistenceReducer:
         committed = publication.committed_record
         if committed is None:
             return False
+        if str(notice.code or "").startswith("legacy_migration_saved:"):
+            current = self._registry.get(committed.frame_id)
+            return bool(
+                current is not None
+                and current.version >= committed.version
+                and self._session.active_frame_id == committed.frame_id
+            )
         return bool(
             self._registry.get(committed.frame_id) == committed
             and self._session.active_frame_id == committed.frame_id

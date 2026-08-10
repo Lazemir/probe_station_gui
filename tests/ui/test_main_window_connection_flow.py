@@ -9,18 +9,23 @@ from probe_station_gui.coordinates.model import (
     ReadinessStatus,
 )
 from probe_station_gui.coordinates.coordinator_model import (
+    CaptureMachinePoseIntent,
     CoordinateAdapterCompletion,
     CoordinateNotice,
     CoordinateSystemSnapshot,
     CoordinateTransition,
+    FinishOperatorAlignmentUiEffect,
+    LegacyDesignStateRewriteResult,
     LoadCoordinateFramesIntent,
     MachineProfileObservation,
+    RegistrationWorkflowSnapshot,
+    RestoreOperatorAlignmentUiEffect,
+    RewriteLegacyDesignStateIntent,
     SaveCoordinateFramesIntent,
 )
 from probe_station_gui.coordinates.persistence import (
     CoordinateFrameDocument,
     CoordinateFrameLoadResult,
-    CoordinateFrameStoreSuccess,
 )
 from probe_station_gui.coordinates.transforms import BFrameTransform
 from probe_station_gui.views import main_window_connection_flow as connection_flow
@@ -58,7 +63,41 @@ def test_coordinate_transition_submits_load_intent_to_store(monkeypatch) -> None
     ]
 
 
-def test_coordinate_load_request_and_completion_delegate_to_coordinator() -> None:
+def test_coordinate_transition_submits_typed_machine_capture_intent(
+    monkeypatch,
+) -> None:
+    events: list[object] = []
+    owner = SimpleNamespace(
+        _coordinate_frames_loaded=True,
+        stage_controller=SimpleNamespace(
+            request_machine_coordinate_snapshot=lambda request_id, *, axes: (
+                events.append(("capture", request_id, tuple(axes))) or True
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        connection_flow.stage_position_panel,
+        "refresh_coordinate_frame_display",
+        lambda _owner: events.append(("refresh",)),
+    )
+
+    connection_flow.apply_coordinate_transition(
+        owner,
+        CoordinateTransition(
+            CoordinateSystemSnapshot(True, (), None),
+            intents=(CaptureMachinePoseIntent(-7),),
+        ),
+    )
+
+    assert events == [
+        ("refresh",),
+        ("capture", -7, ("X", "Y", "B")),
+    ]
+
+
+def test_coordinate_load_request_and_completion_delegate_to_coordinator(
+    monkeypatch,
+) -> None:
     calls: list[object] = []
     pending = CoordinateSystemSnapshot(False, (), None)
     loaded = CoordinateSystemSnapshot(True, (), CoordinateFrameDocument())
@@ -88,10 +127,11 @@ def test_coordinate_load_request_and_completion_delegate_to_coordinator() -> Non
         _reconcile_design_calibration_fingerprints=lambda: calls.append(
             ("reconcile",)
         ),
-        _apply_coordinate_frame_authority_blocks=lambda: calls.append(
-            ("authority",)
-        ),
-        _activate_loaded_design_frame=lambda: calls.append(("activate",)),
+    )
+    monkeypatch.setattr(
+        connection_flow,
+        "activate_current_design",
+        lambda _owner: calls.append(("activate",)),
     )
     result = CoordinateFrameLoadResult(8, CoordinateFrameDocument())
 
@@ -105,7 +145,6 @@ def test_coordinate_load_request_and_completion_delegate_to_coordinator() -> Non
         ("complete", CoordinateAdapterCompletion(8, result)),
         ("custom",),
         ("reconcile",),
-        ("authority",),
         ("activate",),
     ]
 
@@ -123,6 +162,8 @@ def test_coordinate_transition_submits_save_and_presents_notices(monkeypatch) ->
         _show_status=lambda message, duration=0: events.append(
             ("status", message, duration)
         ),
+        _refresh_design_panel=lambda: events.append(("design_panel",)),
+        _refresh_design_position=lambda: events.append(("design_position",)),
     )
     monkeypatch.setattr(
         connection_flow.stage_position_panel,
@@ -141,9 +182,143 @@ def test_coordinate_transition_submits_save_and_presents_notices(monkeypatch) ->
 
     assert events == [
         ("refresh",),
+        ("design_panel",),
+        ("design_position",),
         ("status", "saved", 7000),
         ("save", 9, document),
     ]
+
+
+def test_capture_notice_refreshes_design_views_but_stale_transition_does_not(
+    monkeypatch,
+) -> None:
+    events: list[object] = []
+    snapshot = CoordinateSystemSnapshot(True, (), None)
+    owner = SimpleNamespace(
+        _coordinate_frames_loaded=True,
+        _refresh_design_panel=lambda: events.append(("design_panel",)),
+        _refresh_design_position=lambda: events.append(("design_position",)),
+        _show_status=lambda message, duration=0: events.append(
+            ("status", message, duration)
+        ),
+    )
+    monkeypatch.setattr(
+        connection_flow.stage_position_panel,
+        "refresh_coordinate_frame_display",
+        lambda _owner: events.append(("coordinate_display",)),
+    )
+
+    connection_flow.apply_coordinate_transition(
+        owner,
+        CoordinateTransition(
+            snapshot,
+            notices=(
+                CoordinateNotice(
+                    "Stage source mark captured.",
+                    duration_ms=4000,
+                    code="registration_capture_updated",
+                ),
+            ),
+        ),
+    )
+    connection_flow.apply_coordinate_transition(owner, CoordinateTransition(snapshot))
+
+    assert events == [
+        ("coordinate_display",),
+        ("design_panel",),
+        ("design_position",),
+        ("status", "Stage source mark captured.", 4000),
+        ("coordinate_display",),
+    ]
+
+
+def test_activation_view_changes_refresh_on_authority_block_and_recovery(
+    monkeypatch,
+) -> None:
+    events: list[str] = []
+    owner = SimpleNamespace(
+        _coordinate_frames_loaded=True,
+        _refresh_design_panel=lambda: events.append("panel"),
+        _refresh_design_position=lambda: events.append("position"),
+    )
+    monkeypatch.setattr(
+        connection_flow.stage_position_panel,
+        "refresh_coordinate_frame_display",
+        lambda _owner: events.append("coordinates"),
+    )
+    snapshot = CoordinateSystemSnapshot(True, (), None)
+
+    connection_flow.apply_coordinate_transition(
+        owner,
+        CoordinateTransition(snapshot, view_changed=True),
+    )
+    connection_flow.apply_coordinate_transition(
+        owner,
+        CoordinateTransition(snapshot, view_changed=True),
+    )
+
+    assert events == [
+        "coordinates",
+        "panel",
+        "position",
+        "coordinates",
+        "panel",
+        "position",
+    ]
+
+
+def test_operator_alignment_effects_finish_and_restore_exact_ui_draft(
+    monkeypatch,
+) -> None:
+    events: list[object] = []
+    snapshot = CoordinateSystemSnapshot(True, (), None)
+    owner = SimpleNamespace(
+        _coordinate_frames_loaded=True,
+        _alignment_design_draft=((9.0, 9.0),),
+        _alignment_stage_draft=[(8.0, 8.0)],
+        _alignment_draft_fit_residuals=(1.0, 2.0),
+        _set_design_snap_enabled=lambda enabled: events.append(("snap", enabled)),
+        _finish_alignment_draft=lambda: events.append("finish"),
+        _refresh_manual_alignment_ui=lambda: events.append("manual"),
+        _update_stage_coordinate_apply_state=lambda: events.append("apply-state"),
+    )
+    monkeypatch.setattr(
+        connection_flow.stage_position_panel,
+        "refresh_coordinate_frame_display",
+        lambda _owner: None,
+    )
+
+    connection_flow.apply_coordinate_transition(
+        owner,
+        CoordinateTransition(
+            snapshot,
+            ui_effects=(FinishOperatorAlignmentUiEffect(),),
+        ),
+    )
+    connection_flow.apply_coordinate_transition(
+        owner,
+        CoordinateTransition(snapshot),
+    )
+
+    assert events == [("snap", False), "finish"]
+
+    connection_flow.apply_coordinate_transition(
+        owner,
+        CoordinateTransition(
+            snapshot,
+            ui_effects=(
+                RestoreOperatorAlignmentUiEffect(
+                    design_marks=((1.0, 2.0), (3.0, 4.0)),
+                    stage_marks=((5.0, 6.0), None),
+                ),
+            ),
+        ),
+    )
+
+    assert owner._alignment_design_draft == ((1.0, 2.0), (3.0, 4.0))
+    assert owner._alignment_stage_draft == [(5.0, 6.0), None]
+    assert owner._alignment_draft_fit_residuals is None
+    assert events[-3:] == [("snap", True), "manual", "apply-state"]
 
 
 class _Serial:
@@ -429,7 +604,7 @@ def test_on_serial_connected_preserves_attach_order(monkeypatch) -> None:
     assert owner._controller_state_persistence_suspended is False
 
 
-def test_on_serial_disconnected_preserves_detach_cleanup_order() -> None:
+def test_on_serial_disconnected_preserves_detach_cleanup_order(monkeypatch) -> None:
     events: list[object] = []
     owner = _owner(events)
     owner.serial_connection = _Serial(events, port="COM9")
@@ -440,6 +615,11 @@ def test_on_serial_disconnected_preserves_detach_cleanup_order() -> None:
     )
     connection_flow.stage_position_panel.update_stage_position_display = (
         lambda _owner, value: events.append(("stage_display", value))
+    )
+    monkeypatch.setattr(
+        connection_flow,
+        "activate_current_design",
+        lambda _owner: events.append(("activate_design",)),
     )
 
     try:
@@ -467,7 +647,7 @@ def test_on_serial_disconnected_preserves_detach_cleanup_order() -> None:
     assert ("contact", "needle_lowering", None) in events
     assert ("oscillation", False, "") in events
     assert not any(event[0] == "invalidate_design" for event in events)
-    assert ("authority_blocks",) in events
+    assert ("activate_design",) in events
     assert owner.serial_connection is None
     assert owner._controller_state_persistence_suspended is False
 
@@ -618,27 +798,27 @@ def test_restore_persisted_controller_state_imports_current_cache(monkeypatch) -
     ]
 
 
-def test_legacy_state_is_removed_only_after_matching_frame_save(
+def test_legacy_controller_state_rewrite_reports_typed_success(
     monkeypatch,
 ) -> None:
     events: list[object] = []
     snapshot = CoordinateSystemSnapshot(True, (), CoordinateFrameDocument())
+    persisted = {"version": 3, "active_frame_id": "frame-7"}
 
     class _Coordinator:
         def complete(self, completion: CoordinateAdapterCompletion) -> CoordinateTransition:
-            events.append(("complete", completion.intent_id))
-            notices = (
-                (CoordinateNotice("", code="legacy_migration_saved"),)
-                if completion.intent_id == 7
-                else ()
+            events.append(
+                (
+                    "complete",
+                    completion.intent_id,
+                    completion.result,
+                )
             )
-            return CoordinateTransition(snapshot, notices=notices)
+            return CoordinateTransition(snapshot)
 
     owner = SimpleNamespace(
         _coordinate_system_coordinator=_Coordinator(),
         _coordinate_frames_loaded=True,
-        _legacy_design_migration_request_id=7,
-        _legacy_design_migration_state={"version": 2},
     )
     monkeypatch.setattr(
         connection_flow.stage_position_panel,
@@ -648,45 +828,48 @@ def test_legacy_state_is_removed_only_after_matching_frame_save(
     monkeypatch.setattr(
         connection_flow,
         "complete_legacy_design_migration",
-        lambda _owner: events.append(("remove_legacy",)),
+        lambda _owner, state: events.append(("rewrite", state)),
     )
 
-    connection_flow.handle_coordinate_frame_saved(
+    connection_flow.apply_coordinate_transition(
         owner,
-        CoordinateFrameStoreSuccess(6, "save"),
+        CoordinateTransition(
+            snapshot,
+            intents=(RewriteLegacyDesignStateIntent(7, persisted),),
+        ),
     )
-    connection_flow.handle_coordinate_frame_saved(
-        owner,
-        CoordinateFrameStoreSuccess(7, "save"),
-    )
 
-    assert events == [
-        ("complete", 6),
-        ("complete", 7),
-        ("remove_legacy",),
-    ]
-    assert owner._legacy_design_migration_request_id is None
-    assert owner._legacy_design_migration_state is None
+    assert events[0] == ("rewrite", persisted)
+    _, intent_id, result = events[1]
+    assert intent_id == 7
+    assert isinstance(result, LegacyDesignStateRewriteResult)
+    assert result.succeeded
+    assert result.message == ""
 
 
-def test_failed_legacy_controller_state_rewrite_keeps_migration_pending(
+def test_legacy_controller_state_rewrite_reports_typed_failure(
     monkeypatch,
 ) -> None:
+    completions: list[CoordinateAdapterCompletion] = []
     statuses: list[str] = []
-    legacy = {"version": 2}
     snapshot = CoordinateSystemSnapshot(True, (), CoordinateFrameDocument())
-    owner = SimpleNamespace(
-        _coordinate_system_coordinator=SimpleNamespace(
-            complete=lambda _completion: CoordinateTransition(
-                snapshot,
-                notices=(
-                    CoordinateNotice("", code="legacy_migration_saved"),
+
+    def complete(completion: CoordinateAdapterCompletion) -> CoordinateTransition:
+        completions.append(completion)
+        return CoordinateTransition(
+            snapshot,
+            notices=(
+                CoordinateNotice(
+                    "Design registration migration could not be finalized.",
+                    severity="warning",
+                    duration_ms=6000,
                 ),
-            )
-        ),
+            ),
+        )
+
+    owner = SimpleNamespace(
+        _coordinate_system_coordinator=SimpleNamespace(complete=complete),
         _coordinate_frames_loaded=True,
-        _legacy_design_migration_request_id=4,
-        _legacy_design_migration_state=legacy,
         _show_status=lambda message, _timeout: statuses.append(message),
     )
     monkeypatch.setattr(
@@ -697,17 +880,30 @@ def test_failed_legacy_controller_state_rewrite_keeps_migration_pending(
     monkeypatch.setattr(
         connection_flow,
         "complete_legacy_design_migration",
-        lambda _owner: (_ for _ in ()).throw(OSError("disk full")),
+        lambda _owner, _state: (_ for _ in ()).throw(OSError("disk full")),
     )
 
-    connection_flow.handle_coordinate_frame_saved(
+    connection_flow.apply_coordinate_transition(
         owner,
-        CoordinateFrameStoreSuccess(4, "save"),
+        CoordinateTransition(
+            snapshot,
+            intents=(
+                RewriteLegacyDesignStateIntent(
+                    4,
+                    {"version": 3, "active_frame_id": "frame-4"},
+                ),
+            ),
+        ),
     )
 
-    assert owner._legacy_design_migration_request_id == 4
-    assert owner._legacy_design_migration_state is legacy
+    assert len(completions) == 1
+    result = completions[0].result
+    assert isinstance(result, LegacyDesignStateRewriteResult)
+    assert not result.succeeded
+    assert result.message == "disk full"
     assert statuses == ["Design registration migration could not be finalized."]
+
+
 def test_controller_state_persistence_preserves_legacy_registration_until_frame_save() -> None:
     legacy = {
         "version": 2,
@@ -715,8 +911,16 @@ def test_controller_state_persistence_preserves_legacy_registration_until_frame_
         "source_stage_marks": [[2.0, 3.0], [3.0, 3.0]],
     }
     owner = SimpleNamespace(
-        _legacy_design_migration_request_id=7,
-        _legacy_design_migration_state=legacy,
+        _coordinate_system_coordinator=SimpleNamespace(
+            snapshot=lambda: CoordinateSystemSnapshot(
+                True,
+                (),
+                CoordinateFrameDocument(),
+                registration=RegistrationWorkflowSnapshot(
+                    legacy_migration_state=legacy,
+                ),
+            )
+        ),
         stage_controller=SimpleNamespace(
             export_cached_controller_state=lambda: {"last_stage_position": [1.0, 2.0]}
         ),

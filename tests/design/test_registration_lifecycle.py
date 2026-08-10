@@ -544,7 +544,7 @@ def test_design_package_exports_the_registration_lifecycle_interface() -> None:
     )
 
 
-def test_registration_lifecycle_exposes_exactly_six_operations() -> None:
+def test_registration_lifecycle_exposes_only_explicit_operations() -> None:
     operations = {
         name
         for name, value in vars(DesignRegistrationLifecycle).items()
@@ -558,6 +558,7 @@ def test_registration_lifecycle_exposes_exactly_six_operations() -> None:
         "accept_focus",
         "accept_first_contact",
         "cancel",
+        "observe_focus_context",
     }
 
 

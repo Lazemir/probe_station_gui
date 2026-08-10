@@ -19,6 +19,7 @@ from probe_station_gui.route.contact_lifecycle_adapter import (
 )
 from probe_station_gui.route.contact_quality import RouteMeasurementSample
 from probe_station_gui.route.measurement_records import (
+    RouteContactPlacementResult,
     RouteMeasurementPoint,
     RouteMeasurementRecord,
 )
@@ -349,6 +350,62 @@ def test_contact_success_callback_runs_after_quality_and_interrupt_checkpoint() 
     assert result.require_placement().success is True
     assert events.index("quality:record") < events.index("reference:capture")
     assert events.index("contact:check") < events.index("reference:capture")
+
+
+def test_contact_success_finalizer_runs_only_after_the_interrupt_checkpoint() -> None:
+    events: list[str] = []
+
+    def prepare_reference(
+        _placement: RouteContactPlacementResult,
+    ) -> Callable[[], None]:
+        events.append("reference:read-a")
+        return lambda: events.append("reference:commit-a")
+
+    flow = RouteContactFlow(
+        stage=_StageAdapter(events),
+        meter=_MeterAdapter(events),
+        quality=_QualityAdapter(events),
+        interrupt=_InterruptAdapter(),
+        events=_EventAdapter(events),
+        post_success_contact=prepare_reference,
+        post_success_contact_eligible=lambda: True,
+    )
+
+    result = flow.place_contact(_contact_request())
+
+    assert result.interrupted is False
+    assert events.index("reference:read-a") < events.index("reference:commit-a")
+    assert events.index("reference:commit-a") < events.index("photo:contact:true")
+
+
+def test_interrupt_during_contact_reference_read_discards_a_finalizer() -> None:
+    events: list[str] = []
+    interrupt = _InterruptAdapter()
+
+    def interrupting_reference_read(
+        _placement: RouteContactPlacementResult,
+    ) -> Callable[[], None]:
+        events.append("reference:read-a")
+        interrupt.request()
+        return lambda: events.append("reference:commit-a")
+
+    flow = RouteContactFlow(
+        stage=_StageAdapter(events),
+        meter=_MeterAdapter(events),
+        quality=_QualityAdapter(events),
+        interrupt=interrupt,
+        events=_EventAdapter(events),
+        post_success_contact=interrupting_reference_read,
+        post_success_contact_eligible=lambda: True,
+    )
+
+    result = flow.place_contact(_contact_request())
+
+    assert result.interrupted is True
+    assert "reference:read-a" in events
+    assert "reference:commit-a" not in events
+    assert "photo:contact:true" not in events
+    assert "status:Contact ready: ok" not in events
 
 
 def test_interrupt_requested_during_success_callback_stops_later_contact_work() -> None:

@@ -101,7 +101,10 @@ class RouteExternalMeasurementSessionRunner:
         photo_settle_s: float = 0.2,
         wait_before_first_point: bool = False,
         design_frame_snapshot: object | None = None,
-        post_success_contact: Callable[[RouteContactPlacementResult], None] | None = None,
+        post_success_contact: Callable[
+            [RouteContactPlacementResult], Callable[[], None] | None
+        ]
+        | None = None,
     ) -> None:
         self.session_id = str(session_id)
         self._points = list(points)

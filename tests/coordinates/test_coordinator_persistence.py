@@ -32,7 +32,8 @@ from probe_station_gui.coordinates.persistence import (
 from probe_station_gui.coordinates.registry import CoordinateFrameRegistry
 from probe_station_gui.coordinates.transforms import BFrameTransform
 from probe_station_gui.design.frame_registration import DesignFrameMetadata
-from probe_station_gui.design.model import DesignDocument
+from probe_station_gui.design.model import DesignDocument, MeasurementTarget
+from probe_station_gui.design.registration_lifecycle import RegistrationCancellation
 from probe_station_gui.design.session import DesignFrameLinkProjection, DesignSession
 
 
@@ -189,7 +190,7 @@ def test_start_returns_load_intent_and_pending_snapshot(tmp_path: Path) -> None:
     assert transition.intents == (LoadCoordinateFramesIntent(1, "profile-a"),)
 
 
-def test_coordinator_has_one_public_publication_input() -> None:
+def test_coordinator_exposes_only_explicit_coordinate_workflows() -> None:
     public_methods = {
         name
         for name, value in vars(CoordinateSystemCoordinator).items()
@@ -197,10 +198,20 @@ def test_coordinator_has_one_public_publication_input() -> None:
     }
 
     assert public_methods == {
+        "activate_design",
+        "arm_first_contact",
+        "cancel_registration",
+        "capture_registration_mark",
+        "close_design",
         "complete",
+        "focus_search_lease",
+        "observe_focus_context",
+        "offer_focus_candidate",
         "publish_frame_records",
+        "reset_focus_reference",
         "snapshot",
         "start",
+        "use_focus_reference",
     }
 
 
@@ -410,6 +421,146 @@ def test_publication_captures_its_adopted_session_for_rollback(
 
     assert registry.get(draft.frame_id) == draft
     assert session.active_frame_id is None
+
+
+def test_same_frame_failure_preserves_newer_targets_route_and_selections(
+    tmp_path: Path,
+) -> None:
+    design = _document(tmp_path)
+    draft = _record(design, _FRAME_A, "draft")
+    committed = replace(draft, name="registered", version=1)
+    coordinator, registry, session = _coordinator(design)
+    load = coordinator.start(MachineProfileObservation("profile")).intents[0]
+    assert isinstance(load, LoadCoordinateFramesIntent)
+    _complete_load(coordinator, load, CoordinateFrameDocument(records=(draft,)))
+    session.apply_active_frame_link(draft, _link(draft).projection)
+    session._runtime_blocked_persisted_state = {"legacy": "blocked"}
+    session._legacy_stage_coordinate_provenance = {"wco": "G54"}
+    session._legacy_stage_coordinate_provenance_present = True
+    baseline = DesignSessionCheckpoint.capture(session)
+    save = _save_intent(
+        coordinator.publish_frame_records(
+            FrameRecordsPublication(
+                records=(committed,),
+                previous_record=draft,
+                committed_record=committed,
+                previous_session=baseline,
+                proposed_session_link=DesignSessionFrameLink(
+                    frame_id=committed.frame_id,
+                    projection=DesignFrameLinkProjection(
+                        frame_id=committed.frame_id,
+                        source_design_marks=((0.0, 0.0), (1000.0, 0.0)),
+                        source_stage_marks=((10.0, 20.0), (11.0, 20.0)),
+                        check_design_marks=(),
+                        check_stage_marks=(),
+                    ),
+                ),
+            )
+        )
+    )
+    targets = [
+        MeasurementTarget("target-a", "A", (100.0, 200.0)),
+        MeasurementTarget("target-b", "B", (300.0, 400.0)),
+    ]
+    session.set_targets(targets)
+    session.selected_target_index = 1
+    route = session.create_route(name="edited while saving")
+    session.add_route_point((10.0, 20.0))
+    session.add_route_point((30.0, 40.0))
+    session.select_route_point(0)
+
+    failed = coordinator.complete(
+        CoordinateAdapterCompletion(
+            save.intent_id,
+            CoordinateFrameStoreFailure(save.intent_id, "save", "disk full"),
+        )
+    )
+
+    assert registry.get(draft.frame_id) == draft
+    assert session.active_frame_id == baseline.active_frame_id
+    assert session.source_design_marks == baseline.source_design_marks
+    assert session.source_stage_marks == baseline.source_stage_marks
+    assert tuple(session.check_design_marks) == baseline.check_design_marks
+    assert tuple(session.check_stage_marks) == baseline.check_stage_marks
+    assert session.registration == baseline.registration
+    assert session.registration_status == baseline.registration_status
+    assert (
+        session._runtime_blocked_persisted_state
+        == baseline.runtime_blocked_persisted_state
+    )
+    assert (
+        session._legacy_stage_coordinate_provenance
+        == baseline.legacy_stage_coordinate_provenance
+    )
+    assert (
+        session._legacy_stage_coordinate_provenance_present
+        == baseline.legacy_stage_coordinate_provenance_present
+    )
+    assert session.targets == targets
+    assert session.selected_target_index == 1
+    assert session.route is route
+    assert [point.camera_center for point in route.points] == [
+        (10.0, 20.0),
+        (30.0, 40.0),
+    ]
+    assert session.selected_route_point_index == 0
+    assert failed.notices
+
+
+def test_old_failure_does_not_overwrite_newer_same_frame_coordinate_edit(
+    tmp_path: Path,
+) -> None:
+    design = _document(tmp_path)
+    draft = _record(design, _FRAME_A, "draft")
+    committed = replace(draft, name="registered", version=1)
+    coordinator, registry, session = _coordinator(design)
+    load = coordinator.start(MachineProfileObservation("profile")).intents[0]
+    assert isinstance(load, LoadCoordinateFramesIntent)
+    _complete_load(coordinator, load, CoordinateFrameDocument(records=(draft,)))
+    session.apply_active_frame_link(draft, _link(draft).projection)
+    save = _save_intent(
+        coordinator.publish_frame_records(
+            FrameRecordsPublication(
+                records=(committed,),
+                previous_record=draft,
+                committed_record=committed,
+                previous_session=DesignSessionCheckpoint.capture(session),
+                proposed_session_link=DesignSessionFrameLink(
+                    frame_id=committed.frame_id,
+                    projection=DesignFrameLinkProjection(
+                        frame_id=committed.frame_id,
+                        source_design_marks=((0.0, 0.0), (1000.0, 0.0)),
+                        source_stage_marks=((10.0, 20.0), (11.0, 20.0)),
+                        check_design_marks=(),
+                        check_stage_marks=(),
+                    ),
+                ),
+            )
+        )
+    )
+    assert session.registration is not None
+    coordinator.cancel_registration(RegistrationCancellation.MARK_SET_CHANGED)
+    session.add_source_design_mark((500.0, 500.0))
+    edited_design_marks = session.source_design_marks
+    edited_stage_marks = session.source_stage_marks
+    edited_status = session.registration_status
+    assert session.registration is None
+
+    failed = coordinator.complete(
+        CoordinateAdapterCompletion(
+            save.intent_id,
+            CoordinateFrameStoreFailure(save.intent_id, "save", "disk full"),
+        )
+    )
+
+    assert registry.get(draft.frame_id) == draft
+    assert session.active_frame_id == draft.frame_id
+    assert session.source_design_marks == edited_design_marks
+    assert session.source_design_marks[-1] == (500.0, 500.0)
+    assert session.source_stage_marks == edited_stage_marks
+    assert session.registration is None
+    assert session.registration_status == edited_status
+    assert failed.notices
 
 
 def test_terminal_failure_privately_releases_contact_commit(
@@ -656,8 +807,6 @@ def test_terminal_failure_rolls_back_each_frame_and_exact_session_once(
             )
         )
     )
-    session.registration_status = "changed after publication"
-
     transition = coordinator.complete(
         CoordinateAdapterCompletion(
             terminal.intent_id,

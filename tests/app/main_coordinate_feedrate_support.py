@@ -1,13 +1,7 @@
-import csv
-import json
-import subprocess
 import struct
 import threading
 import time
-import tempfile
 import types
-import unittest
-from unittest import mock
 import zlib
 
 from tests.app.import_reset import restore_real_imports_for_main
@@ -17,9 +11,6 @@ restore_real_imports_for_main()
 import main as main_module
 from main import Main
 from probe_station_gui.coordinates.lifecycle import CoordinateFrameLifecycle
-from probe_station_gui.design.registration_lifecycle import (
-    DesignRegistrationLifecycle,
-)
 from probe_station_gui.design.contact_navigation import api_route_adjusted_stage_xy
 from probe_station_gui.dialogs import (
     route_measurement_dialog as route_measurement_dialog_module,
@@ -29,7 +20,6 @@ from probe_station_gui.dialogs.route_measurement_dialog import (
     RouteMeasurementRunConfiguration,
 )
 from probe_station_gui.route.measurement import (
-    RouteExternalMeasurementSessionRunner,
     RouteContactPlacementResult,
     RouteContactHeightRecord,
     RouteContactQualityLimits,
@@ -58,6 +48,26 @@ from probe_station_gui.stage.coordinate_targets import (
 from probe_station_gui.stage.manual_jog_prediction import (
     ManualJogPredictionConfig,
     ManualJogPredictionState,
+)
+
+
+__all__ = (
+    "LCRMeterError",
+    "ObjectiveCalibrationSettings",
+    "RouteContactHeightRecord",
+    "RouteContactPlacementResult",
+    "RouteContactQuality",
+    "RouteContactSeekResult",
+    "RouteMeasurementDialog",
+    "RouteMeasurementPointRequestCallbacks",
+    "RouteMeasurementRecord",
+    "RouteMeasurementRunner",
+    "RouteMeasurementSettingsStore",
+    "RoutePhotoRecord",
+    "StageControllerError",
+    "api_move_feedrate",
+    "api_route_adjusted_stage_xy",
+    "request_route_measurement_for_point",
 )
 
 
@@ -799,7 +809,6 @@ def _make_route_start_main(
 ]:
     point = _route_start_point()
     window = Main.__new__(Main)
-    window._design_registration_lifecycle = DesignRegistrationLifecycle()
     statuses: list[tuple[str, int | None]] = []
     telegrams: list[tuple[str, tuple[object, ...], dict[str, object]]] = []
     camera_calls: list[float] = []
@@ -829,6 +838,7 @@ def _make_route_start_main(
             frame_version=4,
         )
     )
+    window._design_contact_success_callback = lambda _frame: None
     window._route_measurement_points = (
         lambda _route, *, frame_usability_snapshot=None: [point]
     )

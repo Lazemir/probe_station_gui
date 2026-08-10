@@ -526,6 +526,11 @@ def test_needles_zone_change_persists_controller_state(monkeypatch) -> None:
         "needles_zone": "lift"
     }
     owner._design_session = SimpleNamespace(export_persisted_state=lambda: None)
+    owner._coordinate_system_coordinator = SimpleNamespace(
+        snapshot=lambda: SimpleNamespace(
+            registration=SimpleNamespace(legacy_migration_state=None)
+        )
+    )
     owner._controller_state_persistence_suspended = False
     owner.settings_manager.save_controller_state = lambda state: saved.append(state)
 

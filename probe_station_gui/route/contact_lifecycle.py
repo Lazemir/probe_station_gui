@@ -233,7 +233,10 @@ class RouteContactFlow:
         quality: RouteContactQualityPort,
         interrupt: RouteContactInterruptPort,
         events: RouteContactEventPort,
-        post_success_contact: Callable[[RouteContactPlacementResult], None] | None = None,
+        post_success_contact: Callable[
+            [RouteContactPlacementResult], Callable[[], None] | None
+        ]
+        | None = None,
         post_success_contact_eligible: Callable[[], bool] | None = None,
     ) -> None:
         if post_success_contact is not None and post_success_contact_eligible is None:
@@ -354,7 +357,10 @@ class RouteContactFlow:
                 include_seek=auto_contact_seek,
             )
             self._raise_if_interrupted()
-            self._notify_successful_contact(placement)
+            finalize_contact = self._notify_successful_contact(placement)
+            self._raise_if_interrupted()
+            if finalize_contact is not None:
+                finalize_contact()
             self._raise_if_interrupted()
             self._events.status(placement.message)
             return RouteContactFlowResult(placement=placement)
@@ -503,7 +509,10 @@ class RouteContactFlow:
                 self._lift_failed_contact()
                 needles_lowered = False
             placement_succeeded = placement.success
-            self._notify_successful_contact(placement)
+            finalize_contact = self._notify_successful_contact(placement)
+            self._raise_if_interrupted()
+            if finalize_contact is not None:
+                finalize_contact()
             self._raise_if_interrupted()
             self._events.contact_photo(
                 request.point,
@@ -529,17 +538,19 @@ class RouteContactFlow:
     def _notify_successful_contact(
         self,
         placement: RouteContactPlacementResult,
-    ) -> None:
+    ) -> Callable[[], None] | None:
         callback = self._post_success_contact
         if callback is None or not placement.success:
-            return
+            return None
         eligible = self._post_success_contact_eligible
         if eligible is None or not eligible():
-            return
+            return None
         try:
-            callback(placement)
+            finalizer = callback(placement)
         except Exception:
             logger.exception("Post-contact success callback failed.")
+            return None
+        return finalizer if callable(finalizer) else None
 
     def _prepare_interrupt(self, clear_interrupt: bool) -> None:
         if clear_interrupt:

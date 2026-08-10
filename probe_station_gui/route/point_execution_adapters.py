@@ -188,7 +188,9 @@ class LegacyContactBindings:
     def build_flow(
         self,
         *,
-        post_success_contact: Callable[[RouteContactPlacementResult], None]
+        post_success_contact: Callable[
+            [RouteContactPlacementResult], Callable[[], None] | None
+        ]
         | None = None,
         post_success_contact_eligible: Callable[[], bool] | None = None,
     ) -> RouteContactFlow:

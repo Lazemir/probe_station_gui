@@ -2,16 +2,28 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 import logging
 
 from PySide6.QtCore import QTimer
 
 from probe_station_gui.coordinates.coordinator_model import (
+    AutofocusResult,
+    CaptureMachinePoseIntent,
     CoordinateAdapterCompletion,
     CoordinateTransition,
+    DesignActivationRequest,
+    FinishOperatorAlignmentUiEffect,
+    FocusMoveResult,
+    LegacyDesignStateRewriteResult,
     LoadCoordinateFramesIntent,
     MachineProfileObservation,
+    MachinePoseCaptureResult,
+    MoveToFocusTargetIntent,
+    RunAutofocusIntent,
     SaveCoordinateFramesIntent,
+    RestoreOperatorAlignmentUiEffect,
+    RewriteLegacyDesignStateIntent,
 )
 from probe_station_gui.coordinates.persistence import (
     CoordinateFrameStoreFailure,
@@ -23,6 +35,7 @@ from probe_station_gui.views import main_window_stage_position_panel as stage_po
 
 
 logger = logging.getLogger(__name__)
+_FRAME_METADATA_UNSET = object()
 
 
 def apply_coordinate_transition(
@@ -33,6 +46,15 @@ def apply_coordinate_transition(
 
     owner._coordinate_frames_loaded = transition.snapshot.frames_loaded
     stage_position_panel.refresh_coordinate_frame_display(owner)
+    _render_registration_snapshot(owner, transition)
+    _render_coordinate_ui_effects(owner, transition)
+    if _registration_view_changed(transition):
+        refresh_panel = getattr(owner, "_refresh_design_panel", None)
+        if callable(refresh_panel):
+            refresh_panel()
+        refresh_position = getattr(owner, "_refresh_design_position", None)
+        if callable(refresh_position):
+            refresh_position()
     show_status = getattr(owner, "_show_status", None)
     for notice in transition.notices:
         if notice.message and callable(show_status):
@@ -41,23 +63,6 @@ def apply_coordinate_transition(
             collapse = getattr(owner, "_collapse_alignment_panel_if_ready", None)
             if callable(collapse):
                 collapse()
-        elif notice.code == "operator_alignment_rollback":
-            set_snap = getattr(owner, "_set_design_snap_enabled", None)
-            if callable(set_snap):
-                set_snap(True)
-        elif notice.code == "legacy_migration_saved":
-            try:
-                complete_legacy_design_migration(owner)
-            except Exception:
-                logger.exception("Failed to replace legacy Design registration state")
-                if callable(show_status):
-                    show_status(
-                        "Design registration migration could not be finalized.",
-                        6000,
-                    )
-            else:
-                owner._legacy_design_migration_request_id = None
-                owner._legacy_design_migration_state = None
     for intent in transition.intents:
         try:
             if isinstance(intent, LoadCoordinateFramesIntent):
@@ -70,23 +75,204 @@ def apply_coordinate_transition(
                     intent.intent_id,
                     intent.document,
                 )
-        except Exception as exc:
-            logger.exception("Coordinate frame adapter submission failed")
-            failed = owner._coordinate_system_coordinator.complete(
-                CoordinateAdapterCompletion(
-                    intent_id=intent.intent_id,
-                    result=CoordinateFrameStoreFailure(
-                        request_id=intent.intent_id,
-                        operation=(
-                            "load"
-                            if isinstance(intent, LoadCoordinateFramesIntent)
-                            else "save"
+            elif isinstance(intent, CaptureMachinePoseIntent):
+                accepted = owner.stage_controller.request_machine_coordinate_snapshot(
+                    intent.intent_id,
+                    axes=intent.axes,
+                )
+                if not accepted:
+                    _complete_coordinate_adapter(
+                        owner,
+                        MachinePoseCaptureResult(
+                            intent.intent_id,
+                            succeeded=False,
+                            message="Machine coordinates are unavailable.",
                         ),
-                        message=str(exc) or type(exc).__name__,
+                    )
+            elif isinstance(intent, MoveToFocusTargetIntent):
+                accepted = owner.stage_controller.request_token_bound_move_to_xy(
+                    intent.intent_id,
+                    intent.target_xy[0],
+                    intent.target_xy[1],
+                    owner.design_registration_focus_move_finished.emit,
+                )
+                if not accepted:
+                    _complete_coordinate_adapter(
+                        owner,
+                        FocusMoveResult(
+                            intent.intent_id,
+                            succeeded=False,
+                            message="Focus move was not started.",
+                        ),
+                    )
+            elif isinstance(intent, RunAutofocusIntent):
+                accepted = owner.stage_controller.request_registration_autofocus(
+                    intent.intent_id,
+                    owner.design_registration_autofocus_finished.emit,
+                )
+                if not accepted:
+                    _complete_coordinate_adapter(
+                        owner,
+                        AutofocusResult(
+                            intent.intent_id,
+                            succeeded=False,
+                            message="Autofocus was not started.",
+                        ),
+                    )
+            elif isinstance(intent, RewriteLegacyDesignStateIntent):
+                complete_legacy_design_migration(
+                    owner,
+                    intent.persisted_design_state,
+                )
+                _complete_coordinate_adapter(
+                    owner,
+                    LegacyDesignStateRewriteResult(
+                        intent.intent_id,
+                        succeeded=True,
                     ),
                 )
+        except Exception as exc:
+            logger.exception("Coordinate frame adapter submission failed")
+            if isinstance(
+                intent,
+                (LoadCoordinateFramesIntent, SaveCoordinateFramesIntent),
+            ):
+                failure = CoordinateFrameStoreFailure(
+                    request_id=intent.intent_id,
+                    operation=(
+                        "load"
+                        if isinstance(intent, LoadCoordinateFramesIntent)
+                        else "save"
+                    ),
+                    message=str(exc) or type(exc).__name__,
+                )
+            elif isinstance(intent, CaptureMachinePoseIntent):
+                failure = MachinePoseCaptureResult(
+                    intent.intent_id,
+                    succeeded=False,
+                    message=str(exc) or type(exc).__name__,
+                )
+            elif isinstance(intent, MoveToFocusTargetIntent):
+                failure = FocusMoveResult(
+                    intent.intent_id,
+                    succeeded=False,
+                    message=str(exc) or type(exc).__name__,
+                )
+            elif isinstance(intent, RunAutofocusIntent):
+                failure = AutofocusResult(
+                    intent.intent_id,
+                    succeeded=False,
+                    message=str(exc) or type(exc).__name__,
+                )
+            elif isinstance(intent, RewriteLegacyDesignStateIntent):
+                failure = LegacyDesignStateRewriteResult(
+                    intent.intent_id,
+                    succeeded=False,
+                    message=str(exc) or type(exc).__name__,
+                )
+            else:
+                continue
+            _complete_coordinate_adapter(owner, failure)
+
+
+def _registration_view_changed(transition: CoordinateTransition) -> bool:
+    if transition.view_changed:
+        return True
+    if any(isinstance(intent, SaveCoordinateFramesIntent) for intent in transition.intents):
+        return True
+    return any(
+        notice.code in {"registration_capture_updated", "registration_save_pending"}
+        or notice.message == "Design coordinate frames could not be saved."
+        for notice in transition.notices
+    )
+
+
+def _render_coordinate_ui_effects(
+    owner: object,
+    transition: CoordinateTransition,
+) -> None:
+    for effect in transition.ui_effects:
+        if isinstance(effect, FinishOperatorAlignmentUiEffect):
+            set_snap = getattr(owner, "_set_design_snap_enabled", None)
+            if callable(set_snap):
+                set_snap(False)
+            finish = getattr(owner, "_finish_alignment_draft", None)
+            if callable(finish):
+                finish()
+            continue
+        if not isinstance(effect, RestoreOperatorAlignmentUiEffect):
+            continue
+        owner._alignment_design_draft = tuple(effect.design_marks)
+        owner._alignment_stage_draft = list(effect.stage_marks)
+        owner._alignment_draft_fit_residuals = None
+        set_snap = getattr(owner, "_set_design_snap_enabled", None)
+        if callable(set_snap):
+            set_snap(True)
+        window = getattr(owner, "design_layout_window", None)
+        if window is not None and hasattr(window, "set_alignment_capture_points"):
+            window.set_alignment_capture_points(effect.design_marks)
+        refresh = getattr(owner, "_refresh_manual_alignment_ui", None)
+        if callable(refresh):
+            refresh()
+        update = getattr(owner, "_update_stage_coordinate_apply_state", None)
+        if callable(update):
+            update()
+
+
+def _render_registration_snapshot(
+    owner: object,
+    transition: CoordinateTransition,
+) -> None:
+    registration = transition.snapshot.registration
+    release = registration.operator_pick_release
+    marks_changed = False
+    if registration.operator_stage_marks:
+        marks = list(registration.operator_stage_marks)
+        marks_changed = marks != getattr(owner, "_alignment_stage_draft", None)
+        owner._alignment_stage_draft = marks
+    if release is not None:
+        active_slot = getattr(owner, "_manual_alignment_pick_slot", None)
+        active_generation = getattr(owner, "_manual_alignment_pick_generation", None)
+        matching = bool(
+            (release.generation is None and active_slot is None)
+            or (
+                active_slot == release.slot
+                and active_generation == release.generation
             )
-            apply_coordinate_transition(owner, failed)
+        )
+        if matching:
+            owner._manual_alignment_pick_slot = None
+        if not registration.operator_stage_marks:
+            marks_changed = bool(getattr(owner, "_alignment_stage_draft", ()))
+            owner._alignment_stage_draft = []
+    if marks_changed or release is not None:
+        refresh = getattr(owner, "_refresh_manual_alignment_ui", None)
+        if callable(refresh):
+            refresh()
+        update = getattr(owner, "_update_stage_coordinate_apply_state", None)
+        if callable(update):
+            update()
+    window = getattr(owner, "design_layout_window", None)
+    if window is not None:
+        window.set_focus_candidate(registration.focus_candidate)
+        window.set_selected_focus_point(
+            None
+            if registration.focus_candidate is None
+            else registration.focus_candidate.center
+        )
+
+
+def _complete_coordinate_adapter(owner: object, result: object) -> None:
+    intent_id = getattr(result, "intent_id", getattr(result, "request_id", None))
+    if not isinstance(intent_id, int):
+        return
+    transition = owner._coordinate_system_coordinator.complete(
+        CoordinateAdapterCompletion(
+            intent_id=intent_id,
+            result=result,
+        )
+    )
+    apply_coordinate_transition(owner, transition)
 
 
 def request_coordinate_frame_load(owner: object) -> int:
@@ -104,6 +290,64 @@ def request_coordinate_frame_load(owner: object) -> int:
     )
     apply_coordinate_transition(owner, transition)
     return load_intent.intent_id
+
+
+def activate_current_design(
+    owner: object,
+    *,
+    session_state: object | None = None,
+    frame_metadata: object = _FRAME_METADATA_UNSET,
+    requested_frame_id: str | None = None,
+    create_new: bool = False,
+    create_new_if_registered: bool = False,
+) -> CoordinateTransition | None:
+    """Capture live adapter observations and submit one Design activation."""
+
+    session = getattr(owner, "_design_session", None)
+    coordinator = getattr(owner, "_coordinate_system_coordinator", None)
+    if session is None or coordinator is None:
+        return None
+    state = session.snapshot_state() if session_state is None else session_state
+    try:
+        pivot_value = owner._rotation_geometry_snapshot().pivot_machine_xy
+        pivot = (float(pivot_value[0]), float(pivot_value[1]))
+    except Exception:
+        pivot = None
+    try:
+        objective_value = owner._active_objective_xy_offset()
+        objective_offset = (
+            float(objective_value[0]),
+            float(objective_value[1]),
+        )
+    except Exception:
+        objective_offset = (0.0, 0.0)
+    stage = owner.stage_controller
+    axes_are_homed = getattr(stage, "axes_are_homed", None)
+    homed_axes = frozenset(
+        axis
+        for axis in ("X", "Y")
+        if callable(axes_are_homed) and axes_are_homed({axis})
+    )
+    latest_snapshot = getattr(stage, "latest_machine_coordinate_snapshot", None)
+    transition = coordinator.activate_design(
+        DesignActivationRequest(
+            session_state=state,
+            frame_metadata=(
+                getattr(owner, "_active_design_frame_metadata", None)
+                if frame_metadata is _FRAME_METADATA_UNSET
+                else frame_metadata
+            ),
+            machine_snapshot=(latest_snapshot() if callable(latest_snapshot) else None),
+            pivot_machine_xy=pivot,
+            objective_xy_offset=objective_offset,
+            requested_frame_id=requested_frame_id,
+            create_new=create_new,
+            create_new_if_registered=create_new_if_registered,
+            homed_axes=homed_axes,
+        )
+    )
+    apply_coordinate_transition(owner, transition)
+    return transition
 
 
 def handle_coordinate_frame_loaded(owner: object, result: object) -> None:
@@ -134,10 +378,7 @@ def handle_coordinate_frame_loaded(owner: object, result: object) -> None:
     )
     if callable(reconcile_calibrations):
         reconcile_calibrations()
-    apply_authority = getattr(owner, "_apply_coordinate_frame_authority_blocks", None)
-    if callable(apply_authority):
-        apply_authority()
-    owner._activate_loaded_design_frame()
+    activate_current_design(owner)
 def handle_coordinate_frame_saved(owner: object, result: object) -> None:
     transition = owner._coordinate_system_coordinator.complete(
         CoordinateAdapterCompletion(
@@ -165,18 +406,21 @@ def handle_coordinate_frame_failed(owner: object, failure: object) -> None:
             refresh_position()
 
 
-def complete_legacy_design_migration(owner: object) -> None:
+def complete_legacy_design_migration(
+    owner: object,
+    persisted_design_state: object,
+) -> None:
     """Replace legacy controller-owned registration after frame publication."""
 
+    if not isinstance(persisted_design_state, dict):
+        raise TypeError("persisted_design_state must be a mapping")
     state = owner.stage_controller.export_cached_controller_state()
     if state is None:
         loaded = owner.settings_manager.load_controller_state()
         state = dict(loaded) if isinstance(loaded, dict) else {}
     state.pop("design", None)
     state.pop("design_session", None)
-    session_state = owner._design_session.export_persisted_state()
-    if session_state is not None:
-        state["design_session"] = session_state
+    state["design_session"] = deepcopy(persisted_design_state)
     owner.settings_manager.save_controller_state(state)
 
 
@@ -212,9 +456,7 @@ def on_serial_connected(owner: object, serial_port: object) -> None:
         cached_state,
         cache_already_loaded=True,
     )
-    apply_authority = getattr(owner, "_apply_coordinate_frame_authority_blocks", None)
-    if callable(apply_authority):
-        apply_authority()
+    activate_current_design(owner)
     if owner.joystick_panel and owner.joystick_dock:
         owner.joystick_panel.set_serial(owner.serial_connection)
         owner.joystick_dock.setVisible(True)
@@ -271,9 +513,7 @@ def on_serial_disconnected(owner: object) -> None:
     if owner.oscillation_panel:
         owner.oscillation_panel.set_running(False, "")
     owner._reset_manual_alignment(cancel_pick=True)
-    apply_authority = getattr(owner, "_apply_coordinate_frame_authority_blocks", None)
-    if callable(apply_authority):
-        apply_authority()
+    activate_current_design(owner)
     owner._update_design_position(None)
 
 
@@ -383,9 +623,7 @@ def on_controller_reboot_detected(owner: object) -> None:
     owner._stage_unhomed_display_origins.clear()
     owner._pending_persisted_design_state = None
     owner._pending_persisted_design_position = None
-    apply_authority = getattr(owner, "_apply_coordinate_frame_authority_blocks", None)
-    if callable(apply_authority):
-        apply_authority()
+    activate_current_design(owner)
 
 
 def _clear_exact_step_targets(owner: object) -> None:
@@ -456,17 +694,9 @@ def controller_state_with_design(owner: object) -> dict[str, object] | None:
     state = owner.stage_controller.export_cached_controller_state()
     if state is None:
         return None
-    if getattr(owner, "_legacy_design_migration_request_id", None) is not None:
-        legacy_state = getattr(owner, "_legacy_design_migration_state", None)
-        if not isinstance(legacy_state, dict):
-            persisted = owner.settings_manager.load_controller_state()
-            if isinstance(persisted, dict):
-                legacy_state = persisted.get(
-                    "design_session",
-                    persisted.get("design"),
-                )
-        if isinstance(legacy_state, dict):
-            state["design_session"] = dict(legacy_state)
+    registration = owner._coordinate_system_coordinator.snapshot().registration
+    if isinstance(registration.legacy_migration_state, dict):
+        state["design_session"] = deepcopy(registration.legacy_migration_state)
         return state
     design_state = owner._design_session.export_persisted_state()
     if design_state is not None:

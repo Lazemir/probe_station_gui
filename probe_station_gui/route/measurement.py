@@ -161,7 +161,10 @@ class RouteMeasurementRunner:
         photo_output_dir: str = "",
         wait_before_first_point: bool = False,
         design_frame_snapshot: object | None = None,
-        post_success_contact: Callable[[RouteContactPlacementResult], None] | None = None,
+        post_success_contact: Callable[
+            [RouteContactPlacementResult], Callable[[], None] | None
+        ]
+        | None = None,
     ) -> None:
         self._points = list(points)
         self._csv_writer = RouteMeasurementCsvWriter(csv_path)

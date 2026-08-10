@@ -19,6 +19,11 @@ from probe_station_gui.design.model import (
     MeasurementTarget,
     Point2D,
 )
+from probe_station_gui.design.session_state import (
+    DesignSessionState,
+    restore_session_state,
+    snapshot_session_state,
+)
 from probe_station_gui.route.model import MeasurementRoute, RoutePoint
 
 
@@ -98,6 +103,16 @@ class DesignSession:
         repr=False,
         compare=False,
     )
+
+    def snapshot_state(self) -> DesignSessionState:
+        """Return a detached snapshot without replacing this session."""
+
+        return snapshot_session_state(self)
+
+    def apply_state(self, state: DesignSessionState) -> None:
+        """Replace owned state atomically while retaining this session's identity."""
+
+        restore_session_state(self, state)
 
     def export_persisted_state(self) -> dict[str, object] | None:
         """Return design state tied to the current controller coordinate session."""
@@ -1070,4 +1085,4 @@ class DesignSession:
         return (x_value, y_value)
 
 
-__all__ = ["AlignmentPreparation", "DesignSession"]
+__all__ = ["AlignmentPreparation", "DesignSession", "DesignSessionState"]
