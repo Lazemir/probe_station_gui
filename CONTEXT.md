@@ -18,6 +18,16 @@ The active refactoring roadmap is `.superpowers/sdd/refactor-plan.md`; it tracks
 
 ## Language
 
+### Coordinate Systems
+
+**Coordinate System**:
+A user-selectable coordinate view for displayed positions and relative movement. Machine, Design, and Custom are Coordinate Systems.
+_Avoid_: Coordinate Frame, WCO
+
+**Coordinate Frame**:
+A stored registration of transform, readiness, and provenance that relates a Coordinate System to the Stage.
+_Avoid_: Coordinate System, WCO
+
 ## Microscope Distortion Calibration
 
 The project-specific lens distortion calibration protocol is seam-debug based. Do not treat it as a generic grid-pitch calibration, and do not assume the physical grid pitch is known unless the whole 50 um grid calibration target fits in the current objective FOV.
