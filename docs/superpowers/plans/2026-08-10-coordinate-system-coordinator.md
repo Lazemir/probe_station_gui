@@ -69,16 +69,29 @@ git commit -m "docs: define coordinate coordinator refactor"
 - Create: `probe_station_gui/coordinates/coordinator.py`
 - Create: `probe_station_gui/coordinates/coordinator_model.py`
 - Create: `probe_station_gui/coordinates/coordinator_persistence.py`
+- Create: `probe_station_gui/coordinates/store_model.py`
 - Modify: `probe_station_gui/coordinates/__init__.py`
+- Modify: `probe_station_gui/coordinates/persistence.py`
+- Modify: `probe_station_gui/design/navigation_adapter.py`
+- Modify: `probe_station_gui/design/registration_lifecycle.py`
 - Modify: `probe_station_gui/views/main_window_connection_flow.py:26-166`
 - Modify: `main.py:950-1075,7716-7959`
 - Create: `tests/coordinates/test_coordinator_persistence.py`
+- Modify: `tests/coordinates/test_public_api.py`
+- Modify: `tests/design/test_navigation_adapter.py`
+- Modify: `tests/design/test_registration_lifecycle.py`
 - Modify: `tests/ui/test_main_window_connection_flow.py:502-670,887-930`
 - Modify: `tests/app/test_main_design_navigation.py:1620-2260`
+- Modify: `tests/app/test_main_software_coordinate_pivot.py`
 
 **Owned after this task:** frame load generation, the single registry/session
 instances for every frame publication, durable document, publication journal,
 acknowledgements, rollback grouping/application, and persistence intents.
+Store completion DTOs live in the Qt-free `store_model.py` seam and
+`persistence.py` re-exports them for compatibility. Persistence rollback also
+owns the minimal exact-operation release hook for the registration lifecycle's
+first-contact write latch: a terminal rollback must permit that same A commit
+to be retried, while stale or superseded failures must not release it.
 Non-publication registration/selection behavior remains transitional until its
 owning pass, but no publisher mutates registry/session outside the coordinator.
 
@@ -195,7 +208,7 @@ Record Wily/Radon delta and require an independent review with no Critical or
 Important finding.
 
 ```powershell
-git add probe_station_gui/coordinates/coordinator.py probe_station_gui/coordinates/coordinator_model.py probe_station_gui/coordinates/coordinator_persistence.py probe_station_gui/coordinates/__init__.py probe_station_gui/views/main_window_connection_flow.py main.py tests/coordinates/test_coordinator_persistence.py tests/ui/test_main_window_connection_flow.py tests/app/test_main_design_navigation.py
+git add docs/superpowers/plans/2026-08-10-coordinate-system-coordinator.md probe_station_gui/coordinates/coordinator.py probe_station_gui/coordinates/coordinator_model.py probe_station_gui/coordinates/coordinator_persistence.py probe_station_gui/coordinates/store_model.py probe_station_gui/coordinates/__init__.py probe_station_gui/coordinates/persistence.py probe_station_gui/design/navigation_adapter.py probe_station_gui/design/registration_lifecycle.py probe_station_gui/views/main_window_connection_flow.py main.py tests/coordinates/test_coordinator_persistence.py tests/coordinates/test_public_api.py tests/design/test_navigation_adapter.py tests/design/test_registration_lifecycle.py tests/ui/test_main_window_connection_flow.py tests/app/test_main_design_navigation.py tests/app/test_main_software_coordinate_pivot.py
 git commit -m "refactor: centralize coordinate frame persistence"
 ```
 

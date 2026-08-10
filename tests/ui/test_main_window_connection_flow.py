@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import replace
 from types import SimpleNamespace
 
 from probe_station_gui.coordinates.model import (
@@ -9,22 +8,142 @@ from probe_station_gui.coordinates.model import (
     FrameKind,
     ReadinessStatus,
 )
-from probe_station_gui.coordinates.lifecycle import (
-    CoordinateFrameLifecycle,
-    FrameLifecycleEffects,
-    FrameLoadResult,
-    FramePublication,
+from probe_station_gui.coordinates.coordinator_model import (
+    CoordinateAdapterCompletion,
+    CoordinateNotice,
+    CoordinateSystemSnapshot,
+    CoordinateTransition,
+    LoadCoordinateFramesIntent,
+    MachineProfileObservation,
+    SaveCoordinateFramesIntent,
 )
-
 from probe_station_gui.coordinates.persistence import (
     CoordinateFrameDocument,
     CoordinateFrameLoadResult,
     CoordinateFrameStoreSuccess,
 )
-from probe_station_gui.coordinates.provenance import RUNTIME_PROVENANCE_STATUS
-from probe_station_gui.coordinates.registry import CoordinateFrameRegistry
 from probe_station_gui.coordinates.transforms import BFrameTransform
 from probe_station_gui.views import main_window_connection_flow as connection_flow
+
+
+def test_coordinate_transition_submits_load_intent_to_store(monkeypatch) -> None:
+    events: list[object] = []
+    snapshot = CoordinateSystemSnapshot(False, (), None)
+    owner = SimpleNamespace(
+        _coordinate_frame_store=SimpleNamespace(
+            load=lambda request_id, **kwargs: events.append(
+                ("load", request_id, kwargs)
+            )
+        ),
+        _coordinate_frames_loaded=True,
+    )
+    monkeypatch.setattr(
+        connection_flow.stage_position_panel,
+        "refresh_coordinate_frame_display",
+        lambda _owner: events.append(("refresh",)),
+    )
+
+    connection_flow.apply_coordinate_transition(
+        owner,
+        CoordinateTransition(
+            snapshot,
+            intents=(LoadCoordinateFramesIntent(7, "rig-7"),),
+        ),
+    )
+
+    assert owner._coordinate_frames_loaded is False
+    assert events == [
+        ("refresh",),
+        ("load", 7, {"machine_profile_id": "rig-7"}),
+    ]
+
+
+def test_coordinate_load_request_and_completion_delegate_to_coordinator() -> None:
+    calls: list[object] = []
+    pending = CoordinateSystemSnapshot(False, (), None)
+    loaded = CoordinateSystemSnapshot(True, (), CoordinateFrameDocument())
+
+    class _Coordinator:
+        def start(self, profile: MachineProfileObservation) -> CoordinateTransition:
+            calls.append(("start", profile))
+            return CoordinateTransition(
+                pending,
+                intents=(LoadCoordinateFramesIntent(8, profile.machine_profile_id),),
+            )
+
+        def complete(self, completion: CoordinateAdapterCompletion) -> CoordinateTransition:
+            calls.append(("complete", completion))
+            return CoordinateTransition(loaded)
+
+    owner = SimpleNamespace(
+        _coordinate_system_coordinator=_Coordinator(),
+        _coordinate_frame_store=SimpleNamespace(
+            load=lambda request_id, **kwargs: calls.append(
+                ("store_load", request_id, kwargs)
+            )
+        ),
+        _coordinate_frames_loaded=True,
+        _current_machine_profile_id=lambda: "rig-8",
+        _materialize_software_coordinate_frames=lambda: calls.append(("custom",)),
+        _reconcile_design_calibration_fingerprints=lambda: calls.append(
+            ("reconcile",)
+        ),
+        _apply_coordinate_frame_authority_blocks=lambda: calls.append(
+            ("authority",)
+        ),
+        _activate_loaded_design_frame=lambda: calls.append(("activate",)),
+    )
+    result = CoordinateFrameLoadResult(8, CoordinateFrameDocument())
+
+    request_id = connection_flow.request_coordinate_frame_load(owner)
+    connection_flow.handle_coordinate_frame_loaded(owner, result)
+
+    assert request_id == 8
+    assert calls == [
+        ("start", MachineProfileObservation("rig-8")),
+        ("store_load", 8, {"machine_profile_id": "rig-8"}),
+        ("complete", CoordinateAdapterCompletion(8, result)),
+        ("custom",),
+        ("reconcile",),
+        ("authority",),
+        ("activate",),
+    ]
+
+
+def test_coordinate_transition_submits_save_and_presents_notices(monkeypatch) -> None:
+    events: list[object] = []
+    document = CoordinateFrameDocument()
+    owner = SimpleNamespace(
+        _coordinate_frame_store=SimpleNamespace(
+            publish=lambda request_id, value: events.append(
+                ("save", request_id, value)
+            )
+        ),
+        _coordinate_frames_loaded=False,
+        _show_status=lambda message, duration=0: events.append(
+            ("status", message, duration)
+        ),
+    )
+    monkeypatch.setattr(
+        connection_flow.stage_position_panel,
+        "refresh_coordinate_frame_display",
+        lambda _owner: events.append(("refresh",)),
+    )
+
+    connection_flow.apply_coordinate_transition(
+        owner,
+        CoordinateTransition(
+            CoordinateSystemSnapshot(True, (), document),
+            intents=(SaveCoordinateFramesIntent(9, document),),
+            notices=(CoordinateNotice("saved", duration_ms=7000),),
+        ),
+    )
+
+    assert events == [
+        ("refresh",),
+        ("status", "saved", 7000),
+        ("save", 9, document),
+    ]
 
 
 class _Serial:
@@ -499,328 +618,32 @@ def test_restore_persisted_controller_state_imports_current_cache(monkeypatch) -
     ]
 
 
-def test_coordinate_frame_document_load_is_independent_from_serial_controller_state() -> None:
-    events: list[object] = []
-    owner = SimpleNamespace(
-        serial_connection=None,
-        _coordinate_frame_request_id=0,
-        _coordinate_frame_lifecycle=CoordinateFrameLifecycle(),
-        _coordinate_frames_loaded=False,
-        _coordinate_frame_registry=CoordinateFrameRegistry(),
-        _coordinate_frame_store=SimpleNamespace(
-            load=lambda request_id, **kwargs: events.append(
-                ("frame_load", request_id, kwargs)
-            )
-        ),
-        _current_machine_profile_id=lambda: "rig-7",
-        _apply_coordinate_frame_authority_blocks=lambda: events.append(
-            ("authority_blocks",)
-        ),
-        _activate_loaded_design_frame=lambda: events.append(("activate_design",)),
-        _materialize_software_coordinate_frames=lambda: events.append(("custom_frames",)),
-        _reconcile_design_calibration_fingerprints=lambda: events.append(
-            ("reconcile_calibrations",)
-        ),
-    )
-
-    request_id = connection_flow.request_coordinate_frame_load(owner)
-    connection_flow.handle_coordinate_frame_loaded(
-        owner,
-        CoordinateFrameLoadResult(request_id, CoordinateFrameDocument()),
-    )
-
-    assert events == [
-        ("frame_load", request_id, {"machine_profile_id": "rig-7"}),
-        ("custom_frames",),
-        ("reconcile_calibrations",),
-        ("authority_blocks",),
-        ("activate_design",),
-    ]
-    assert owner._coordinate_frames_loaded is True
-
-
-def test_coordinate_frame_load_delegates_generation_and_result_acceptance(
-    monkeypatch,
-) -> None:
-    calls: list[object] = []
-    record = _design_record()
-
-    class _Lifecycle:
-        def begin_load(self, request_id: int) -> FrameLifecycleEffects:
-            calls.append(("begin_load", request_id))
-            return FrameLifecycleEffects(
-                invalidate_session_reason="checking provenance",
-                refresh_display=True,
-            )
-
-        def accept_load(self, result: FrameLoadResult) -> FrameLifecycleEffects:
-            calls.append(("accept_load", result))
-            return FrameLifecycleEffects(replace_records=result.records)
-
-    registry = CoordinateFrameRegistry()
-    invalidations: list[str] = []
-    owner = SimpleNamespace(
-        _coordinate_frame_request_id=0,
-        _coordinate_frame_lifecycle=_Lifecycle(),
-        _coordinate_frames_loaded=True,
-        _coordinate_frame_registry=registry,
-        _coordinate_frame_store=SimpleNamespace(
-            load=lambda request_id, **_kwargs: calls.append(("store_load", request_id))
-        ),
-        _design_session=SimpleNamespace(
-            active_frame_id=record.frame_id,
-            invalidate_registration=invalidations.append,
-        ),
-        _activate_loaded_design_frame=lambda: calls.append(("activate",)),
-    )
-    monkeypatch.setattr(
-        connection_flow.stage_position_panel,
-        "refresh_coordinate_frame_display",
-        lambda _owner: calls.append(("refresh",)),
-    )
-
-    request_id = connection_flow.request_coordinate_frame_load(owner)
-    document = CoordinateFrameDocument(records=(record,))
-    connection_flow.handle_coordinate_frame_loaded(
-        owner,
-        CoordinateFrameLoadResult(request_id, document),
-    )
-
-    assert calls == [
-        ("begin_load", request_id),
-        ("refresh",),
-        ("store_load", request_id),
-        ("accept_load", FrameLoadResult(request_id, (record,))),
-        ("activate",),
-    ]
-    assert invalidations == ["checking provenance"]
-    assert registry.snapshot().records == (record,)
-    assert not hasattr(owner, "_coordinate_frame_load_request_id")
-
-
-def test_publication_is_tracked_before_store_submission(monkeypatch) -> None:
-    events: list[object] = []
-
-    class _Lifecycle:
-        def track_publication(self, publication: FramePublication) -> None:
-            events.append(("track", publication))
-
-    record = _design_record()
-    registry = CoordinateFrameRegistry()
-    registry.add(record)
-    owner = SimpleNamespace(
-        _coordinate_frame_request_id=7,
-        _coordinate_frame_lifecycle=_Lifecycle(),
-        _coordinate_frame_registry=registry,
-        _coordinate_frame_store=SimpleNamespace(
-            publish=lambda request_id, document: events.append(
-                ("publish", request_id, document)
-            )
-        ),
-    )
-    monkeypatch.setattr(
-        connection_flow.stage_position_panel,
-        "refresh_coordinate_frame_display",
-        lambda _owner: None,
-    )
-
-    request_id = connection_flow.publish_coordinate_frames(owner)
-
-    assert events[0] == (
-        "track",
-        FramePublication(request_id=request_id, records=(record,)),
-    )
-    assert events[1][0:2] == ("publish", request_id)
-    assert not hasattr(owner, "_coordinate_frame_latest_save_request_id")
-
-
-def test_coordinate_frame_load_marks_existing_designs_unavailable_while_pending() -> None:
-    loads: list[tuple[int, dict[str, object]]] = []
-    invalidations: list[str] = []
-    registry = CoordinateFrameRegistry()
-    registry.add(_design_record())
-    owner = SimpleNamespace(
-        _coordinate_frame_request_id=0,
-        _coordinate_frame_lifecycle=CoordinateFrameLifecycle(),
-        _coordinate_frames_loaded=True,
-        _coordinate_frame_registry=registry,
-        _coordinate_frame_store=SimpleNamespace(
-            load=lambda request_id, **kwargs: loads.append((request_id, kwargs))
-        ),
-        _design_session=SimpleNamespace(
-            active_frame_id=_design_record().frame_id,
-            invalidate_registration=invalidations.append,
-        ),
-    )
-
-    request_id = connection_flow.request_coordinate_frame_load(owner)
-
-    pending = registry.get(_design_record().frame_id)
-    assert request_id == 1
-    assert owner._coordinate_frames_loaded is False
-    assert pending is not None
-    assert pending.metadata[RUNTIME_PROVENANCE_STATUS] == "pending"
-    assert invalidations == ["Design coordinate provenance is being checked."]
-    assert loads == [(1, {"machine_profile_id": "default"})]
-
-
-def test_loaded_document_preserves_rejected_raw_records_through_publish(
-    monkeypatch,
-) -> None:
-    published: list[CoordinateFrameDocument] = []
-    payload = CoordinateFrameDocument(records=(_design_record(),)).to_dict()
-    rejected = {"frame_id": "broken", "future": {"keep": True}}
-    payload["records"].append(rejected)
-    document = CoordinateFrameDocument.from_dict(payload)
-    lifecycle = CoordinateFrameLifecycle()
-    lifecycle.begin_load(1)
-    owner = SimpleNamespace(
-        _coordinate_frame_request_id=1,
-        _coordinate_frame_lifecycle=lifecycle,
-        _coordinate_frames_loaded=False,
-        _coordinate_frame_registry=CoordinateFrameRegistry(),
-        _coordinate_frame_store=SimpleNamespace(
-            publish=lambda _request_id, value: published.append(value)
-        ),
-        _activate_loaded_design_frame=lambda: None,
-        _show_status=lambda *_args: None,
-    )
-    monkeypatch.setattr(
-        connection_flow.stage_position_panel,
-        "refresh_coordinate_frame_display",
-        lambda _owner: None,
-    )
-
-    connection_flow.handle_coordinate_frame_loaded(
-        owner,
-        CoordinateFrameLoadResult(1, document),
-    )
-    owner._coordinate_frame_registry.reset((_design_record(name="renamed"),))
-    connection_flow.publish_coordinate_frames(owner)
-
-    assert published[0].to_dict()["records"][0]["name"] == "renamed"
-    assert published[0].to_dict()["records"][1] == rejected
-    assert not hasattr(owner, "_coordinate_frame_latest_save_request_id")
-
-
-def test_stale_provenance_callback_cannot_expose_design_frames(monkeypatch) -> None:
-    lifecycle = CoordinateFrameLifecycle()
-    lifecycle.begin_load(2)
-    owner = SimpleNamespace(
-        _coordinate_frame_lifecycle=lifecycle,
-        _coordinate_frames_loaded=False,
-        _coordinate_frame_registry=CoordinateFrameRegistry(),
-    )
-    monkeypatch.setattr(
-        connection_flow.stage_position_panel,
-        "refresh_coordinate_frame_display",
-        lambda _owner: None,
-    )
-
-    connection_flow.handle_coordinate_frame_loaded(
-        owner,
-        CoordinateFrameLoadResult(
-            1,
-            CoordinateFrameDocument(records=(_design_record(),)),
-            runtime_records=(_design_record(),),
-        ),
-    )
-
-    assert owner._coordinate_frames_loaded is False
-    assert owner._coordinate_frame_registry.snapshot().records == ()
-
-
-def test_only_current_delayed_provenance_callback_reactivates_design(
-    monkeypatch,
-) -> None:
-    loads: list[int] = []
-    invalidations: list[str] = []
-    activations: list[str] = []
-    record = _design_record()
-    verified = replace(
-        record,
-        metadata={
-            **record.metadata,
-            RUNTIME_PROVENANCE_STATUS: "verified",
-        },
-    )
-    registry = CoordinateFrameRegistry()
-    registry.add(record)
-    owner = SimpleNamespace(
-        _coordinate_frame_request_id=0,
-        _coordinate_frame_lifecycle=CoordinateFrameLifecycle(),
-        _coordinate_frames_loaded=True,
-        _coordinate_frame_registry=registry,
-        _coordinate_frame_store=SimpleNamespace(
-            load=lambda request_id, **_kwargs: loads.append(request_id)
-        ),
-        _design_session=SimpleNamespace(
-            active_frame_id=record.frame_id,
-            invalidate_registration=invalidations.append,
-        ),
-        _activate_loaded_design_frame=lambda: activations.append("activated"),
-    )
-    monkeypatch.setattr(
-        connection_flow.stage_position_panel,
-        "refresh_coordinate_frame_display",
-        lambda _owner: None,
-    )
-
-    stale_request_id = connection_flow.request_coordinate_frame_load(owner)
-    current_request_id = connection_flow.request_coordinate_frame_load(owner)
-    document = CoordinateFrameDocument(records=(record,))
-
-    connection_flow.handle_coordinate_frame_loaded(
-        owner,
-        CoordinateFrameLoadResult(
-            stale_request_id,
-            document,
-            runtime_records=(verified,),
-        ),
-    )
-
-    assert owner._coordinate_frames_loaded is False
-    assert activations == []
-    assert registry.get(record.frame_id).metadata[RUNTIME_PROVENANCE_STATUS] == (
-        "pending"
-    )
-
-    connection_flow.handle_coordinate_frame_loaded(
-        owner,
-        CoordinateFrameLoadResult(
-            current_request_id,
-            document,
-            runtime_records=(verified,),
-        ),
-    )
-
-    assert loads == [stale_request_id, current_request_id]
-    assert invalidations == [
-        "Design coordinate provenance is being checked.",
-        "Design coordinate provenance is being checked.",
-    ]
-    assert owner._coordinate_frames_loaded is True
-    assert registry.get(record.frame_id).metadata[RUNTIME_PROVENANCE_STATUS] == (
-        "verified"
-    )
-    assert activations == ["activated"]
-
-
-def test_legacy_state_is_removed_only_after_frame_document_publish_succeeds(
+def test_legacy_state_is_removed_only_after_matching_frame_save(
     monkeypatch,
 ) -> None:
     events: list[object] = []
+    snapshot = CoordinateSystemSnapshot(True, (), CoordinateFrameDocument())
+
+    class _Coordinator:
+        def complete(self, completion: CoordinateAdapterCompletion) -> CoordinateTransition:
+            events.append(("complete", completion.intent_id))
+            notices = (
+                (CoordinateNotice("", code="legacy_migration_saved"),)
+                if completion.intent_id == 7
+                else ()
+            )
+            return CoordinateTransition(snapshot, notices=notices)
+
     owner = SimpleNamespace(
-        _coordinate_frame_request_id=0,
-        _coordinate_frame_lifecycle=CoordinateFrameLifecycle(),
-        _legacy_design_migration_request_id=None,
+        _coordinate_system_coordinator=_Coordinator(),
+        _coordinate_frames_loaded=True,
+        _legacy_design_migration_request_id=7,
         _legacy_design_migration_state={"version": 2},
-        _coordinate_frame_registry=CoordinateFrameRegistry(),
-        _coordinate_frame_store=SimpleNamespace(
-            publish=lambda request_id, _document: events.append(
-                ("publish", request_id)
-            )
-        ),
+    )
+    monkeypatch.setattr(
+        connection_flow.stage_position_panel,
+        "refresh_coordinate_frame_display",
+        lambda _owner: None,
     )
     monkeypatch.setattr(
         connection_flow,
@@ -828,30 +651,18 @@ def test_legacy_state_is_removed_only_after_frame_document_publish_succeeds(
         lambda _owner: events.append(("remove_legacy",)),
     )
 
-    request_id = connection_flow.publish_coordinate_frames(
-        owner,
-        legacy_migration=True,
-    )
-    assert events == [("publish", request_id)]
-
-    replacement_request_id = connection_flow.publish_coordinate_frames(owner)
     connection_flow.handle_coordinate_frame_saved(
         owner,
-        CoordinateFrameStoreSuccess(request_id, "save"),
+        CoordinateFrameStoreSuccess(6, "save"),
     )
-    assert events == [
-        ("publish", request_id),
-        ("publish", replacement_request_id),
-    ]
-
     connection_flow.handle_coordinate_frame_saved(
         owner,
-        CoordinateFrameStoreSuccess(replacement_request_id, "save"),
+        CoordinateFrameStoreSuccess(7, "save"),
     )
 
     assert events == [
-        ("publish", request_id),
-        ("publish", replacement_request_id),
+        ("complete", 6),
+        ("complete", 7),
         ("remove_legacy",),
     ]
     assert owner._legacy_design_migration_request_id is None
@@ -863,10 +674,25 @@ def test_failed_legacy_controller_state_rewrite_keeps_migration_pending(
 ) -> None:
     statuses: list[str] = []
     legacy = {"version": 2}
+    snapshot = CoordinateSystemSnapshot(True, (), CoordinateFrameDocument())
     owner = SimpleNamespace(
+        _coordinate_system_coordinator=SimpleNamespace(
+            complete=lambda _completion: CoordinateTransition(
+                snapshot,
+                notices=(
+                    CoordinateNotice("", code="legacy_migration_saved"),
+                ),
+            )
+        ),
+        _coordinate_frames_loaded=True,
         _legacy_design_migration_request_id=4,
         _legacy_design_migration_state=legacy,
         _show_status=lambda message, _timeout: statuses.append(message),
+    )
+    monkeypatch.setattr(
+        connection_flow.stage_position_panel,
+        "refresh_coordinate_frame_display",
+        lambda _owner: None,
     )
     monkeypatch.setattr(
         connection_flow,
@@ -882,8 +708,6 @@ def test_failed_legacy_controller_state_rewrite_keeps_migration_pending(
     assert owner._legacy_design_migration_request_id == 4
     assert owner._legacy_design_migration_state is legacy
     assert statuses == ["Design registration migration could not be finalized."]
-
-
 def test_controller_state_persistence_preserves_legacy_registration_until_frame_save() -> None:
     legacy = {
         "version": 2,

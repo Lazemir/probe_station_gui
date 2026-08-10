@@ -29,13 +29,24 @@ from probe_station_gui.design.model import DesignRegistration
 from probe_station_gui.design.klayout_types import StructureBoundsResult
 from probe_station_gui.design.session import DesignSession
 from probe_station_gui.coordinates.registry import CoordinateFrameRegistry
+from probe_station_gui.coordinates.coordinator import CoordinateSystemCoordinator
+from probe_station_gui.coordinates.coordinator_model import (
+    CoordinateAdapterCompletion,
+    CoordinateSystemSnapshot,
+    CoordinateTransition,
+    DesignSessionCheckpoint,
+    LoadCoordinateFramesIntent,
+    MachineProfileObservation,
+)
+from probe_station_gui.coordinates.persistence import (
+    CoordinateFrameDocument,
+    CoordinateFrameLoadResult,
+    CoordinateFrameStoreFailure,
+)
 from probe_station_gui.coordinates.lifecycle import (
     CoordinateFrameLifecycle,
     DesignFrameUsabilitySnapshot,
     DesignUsabilityContext,
-    FrameLifecycleEffects,
-    FramePublication,
-    FramePublicationResult,
 )
 from probe_station_gui.coordinates.provenance import (
     RUNTIME_PROVENANCE_REASON,
@@ -141,6 +152,51 @@ def _make_document(tmp_path: Path) -> DesignDocument:
         library=_FakeLibrary(),
         top_cell_name="TOP",
     )
+
+
+def _install_coordinate_coordinator(
+    window: Main,
+    *,
+    publish: object | None = None,
+) -> CoordinateSystemCoordinator:
+    registry = window._coordinate_frame_registry
+    session = window._design_session
+    lifecycle = getattr(window, "_coordinate_frame_lifecycle", None)
+    if lifecycle is None:
+        lifecycle = CoordinateFrameLifecycle()
+        window._coordinate_frame_lifecycle = lifecycle
+    records = registry.snapshot().records
+    session_checkpoint = DesignSessionCheckpoint.capture(session)
+    coordinator = CoordinateSystemCoordinator(
+        registry=registry,
+        session=session,
+        lifecycle=lifecycle,
+        registration_lifecycle=getattr(
+            window,
+            "_design_registration_lifecycle",
+            None,
+        ),
+    )
+    load = coordinator.start(MachineProfileObservation("test-profile")).intents[0]
+    assert isinstance(load, LoadCoordinateFramesIntent)
+    coordinator.complete(
+        CoordinateAdapterCompletion(
+            load.intent_id,
+            CoordinateFrameLoadResult(
+                load.intent_id,
+                CoordinateFrameDocument(records=records),
+                runtime_records=records,
+            ),
+        )
+    )
+    session_checkpoint.restore(session)
+    window._coordinate_system_coordinator = coordinator
+    window._coordinate_frames_loaded = True
+    publish_callback = publish if callable(publish) else (lambda *_args: None)
+    window._coordinate_frame_store = types.SimpleNamespace(
+        publish=publish_callback,
+    )
+    return coordinator
 
 
 def _lifecycle_context(
@@ -579,12 +635,9 @@ def test_first_fresh_b_status_retries_legacy_migration_once(
         latest_machine_coordinate_snapshot=lambda: snapshot["value"],
         axes_are_homed=lambda axes: axes.issubset({"X", "Y"}),
     )
-    monkeypatch.setattr(
-        main_module.connection_flow,
-        "publish_coordinate_frames",
-        lambda _owner, *, legacy_migration=False: publish_calls.append(
-            bool(legacy_migration)
-        ),
+    _install_coordinate_coordinator(
+        window,
+        publish=lambda _request_id, _document: publish_calls.append(True),
     )
 
     Main._activate_loaded_design_frame(window)
@@ -609,7 +662,6 @@ def test_first_fresh_b_status_retries_legacy_migration_once(
     assert session.active_frame_id is not None
     assert session.registration is not None and session.registration.valid
     assert len(registry.snapshot().records) == 1
-    assert registry.snapshot().generation == 1
     assert publish_calls == [True]
 
 
@@ -715,11 +767,7 @@ def test_legacy_migration_without_verified_capture_wco_blocks_and_preserves_payl
     )
     window._show_status = lambda message, _timeout: statuses.append(str(message))
     _set_rotation_settings(window)
-    monkeypatch.setattr(
-        main_module.connection_flow,
-        "publish_coordinate_frames",
-        lambda _owner, *, legacy_migration=False: None,
-    )
+    _install_coordinate_coordinator(window)
 
     Main._activate_loaded_design_frame(window)
 
@@ -784,10 +832,9 @@ def test_stage_mark_capture_commits_active_frame_without_motion(
     window._refresh_design_position = lambda: None
     statuses: list[str] = []
     window._show_status = lambda message, _timeout=0: statuses.append(str(message))
-    monkeypatch.setattr(
-        main_module.connection_flow,
-        "publish_coordinate_frames",
-        lambda _owner: events.append(("publish",)),
+    _install_coordinate_coordinator(
+        window,
+        publish=lambda _request_id, _document: events.append(("publish",)),
     )
 
     Main._capture_stage_source_mark(window)
@@ -804,6 +851,23 @@ def test_stage_mark_capture_commits_active_frame_without_motion(
     )
     Main._capture_stage_source_mark(window)
     second_token, _second_axes = requests.pop()
+    publication_order: list[str] = []
+    real_capture = DesignSessionCheckpoint.capture
+    real_apply_effects = Main._apply_registration_effects
+    monkeypatch.setattr(
+        DesignSessionCheckpoint,
+        "capture",
+        classmethod(
+            lambda _cls, target: (
+                publication_order.append("checkpoint"),
+                real_capture(target),
+            )[1]
+        ),
+    )
+    window._apply_registration_effects = lambda effects: (
+        publication_order.append("session_effect"),
+        real_apply_effects(window, effects),
+    )[1]
     second_snapshot = next(snapshots)
     window.stage_controller.latest_machine_coordinate_snapshot = lambda: second_snapshot
     Main._on_registration_machine_coordinate_snapshot_finished(
@@ -824,10 +888,11 @@ def test_stage_mark_capture_commits_active_frame_without_motion(
     assert committed.transform.reference_b_deg == 42.0
     assert session.source_stage_marks_compact() == [(-97.0, 204.0), (-96.0, 204.0)]
     assert events == [("publish",)]
+    assert publication_order[:2] == ["checkpoint", "session_effect"]
     assert isinstance(window._design_registration_lifecycle, DesignRegistrationLifecycle)
     assert not hasattr(window, "_pending_registration_physical_marks")
     assert not hasattr(window, "_pending_registration_mark_capture")
-    assert "captured" in statuses[-1].lower()
+    assert statuses[-1] == "Saving design registration."
 
 
 def test_stage_mark_capture_normalizes_mixed_b_samples_to_first_context(
@@ -855,11 +920,7 @@ def test_stage_mark_capture_normalizes_mixed_b_samples_to_first_context(
     window._refresh_design_panel = lambda: None
     window._refresh_design_position = lambda: None
     window._show_status = lambda *_args: None
-    monkeypatch.setattr(
-        main_module.connection_flow,
-        "publish_coordinate_frames",
-        lambda _owner: None,
-    )
+    _install_coordinate_coordinator(window)
 
     Main._capture_stage_source_mark(window)
     first = _machine_snapshot((10.0, 0.0, 0.0, 0.0, 0.0))
@@ -963,10 +1024,9 @@ def test_operator_align_normalizes_physical_marks_captured_at_different_b_and_pi
     window._refresh_design_position = lambda: None
     window._update_coordinate_display = lambda **_kwargs: None
     window._show_status = lambda message, _timeout=0: statuses.append(str(message))
-    monkeypatch.setattr(
-        main_module.connection_flow,
-        "publish_coordinate_frames",
-        lambda owner, **_kwargs: publishes.append(owner),
+    _install_coordinate_coordinator(
+        window,
+        publish=lambda _request_id, _document: publishes.append(window),
     )
 
     Main._on_alignment_draft_accepted(
@@ -1064,7 +1124,7 @@ def test_operator_align_normalizes_physical_marks_captured_at_different_b_and_pi
     assert session.registration is not None and session.registration.valid
     assert publishes == [window]
     assert rotations == []
-    assert "complete" in statuses[-1].lower()
+    assert statuses[-1] == "Saving design registration."
     assert not hasattr(window, "_pending_operator_alignment_capture")
     assert not hasattr(window, "_alignment_physical_draft")
     assert not hasattr(window, "_alignment_operation_id")
@@ -1643,10 +1703,11 @@ def test_registration_publish_failure_rolls_back_and_does_not_announce_success(
     window._refresh_design_panel = lambda: None
     window._refresh_design_position = lambda: None
     window._show_status = lambda message, _timeout=0: statuses.append(str(message))
-    monkeypatch.setattr(
-        main_module.connection_flow,
-        "publish_coordinate_frames",
-        lambda _owner: (_ for _ in ()).throw(RuntimeError("save unavailable")),
+    _install_coordinate_coordinator(
+        window,
+        publish=lambda _request_id, _document: (_ for _ in ()).throw(
+            RuntimeError("save unavailable")
+        ),
     )
 
     for xy in ((1.0, 2.0), (2.0, 2.0)):
@@ -1665,7 +1726,7 @@ def test_registration_publish_failure_rolls_back_and_does_not_announce_success(
     assert not restored.readiness["X"].available
     assert not hasattr(window, "_pending_registration_physical_marks")
     assert session.source_stage_marks_compact() == []
-    assert statuses[-1] == "save unavailable"
+    assert statuses[-1] == "Design coordinate frames could not be saved."
     assert "captured" not in statuses[-1].lower()
 
 
@@ -1681,6 +1742,7 @@ def test_registration_save_failure_rolls_back_before_success_is_announced(
     session.source_design_marks = ((0.0, 0.0), (1000.0, 0.0))
     requests: list[object] = []
     statuses: list[str] = []
+    save_ids: list[int] = []
     window = Main.__new__(Main)
     window._coordinate_frame_lifecycle = CoordinateFrameLifecycle()
     window._design_session = session
@@ -1696,10 +1758,9 @@ def test_registration_save_failure_rolls_back_before_success_is_announced(
     window._refresh_design_panel = lambda: None
     window._refresh_design_position = lambda: None
     window._show_status = lambda message, _timeout=0: statuses.append(str(message))
-    monkeypatch.setattr(
-        main_module.connection_flow,
-        "publish_coordinate_frames",
-        lambda _owner: 41,
+    _install_coordinate_coordinator(
+        window,
+        publish=lambda request_id, _document: save_ids.append(request_id),
     )
 
     for xy in ((1.0, 2.0), (2.0, 2.0)):
@@ -1718,11 +1779,7 @@ def test_registration_save_failure_rolls_back_before_success_is_announced(
 
     Main._on_coordinate_frame_store_failed(
         window,
-        types.SimpleNamespace(
-            request_id=41,
-            operation="save",
-            message="disk full",
-        ),
+        CoordinateFrameStoreFailure(save_ids[-1], "save", "disk full"),
     )
 
     restored = registry.get(draft.frame_id)
@@ -1731,574 +1788,6 @@ def test_registration_save_failure_rolls_back_before_success_is_announced(
     assert not restored.readiness["X"].available
     assert session.source_stage_marks_compact() == []
     assert all("captured" not in status.lower() for status in statuses[-2:])
-
-
-def test_deferred_registration_failure_applies_exact_capture_baseline_once(
-    monkeypatch,
-    tmp_path: Path,
-) -> None:
-    document = _make_document(tmp_path)
-    registry = CoordinateFrameRegistry()
-    draft = registry.add(new_design_frame_draft(document, existing_names=()))
-    session = DesignSession(document=document)
-    session.link_active_frame(draft)
-    session.source_design_marks = ((0.0, 0.0), (1000.0, 0.0))
-    baseline_registration = DesignRegistration.empty()
-    session.source_stage_marks = (None, (8.0, 9.0))
-    session.check_stage_marks = [(10.0, 11.0)]
-    session.registration = baseline_registration
-    session.registration_status = "Exact durable baseline."
-    requests: list[object] = []
-    tracked: list[FramePublication] = []
-    statuses: list[str] = []
-    lifecycle = CoordinateFrameLifecycle()
-    track_publication = lifecycle.track_publication
-
-    def track(publication: FramePublication) -> None:
-        tracked.append(publication)
-        track_publication(publication)
-
-    lifecycle.track_publication = track
-    window = Main.__new__(Main)
-    window._coordinate_frame_lifecycle = lifecycle
-    window._design_session = session
-    window._coordinate_frame_registry = registry
-    window.stage_controller = types.SimpleNamespace(
-        request_machine_coordinate_snapshot=lambda token, *, axes: (
-            requests.append(token) or True
-        ),
-        latest_machine_coordinate_snapshot=lambda: _machine_snapshot(
-            (50.0, 60.0, 0.0, 0.0, 75.0)
-        ),
-    )
-    _set_rotation_settings(window)
-    window._camera_stage_xy_from_raw_stage_xy = lambda point: (
-        point[0] - 100.0,
-        point[1] + 200.0,
-    )
-    window._design_navigation_xy_from_physical_machine_xy = lambda point: point
-    window._refresh_design_panel = lambda: None
-    window._refresh_design_position = lambda: None
-    window._show_status = lambda message, _timeout=0: statuses.append(str(message))
-    monkeypatch.setattr(
-        main_module.connection_flow,
-        "publish_coordinate_frames",
-        lambda _owner: 41,
-    )
-
-    for xy in ((1.0, 2.0), (2.0, 2.0)):
-        Main._capture_stage_source_mark(window)
-        Main._on_registration_machine_coordinate_snapshot_finished(
-            window,
-            requests.pop(),
-            True,
-            _machine_snapshot((*xy, 0.0, 0.0, 5.0)),
-            "",
-        )
-
-    assert len(tracked) == 1
-    saved_rollback = tracked[0].registration_rollback_effects
-    current = registry.get(draft.frame_id)
-    assert current is not None and current != draft
-    session.link_active_frame(
-        current,
-        machine_b_deg=75.0,
-        pivot_machine_xy=(50.0, 60.0),
-    )
-    session.source_stage_marks = ((901.0, 902.0),)
-    session.check_stage_marks = [(903.0, 904.0)]
-    session.registration = DesignRegistration.empty()
-    session.registration_status = "Changed after publication."
-    session.link_active_frame = lambda *_args, **_kwargs: pytest.fail(
-        "exact registration rollback must not reconstruct the session"
-    )
-    _set_rotation_settings(window, (50.0, 60.0))
-    window._camera_stage_xy_from_raw_stage_xy = lambda point: (
-        point[0] + 300.0,
-        point[1] - 400.0,
-    )
-    applied: list[RegistrationEffects] = []
-
-    def apply_registration_effects(effects: RegistrationEffects) -> None:
-        applied.append(effects)
-        Main._apply_registration_effects(window, effects)
-
-    window._apply_registration_effects = apply_registration_effects
-
-    Main._on_coordinate_frame_store_failed(
-        window,
-        types.SimpleNamespace(
-            request_id=41,
-            operation="save",
-            message="disk full",
-        ),
-    )
-
-    assert saved_rollback is not None
-    assert applied == [saved_rollback]
-    restored = registry.get(draft.frame_id)
-    assert restored is not None
-    assert restored.transform == draft.transform
-    assert restored.readiness == draft.readiness
-    assert session.source_stage_marks == (None, (8.0, 9.0))
-    assert session.check_stage_marks == [(10.0, 11.0)]
-    assert session.registration is baseline_registration
-    assert session.registration_status == "Exact durable baseline."
-
-
-def test_saved_callback_delegates_acknowledgement_to_coordinate_lifecycle(
-    tmp_path: Path,
-) -> None:
-    document = _make_document(tmp_path)
-    registry = CoordinateFrameRegistry()
-    draft = registry.add(new_design_frame_draft(document, existing_names=()))
-    committed = registry.replace(
-        commit_xyb_registration(
-            draft,
-            design_points=((0.0, 0.0), (1000.0, 0.0)),
-            physical_machine_points=((1.0, 2.0), (2.0, 2.0)),
-            physical_b_deg=5.0,
-            pivot_machine_xy=(0.0, 0.0),
-        ),
-        expected_version=draft.version,
-    )
-    publication = FramePublication(
-        request_id=41,
-        records=(committed,),
-        previous_record=draft,
-        committed_record=committed,
-        machine_b_deg=5.0,
-        pivot_machine_xy=(0.0, 0.0),
-        success_message="registration saved",
-    )
-    calls: list[FramePublicationResult] = []
-
-    class _Lifecycle:
-        def finish_publication(
-            self,
-            result: FramePublicationResult,
-        ) -> FrameLifecycleEffects:
-            calls.append(result)
-            return FrameLifecycleEffects(
-                acknowledged_publications=(publication,),
-            )
-
-    statuses: list[str] = []
-    window = Main.__new__(Main)
-    window._coordinate_frame_lifecycle = _Lifecycle()
-    window._coordinate_frame_registry = registry
-    window._design_session = types.SimpleNamespace(active_frame_id=draft.frame_id)
-    window._show_status = lambda message, _timeout=0: statuses.append(str(message))
-
-    Main._on_coordinate_frames_saved(
-        window,
-        types.SimpleNamespace(request_id=41),
-    )
-
-    assert calls == [FramePublicationResult(41, True)]
-    assert statuses == ["registration saved"]
-    assert not hasattr(window, "_registration_persistence_transactions")
-
-
-def test_main_coordinate_callback_executes_lifecycle_effects_once(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    effects = FrameLifecycleEffects(refresh_display=True)
-    calls: list[FramePublicationResult] = []
-    applied: list[FrameLifecycleEffects] = []
-
-    class _Lifecycle:
-        def finish_publication(
-            self,
-            result: FramePublicationResult,
-        ) -> FrameLifecycleEffects:
-            calls.append(result)
-            return effects
-
-    owner = Main.__new__(Main)
-    owner._coordinate_frame_lifecycle = _Lifecycle()
-    owner._apply_coordinate_frame_lifecycle_effects = applied.append
-    monkeypatch.setattr(
-        main_module.connection_flow,
-        "handle_coordinate_frame_saved",
-        lambda _owner, _result: None,
-    )
-
-    Main._on_coordinate_frames_saved(
-        owner,
-        types.SimpleNamespace(request_id=12),
-    )
-
-    assert calls == [FramePublicationResult(12, True)]
-    assert applied == [effects]
-
-
-def test_main_lifecycle_seams_have_no_policy_pass_through_helpers() -> None:
-    assert "_registration_capture_lifecycle" not in Main.__dict__
-    assert "_cancel_registration_capture" not in Main.__dict__
-
-
-def test_failed_callback_executes_lifecycle_rollback_effect(
-    tmp_path: Path,
-) -> None:
-    document = _make_document(tmp_path)
-    registry = CoordinateFrameRegistry()
-    draft = registry.add(new_design_frame_draft(document, existing_names=()))
-    committed = registry.replace(
-        commit_xyb_registration(
-            draft,
-            design_points=((0.0, 0.0), (1000.0, 0.0)),
-            physical_machine_points=((1.0, 2.0), (2.0, 2.0)),
-            physical_b_deg=5.0,
-            pivot_machine_xy=(0.0, 0.0),
-        ),
-        expected_version=draft.version,
-    )
-    publication = FramePublication(
-        request_id=41,
-        records=(committed,),
-        previous_record=draft,
-        committed_record=committed,
-        machine_b_deg=5.0,
-        pivot_machine_xy=(0.0, 0.0),
-        success_message="registration saved",
-    )
-    calls: list[FramePublicationResult] = []
-
-    class _Lifecycle:
-        def finish_publication(
-            self,
-            result: FramePublicationResult,
-        ) -> FrameLifecycleEffects:
-            calls.append(result)
-            return FrameLifecycleEffects(
-                rollback_publications=(publication,),
-                refresh_display=True,
-            )
-
-    session = DesignSession(document=document)
-    session.link_active_frame(
-        committed,
-        machine_b_deg=5.0,
-        pivot_machine_xy=(0.0, 0.0),
-    )
-    window = Main.__new__(Main)
-    window._coordinate_frame_lifecycle = _Lifecycle()
-    window._coordinate_frame_registry = registry
-    window._coordinate_frame_document = None
-    window._design_session = session
-    window._design_navigation_xy_from_physical_machine_xy = lambda point: point
-    window._refresh_design_panel = lambda: None
-    window._refresh_design_position = lambda: None
-    window._show_status = lambda *_args: None
-
-    Main._on_coordinate_frame_store_failed(
-        window,
-        types.SimpleNamespace(
-            request_id=41,
-            operation="save",
-            message="disk full",
-        ),
-    )
-
-    assert calls == [FramePublicationResult(41, False)]
-    restored = registry.get(draft.frame_id)
-    assert restored is not None
-    assert restored.transform == draft.transform
-    assert restored.readiness == draft.readiness
-    assert session.registration is None
-    assert not hasattr(window, "_registration_persistence_transactions")
-
-
-def test_failed_callback_executes_every_lifecycle_rollback_effect(
-    tmp_path: Path,
-) -> None:
-    document = _make_document(tmp_path)
-    registry = CoordinateFrameRegistry()
-    first_draft = registry.add(
-        new_design_frame_draft(document, existing_names=())
-    )
-    second_draft = registry.add(
-        new_design_frame_draft(
-            document,
-            existing_names=(first_draft.name,),
-        )
-    )
-    first_committed = registry.replace(
-        commit_xyb_registration(
-            first_draft,
-            design_points=((0.0, 0.0), (1000.0, 0.0)),
-            physical_machine_points=((1.0, 2.0), (2.0, 2.0)),
-            physical_b_deg=5.0,
-            pivot_machine_xy=(0.0, 0.0),
-        ),
-        expected_version=first_draft.version,
-    )
-    second_committed = registry.replace(
-        commit_xyb_registration(
-            second_draft,
-            design_points=((0.0, 0.0), (1000.0, 0.0)),
-            physical_machine_points=((3.0, 4.0), (4.0, 4.0)),
-            physical_b_deg=7.0,
-            pivot_machine_xy=(0.5, 0.25),
-        ),
-        expected_version=second_draft.version,
-    )
-    publications = (
-        FramePublication(
-            request_id=41,
-            records=(first_committed,),
-            previous_record=first_draft,
-            committed_record=first_committed,
-            machine_b_deg=5.0,
-            pivot_machine_xy=(0.0, 0.0),
-        ),
-        FramePublication(
-            request_id=42,
-            records=(second_committed,),
-            previous_record=second_draft,
-            committed_record=second_committed,
-            machine_b_deg=7.0,
-            pivot_machine_xy=(0.5, 0.25),
-            operator_alignment=True,
-        ),
-    )
-    calls: list[FramePublicationResult] = []
-
-    class _Lifecycle:
-        def finish_publication(
-            self,
-            result: FramePublicationResult,
-        ) -> FrameLifecycleEffects:
-            calls.append(result)
-            return FrameLifecycleEffects(
-                rollback_publications=publications,
-                refresh_display=True,
-            )
-
-    session = DesignSession(document=document)
-    session.link_active_frame(
-        first_committed,
-        machine_b_deg=5.0,
-        pivot_machine_xy=(0.0, 0.0),
-    )
-    presentation: list[str] = []
-    snap_states: list[bool] = []
-    window = Main.__new__(Main)
-    window._coordinate_frame_lifecycle = _Lifecycle()
-    window._coordinate_frame_registry = registry
-    window._coordinate_frame_document = None
-    window._design_session = session
-    window._design_navigation_xy_from_physical_machine_xy = lambda point: point
-    window._refresh_design_panel = lambda: presentation.append("panel")
-    window._refresh_design_position = lambda: presentation.append("position")
-    window._set_design_snap_enabled = lambda enabled: snap_states.append(enabled)
-    window._show_status = lambda *_args: None
-
-    Main._on_coordinate_frame_store_failed(
-        window,
-        types.SimpleNamespace(
-            request_id=42,
-            operation="save",
-            message="disk full",
-        ),
-    )
-
-    assert calls == [FramePublicationResult(42, False)]
-    for draft in (first_draft, second_draft):
-        restored = registry.get(draft.frame_id)
-        assert restored is not None
-        assert restored.transform == draft.transform
-        assert restored.readiness == draft.readiness
-    assert session.registration is None
-    assert snap_states == [True]
-    assert presentation == ["panel", "position"]
-
-
-@pytest.mark.parametrize(
-    "save_sequence",
-    ("contiguous", "intervening-focus", "trailing-focus"),
-)
-def test_coalesced_registration_save_failure_restores_earliest_durable_record(
-    tmp_path: Path,
-    save_sequence: str,
-) -> None:
-    document = _make_document(tmp_path)
-    registry = CoordinateFrameRegistry()
-    draft = registry.add(new_design_frame_draft(document, existing_names=()))
-    first = registry.replace(
-        commit_xyb_registration(
-            draft,
-            design_points=((0.0, 0.0), (1000.0, 0.0)),
-            physical_machine_points=((1.0, 2.0), (2.0, 2.0)),
-            physical_b_deg=5.0,
-            pivot_machine_xy=(0.0, 0.0),
-        ),
-        expected_version=draft.version,
-    )
-    current = first
-    if save_sequence != "contiguous":
-        current = registry.replace(
-            set_focus_reference(first, physical_machine_z_mm=0.25),
-            expected_version=first.version,
-        )
-    lifecycle = CoordinateFrameLifecycle()
-    lifecycle.track_publication(
-        FramePublication(
-            request_id=41,
-            records=(first,),
-            previous_record=draft,
-            committed_record=first,
-            machine_b_deg=5.0,
-            pivot_machine_xy=(0.0, 0.0),
-            success_message="first saved",
-        )
-    )
-    failed_request_id = 42
-    if save_sequence != "contiguous":
-        lifecycle.track_publication(
-            FramePublication(request_id=42, records=(current,))
-        )
-    if save_sequence != "trailing-focus":
-        second_previous = current
-        current = registry.replace(
-            commit_xyb_registration(
-                second_previous,
-                design_points=((0.0, 0.0), (1000.0, 0.0)),
-                physical_machine_points=((3.0, 4.0), (4.0, 4.0)),
-                physical_b_deg=6.0,
-                pivot_machine_xy=(0.0, 0.0),
-            ),
-            expected_version=second_previous.version,
-        )
-        failed_request_id = 42 if save_sequence == "contiguous" else 43
-        lifecycle.track_publication(
-            FramePublication(
-                request_id=failed_request_id,
-                records=(current,),
-                previous_record=second_previous,
-                committed_record=current,
-                machine_b_deg=6.0,
-                pivot_machine_xy=(0.0, 0.0),
-                success_message="second saved",
-            )
-        )
-    session = DesignSession(document=document)
-    session.link_active_frame(
-        current,
-        machine_b_deg=6.0,
-        pivot_machine_xy=(0.0, 0.0),
-    )
-    window = Main.__new__(Main)
-    window._coordinate_frame_lifecycle = lifecycle
-    window._design_session = session
-    window._coordinate_frame_registry = registry
-    window._design_navigation_xy_from_physical_machine_xy = lambda point: point
-    window._refresh_design_panel = lambda: None
-    window._refresh_design_position = lambda: None
-    window._show_status = lambda _message, _timeout=0: None
-
-    Main._on_coordinate_frame_store_failed(
-        window,
-        types.SimpleNamespace(
-            request_id=failed_request_id,
-            operation="save",
-            message="disk full",
-        ),
-    )
-
-    restored = registry.get(draft.frame_id)
-    assert restored is not None
-    assert restored.transform == draft.transform
-    assert not restored.readiness["X"].available
-    assert session.registration is None
-    assert not hasattr(window, "_registration_persistence_transactions")
-
-
-@pytest.mark.parametrize("newer_outcome", ("saved", "failed"))
-def test_older_registration_save_failure_defers_to_newer_publication(
-    tmp_path: Path,
-    newer_outcome: str,
-) -> None:
-    document = _make_document(tmp_path)
-    registry = CoordinateFrameRegistry()
-    draft = registry.add(new_design_frame_draft(document, existing_names=()))
-    registered = registry.replace(
-        commit_xyb_registration(
-            draft,
-            design_points=((0.0, 0.0), (1000.0, 0.0)),
-            physical_machine_points=((1.0, 2.0), (2.0, 2.0)),
-            physical_b_deg=5.0,
-            pivot_machine_xy=(0.0, 0.0),
-        ),
-        expected_version=draft.version,
-    )
-    focused = registry.replace(
-        set_focus_reference(registered, physical_machine_z_mm=0.25),
-        expected_version=registered.version,
-    )
-    session = DesignSession(document=document)
-    session.link_active_frame(
-        focused,
-        machine_b_deg=5.0,
-        pivot_machine_xy=(0.0, 0.0),
-    )
-    lifecycle = CoordinateFrameLifecycle()
-    lifecycle.track_publication(
-        FramePublication(
-            request_id=41,
-            records=(registered,),
-            previous_record=draft,
-            committed_record=registered,
-            machine_b_deg=5.0,
-            pivot_machine_xy=(0.0, 0.0),
-            success_message="registration saved",
-        )
-    )
-    lifecycle.track_publication(
-        FramePublication(request_id=42, records=(focused,))
-    )
-    window = Main.__new__(Main)
-    window._coordinate_frame_lifecycle = lifecycle
-    window._design_session = session
-    window._coordinate_frame_registry = registry
-    window._design_navigation_xy_from_physical_machine_xy = lambda point: point
-    window._refresh_design_panel = lambda: None
-    window._refresh_design_position = lambda: None
-    window._show_status = lambda _message, _timeout=0: None
-
-    Main._on_coordinate_frame_store_failed(
-        window,
-        types.SimpleNamespace(
-            request_id=41,
-            operation="save",
-            message="disk full",
-        ),
-    )
-
-    assert registry.get(draft.frame_id) == focused
-    assert not hasattr(window, "_registration_persistence_transactions")
-
-    if newer_outcome == "saved":
-        Main._on_coordinate_frames_saved(
-            window,
-            types.SimpleNamespace(request_id=42),
-        )
-        assert registry.get(draft.frame_id) == focused
-    else:
-        Main._on_coordinate_frame_store_failed(
-            window,
-            types.SimpleNamespace(
-                request_id=42,
-                operation="save",
-                message="still full",
-            ),
-        )
-        restored = registry.get(draft.frame_id)
-        assert restored is not None
-        assert restored.transform == draft.transform
-        assert session.registration is None
-    assert not hasattr(window, "_registration_persistence_transactions")
 
 
 def test_design_navigation_inverts_universal_calibration_and_current_wco(
@@ -2910,11 +2399,7 @@ def test_check_capture_at_changed_b_preserves_transform_and_normalizes_metadata(
     window._refresh_design_panel = lambda: None
     window._refresh_design_position = lambda: None
     window._show_status = lambda *_args: None
-    monkeypatch.setattr(
-        main_module.connection_flow,
-        "publish_coordinate_frames",
-        lambda _owner: None,
-    )
+    _install_coordinate_coordinator(window)
 
     Main._capture_stage_check_mark(window)
     Main._on_registration_machine_coordinate_snapshot_finished(
@@ -2992,11 +2477,7 @@ def test_source_capture_at_changed_b_retains_existing_check_evidence(
     window._refresh_design_panel = lambda: None
     window._refresh_design_position = lambda: None
     window._show_status = lambda message, _timeout: statuses.append(str(message))
-    monkeypatch.setattr(
-        main_module.connection_flow,
-        "publish_coordinate_frames",
-        lambda _owner: None,
-    )
+    _install_coordinate_coordinator(window)
 
     Main._capture_stage_source_mark(window)
     Main._on_registration_machine_coordinate_snapshot_finished(
@@ -3020,7 +2501,7 @@ def test_source_capture_at_changed_b_retains_existing_check_evidence(
     assert metadata.check_machine_marks[0] == pytest.approx(
         existing_check_at_current_b
     )
-    assert statuses and "captured" in statuses[-1].lower()
+    assert statuses[-1] == "Saving design registration."
 
 
 def test_source_capture_at_changed_b_rotates_measured_source_evidence(
@@ -3107,11 +2588,7 @@ def test_source_capture_at_changed_b_rotates_measured_source_evidence(
     window._refresh_design_panel = lambda: None
     window._refresh_design_position = lambda: None
     window._show_status = lambda message, _timeout: statuses.append(str(message))
-    monkeypatch.setattr(
-        main_module.connection_flow,
-        "publish_coordinate_frames",
-        lambda _owner: None,
-    )
+    _install_coordinate_coordinator(window)
 
     Main._capture_stage_source_mark(window)
     Main._on_registration_machine_coordinate_snapshot_finished(
@@ -3131,7 +2608,7 @@ def test_source_capture_at_changed_b_rotates_measured_source_evidence(
     )
     assert metadata.max_residual_mm is not None
     assert metadata.max_residual_mm > 0.0
-    assert statuses and "captured" in statuses[-1].lower()
+    assert statuses[-1] == "Saving design registration."
 
 
 def test_legacy_migration_projection_failure_leaves_registry_and_link_unchanged(
@@ -3205,10 +2682,9 @@ def test_reset_design_registration_creates_an_independent_persistent_draft(
     window._apply_coordinate_frame_authority_blocks = lambda: events.append(
         ("authority",)
     )
-    monkeypatch.setattr(
-        main_module.connection_flow,
-        "publish_coordinate_frames",
-        lambda _owner: events.append(("publish",)),
+    _install_coordinate_coordinator(
+        window,
+        publish=lambda _request_id, _document: events.append(("publish",)),
     )
 
     Main._clear_design_registration(window)
@@ -3222,6 +2698,48 @@ def test_reset_design_registration_creates_an_independent_persistent_draft(
     assert new_metadata.source_design_marks == ()
     assert new_metadata.source_machine_marks == ()
     assert ("publish",) in events
+
+
+def test_reset_registration_preparation_failure_does_not_cancel_live_session(
+    tmp_path: Path,
+) -> None:
+    document = _make_document(tmp_path)
+    registry = CoordinateFrameRegistry()
+    first = registry.add(new_design_frame_draft(document, existing_names=()))
+    session = DesignSession(document=document)
+    session.link_active_frame(first)
+    cancellations: list[RegistrationCancellation] = []
+    window = Main.__new__(Main)
+    window._design_session = session
+    window._coordinate_frame_registry = registry
+    window._coordinate_frames_loaded = True
+    window._active_design_frame_metadata = main_module.DesignFrameMetadata.from_mapping(
+        first.metadata
+    )
+    window._design_registration_lifecycle = types.SimpleNamespace(
+        cancel=lambda reason: (
+            cancellations.append(reason) or RegistrationEffects()
+        )
+    )
+    window._pending_alignment_preparation = object()
+    window._last_selected_design_point = (1.0, 2.0)
+    window.stage_controller = types.SimpleNamespace(
+        latest_machine_coordinate_snapshot=lambda: _machine_snapshot(
+            (0.0, 0.0, 0.0, 0.0, 0.0)
+        )
+    )
+    _set_rotation_settings(window)
+    session.prepare_active_frame_link = lambda *_args, **_kwargs: (
+        (_ for _ in ()).throw(main_module.DesignModelError("projection failed"))
+    )
+    window._show_status = lambda *_args: None
+    before = DesignSessionCheckpoint.capture(session)
+
+    Main._clear_design_registration(window)
+
+    assert cancellations == []
+    assert DesignSessionCheckpoint.capture(session) == before
+    assert registry.snapshot().records == (first,)
 
 
 def test_registration_focus_completion_publishes_only_after_matching_replace(
@@ -3248,16 +2766,16 @@ def test_registration_focus_completion_publishes_only_after_matching_replace(
     events: list[object] = []
     window = Main.__new__(Main)
     window._coordinate_frame_registry = registry
-    window._design_session = types.SimpleNamespace(active_frame_id=registered.frame_id)
+    window._design_session = DesignSession(document=document)
+    window._design_session.link_active_frame(registered)
     window._design_registration_lifecycle = lifecycle
     window._design_focus_overlay_context_key = lambda: context
     window.design_layout_window = None
     window._refresh_design_panel = lambda: events.append("refresh")
     window._show_status = lambda message, _timeout: events.append(("status", message))
-    monkeypatch.setattr(
-        main_module.connection_flow,
-        "publish_coordinate_frames",
-        lambda _owner: events.append("publish"),
+    _install_coordinate_coordinator(
+        window,
+        publish=lambda _request_id, _document: events.append("publish"),
     )
 
     Main._on_registration_focus_autofocus_finished(
@@ -3272,6 +2790,119 @@ def test_registration_focus_completion_publishes_only_after_matching_replace(
     assert focused is not None and focused.readiness["Z"].available
     assert focused.transform.z_zero_machine_mm == 6.0
     assert events.index("publish") < events.index("refresh")
+
+
+def test_focus_reset_preparation_failure_does_not_cancel_live_session(
+    tmp_path: Path,
+) -> None:
+    document = _make_document(tmp_path)
+    registry = CoordinateFrameRegistry()
+    focused = registry.add(
+        set_focus_reference(
+            commit_xyb_registration(
+                new_design_frame_draft(document, existing_names=()),
+                design_points=((0.0, 0.0), (1000.0, 0.0)),
+                physical_machine_points=((1.0, 2.0), (2.0, 2.0)),
+                physical_b_deg=0.0,
+                pivot_machine_xy=(0.0, 0.0),
+            ),
+            physical_machine_z_mm=6.0,
+        )
+    )
+    session = DesignSession(document=document)
+    session.link_active_frame(focused)
+    cancellations: list[RegistrationCancellation] = []
+    window = Main.__new__(Main)
+    window._coordinate_frame_registry = registry
+    window._design_session = session
+    window._design_registration_lifecycle = types.SimpleNamespace(
+        cancel=lambda reason: cancellations.append(reason) or RegistrationEffects()
+    )
+    window._active_design_frame_record = lambda: focused
+    window._clear_design_focus_overlay_state = lambda **_kwargs: None
+    window._refresh_design_panel = lambda: None
+    window._show_status = lambda *_args: None
+    window._design_navigation_xy_from_physical_machine_xy = lambda point: point
+    window._tracked_physical_b_for_design_frame = lambda: 0.0
+    window._rotation_geometry_snapshot = lambda: types.SimpleNamespace(
+        pivot_machine_xy=(0.0, 0.0)
+    )
+    _install_coordinate_coordinator(window)
+    session.prepare_active_frame_link = lambda *_args, **_kwargs: (
+        (_ for _ in ()).throw(main_module.DesignModelError("projection failed"))
+    )
+    before = DesignSessionCheckpoint.capture(session)
+
+    Main._reset_design_focus_reference(window)
+
+    assert cancellations == []
+    assert DesignSessionCheckpoint.capture(session) == before
+    assert registry.get(focused.frame_id) == focused
+
+
+def test_focus_reset_save_failure_restores_exact_pre_action_session(
+    tmp_path: Path,
+) -> None:
+    document = _make_document(tmp_path)
+    registry = CoordinateFrameRegistry()
+    focused = registry.add(
+        set_focus_reference(
+            commit_xyb_registration(
+                new_design_frame_draft(document, existing_names=()),
+                design_points=((0.0, 0.0), (1000.0, 0.0)),
+                physical_machine_points=((1.0, 2.0), (2.0, 2.0)),
+                physical_b_deg=0.0,
+                pivot_machine_xy=(0.0, 0.0),
+            ),
+            physical_machine_z_mm=6.0,
+        )
+    )
+    session = DesignSession(document=document)
+    session.link_active_frame(focused)
+    current_registration = object()
+    cancellation_effects = RegistrationEffects(
+        restore_baseline=True,
+        baseline_session_identity=id(session),
+        baseline_frame_id=focused.frame_id,
+        baseline_source_stage_marks=((1.0, 1.0),),
+        baseline_registration=object(),
+        baseline_registration_status="Older capture baseline.",
+    )
+    save_ids: list[int] = []
+    window = Main.__new__(Main)
+    window._coordinate_frame_registry = registry
+    window._design_session = session
+    window._design_registration_lifecycle = types.SimpleNamespace(
+        cancel=lambda _reason: cancellation_effects
+    )
+    window._active_design_frame_record = lambda: focused
+    window._clear_design_focus_overlay_state = lambda **_kwargs: None
+    window._refresh_design_panel = lambda: None
+    window._refresh_design_position = lambda: None
+    window._show_status = lambda *_args: None
+    window._design_navigation_xy_from_physical_machine_xy = lambda point: point
+    window._tracked_physical_b_for_design_frame = lambda: 0.0
+    window._rotation_geometry_snapshot = lambda: types.SimpleNamespace(
+        pivot_machine_xy=(0.0, 0.0)
+    )
+    window.design_layout_window = None
+    _install_coordinate_coordinator(
+        window,
+        publish=lambda request_id, _document: save_ids.append(request_id),
+    )
+    session.source_stage_marks = ((9.0, 9.0),)
+    session.registration = current_registration
+    session.registration_status = "Current in-memory registration."
+    before = DesignSessionCheckpoint.capture(session)
+
+    Main._reset_design_focus_reference(window)
+    Main._on_coordinate_frame_store_failed(
+        window,
+        CoordinateFrameStoreFailure(save_ids[-1], "save", "disk full"),
+    )
+
+    assert registry.get(focused.frame_id) == focused
+    assert DesignSessionCheckpoint.capture(session) == before
 
 
 def test_registration_focus_completion_ignores_inactive_frame(
@@ -3307,12 +2938,6 @@ def test_registration_focus_completion_ignores_inactive_frame(
     window.design_layout_window = None
     window._refresh_design_panel = lambda: events.append("refresh")
     window._show_status = lambda *_args: events.append("status")
-    monkeypatch.setattr(
-        main_module.connection_flow,
-        "publish_coordinate_frames",
-        lambda _owner: events.append("publish"),
-    )
-
     Main._on_registration_focus_autofocus_finished(
         window,
         token,
@@ -3452,12 +3077,6 @@ def test_stale_contact_completion_never_publishes_or_captures_a(
     window = Main.__new__(Main)
     window._coordinate_frame_registry = registry
     window._refresh_design_panel = lambda: events.append("refresh")
-    monkeypatch.setattr(
-        main_module.connection_flow,
-        "publish_coordinate_frames",
-        lambda _owner: events.append("publish"),
-    )
-
     Main._on_design_contact_reference_ready(
         window,
         ContactReferenceToken(focused.frame_id, focused.version + 1),
@@ -3488,6 +3107,64 @@ def test_invalid_contact_completion_fails_closed_before_registry_effects() -> No
     Main._on_design_contact_reference_ready(window, token, "invalid")
 
     assert lifecycle.accept_first_contact(context, None, token=token).capture_contact
+
+
+def test_contact_publication_contains_no_coordinator_rollback_bookkeeping(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    document = _make_document(tmp_path)
+    registry = CoordinateFrameRegistry()
+    focused = registry.add(
+        set_focus_reference(
+            commit_xyb_registration(
+                new_design_frame_draft(document, existing_names=()),
+                design_points=((0.0, 0.0), (1000.0, 0.0)),
+                physical_machine_points=((1.0, 2.0), (2.0, 2.0)),
+                physical_b_deg=0.0,
+                pivot_machine_xy=(0.0, 0.0),
+            ),
+            physical_machine_z_mm=6.0,
+        )
+    )
+    context = _lifecycle_context(
+        frame_id=focused.frame_id,
+        frame_version=focused.version,
+        z_ready=True,
+    )
+    lifecycle = DesignRegistrationLifecycle()
+    armed = lifecycle.accept_first_contact(context, None)
+    token = armed.contact_token
+    assert token is not None
+    publications: list[object] = []
+
+    class _Coordinator:
+        def publish_frame_records(self, publication):
+            publications.append(publication)
+            return CoordinateTransition(
+                CoordinateSystemSnapshot(True, publication.records, None)
+            )
+
+    window = Main.__new__(Main)
+    window._design_registration_lifecycle = lifecycle
+    window._design_session = DesignSession(document=document)
+    window._design_session.link_active_frame(focused)
+    window._coordinate_frame_registry = registry
+    window._coordinate_system_coordinator = _Coordinator()
+    window._coordinate_frames_loaded = True
+    window._design_registration_context = lambda **_kwargs: context
+    window._refresh_design_panel = lambda: None
+    window._show_status = lambda *_args: None
+    monkeypatch.setattr(
+        main_module.connection_flow.stage_position_panel,
+        "refresh_coordinate_frame_display",
+        lambda _owner: None,
+    )
+
+    Main._on_design_contact_reference_ready(window, token, 8.0)
+
+    assert len(publications) == 1
+    assert not hasattr(publications[0], "rollback_outcome")
 
 
 def test_contact_callback_eligibility_delegates_to_registration_lifecycle() -> None:
@@ -3662,11 +3339,7 @@ def test_later_route_does_not_recapture_established_contact_reference(
             value,
         )
     )
-    monkeypatch.setattr(
-        main_module.connection_flow,
-        "publish_coordinate_frames",
-        lambda _owner: None,
-    )
+    _install_coordinate_coordinator(window)
     first_route_callback = Main._design_contact_success_callback(
         window,
         main_module.snapshot_route_design_frame(
@@ -3692,6 +3365,68 @@ def test_later_route_does_not_recapture_established_contact_reference(
     assert established.transform is not None
     assert established.transform.a_zero_machine_mm == 8.0
     assert reads == [("A",)]
+
+
+def test_failed_contact_save_releases_first_write_for_retry(tmp_path: Path) -> None:
+    document = _make_document(tmp_path)
+    registry = CoordinateFrameRegistry()
+    focused = registry.add(
+        set_focus_reference(
+            commit_xyb_registration(
+                new_design_frame_draft(document, existing_names=()),
+                design_points=((0.0, 0.0), (1000.0, 0.0)),
+                physical_machine_points=((1.0, 2.0), (2.0, 2.0)),
+                physical_b_deg=0.0,
+                pivot_machine_xy=(0.0, 0.0),
+            ),
+            physical_machine_z_mm=6.0,
+        )
+    )
+    reads: list[tuple[str, ...]] = []
+    save_ids: list[int] = []
+    window = Main.__new__(Main)
+    window._design_registration_lifecycle = DesignRegistrationLifecycle()
+    window._coordinate_frame_registry = registry
+    window._design_session = DesignSession(document=document)
+    window._design_session.link_active_frame(focused)
+    window.stage_controller = types.SimpleNamespace(
+        run_external_current_physical_machine_coordinates=lambda axes: (
+            reads.append(tuple(axes)) or {"A": 8.0}
+        )
+    )
+    window._refresh_design_panel = lambda: None
+    window._refresh_design_position = lambda: None
+    window._show_status = lambda *_args: None
+    window.design_contact_reference_ready = types.SimpleNamespace(
+        emit=lambda token, value: Main._on_design_contact_reference_ready(
+            window,
+            token,
+            value,
+        )
+    )
+    _install_coordinate_coordinator(
+        window,
+        publish=lambda request_id, _document: save_ids.append(request_id),
+    )
+    lease = main_module.snapshot_route_design_frame(
+        frame_id=focused.frame_id,
+        frame_version=focused.version,
+    )
+    first = Main._design_contact_success_callback(window, lease)
+    assert first is not None
+    first(object())
+    assert Main._design_contact_success_callback(window, lease) is None
+
+    Main._on_coordinate_frame_store_failed(
+        window,
+        CoordinateFrameStoreFailure(save_ids[-1], "save", "disk full"),
+    )
+    retry = Main._design_contact_success_callback(window, lease)
+    assert retry is not None
+    retry(object())
+
+    assert reads == [("A",), ("A",)]
+    assert len(save_ids) == 2
 
 
 def test_design_fov_size_is_returned_in_design_units() -> None:
@@ -4050,11 +3785,7 @@ def test_replacing_committed_source_marks_starts_fresh_draft_before_capture(
     window._set_alignment_panel_expanded = lambda: None
     window._show_status = lambda *_args: None
     window._apply_coordinate_frame_authority_blocks = lambda: None
-    monkeypatch.setattr(
-        main_module.connection_flow,
-        "publish_coordinate_frames",
-        lambda _owner: None,
-    )
+    _install_coordinate_coordinator(window)
 
     Main._on_design_layout_point_selected(window, 0, 100.0, 200.0)
     Main._on_design_layout_point_selected(window, 1, 1100.0, 200.0)
@@ -4132,11 +3863,7 @@ def test_changing_source_mark_discards_unpaired_physical_capture(
     window._refresh_design_position = lambda: None
     window._set_alignment_panel_expanded = lambda: None
     window._show_status = lambda *_args: None
-    monkeypatch.setattr(
-        main_module.connection_flow,
-        "publish_coordinate_frames",
-        lambda _owner: None,
-    )
+    _install_coordinate_coordinator(window)
 
     Main._capture_stage_source_mark(window)
     Main._on_registration_machine_coordinate_snapshot_finished(
@@ -4229,11 +3956,7 @@ def test_top_cell_switch_links_the_matching_persistent_frame(
     window._show_navigation_status = lambda _plan: None
     window._show_status = lambda *_args: None
     window._apply_coordinate_frame_authority_blocks = lambda: None
-    monkeypatch.setattr(
-        main_module.connection_flow,
-        "publish_coordinate_frames",
-        lambda _owner: None,
-    )
+    _install_coordinate_coordinator(window)
 
     Main._set_design_top_cell(window, "ALT")
 
@@ -4244,6 +3967,48 @@ def test_top_cell_switch_links_the_matching_persistent_frame(
     assert cancellations == [RegistrationCancellation.TOP_CELL_CHANGED]
     assert not hasattr(window, "_pending_registration_physical_marks")
     assert not hasattr(window, "_pending_registration_mark_capture")
+
+
+def test_registration_selection_preparation_failure_keeps_live_session(
+    tmp_path: Path,
+) -> None:
+    document = _make_document(tmp_path)
+    registry = CoordinateFrameRegistry()
+    first = registry.add(new_design_frame_draft(document, existing_names=()))
+    second = registry.add(
+        new_design_frame_draft(document, existing_names=(first.name,))
+    )
+    session = DesignSession(document=document)
+    session.link_active_frame(first)
+    cancellations: list[RegistrationCancellation] = []
+    window = Main.__new__(Main)
+    window._design_session = session
+    window._coordinate_frame_registry = registry
+    window._active_design_frame_metadata = main_module.DesignFrameMetadata.from_mapping(
+        first.metadata
+    )
+    window._design_registration_lifecycle = types.SimpleNamespace(
+        cancel=lambda reason: (
+            cancellations.append(reason) or RegistrationEffects()
+        )
+    )
+    window._design_load_pending = False
+    window._route_measurement_thread = None
+    window._route_measurement_session_active = False
+    window._tracked_physical_b_for_design_frame = lambda: 0.0
+    window._design_navigation_xy_from_physical_machine_xy = lambda point: point
+    _set_rotation_settings(window)
+    session.prepare_active_frame_link = lambda *_args, **_kwargs: (
+        (_ for _ in ()).throw(main_module.DesignModelError("projection failed"))
+    )
+    window._show_status = lambda *_args: None
+    before = DesignSessionCheckpoint.capture(session)
+
+    Main._select_design_registration_instance(window, second.frame_id)
+
+    assert cancellations == []
+    assert DesignSessionCheckpoint.capture(session) == before
+    assert registry.snapshot().records == (first, second)
 
 
 def test_registration_instance_switch_new_and_route_lineage_preserve_records(
@@ -4303,11 +4068,7 @@ def test_registration_instance_switch_new_and_route_lineage_preserve_records(
     window._show_status = lambda *_args: None
     window._apply_coordinate_frame_authority_blocks = lambda: None
     window._set_design_snap_enabled = lambda _enabled: None
-    monkeypatch.setattr(
-        main_module.connection_flow,
-        "publish_coordinate_frames",
-        lambda _owner: None,
-    )
+    _install_coordinate_coordinator(window)
     original_records = registry.snapshot().records
 
     window._route_measurement_thread = types.SimpleNamespace(is_alive=lambda: True)

@@ -6,6 +6,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from probe_station_gui.coordinates.coordinator_model import DesignSessionCheckpoint
 from probe_station_gui.coordinates.registry import CoordinateFrameRegistry
 from probe_station_gui.coordinates.provenance import (
     RUNTIME_PROVENANCE_REASON,
@@ -32,6 +33,8 @@ from probe_station_gui.design.navigation_adapter import (
     parse_persisted_visible_layers,
     plan_design_coordinate_move,
     plan_design_target_move,
+    prepare_design_frame_activation,
+    prepare_design_frame_publication,
     prepare_persisted_design_restore,
     select_route_point,
 )
@@ -340,6 +343,65 @@ def test_loaded_design_links_requested_existing_frame_and_new_registration_is_in
     assert created.record.frame_id not in {first.frame_id, second.frame_id}
     assert created.record.name == f"{document.path.stem} (3)"
     assert session.active_frame_id == created.record.frame_id
+
+
+def test_design_frame_publication_is_prepared_without_mutating_live_session(
+    tmp_path: Path,
+) -> None:
+    document = _make_document(tmp_path)
+    draft = new_design_frame_draft(document, existing_names=())
+    committed = replace(draft, name="registered", version=1)
+    session = DesignSession(document=document)
+    session.link_active_frame(draft)
+    checkpoint = DesignSessionCheckpoint.capture(session)
+
+    publication = prepare_design_frame_publication(
+        session,
+        (draft,),
+        committed,
+        previous_record=draft,
+        machine_point_for_navigation=lambda point: point,
+        machine_b_deg=0.0,
+        pivot_machine_xy=(0.0, 0.0),
+        success_message="saved",
+        success_duration_ms=7000,
+    )
+
+    assert DesignSessionCheckpoint.capture(session) == checkpoint
+    assert publication.records == (committed,)
+    assert publication.previous_record == draft
+    assert publication.previous_session == checkpoint
+    assert publication.proposed_session_link is not None
+    assert publication.proposed_session_link.frame_id == committed.frame_id
+    assert publication.success_notice is not None
+    assert publication.success_notice.message == "saved"
+
+
+def test_design_frame_activation_is_prepared_on_detached_owners(
+    tmp_path: Path,
+) -> None:
+    document = _make_document(tmp_path)
+    registry = CoordinateFrameRegistry()
+    draft = registry.add(new_design_frame_draft(document, existing_names=()))
+    session = DesignSession(document=document)
+    session.link_active_frame(draft)
+    registry_before = registry.snapshot()
+    session_before = DesignSessionCheckpoint.capture(session)
+
+    prepared = prepare_design_frame_activation(
+        session,
+        registry,
+        document,
+        requested_frame_id=draft.frame_id,
+        machine_point_for_navigation=lambda point: point,
+        machine_b_deg=0.0,
+        pivot_machine_xy=(0.0, 0.0),
+    )
+
+    assert prepared.activation.record.frame_id == draft.frame_id
+    assert prepared.projection.frame_id == draft.frame_id
+    assert registry.snapshot() == registry_before
+    assert DesignSessionCheckpoint.capture(session) == session_before
 
 
 def test_requested_frame_with_blocked_provenance_cannot_link(

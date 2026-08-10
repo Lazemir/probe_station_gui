@@ -9,10 +9,12 @@ from probe_station_gui.coordinates import (
     BFrameTransform,
     CoordinateFrameRecord,
     CoordinateFrameRegistry,
+    CoordinateSystemCoordinator,
     FrameKind,
     PhysicalMachinePose,
     ReadinessStatus,
 )
+from probe_station_gui.design.session import DesignSession
 from probe_station_gui.coordinates.software_frames import materialize_custom_frames
 from probe_station_gui.coordinates.lifecycle import CoordinateFrameLifecycle
 from probe_station_gui.coordinates.persistence import (
@@ -202,6 +204,10 @@ def test_busy_stage_rejects_programmatic_settings_submission_without_side_effect
 
 def test_late_coordinate_store_callbacks_do_not_mutate_runtime_registry() -> None:
     owner = _owner()
+    owner._coordinate_system_coordinator = CoordinateSystemCoordinator(
+        registry=owner._coordinate_frame_registry,
+        session=DesignSession(),
+    )
     before = owner._coordinate_frame_registry.snapshot()
 
     Main._on_coordinate_frames_saved(owner, CoordinateFrameStoreSuccess(1, "save"))

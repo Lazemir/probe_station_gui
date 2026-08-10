@@ -127,23 +127,46 @@ def test_focus_requires_ready_xyb_and_missing_z(context: RegistrationContext) ->
 
 def test_contact_is_first_write_wins_and_requires_ready_z() -> None:
     lifecycle = DesignRegistrationLifecycle()
+    ready = _registration_context(z_ready=True)
 
     missing_z = lifecycle.accept_first_contact(
         _registration_context(z_ready=False),
         4.0,
     )
     first = lifecycle.accept_first_contact(
-        _registration_context(z_ready=True),
+        ready,
         4.0,
     )
     second = lifecycle.accept_first_contact(
-        _registration_context(z_ready=True, a_ready=True),
+        ready,
         5.0,
     )
 
     assert missing_z.accepted is False
     assert first.commit_a_mm == 4.0
     assert second.commit_a_mm is None
+
+
+def test_completed_contact_token_rejects_replay_but_allows_rollback_retry() -> None:
+    lifecycle = DesignRegistrationLifecycle()
+    context = _registration_context(z_ready=True)
+    armed = lifecycle.accept_first_contact(context, None)
+    token = armed.contact_token
+    assert token is not None
+
+    completed = lifecycle.accept_first_contact(context, 4.0, token=token)
+    replay = lifecycle.accept_first_contact(context, 5.0, token=token)
+    released = lifecycle._release_contact_commit(
+        session_identity=context.session_identity,
+        frame_id=context.frame_id,
+        frame_version=context.frame_version,
+    )
+    retry = lifecycle.accept_first_contact(context, None)
+
+    assert completed.commit_a_mm == 4.0
+    assert replay.commit_a_mm is None
+    assert released is True
+    assert retry.capture_contact is True
 
 
 def test_focus_move_and_autofocus_require_the_current_operation_and_target() -> None:

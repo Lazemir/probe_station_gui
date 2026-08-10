@@ -230,7 +230,9 @@ class DesignRegistrationLifecycle:
         self._focus_context: RegistrationContext | None = None
         self._pending_focus: _PendingFocus | None = None
         self._pending_contact: _PendingContact | None = None
-        self._accepted_contact_identity: tuple[int, str | None, int | None] | None = None
+        self._accepted_contact_identity: tuple[int, str | None, int | None] | None = (
+            None
+        )
 
     def begin_capture(
         self,
@@ -532,6 +534,21 @@ class DesignRegistrationLifecycle:
             accepted=True,
             commit_a_mm=physical_a,
         )
+
+    def _release_contact_commit(
+        self,
+        *,
+        session_identity: int,
+        frame_id: str | None,
+        frame_version: int | None,
+    ) -> bool:
+        """Release only the exact first-write latch whose save rolled back."""
+
+        identity = (session_identity, frame_id, frame_version)
+        if self._accepted_contact_identity != identity:
+            return False
+        self._accepted_contact_identity = None
+        return True
 
     def cancel(self, reason: RegistrationCancellation) -> RegistrationEffects:
         pending = self._pending

@@ -6,13 +6,15 @@ import logging
 
 from PySide6.QtCore import QTimer
 
-from probe_station_gui.coordinates.lifecycle import (
-    FrameLoadResult,
-    FramePublication,
+from probe_station_gui.coordinates.coordinator_model import (
+    CoordinateAdapterCompletion,
+    CoordinateTransition,
+    LoadCoordinateFramesIntent,
+    MachineProfileObservation,
+    SaveCoordinateFramesIntent,
 )
-from probe_station_gui.coordinates.persistence import CoordinateFrameDocument
-from probe_station_gui.coordinates.provenance import (
-    mark_design_frame_provenance_pending,
+from probe_station_gui.coordinates.persistence import (
+    CoordinateFrameStoreFailure,
 )
 from probe_station_gui.design import navigation_adapter as design_navigation
 from probe_station_gui.stage import move_lifecycle as stage_move_lifecycle
@@ -23,56 +25,98 @@ from probe_station_gui.views import main_window_stage_position_panel as stage_po
 logger = logging.getLogger(__name__)
 
 
-def _next_coordinate_frame_request_id(owner: object) -> int:
-    request_id = int(getattr(owner, "_coordinate_frame_request_id", 0)) + 1
-    owner._coordinate_frame_request_id = request_id
-    return request_id
+def apply_coordinate_transition(
+    owner: object,
+    transition: CoordinateTransition,
+) -> None:
+    """Render one finished domain transition and submit its adapter intents."""
+
+    owner._coordinate_frames_loaded = transition.snapshot.frames_loaded
+    stage_position_panel.refresh_coordinate_frame_display(owner)
+    show_status = getattr(owner, "_show_status", None)
+    for notice in transition.notices:
+        if notice.message and callable(show_status):
+            show_status(notice.message, notice.duration_ms)
+        if notice.code == "operator_alignment_saved":
+            collapse = getattr(owner, "_collapse_alignment_panel_if_ready", None)
+            if callable(collapse):
+                collapse()
+        elif notice.code == "operator_alignment_rollback":
+            set_snap = getattr(owner, "_set_design_snap_enabled", None)
+            if callable(set_snap):
+                set_snap(True)
+        elif notice.code == "legacy_migration_saved":
+            try:
+                complete_legacy_design_migration(owner)
+            except Exception:
+                logger.exception("Failed to replace legacy Design registration state")
+                if callable(show_status):
+                    show_status(
+                        "Design registration migration could not be finalized.",
+                        6000,
+                    )
+            else:
+                owner._legacy_design_migration_request_id = None
+                owner._legacy_design_migration_state = None
+    for intent in transition.intents:
+        try:
+            if isinstance(intent, LoadCoordinateFramesIntent):
+                owner._coordinate_frame_store.load(
+                    intent.intent_id,
+                    machine_profile_id=intent.machine_profile_id,
+                )
+            elif isinstance(intent, SaveCoordinateFramesIntent):
+                owner._coordinate_frame_store.publish(
+                    intent.intent_id,
+                    intent.document,
+                )
+        except Exception as exc:
+            logger.exception("Coordinate frame adapter submission failed")
+            failed = owner._coordinate_system_coordinator.complete(
+                CoordinateAdapterCompletion(
+                    intent_id=intent.intent_id,
+                    result=CoordinateFrameStoreFailure(
+                        request_id=intent.intent_id,
+                        operation=(
+                            "load"
+                            if isinstance(intent, LoadCoordinateFramesIntent)
+                            else "save"
+                        ),
+                        message=str(exc) or type(exc).__name__,
+                    ),
+                )
+            )
+            apply_coordinate_transition(owner, failed)
 
 
 def request_coordinate_frame_load(owner: object) -> int:
     """Start the durable-frame load independently from serial connection state."""
 
-    request_id = _next_coordinate_frame_request_id(owner)
-    effects = owner._coordinate_frame_lifecycle.begin_load(request_id)
-    registry = getattr(owner, "_coordinate_frame_registry", None)
-    if registry is not None:
-        snapshot = registry.snapshot()
-        registry.reset(mark_design_frame_provenance_pending(snapshot.records))
-    session = getattr(owner, "_design_session", None)
-    active_frame_id = getattr(session, "active_frame_id", None)
-    invalidate_registration = getattr(session, "invalidate_registration", None)
-    if active_frame_id and callable(invalidate_registration):
-        reason = effects.invalidate_session_reason
-        if reason is not None:
-            invalidate_registration(reason)
-    owner._coordinate_frames_loaded = False
     profile_source = getattr(owner, "_current_machine_profile_id", None)
     profile_id = profile_source() if callable(profile_source) else "default"
-    if not isinstance(profile_id, str) or not profile_id.strip():
-        profile_id = "default"
-    if effects.refresh_display:
-        stage_position_panel.refresh_coordinate_frame_display(owner)
-    owner._coordinate_frame_store.load(
-        request_id,
-        machine_profile_id=profile_id.strip(),
+    transition = owner._coordinate_system_coordinator.start(
+        MachineProfileObservation(str(profile_id or "default"))
     )
-    return request_id
+    load_intent = next(
+        intent
+        for intent in transition.intents
+        if isinstance(intent, LoadCoordinateFramesIntent)
+    )
+    apply_coordinate_transition(owner, transition)
+    return load_intent.intent_id
 
 
 def handle_coordinate_frame_loaded(owner: object, result: object) -> None:
-    runtime_records = getattr(result, "runtime_records", None)
-    records = result.document.records if runtime_records is None else runtime_records
-    effects = owner._coordinate_frame_lifecycle.accept_load(
-        FrameLoadResult(
-            request_id=int(result.request_id),
-            records=tuple(records),
+    was_loaded = bool(getattr(owner, "_coordinate_frames_loaded", False))
+    transition = owner._coordinate_system_coordinator.complete(
+        CoordinateAdapterCompletion(
+            intent_id=int(result.request_id),
+            result=result,
         )
     )
-    if effects.replace_records is None:
+    apply_coordinate_transition(owner, transition)
+    if was_loaded or not transition.snapshot.frames_loaded:
         return
-    owner._coordinate_frame_document = result.document
-    owner._coordinate_frame_registry.reset(effects.replace_records)
-    owner._coordinate_frames_loaded = True
     diagnostics = (
         *result.document.diagnostics,
         *getattr(result, "provenance_diagnostics", ()),
@@ -80,9 +124,6 @@ def handle_coordinate_frame_loaded(owner: object, result: object) -> None:
     if diagnostics:
         for diagnostic in diagnostics:
             logger.warning("Design coordinate frame unavailable: %s", diagnostic)
-        show_status = getattr(owner, "_show_status", None)
-        if callable(show_status):
-            show_status("Some Design coordinate frames are unavailable.", 6000)
     materialize_custom = getattr(owner, "_materialize_software_coordinate_frames", None)
     if callable(materialize_custom):
         materialize_custom()
@@ -97,57 +138,31 @@ def handle_coordinate_frame_loaded(owner: object, result: object) -> None:
     if callable(apply_authority):
         apply_authority()
     owner._activate_loaded_design_frame()
-    if effects.refresh_display:
-        stage_position_panel.refresh_coordinate_frame_display(owner)
-
-
-def publish_coordinate_frames(
-    owner: object,
-    *,
-    legacy_migration: bool = False,
-) -> int:
-    stage_position_panel.refresh_coordinate_frame_display(owner)
-    request_id = _next_coordinate_frame_request_id(owner)
-    base_document = getattr(owner, "_coordinate_frame_document", None)
-    if not isinstance(base_document, CoordinateFrameDocument):
-        base_document = CoordinateFrameDocument()
-    document = base_document.with_records(
-        owner._coordinate_frame_registry.snapshot().records
-    )
-    owner._coordinate_frame_document = document
-    if legacy_migration or getattr(
-        owner,
-        "_legacy_design_migration_request_id",
-        None,
-    ) is not None:
-        owner._legacy_design_migration_request_id = request_id
-    owner._coordinate_frame_lifecycle.track_publication(
-        FramePublication(
-            request_id=request_id,
-            records=tuple(document.records),
+def handle_coordinate_frame_saved(owner: object, result: object) -> None:
+    transition = owner._coordinate_system_coordinator.complete(
+        CoordinateAdapterCompletion(
+            intent_id=int(result.request_id),
+            result=result,
         )
     )
-    owner._coordinate_frame_store.publish(request_id, document)
-    return request_id
+    apply_coordinate_transition(owner, transition)
 
 
-def handle_coordinate_frame_saved(owner: object, result: object) -> None:
-    if result.request_id != getattr(
-        owner,
-        "_legacy_design_migration_request_id",
-        None,
-    ):
+def handle_coordinate_frame_failed(owner: object, failure: object) -> None:
+    request_id = getattr(failure, "request_id", None)
+    if not isinstance(request_id, int):
         return
-    try:
-        complete_legacy_design_migration(owner)
-    except Exception:
-        logger.exception("Failed to replace legacy Design registration state")
-        show_status = getattr(owner, "_show_status", None)
-        if callable(show_status):
-            show_status("Design registration migration could not be finalized.", 6000)
-        return
-    owner._legacy_design_migration_request_id = None
-    owner._legacy_design_migration_state = None
+    transition = owner._coordinate_system_coordinator.complete(
+        CoordinateAdapterCompletion(intent_id=request_id, result=failure)
+    )
+    apply_coordinate_transition(owner, transition)
+    if str(getattr(failure, "operation", "")) == "save" and transition.notices:
+        refresh_panel = getattr(owner, "_refresh_design_panel", None)
+        if callable(refresh_panel):
+            refresh_panel()
+        refresh_position = getattr(owner, "_refresh_design_position", None)
+        if callable(refresh_position):
+            refresh_position()
 
 
 def complete_legacy_design_migration(owner: object) -> None:

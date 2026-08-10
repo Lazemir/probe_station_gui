@@ -16,12 +16,6 @@ from .registry import (
     RegistrySnapshot,
     invalidate_axes,
 )
-from .persistence import (
-    CoordinateFrameDocument,
-    CoordinateFrameStoreWorker,
-    FilesystemCoordinateFrameBackend,
-    FrameLoadDiagnostic,
-)
 from .transforms import BFrameTransform, rotate_xy
 from .lifecycle import (
     MACHINE_FRAME_ID,
@@ -31,6 +25,38 @@ from .lifecycle import (
     FrameSelectionContext,
     FrameSelectionDecision,
 )
+from .coordinator import CoordinateSystemCoordinator
+from .coordinator_model import (
+    CoordinateAdapterCompletion,
+    CoordinateNotice,
+    CoordinateSystemSnapshot,
+    CoordinateTransition,
+    DesignSessionCheckpoint,
+    DesignSessionFrameLink,
+    FrameRecordsPublication,
+    LoadCoordinateFramesIntent,
+    MachineProfileObservation,
+    SaveCoordinateFramesIntent,
+)
+
+_PERSISTENCE_EXPORTS = frozenset(
+    {
+        "CoordinateFrameDocument",
+        "CoordinateFrameStoreWorker",
+        "FilesystemCoordinateFrameBackend",
+        "FrameLoadDiagnostic",
+    }
+)
+
+
+def __getattr__(name: str) -> object:
+    if name not in _PERSISTENCE_EXPORTS:
+        raise AttributeError(name)
+    from . import persistence
+
+    value = getattr(persistence, name)
+    globals()[name] = value
+    return value
 
 __all__ = [
     "STAGE_AXES",
@@ -38,22 +64,33 @@ __all__ = [
     "AxisReadiness",
     "BFrameTransform",
     "CoordinateFrameLifecycle",
+    "CoordinateAdapterCompletion",
+    "CoordinateNotice",
+    "CoordinateSystemCoordinator",
+    "CoordinateSystemSnapshot",
+    "CoordinateTransition",
     "CoordinateFrameDocument",
     "CoordinateFrameRecord",
     "CoordinateFrameRegistry",
     "CoordinateFrameStoreWorker",
     "DesignFrameUsabilitySnapshot",
+    "DesignSessionCheckpoint",
+    "DesignSessionFrameLink",
     "DesignUsabilityContext",
     "FilesystemCoordinateFrameBackend",
     "FrameKind",
+    "FrameRecordsPublication",
     "FrameLoadDiagnostic",
     "FrameSelectionContext",
     "FrameSelectionDecision",
     "FrameVersionConflict",
     "PhysicalMachinePose",
     "MACHINE_FRAME_ID",
+    "LoadCoordinateFramesIntent",
+    "MachineProfileObservation",
     "ReadinessStatus",
     "RegistrySnapshot",
+    "SaveCoordinateFramesIntent",
     "invalidate_axes",
     "normalize_axis_values",
     "rotate_xy",

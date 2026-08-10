@@ -23,6 +23,11 @@ from .model import (
     ReadinessStatus,
     VISIBLE_STAGE_AXES,
 )
+from .store_model import (
+    CoordinateFrameLoadResult,
+    CoordinateFrameStoreFailure,
+    CoordinateFrameStoreSuccess,
+)
 from .transforms import BFrameTransform
 
 
@@ -384,27 +389,6 @@ def _write_atomic(path: Path, payload: bytes) -> None:
         os.replace(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
-
-
-@dataclass(frozen=True)
-class CoordinateFrameLoadResult:
-    request_id: int
-    document: CoordinateFrameDocument
-    runtime_records: tuple[CoordinateFrameRecord, ...] | None = None
-    provenance_diagnostics: tuple[object, ...] = ()
-
-
-@dataclass(frozen=True)
-class CoordinateFrameStoreSuccess:
-    request_id: int
-    operation: str
-
-
-@dataclass(frozen=True)
-class CoordinateFrameStoreFailure:
-    request_id: int
-    operation: str
-    message: str
 
 
 @dataclass(frozen=True)

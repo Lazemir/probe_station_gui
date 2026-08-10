@@ -106,6 +106,9 @@ from probe_station_gui import (
 from probe_station_gui.coordinates import (
     CoordinateFrameRegistry,
     CoordinateFrameStoreWorker,
+    CoordinateSystemCoordinator,
+    DesignSessionCheckpoint,
+    FrameRecordsPublication,
     PhysicalMachinePose,
     rotate_xy,
 )
@@ -113,9 +116,6 @@ from probe_station_gui.coordinates.lifecycle import (
     CoordinateFrameLifecycle,
     DesignFrameUsabilitySnapshot,
     DesignUsabilityContext,
-    FrameLifecycleEffects,
-    FramePublication,
-    FramePublicationResult,
 )
 from probe_station_gui.coordinates.rotation_geometry import (
     RotationGeometrySnapshot,
@@ -137,12 +137,13 @@ from probe_station_gui.design.klayout_types import (
 from probe_station_gui.design.klayout_workers import KLayoutStructureBoundsWorker
 from probe_station_gui.design.frame_registration import (
     DesignFrameMetadata,
-    commit_contact_reference,
-    commit_focus_reference,
     commit_xyb_registration,
     find_equivalent_migrated_frame,
     migrate_legacy_design_state,
+    new_design_frame_draft,
     reset_focus_reference,
+    set_contact_reference,
+    set_focus_reference,
     update_check_registration,
 )
 from probe_station_gui.design.registration_lifecycle import (
@@ -1039,18 +1040,23 @@ class Main(QMainWindow):
         self._contact_seek_stop_requested = threading.Event()
         self._design_session = DesignSession()
         self._coordinate_frame_registry = CoordinateFrameRegistry()
+        self._design_registration_lifecycle = DesignRegistrationLifecycle()
+        self._coordinate_system_coordinator = CoordinateSystemCoordinator(
+            registry=self._coordinate_frame_registry,
+            session=self._design_session,
+            lifecycle=self._coordinate_frame_lifecycle,
+            registration_lifecycle=self._design_registration_lifecycle,
+        )
         self._coordinate_frame_store = CoordinateFrameStoreWorker(
             self,
             path=self.settings_manager.coordinate_frames_path(),
         )
-        self._coordinate_frame_request_id = 0
         self._legacy_design_migration_request_id: int | None = None
         self._legacy_design_migration_state: dict[str, object] | None = None
         self._coordinate_frames_loaded = False
         self._active_design_frame_metadata: DesignFrameMetadata | None = None
         self._coordinate_frame_authority_blocked_axes: set[str] = set()
         self._active_route_design_frame_snapshot = None
-        self._design_registration_lifecycle = DesignRegistrationLifecycle()
         self._focus_structure_bounds_worker: KLayoutStructureBoundsWorker | None = None
         self._focus_structure_request_id = 0
         self._pending_focus_structure_request_id: int | None = None
@@ -4740,14 +4746,19 @@ class Main(QMainWindow):
             return True
         try:
             snapshot = self.stage_controller.latest_machine_coordinate_snapshot()
-            design_navigation.activate_design_frame_for_document(
-                self._design_session,
-                registry,
+            candidate = new_design_frame_draft(
                 document,
-                create_new=True,
-                current_metadata=self._design_metadata_with_calibration_fingerprints(
+                existing_names=(
+                    record.name for record in registry.snapshot().records
+                ),
+                metadata=self._design_metadata_with_calibration_fingerprints(
                     metadata
                 ),
+            )
+            publication = design_navigation.prepare_design_frame_publication(
+                self._design_session,
+                registry.snapshot().records,
+                candidate,
                 machine_point_for_navigation=(
                     self._design_navigation_xy_from_physical_machine_xy
                 ),
@@ -4761,7 +4772,10 @@ class Main(QMainWindow):
         except DesignModelError as exc:
             self._show_status(str(exc), 6000)
             return False
-        connection_flow.publish_coordinate_frames(self)
+        transition = self._coordinate_system_coordinator.publish_frame_records(
+            publication
+        )
+        connection_flow.apply_coordinate_transition(self, transition)
         self._apply_coordinate_frame_authority_blocks()
         return True
 
@@ -5071,10 +5085,12 @@ class Main(QMainWindow):
         )
         if not changed:
             return False
-        registry.reset(records)
         # The registry is made unavailable before this asynchronous write.  If
         # persistence fails, the next startup re-runs this reconciliation.
-        connection_flow.publish_coordinate_frames(self)
+        transition = self._coordinate_system_coordinator.publish_frame_records(
+            FrameRecordsPublication(records=tuple(records))
+        )
+        connection_flow.apply_coordinate_transition(self, transition)
         return True
 
     def _design_metadata_with_calibration_fingerprints(
@@ -7733,111 +7749,12 @@ class Main(QMainWindow):
 
     def _on_coordinate_frames_saved(self, result: object) -> None:
         connection_flow.handle_coordinate_frame_saved(self, result)
-        request_id = getattr(result, "request_id", None)
-        if not isinstance(request_id, int):
-            return
-        effects = self._coordinate_frame_lifecycle.finish_publication(
-            FramePublicationResult(request_id=request_id, succeeded=True)
-        )
-        if effects != FrameLifecycleEffects():
-            self._apply_coordinate_frame_lifecycle_effects(effects)
-
-    def _apply_coordinate_frame_lifecycle_effects(
-        self,
-        effects: FrameLifecycleEffects,
-    ) -> None:
-        for publication in effects.acknowledged_publications:
-            committed = publication.committed_record
-            if committed is None:
-                continue
-            frame_id = getattr(committed, "frame_id", None)
-            registry = getattr(self, "_coordinate_frame_registry", None)
-            session = getattr(self, "_design_session", None)
-            if (
-                frame_id is None
-                or registry is None
-                or registry.get(frame_id) != committed
-                or getattr(session, "active_frame_id", None) != frame_id
-            ):
-                continue
-            if publication.operator_alignment:
-                self._collapse_alignment_panel_if_ready()
-            if publication.success_message is not None:
-                self._show_status(publication.success_message, 7000)
-
-        registry = getattr(self, "_coordinate_frame_registry", None)
-        if registry is None:
-            return
-        restored_any = False
-        for publication in effects.rollback_publications:
-            rollback = publication.previous_record
-            registration_effects = publication.registration_rollback_effects
-            if rollback is not None:
-                frame_id = rollback.frame_id
-                current = registry.get(frame_id)
-                if current is not None:
-                    try:
-                        restored = registry.replace(
-                            rollback,
-                            expected_version=current.version,
-                        )
-                        restored_any = True
-                        session = getattr(self, "_design_session", None)
-                        if (
-                            session is not None
-                            and session.active_frame_id == frame_id
-                            and registration_effects is None
-                        ):
-                            session.link_active_frame(
-                                restored,
-                                machine_point_for_navigation=(
-                                    self._design_navigation_xy_from_physical_machine_xy
-                                ),
-                                machine_b_deg=publication.machine_b_deg,
-                                pivot_machine_xy=(
-                                    publication.pivot_machine_xy or (0.0, 0.0)
-                                ),
-                            )
-                        if publication.operator_alignment:
-                            self._set_design_snap_enabled(True)
-                    except Exception:
-                        logger.exception(
-                            "Failed to roll back unsaved Design registration"
-                        )
-            if registration_effects is not None:
-                self._apply_registration_effects(registration_effects)
-                restored_any = True
-
-        if not restored_any:
-            return
-        try:
-            document = getattr(self, "_coordinate_frame_document", None)
-            with_records = getattr(document, "with_records", None)
-            if callable(with_records):
-                self._coordinate_frame_document = with_records(
-                    registry.snapshot().records
-                )
-            if effects.refresh_display:
-                self._refresh_design_panel()
-                self._refresh_design_position()
-        except Exception:
-            logger.exception("Failed to present rolled-back Design registrations")
 
     def _on_coordinate_frame_store_failed(self, failure: object) -> None:
         operation = str(getattr(failure, "operation", "operation"))
         message = str(getattr(failure, "message", "Unknown persistence error."))
         logger.warning("Coordinate frame %s failed: %s", operation, message)
-        request_id = getattr(failure, "request_id", None)
-        if operation == "save" and isinstance(request_id, int):
-            effects = self._coordinate_frame_lifecycle.finish_publication(
-                FramePublicationResult(request_id=request_id, succeeded=False)
-            )
-            if effects.failure_deferred:
-                return
-            if effects != FrameLifecycleEffects():
-                self._apply_coordinate_frame_lifecycle_effects(effects)
-        action = "loaded" if operation == "load" else "saved"
-        self._show_status(f"Design coordinate frames could not be {action}.", 6000)
+        connection_flow.handle_coordinate_frame_failed(self, failure)
 
     def _activate_loaded_design_frame(
         self,
@@ -7915,29 +7832,33 @@ class Main(QMainWindow):
                 )
                 selected = existing or migrated
                 try:
-                    projection = self._design_session.prepare_active_frame_link(
+                    publication = design_navigation.prepare_design_frame_publication(
+                        self._design_session,
+                        registry.snapshot().records,
                         selected,
+                        previous_record=existing,
                         machine_point_for_navigation=(
                             self._design_navigation_xy_from_physical_machine_xy
                         ),
                         machine_b_deg=physical_b,
                         pivot_machine_xy=pivot,
+                        success_message="",
+                        success_code="legacy_migration_saved",
                     )
                 except DesignModelError as exc:
                     self._show_status(str(exc), 6000)
                     return
-                migrated = selected if existing is not None else registry.add(selected)
-                self._design_session.apply_active_frame_link(migrated, projection)
                 self._legacy_design_migration_state = dict(legacy_state)
-                connection_flow.publish_coordinate_frames(
-                    self,
-                    legacy_migration=True,
+                transition = self._coordinate_system_coordinator.publish_frame_records(
+                    publication
                 )
+                self._legacy_design_migration_request_id = transition.intents[0].intent_id
+                connection_flow.apply_coordinate_transition(self, transition)
                 self._apply_coordinate_frame_authority_blocks()
             return
 
         try:
-            activation = design_navigation.activate_design_frame_for_document(
+            prepared = design_navigation.prepare_design_frame_activation(
                 self._design_session,
                 registry,
                 self._design_session.document,
@@ -7954,8 +7875,17 @@ class Main(QMainWindow):
         except DesignModelError as exc:
             self._show_status(str(exc), 6000)
             return
-        if activation.created or activation.updated:
-            connection_flow.publish_coordinate_frames(self)
+        activation = prepared.activation
+        if prepared.publication is not None:
+            transition = self._coordinate_system_coordinator.publish_frame_records(
+                prepared.publication
+            )
+            connection_flow.apply_coordinate_transition(self, transition)
+        else:
+            self._design_session.apply_active_frame_link(
+                activation.record,
+                prepared.projection,
+            )
         self._apply_coordinate_frame_authority_blocks()
 
     def _apply_coordinate_frame_authority_blocks(
@@ -8990,20 +8920,30 @@ class Main(QMainWindow):
         if effects.commit_a_mm is None:
             return
         try:
-            contacted = commit_contact_reference(
-                self._coordinate_frame_registry,
-                token,
-                success=True,
-                physical_machine_a_mm=effects.commit_a_mm,
+            current = self._coordinate_frame_registry.get(token.frame_id)
+            if current is None or current.version != token.frame_version:
+                return
+            contacted = replace(
+                set_contact_reference(
+                    current,
+                    physical_machine_a_mm=effects.commit_a_mm,
+                ),
+                version=current.version + 1,
             )
         except (KeyError, RuntimeError, TypeError, ValueError):
             logger.exception("Unable to store Design contact reference")
-            contacted = None
-        if contacted is None:
             return
-        connection_flow.publish_coordinate_frames(self)
+        transition = self._coordinate_system_coordinator.publish_frame_records(
+            FrameRecordsPublication.for_committed_record(
+                self._coordinate_frame_registry.snapshot().records,
+                contacted,
+                previous_record=current,
+                success_message="Contact reference ready.",
+                success_duration_ms=5000,
+            )
+        )
+        connection_flow.apply_coordinate_transition(self, transition)
         self._refresh_design_panel()
-        self._show_status("Contact reference ready.", 5000)
 
     def _route_measurement_points(
         self,
@@ -10213,6 +10153,9 @@ class Main(QMainWindow):
         if not isinstance(request_id, RegistrationCaptureToken):
             return
         token = request_id
+        publication_checkpoint = DesignSessionCheckpoint.capture(
+            self._design_session
+        )
         callback_succeeded = bool(
             success and isinstance(snapshot, MachineCoordinateSnapshot)
         )
@@ -10343,6 +10286,7 @@ class Main(QMainWindow):
             commit_result = self._commit_active_design_frame_registration(
                 token,
                 effects,
+                publication_checkpoint=publication_checkpoint,
                 success_message=capture_message,
                 operator_alignment=token.operator_alignment,
             )
@@ -10363,6 +10307,7 @@ class Main(QMainWindow):
         token: RegistrationCaptureToken,
         effects: RegistrationEffects,
         *,
+        publication_checkpoint: DesignSessionCheckpoint,
         success_message: str = "Design registration saved.",
         operator_alignment: bool = False,
     ) -> str:
@@ -10379,6 +10324,9 @@ class Main(QMainWindow):
         ):
             return "incomplete"
         rollback_effects = effects.rollback_effects
+        publication_checkpoint = publication_checkpoint.with_registration_baseline(
+            rollback_effects
+        )
         current = registry.get(frame_id)
         if current is None or current.version != token.frame_version:
             self._apply_registration_effects(rollback_effects)
@@ -10474,16 +10422,14 @@ class Main(QMainWindow):
                     check_design_points=check_design_marks,
                     check_machine_points=check_physical_marks,
                 )
-            committed = registry.replace(
-                committed,
-                expected_version=current.version,
-            )
+            committed = replace(committed, version=current.version + 1)
         except (DesignModelError, KeyError, RuntimeError, ValueError) as exc:
             self._apply_registration_effects(rollback_effects)
             self._show_status(str(exc), 6000)
             return "failed"
+        runtime_record = committed
         try:
-            self._design_session.link_active_frame(
+            projection = self._design_session.prepare_active_frame_link(
                 committed,
                 machine_point_for_navigation=(
                     self._design_navigation_xy_from_physical_machine_xy
@@ -10492,8 +10438,12 @@ class Main(QMainWindow):
                 pivot_machine_xy=pivot,
             )
         except DesignModelError as exc:
-            self._design_session.link_active_frame(
-                committed.with_authority_block({"X", "Y", "B"}, str(exc)),
+            runtime_record = committed.with_authority_block(
+                {"X", "Y", "B"},
+                str(exc),
+            )
+            projection = self._design_session.prepare_active_frame_link(
+                runtime_record,
                 machine_b_deg=target_b,
                 pivot_machine_xy=pivot,
             )
@@ -10508,63 +10458,33 @@ class Main(QMainWindow):
                 f"RMS {float(metadata.rms_residual_mm or 0.0):.4f} mm, "
                 f"max {float(metadata.max_residual_mm or 0.0):.4f} mm."
             )
-        try:
-            publication_request_id = connection_flow.publish_coordinate_frames(self)
-        except Exception as exc:
-            try:
-                restored = registry.replace(
-                    current,
-                    expected_version=committed.version,
-                )
-                self._design_session.link_active_frame(
-                    restored,
-                    machine_point_for_navigation=(
-                        self._design_navigation_xy_from_physical_machine_xy
-                    ),
-                    machine_b_deg=target_b,
-                    pivot_machine_xy=pivot,
-                )
-            except Exception:
-                logger.exception("Failed to roll back Design registration publish")
-            self._apply_registration_effects(rollback_effects)
-            self._show_status(str(exc) or type(exc).__name__, 7000)
-            return "failed"
-        if isinstance(publication_request_id, int):
-            self._coordinate_frame_lifecycle.track_publication(
-                FramePublication(
-                    request_id=publication_request_id,
-                    records=tuple(registry.snapshot().records),
-                    previous_record=current,
-                    committed_record=committed,
-                    machine_b_deg=target_b,
-                    pivot_machine_xy=pivot,
-                    success_message=str(success_message),
-                    operator_alignment=operator_alignment,
-                    registration_rollback_effects=rollback_effects,
-                )
+        transition = self._coordinate_system_coordinator.publish_frame_records(
+            FrameRecordsPublication.for_committed_record(
+                registry.snapshot().records,
+                committed,
+                previous_record=current,
+                previous_session=publication_checkpoint,
+                projection=projection,
+                runtime_record=runtime_record,
+                success_message=str(success_message),
+                success_duration_ms=7000,
+                success_code=(
+                    "operator_alignment_saved" if operator_alignment else None
+                ),
             )
-            if operator_alignment:
-                self._set_design_snap_enabled(False)
-                self._finish_alignment_draft()
-            return "deferred"
+        )
+        connection_flow.apply_coordinate_transition(self, transition)
+        if registry.get(committed.frame_id) != committed:
+            return "failed"
         if operator_alignment:
             self._set_design_snap_enabled(False)
             self._finish_alignment_draft()
-            self._collapse_alignment_panel_if_ready()
-            self._show_status(success_message, 7000)
-            return "presented"
-        return "committed"
+        return "deferred"
 
     def _design_spacing_ratio_is_reasonable(self, ratio: float) -> bool:
         return abs(float(ratio) - 1.0) <= self.DESIGN_SPACING_RATIO_TOLERANCE
 
     def _clear_design_registration(self) -> None:
-        effects = self._design_registration_lifecycle.cancel(
-            RegistrationCancellation.FRAME_CHANGED
-        )
-        self._apply_registration_effects(effects)
-        self._pending_alignment_preparation = None
-        self._last_selected_design_point = None
         registry = getattr(self, "_coordinate_frame_registry", None)
         metadata = getattr(self, "_active_design_frame_metadata", None)
         if (
@@ -10575,14 +10495,19 @@ class Main(QMainWindow):
         ):
             try:
                 snapshot = self.stage_controller.latest_machine_coordinate_snapshot()
-                design_navigation.activate_design_frame_for_document(
-                    self._design_session,
-                    registry,
+                candidate = new_design_frame_draft(
                     self._design_session.document,
-                    create_new=True,
-                    current_metadata=self._design_metadata_with_calibration_fingerprints(
+                    existing_names=(
+                        record.name for record in registry.snapshot().records
+                    ),
+                    metadata=self._design_metadata_with_calibration_fingerprints(
                         metadata
                     ),
+                )
+                publication = design_navigation.prepare_design_frame_publication(
+                    self._design_session,
+                    registry.snapshot().records,
+                    candidate,
                     machine_point_for_navigation=(
                         self._design_navigation_xy_from_physical_machine_xy
                     ),
@@ -10598,10 +10523,26 @@ class Main(QMainWindow):
             except DesignModelError as exc:
                 self._show_status(str(exc), 6000)
                 return
-            connection_flow.publish_coordinate_frames(self)
+            transition = self._coordinate_system_coordinator.publish_frame_records(
+                publication
+            )
+            connection_flow.apply_coordinate_transition(self, transition)
+            if registry.get(candidate.frame_id) != candidate:
+                return
+            cancellation = self._design_registration_lifecycle.cancel(
+                RegistrationCancellation.FRAME_CHANGED
+            )
+            if cancellation.clear_focus_candidate:
+                self._clear_design_focus_overlay_state()
             self._apply_coordinate_frame_authority_blocks()
         else:
+            effects = self._design_registration_lifecycle.cancel(
+                RegistrationCancellation.FRAME_CHANGED
+            )
+            self._apply_registration_effects(effects)
             self._design_session.clear_registration()
+        self._pending_alignment_preparation = None
+        self._last_selected_design_point = None
         self._set_design_snap_enabled(True)
         self._refresh_design_panel()
         self._refresh_design_position()
@@ -10665,12 +10606,8 @@ class Main(QMainWindow):
                 5000,
             )
             return
-        cancellation = self._design_registration_lifecycle.cancel(
-            RegistrationCancellation.FRAME_CHANGED
-        )
-        self._apply_registration_effects(cancellation)
         try:
-            activation = design_navigation.activate_design_frame_for_document(
+            prepared = design_navigation.prepare_design_frame_activation(
                 self._design_session,
                 registry,
                 document,
@@ -10687,13 +10624,25 @@ class Main(QMainWindow):
         except DesignModelError as exc:
             self._show_status(str(exc), 6000)
             return
+        activation = prepared.activation
+        if prepared.publication is not None:
+            transition = self._coordinate_system_coordinator.publish_frame_records(
+                prepared.publication
+            )
+            connection_flow.apply_coordinate_transition(self, transition)
+            if registry.get(activation.record.frame_id) != activation.record:
+                return
+        else:
+            self._design_session.apply_active_frame_link(
+                activation.record,
+                prepared.projection,
+            )
+        self._design_registration_lifecycle.cancel(
+            RegistrationCancellation.FRAME_CHANGED
+        )
         self._pending_alignment_preparation = None
         self._last_selected_design_point = None
-        self._clear_design_focus_overlay_state(
-            clear_window=not cancellation.clear_focus_candidate
-        )
-        if activation.updated:
-            connection_flow.publish_coordinate_frames(self)
+        self._clear_design_focus_overlay_state()
         self._apply_coordinate_frame_authority_blocks()
         self._refresh_design_panel()
         self._refresh_design_position()
@@ -11196,46 +11145,72 @@ class Main(QMainWindow):
         if effects.commit_z_mm is None or effects.focus_token is None:
             return
         try:
-            focused = commit_focus_reference(
-                self._coordinate_frame_registry,
-                effects.focus_token,
-                success=True,
-                physical_machine_z_mm=effects.commit_z_mm,
+            current = self._coordinate_frame_registry.get(effects.focus_token.frame_id)
+            if current is None or current.version != effects.focus_token.frame_version:
+                return
+            focused = replace(
+                set_focus_reference(
+                    current,
+                    physical_machine_z_mm=effects.commit_z_mm,
+                ),
+                version=current.version + 1,
             )
         except (KeyError, RuntimeError, TypeError, ValueError):
             logger.exception("Unable to store Design focus reference")
-            focused = None
-        if focused is None:
             return
-        connection_flow.publish_coordinate_frames(self)
+        transition = self._coordinate_system_coordinator.publish_frame_records(
+            FrameRecordsPublication.for_committed_record(
+                self._coordinate_frame_registry.snapshot().records,
+                focused,
+                previous_record=current,
+                success_message="Focus reference ready.",
+                success_duration_ms=5000,
+            )
+        )
+        connection_flow.apply_coordinate_transition(self, transition)
         self._refresh_design_panel()
-        self._show_status("Focus reference ready.", 5000)
 
     def _reset_design_focus_reference(self) -> None:
         record = self._active_design_frame_record()
         if record is None:
             return
         try:
-            self._coordinate_frame_registry.replace(
+            reset = replace(
                 reset_focus_reference(
                     record,
                     reason="Focus reference reset.",
                 ),
-                expected_version=record.version,
+                version=record.version + 1,
             )
-        except (KeyError, RuntimeError, ValueError) as exc:
+            publication = design_navigation.prepare_design_frame_publication(
+                self._design_session,
+                self._coordinate_frame_registry.snapshot().records,
+                reset,
+                previous_record=record,
+                machine_point_for_navigation=(
+                    self._design_navigation_xy_from_physical_machine_xy
+                ),
+                machine_b_deg=self._tracked_physical_b_for_design_frame(),
+                pivot_machine_xy=self._rotation_geometry_snapshot().pivot_machine_xy,
+                success_message="Focus reference reset.",
+                success_duration_ms=4000,
+            )
+        except (DesignModelError, KeyError, RuntimeError, ValueError) as exc:
             self._show_status(str(exc), 5000)
+            return
+        transition = self._coordinate_system_coordinator.publish_frame_records(
+            publication
+        )
+        connection_flow.apply_coordinate_transition(self, transition)
+        if self._coordinate_frame_registry.get(reset.frame_id) != reset:
             return
         effects = self._design_registration_lifecycle.cancel(
             RegistrationCancellation.Z_CHANGED
         )
-        self._apply_registration_effects(effects)
         self._clear_design_focus_overlay_state(
             clear_window=not effects.clear_focus_candidate
         )
-        connection_flow.publish_coordinate_frames(self)
         self._refresh_design_panel()
-        self._show_status("Focus reference reset.", 4000)
 
     def _connect_design_focus_signals(self) -> None:
         window = getattr(self, "design_layout_window", None)

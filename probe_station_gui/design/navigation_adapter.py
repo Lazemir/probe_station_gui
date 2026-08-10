@@ -7,6 +7,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+from probe_station_gui.coordinates.coordinator_model import (
+    DesignSessionCheckpoint,
+    FrameRecordsPublication,
+)
 from probe_station_gui.coordinates.model import CoordinateFrameRecord
 from probe_station_gui.coordinates.registry import CoordinateFrameRegistry
 from probe_station_gui.coordinates.provenance import design_frame_provenance_error
@@ -23,6 +27,7 @@ from probe_station_gui.design.model import (
 )
 from probe_station_gui.design.session import (
     DEFAULT_B_AXIS_ROTATION_PIVOT_STAGE,
+    DesignFrameLinkProjection,
     DesignSession,
 )
 from probe_station_gui.design.selection_model import (
@@ -69,6 +74,13 @@ class DesignFrameActivation:
     record: CoordinateFrameRecord
     created: bool = False
     updated: bool = False
+
+
+@dataclass(frozen=True)
+class PreparedDesignFrameActivation:
+    activation: DesignFrameActivation
+    projection: DesignFrameLinkProjection
+    publication: FrameRecordsPublication | None = None
 
 
 @dataclass(frozen=True)
@@ -227,6 +239,44 @@ def persisted_design_file_is_current(state: dict[str, object]) -> bool:
     return True
 
 
+def prepare_design_frame_publication(
+    session: DesignSession,
+    records: tuple[CoordinateFrameRecord, ...],
+    committed_record: CoordinateFrameRecord,
+    *,
+    previous_record: CoordinateFrameRecord | None = None,
+    previous_session: DesignSessionCheckpoint | None = None,
+    runtime_record: CoordinateFrameRecord | None = None,
+    machine_point_for_navigation: Callable[[Point2D], Point2D] | None = None,
+    machine_b_deg: float | None = None,
+    pivot_machine_xy: Point2D = DEFAULT_B_AXIS_ROTATION_PIVOT_STAGE,
+    success_message: str | None = None,
+    success_duration_ms: int = 0,
+    success_code: str | None = None,
+) -> FrameRecordsPublication:
+    """Prepare a linked frame proposal without mutating the adopted session."""
+
+    checkpoint = previous_session or DesignSessionCheckpoint.capture(session)
+    projection_record = runtime_record or committed_record
+    projection = session.prepare_active_frame_link(
+        projection_record,
+        machine_point_for_navigation=machine_point_for_navigation,
+        machine_b_deg=machine_b_deg,
+        pivot_machine_xy=pivot_machine_xy,
+    )
+    return FrameRecordsPublication.for_committed_record(
+        records,
+        committed_record,
+        previous_record=previous_record,
+        previous_session=checkpoint,
+        projection=projection,
+        runtime_record=runtime_record,
+        success_message=success_message,
+        success_duration_ms=success_duration_ms,
+        success_code=success_code,
+    )
+
+
 def activate_design_frame_for_document(
     session: DesignSession,
     registry: CoordinateFrameRegistry,
@@ -330,6 +380,61 @@ def activate_design_frame_for_document(
         reconciled = registry.replace(reconciled, expected_version=selected.version)
     session.apply_active_frame_link(reconciled, projection)
     return DesignFrameActivation(record=reconciled, updated=updated)
+
+
+def prepare_design_frame_activation(
+    session: DesignSession,
+    registry: CoordinateFrameRegistry,
+    document: DesignDocument,
+    *,
+    requested_frame_id: str | None = None,
+    current_metadata: DesignFrameMetadata | None = None,
+    machine_point_for_navigation: Callable[[Point2D], Point2D] | None = None,
+    machine_b_deg: float | None = None,
+    pivot_machine_xy: Point2D = DEFAULT_B_AXIS_ROTATION_PIVOT_STAGE,
+) -> PreparedDesignFrameActivation:
+    """Prepare activation and any publication without mutating live owners."""
+
+    proposed_registry = CoordinateFrameRegistry()
+    proposed_registry.reset(registry.snapshot().records)
+    proposed_session = DesignSession(document=document)
+    proposed_session.active_frame_id = session.active_frame_id
+    activation = activate_design_frame_for_document(
+        proposed_session,
+        proposed_registry,
+        document,
+        requested_frame_id=requested_frame_id,
+        current_metadata=current_metadata,
+        machine_point_for_navigation=machine_point_for_navigation,
+        machine_b_deg=machine_b_deg,
+        pivot_machine_xy=pivot_machine_xy,
+    )
+    if activation.created or activation.updated:
+        publication = prepare_design_frame_publication(
+            session,
+            registry.snapshot().records,
+            activation.record,
+            previous_record=(
+                registry.get(activation.record.frame_id) if activation.updated else None
+            ),
+            machine_point_for_navigation=machine_point_for_navigation,
+            machine_b_deg=machine_b_deg,
+            pivot_machine_xy=pivot_machine_xy,
+        )
+        link = publication.proposed_session_link
+        assert link is not None
+        return PreparedDesignFrameActivation(
+            activation=activation,
+            projection=link.projection,
+            publication=publication,
+        )
+    projection = session.prepare_active_frame_link(
+        activation.record,
+        machine_point_for_navigation=machine_point_for_navigation,
+        machine_b_deg=machine_b_deg,
+        pivot_machine_xy=pivot_machine_xy,
+    )
+    return PreparedDesignFrameActivation(activation, projection)
 
 
 def _frame_source_path(record: CoordinateFrameRecord) -> Path | None:
@@ -1005,6 +1110,7 @@ __all__ = [
     "DesignPositionPresentation",
     "DesignTargetSelectionPlan",
     "PersistedDesignRestoreDecision",
+    "PreparedDesignFrameActivation",
     "RouteEditPlan",
     "RoutePointSelectionPlan",
     "add_design_route_point",
@@ -1025,6 +1131,8 @@ __all__ = [
     "plan_design_coordinate_move",
     "plan_design_target_move",
     "position_axis_mismatches",
+    "prepare_design_frame_publication",
+    "prepare_design_frame_activation",
     "prepare_persisted_design_restore",
     "remove_selected_route_point",
     "rotate_design_document",
