@@ -179,9 +179,6 @@ from probe_station_gui.design.markup_store import (
 from probe_station_gui.design.selection_model import (
     SelectionModel,
     apply_markup_entity_changes,
-    plan_mixed_array,
-    plan_mixed_delete,
-    project_entities,
 )
 from probe_station_gui.design.session import (
     AlignmentPreparation,
@@ -652,10 +649,8 @@ if TYPE_CHECKING:
     )
     from probe_station_gui.views.surface_map_panel import SurfaceMapWindow
     from probe_station_gui.views.serial_terminal_window import SerialTerminalWindow
-    from probe_station_gui.views.design_navigator_panel import (
-        DesignLayoutWindow,
-        DesignNavigatorPanel,
-    )
+    from probe_station_gui.views.design_layout_window import DesignLayoutWindow
+    from probe_station_gui.views.design_navigator_panel import DesignNavigatorPanel
 
 
 class Main(QMainWindow):
@@ -3887,7 +3882,7 @@ class Main(QMainWindow):
 
         def load_design_window_module() -> None:
             try:
-                from probe_station_gui.views.design_navigator_panel import (
+                from probe_station_gui.views.design_layout_window import (
                     DesignLayoutWindow as design_layout_window_class,
                 )
             except Exception as exc:
@@ -7841,13 +7836,7 @@ class Main(QMainWindow):
         window = self.design_layout_window
         if window is None:
             return
-        markup = getattr(self, "_design_markup", None)
-        entities = project_entities(self._design_session.route, markup)
-        plan = plan_mixed_delete(
-            entities,
-            window.selection.ids,
-            edit_safe=True,
-        )
+        plan = window.plan_mixed_delete(edit_safe=True)
         self._commit_mixed_design_edit(plan, selection_after=SelectionModel())
 
     def _apply_mixed_design_array(self, request: object) -> None:
@@ -7866,18 +7855,13 @@ class Main(QMainWindow):
             return
         if not self._markup_mutation_ready():
             return
-        markup = getattr(self, "_design_markup", None)
-        entities = project_entities(self._design_session.route, markup)
-        plan = plan_mixed_array(
-            entities,
-            request.source_ids,
+        plan = self.design_layout_window.plan_mixed_array(
             request,
-            route=self._design_session.route,
             edit_safe=True,
         )
         self._commit_mixed_design_edit(
             plan,
-            selection_after=SelectionModel(request.source_ids),
+            selection_after=self.design_layout_window.selection,
         )
 
     def _commit_mixed_design_edit(

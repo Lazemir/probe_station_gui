@@ -14,7 +14,7 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QDockWidget, QMainWindow
 
 from probe_station_gui.views import main_window_menus
-from probe_station_gui.views.design_navigator_panel import DesignLayoutWindow
+from probe_station_gui.views.design_layout_window import DesignLayoutWindow
 from probe_station_gui.views.main_window_menus import setup_main_window_menus
 
 

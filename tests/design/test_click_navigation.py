@@ -19,10 +19,8 @@ from probe_station_gui.design.selection_model import (
     route_entity_id,
 )
 from probe_station_gui.route.model import MeasurementRoute
-from probe_station_gui.views.design_navigator_panel import (
-    DesignNavigatorPanel,
-    _DesignPlotPane,
-)
+from probe_station_gui.views.design_navigator_panel import DesignNavigatorPanel
+from probe_station_gui.views.design_plot_pane import _DesignPlotPane
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]

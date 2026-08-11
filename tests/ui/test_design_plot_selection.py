@@ -28,7 +28,7 @@ from probe_station_gui.route.model import (
     RouteDesignBinding,
     RoutePoint,
 )
-from probe_station_gui.views.design_navigator_panel import DesignLayoutWindow
+from probe_station_gui.views.design_layout_window import DesignLayoutWindow
 from probe_station_gui.design.focus_candidate import FocusCandidate
 from probe_station_gui.views.design_plot_pane import _DesignPlotPane
 

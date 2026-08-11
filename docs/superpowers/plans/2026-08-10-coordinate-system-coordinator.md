@@ -603,6 +603,61 @@ git commit -m "refactor: split coordinate adapter responsibilities"
   the metric gate.
 - Create: `.superpowers/sdd/2026-08-10-coordinate-system-coordinator/final-report.md`
 
+#### Task 5a: Separate Design layout ownership
+
+**Files:**
+- Create: `probe_station_gui/design/layout_state.py`
+- Create: `probe_station_gui/views/design_layout_window.py`
+- Create: `tests/design/test_layout_state.py`
+- Modify: `main.py`
+- Modify: `probe_station_gui/views/__init__.py`
+- Modify: `probe_station_gui/views/design_navigator_panel.py`
+- Modify: `probe_station_gui/views/main_window_auxiliary.py`
+- Modify: `tests/app/test_main_design_markup_navigation.py`
+- Modify: `tests/design/test_click_navigation.py`
+- Modify: `tests/ui/test_design_plot_klayout.py`
+- Modify: `tests/ui/test_design_plot_selection.py`
+- Modify: `tests/ui/test_main_window_menus.py`
+
+- [x] Add strict RED tests for initial selection, preservation, pruning, hidden
+  Markup, replace/add/invert, invalid IDs, mixed-edit projection, and retained
+  document state. Collection first failed because `design.layout_state` did not
+  exist; the planning RED then failed on the absent workflow method.
+- [x] Extract `DesignLayoutWindow` to its own Qt module and migrate every direct
+  import. The UI RED failed collection because `views.design_layout_window` did
+  not yet exist; the old module has no compatibility re-export.
+- [x] Make frozen `DesignLayoutState` the one owner of document, an isolated
+  route snapshot, Markup, selectable projection, selection initialization,
+  pruning, and mixed-edit planning. `Main` consumes workflow-specific plans
+  rather than recomputing `project_entities`. RED/GREEN regressions prove that
+  caller-supplied array IDs cannot override canonical selection and that later
+  mutation of the source `MeasurementRoute` cannot desynchronize the snapshot.
+- [x] Preserve close/reopen without reading `_DesignPlotPane._document`. A
+  dedicated RED/GREEN regression proves ordinary hide/show does not reinstall
+  an already attached document. A closed-window refresh remains worker-free,
+  while reopening installs the latest retained document exactly once. Closing
+  during a preview and then finishing it while hidden also clears preview
+  bookkeeping without reattaching workers; the next preview starts cleanly.
+- [x] Keep `design_plot_pane.py`, the KLayout/snap modules,
+  `selection_model.py`, and the complete `route/` package byte-identical to
+  `e914072`. The route Pause/Interrupt/Resume gates are included in the broad
+  suite.
+- [x] Focused Design/UI/Main Markup gate: `167 passed`; broad
+  Design/UI/route-control gate: `531 passed`; full process-local `QLocale.c()`
+  no-hardware gate: `2,939 passed` plus `14` subtests.
+- [x] Import-order checks pass in both directions. Ruff passes on every changed
+  Python file with inherited startup `E402` ignored; compileall and final review
+  are recorded after the frozen diff.
+- [x] Two frozen independent review rounds found four Important ownership and
+  lifecycle gaps; each received a dedicated failing regression before its
+  fix. A third fresh independent review returned READY with no Critical or
+  Important findings and independently passed `129` affected tests.
+- [x] Metrics: `main.py` LOC `10933 -> 10917`, LLOC `5949 -> 5946`, aggregate
+  CC remains `1904` (average `3.565543`); `design_navigator_panel.py` LOC
+  `2563 -> 2164`, aggregate CC `362 -> 312`. New MI values are
+  `design_layout_window.py 31.25`, `layout_state.py 43.54`, and
+  `test_layout_state.py 38.35`.
+
 - [ ] Run Wily/Radon for the complete branch and compare with the frozen
   baseline. Require:
 

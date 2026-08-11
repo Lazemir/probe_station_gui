@@ -19,6 +19,7 @@ from probe_station_gui.coordinates.persistence import (
     CoordinateFrameLoadResult,
 )
 from probe_station_gui.coordinates.registry import CoordinateFrameRegistry
+from probe_station_gui.design.layout_state import DesignLayoutState
 from probe_station_gui.design.markup import MarkupDocument, MarkupLoadChoice
 from probe_station_gui.design.markup_store import StoreLoadResult
 from probe_station_gui.design.selection_model import (
@@ -38,6 +39,51 @@ from tests.app.test_main_design_navigation import (
     _make_window,
     main_module,
 )
+
+
+class _LayoutStateAdapter:
+    def __init__(
+        self,
+        route: MeasurementRoute,
+        markup: MarkupDocument,
+        selection: SelectionModel,
+        statuses: list[str],
+    ) -> None:
+        self._state = (
+            DesignLayoutState()
+            .with_route(route, selected_route_point_index=-1)
+            .with_markup(markup)
+            .with_selection(selection)
+        )
+        self._statuses = statuses
+
+    @property
+    def selection(self) -> SelectionModel:
+        return self._state.selection
+
+    @selection.setter
+    def selection(self, value: SelectionModel) -> None:
+        self._state = self._state.with_selection(value)
+
+    def plan_mixed_delete(self, *, edit_safe: bool):
+        return self._state.plan_mixed_delete(edit_safe=edit_safe)
+
+    def plan_mixed_array(self, request: MixedArrayRequest, *, edit_safe: bool):
+        return self._state.plan_mixed_array(request, edit_safe=edit_safe)
+
+    def set_selection(self, value: SelectionModel) -> None:
+        self.selection = value
+        self._statuses.append(f"selection:{len(value.ids)}")
+
+    def set_markup(self, value: MarkupDocument) -> None:
+        self._state = self._state.with_markup(value)
+        self._statuses.append(f"markup:{len(value.guides)}")
+
+    def set_guide_undo_available(self, value: bool) -> None:
+        self._statuses.append(f"undo:{value}")
+
+    def set_route_edit_enabled(self, value: bool) -> None:
+        self._statuses.append(f"edit:{value}")
 
 
 def _make_mixed_edit_window(tmp_path: Path) -> tuple[Main, list[str]]:
@@ -63,12 +109,11 @@ def _make_mixed_edit_window(tmp_path: Path) -> tuple[Main, list[str]]:
             }
         )
     )
-    window.design_layout_window = types.SimpleNamespace(
-        selection=selection,
-        set_selection=lambda value: statuses.append(f"selection:{len(value.ids)}"),
-        set_markup=lambda value: statuses.append(f"markup:{len(value.guides)}"),
-        set_guide_undo_available=lambda value: statuses.append(f"undo:{value}"),
-        set_route_edit_enabled=lambda value: statuses.append(f"edit:{value}"),
+    window.design_layout_window = _LayoutStateAdapter(
+        route,
+        markup,
+        selection,
+        statuses,
     )
     window._publish_design_markup = lambda: statuses.append("publish_markup")
     return window, statuses
@@ -235,6 +280,40 @@ def test_mixed_array_keeps_sources_and_copies_both_entity_types(tmp_path: Path) 
     ]
     assert "publish_markup" in statuses
     assert f"selection:{len(original_selection.ids)}" in statuses
+
+
+def test_mixed_array_preserves_canonical_selection_when_request_ids_are_stale(
+    tmp_path: Path,
+) -> None:
+    window, statuses = _make_mixed_edit_window(tmp_path)
+    route = window._design_session.route
+    markup = window._design_markup
+    assert route is not None
+    assert markup is not None
+    canonical_id = route_entity_id(route.points[0].id)
+    stale_point = route.add_point((20.0, 30.0))
+    window.design_layout_window = _LayoutStateAdapter(
+        route,
+        markup,
+        SelectionModel(frozenset({canonical_id})),
+        statuses,
+    )
+    request = MixedArrayRequest(
+        direction_1=(10.0, 0.0),
+        count_1=2,
+        direction_2=(0.0, 5.0),
+        count_2=1,
+        source_ids=frozenset({route_entity_id(stale_point.id)}),
+    )
+
+    Main._apply_mixed_design_array(window, request)
+
+    assert [point.camera_center for point in route.points] == [
+        (2.0, 3.0),
+        (20.0, 30.0),
+        (12.0, 3.0),
+    ]
+    assert window.design_layout_window.selection.ids == frozenset({canonical_id})
 
 
 def test_rotate_design_transforms_and_persists_route_and_markup_together(

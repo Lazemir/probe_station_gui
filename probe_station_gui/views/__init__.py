@@ -7,6 +7,10 @@ from typing import Any
 
 
 _LAZY_EXPORTS = {
+    "DesignLayoutWindow": (
+        "probe_station_gui.views.design_layout_window",
+        "DesignLayoutWindow",
+    ),
     "DesignNavigatorPanel": (
         "probe_station_gui.views.design_navigator_panel",
         "DesignNavigatorPanel",

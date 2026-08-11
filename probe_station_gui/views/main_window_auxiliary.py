@@ -345,7 +345,7 @@ def _resolve_design_layout_window_class(
         return design_layout_window_class
     if owner._design_layout_window_class is not None:
         return owner._design_layout_window_class
-    from probe_station_gui.views.design_navigator_panel import (
+    from probe_station_gui.views.design_layout_window import (
         DesignLayoutWindow as imported_design_layout_window_class,
     )
 

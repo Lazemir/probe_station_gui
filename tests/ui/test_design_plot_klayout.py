@@ -31,10 +31,8 @@ from probe_station_gui.design.navigation_bounds import (
 )
 from probe_station_gui.route.model import MeasurementRoute, NeedleOffset, RoutePoint
 from probe_station_gui.views import design_plot_pane as plot_module
-from probe_station_gui.views.design_navigator_panel import (
-    DesignLayoutWindow,
-    DesignNavigatorPanel,
-)
+from probe_station_gui.views.design_layout_window import DesignLayoutWindow
+from probe_station_gui.views.design_navigator_panel import DesignNavigatorPanel
 
 
 @pytest.fixture(scope="module")
@@ -1069,9 +1067,121 @@ def test_design_window_close_detaches_workers_and_reopen_restores_document(
     window.show_and_raise()
     qt_app.processEvents()
 
-    assert window._main_view._document is document
     assert window._main_view._klayout_config is not None
     assert window._main_view._snap_worker is not first_snap_worker
+    window._main_view.shutdown()
+    window.deleteLater()
+
+
+def test_design_window_closed_refresh_stays_detached_until_reopen(
+    monkeypatch,
+    qt_app: QApplication,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(plot_module, "KLayoutRasterController", _RasterController)
+    monkeypatch.setattr(plot_module, "KLayoutSnapWorker", _SnapWorker)
+    window = DesignLayoutWindow()
+    window.set_document(_document(tmp_path / "first.gds"))
+    window.show()
+    qt_app.processEvents()
+    window.close()
+    qt_app.processEvents()
+    set_document_calls: list[object] = []
+    real_set_document = window._main_view.set_document
+
+    def set_document(document: object) -> None:
+        set_document_calls.append(document)
+        real_set_document(document)
+
+    window._main_view.set_document = set_document
+    refreshed_document = _document(tmp_path / "refreshed.gds")
+
+    window.set_document(refreshed_document)
+
+    assert set_document_calls == []
+    assert window._main_view._klayout_config is None
+
+    window.show_and_raise()
+    qt_app.processEvents()
+
+    assert set_document_calls == [refreshed_document]
+    assert window._main_view._klayout_config is not None
+    window._main_view.shutdown()
+    window.deleteLater()
+
+
+def test_design_window_closed_preview_finish_clears_preview_before_reopen(
+    monkeypatch,
+    qt_app: QApplication,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(plot_module, "KLayoutRasterController", _RasterController)
+    monkeypatch.setattr(plot_module, "KLayoutSnapWorker", _SnapWorker)
+    window = DesignLayoutWindow()
+    document = _document(tmp_path / "current.gds")
+    window.set_document(document)
+    window.show()
+    qt_app.processEvents()
+    window.set_document_preview(_document(tmp_path / "preview.gds"))
+    assert window._main_view._document_preview_active
+    window.close()
+    qt_app.processEvents()
+    set_document_calls: list[object] = []
+    real_set_document = window._main_view.set_document
+
+    def set_document(value: object) -> None:
+        set_document_calls.append(value)
+        real_set_document(value)
+
+    window._main_view.set_document = set_document
+
+    window.finish_document_preview(document)
+
+    assert not window._main_view._document_preview_active
+    assert set_document_calls == [None]
+    assert window._main_view._klayout_config is None
+
+    window.show_and_raise()
+    qt_app.processEvents()
+
+    assert set_document_calls == [None, document]
+    assert window._main_view._klayout_config is not None
+    next_preview = _document(tmp_path / "next-preview.gds")
+    window.set_document_preview(next_preview)
+    assert window._main_view._document_preview_active
+    assert window._main_view._document_preview_previous_document is document
+    window.finish_document_preview(document)
+    assert not window._main_view._document_preview_active
+    window._main_view.shutdown()
+    window.deleteLater()
+
+
+def test_design_window_hide_and_show_keeps_the_attached_document(
+    monkeypatch,
+    qt_app: QApplication,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(plot_module, "KLayoutRasterController", _RasterController)
+    monkeypatch.setattr(plot_module, "KLayoutSnapWorker", _SnapWorker)
+    window = DesignLayoutWindow()
+    window.set_document(_document(tmp_path / "layout.gds"))
+    window.show()
+    qt_app.processEvents()
+    set_document_calls: list[object] = []
+    real_set_document = window._main_view.set_document
+
+    def set_document(document: object) -> None:
+        set_document_calls.append(document)
+        real_set_document(document)
+
+    window._main_view.set_document = set_document
+
+    window.hide()
+    qt_app.processEvents()
+    window.show_and_raise()
+    qt_app.processEvents()
+
+    assert set_document_calls == []
     window._main_view.shutdown()
     window.deleteLater()
 
