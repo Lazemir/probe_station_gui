@@ -31,15 +31,17 @@ def test_adjust_exposure_applies_selected_auto_method_without_general_apply(
 ) -> None:
     widget = CameraSettingsWidget(source.grabber, exposure_policy_source=source)
 
-    assert _combo_items(widget._control_combo) == ["Manual", "Auto"]
-    assert _combo_items(widget._method_combo) == ["Software", "Camera"]
-    assert widget._adjust_exposure_button.text() == "Adjust Exposure"
+    controls = widget._exposure_controls
+    assert controls is not None
+    assert _combo_items(controls._control_combo) == ["Manual", "Auto"]
+    assert _combo_items(controls._method_combo) == ["Software", "Camera"]
+    assert controls._adjust_exposure_button.text() == "Adjust Exposure"
 
-    widget._method_combo.setCurrentText("Camera")
+    controls._method_combo.setCurrentText("Camera")
 
     assert source.updates == []
 
-    widget._adjust_exposure_button.click()
+    controls._adjust_exposure_button.click()
 
     assert source.updates == [(True, "camera")]
     assert source.once_calls == 0
@@ -58,10 +60,12 @@ def test_adjust_exposure_applies_manual_method_then_runs_once(
 ) -> None:
     source.set_state(auto_enabled=False, engine="software")
     widget = CameraSettingsWidget(source.grabber, exposure_policy_source=source)
+    controls = widget._exposure_controls
+    assert controls is not None
     widget._queue_setting("camera", "Gain", 4.5)
-    widget._method_combo.setCurrentText("Camera")
+    controls._method_combo.setCurrentText("Camera")
 
-    widget._adjust_exposure_button.click()
+    controls._adjust_exposure_button.click()
 
     assert source.updates == [(False, "camera")]
     assert source.once_calls == 1
@@ -75,15 +79,17 @@ def test_adjust_exposure_does_not_apply_control_selection(
     source: _ExposurePolicySource,
 ) -> None:
     widget = CameraSettingsWidget(source.grabber, exposure_policy_source=source)
-    widget._control_combo.setCurrentText("Manual")
-    widget._method_combo.setCurrentText("Camera")
+    controls = widget._exposure_controls
+    assert controls is not None
+    controls._control_combo.setCurrentText("Manual")
+    controls._method_combo.setCurrentText("Camera")
 
-    widget._adjust_exposure_button.click()
+    controls._adjust_exposure_button.click()
 
     assert source.updates == [(True, "camera")]
     assert source.once_calls == 0
-    assert widget._control_combo.currentText() == "Manual"
-    assert widget._pending_policy == (False, "camera")
+    assert controls._control_combo.currentText() == "Manual"
+    assert controls._pending_policy == (False, "camera")
     widget.deleteLater()
 
 
@@ -92,11 +98,13 @@ def test_camera_policy_state_does_not_overwrite_unapplied_selection(
     source: _ExposurePolicySource,
 ) -> None:
     widget = CameraSettingsWidget(source.grabber, exposure_policy_source=source)
+    controls = widget._exposure_controls
+    assert controls is not None
 
-    widget._method_combo.setCurrentText("Camera")
+    controls._method_combo.setCurrentText("Camera")
     source.state_changed.emit(source.snapshot())
 
-    assert widget._method_combo.currentText() == "Camera"
+    assert controls._method_combo.currentText() == "Camera"
     assert source.updates == []
     widget.deleteLater()
 
@@ -113,6 +121,46 @@ def test_camera_settings_are_written_only_after_apply(
 
     assert widget.apply_pending_settings() is True
     assert source.grabber.setting_updates == [("camera", "Gain", 4.5)]
+    widget.deleteLater()
+
+
+def test_synchronous_setting_completion_finishes_inside_apply_call(
+    app: QApplication,
+    source: _ExposurePolicySource,
+) -> None:
+    widget = CameraSettingsWidget(source.grabber, exposure_policy_source=source)
+    finished: list[bool] = []
+    widget.apply_finished.connect(finished.append)
+
+    def complete_immediately(
+        map_key: str,
+        node_name: str,
+        value: object,
+        *,
+        request_id: str | None = None,
+    ) -> None:
+        source.grabber.camera_setting_changed.emit(
+            {
+                "ok": True,
+                "message": "Camera setting updated.",
+                "map_key": map_key,
+                "node_name": node_name,
+                "node": {
+                    "name": node_name,
+                    "value": value,
+                    "available": True,
+                    "writable": True,
+                },
+                "request_id": request_id,
+            }
+        )
+
+    source.grabber.request_camera_setting_update = complete_immediately
+    widget._queue_setting("camera", "Gain", 4.5)
+
+    assert widget.apply_pending_settings() is True
+    assert finished == [True]
+    assert widget._is_applying() is False
     widget.deleteLater()
 
 
@@ -254,19 +302,23 @@ def test_trigger_width_is_only_available_for_camera_method(
         }
     )
 
-    assert widget._timing_combo.currentText() == "Timed"
-    assert widget._timing_combo.isEnabled() is False
+    controls = widget._exposure_controls
+    assert controls is not None
+    assert controls._timing_combo.currentText() == "Timed"
+    assert controls._timing_combo.isEnabled() is False
 
-    widget._method_combo.setCurrentText("Camera")
-    assert widget._timing_combo.isEnabled() is True
-    widget._timing_combo.setCurrentText("Trigger width")
+    controls._method_combo.setCurrentText("Camera")
+    assert controls._timing_combo.isEnabled() is True
+    controls._timing_combo.setCurrentText("Trigger width")
     assert source.updates == []
     assert source.grabber.setting_updates == []
 
     assert widget.apply_pending_settings() is True
     assert source.updates[-1] == (True, "camera")
     assert source.grabber.setting_updates[-1] == (
-        "camera", "ExposureMode", "TriggerWidth"
+        "camera",
+        "ExposureMode",
+        "TriggerWidth",
     )
     source.grabber.camera_setting_changed.emit(
         {
@@ -286,17 +338,17 @@ def test_trigger_width_is_only_available_for_camera_method(
         }
     )
 
-    widget._method_combo.setCurrentText("Software")
+    controls._method_combo.setCurrentText("Software")
 
     assert source.updates[-1] == (True, "camera")
     assert source.grabber.setting_updates[-1] == (
-        "camera", "ExposureMode", "TriggerWidth"
+        "camera",
+        "ExposureMode",
+        "TriggerWidth",
     )
-    assert widget._timing_combo.currentText() == "Timed"
+    assert controls._timing_combo.currentText() == "Timed"
     assert widget.apply_pending_settings() is True
-    assert source.grabber.setting_updates[-1] == (
-        "camera", "ExposureMode", "Timed"
-    )
+    assert source.grabber.setting_updates[-1] == ("camera", "ExposureMode", "Timed")
     source.grabber.camera_setting_changed.emit(
         {
             "ok": True,
@@ -316,8 +368,8 @@ def test_trigger_width_is_only_available_for_camera_method(
     )
 
     assert source.updates[-1] == (True, "software")
-    assert widget._exposure_group.isEnabled() is True
-    assert widget._timing_combo.isEnabled() is False
+    assert controls.isEnabled() is True
+    assert controls._timing_combo.isEnabled() is False
     widget.deleteLater()
 
 
@@ -326,12 +378,14 @@ def test_optical_session_disables_entire_exposure_block(
     source: _ExposurePolicySource,
 ) -> None:
     widget = CameraSettingsWidget(source.grabber, exposure_policy_source=source)
+    controls = widget._exposure_controls
+    assert controls is not None
 
     source.state_changed.emit(
         {"auto_enabled": True, "engine": "software", "busy": True}
     )
 
-    assert widget._exposure_group.isEnabled() is False
+    assert controls.isEnabled() is False
     widget.deleteLater()
 
 
@@ -340,6 +394,8 @@ def test_exposure_time_is_only_manual_and_uses_the_policy_adapter(
     source: _ExposurePolicySource,
 ) -> None:
     widget = CameraSettingsWidget(source.grabber, exposure_policy_source=source)
+    controls = widget._exposure_controls
+    assert controls is not None
     widget.refresh()
     source.grabber.camera_settings_snapshot_ready.emit(
         {
@@ -366,21 +422,21 @@ def test_exposure_time_is_only_manual_and_uses_the_policy_adapter(
     )
     assert "ExposureAuto" not in widget.OPERATOR_NODE_NAMES
     assert "ExposureTime" not in widget.OPERATOR_NODE_NAMES
-    assert widget._exposure_time_edit.isEnabled() is False
+    assert controls._exposure_time_edit.isEnabled() is False
 
     source.set_state(auto_enabled=False, engine="software")
-    assert widget._exposure_time_edit.isEnabled() is True
-    widget._exposure_time_edit.setText("2200.5")
-    widget._exposure_time_edit.editingFinished.emit()
+    assert controls._exposure_time_edit.isEnabled() is True
+    controls._exposure_time_edit.setText("2200.5")
+    controls._exposure_time_edit.editingFinished.emit()
     assert source.exposure_time_requests == []
     assert widget.apply_pending_settings() is True
     assert source.exposure_time_requests == [2200.5]
     assert source.grabber.setting_updates == []
     source.finish_exposure_time(2201.0)
-    assert widget._exposure_time_edit.text() == "2201.0"
+    assert controls._exposure_time_edit.text() == "2201.0"
 
     source.set_state(auto_enabled=True, engine="software")
-    assert widget._exposure_time_edit.isEnabled() is False
+    assert controls._exposure_time_edit.isEnabled() is False
     widget.deleteLater()
 
 
@@ -389,12 +445,14 @@ def test_exposure_time_latest_pending_write_replaces_stale_completion(
     source: _ExposurePolicySource,
 ) -> None:
     widget = CameraSettingsWidget(source.grabber, exposure_policy_source=source)
+    controls = widget._exposure_controls
+    assert controls is not None
     _load_manual_exposure_time(widget, source)
 
-    widget._exposure_time_edit.setText("2200.0")
-    widget._exposure_time_edit.editingFinished.emit()
-    widget._exposure_time_edit.setText("2300.0")
-    widget._exposure_time_edit.editingFinished.emit()
+    controls._exposure_time_edit.setText("2200.0")
+    controls._exposure_time_edit.editingFinished.emit()
+    controls._exposure_time_edit.setText("2300.0")
+    controls._exposure_time_edit.editingFinished.emit()
 
     assert source.exposure_time_requests == []
     assert widget.apply_pending_settings() is True
@@ -402,7 +460,7 @@ def test_exposure_time_latest_pending_write_replaces_stale_completion(
     assert source.grabber.setting_updates == []
     source.finish_exposure_time(2300.0)
 
-    assert widget._exposure_time_edit.text() == "2300.0"
+    assert controls._exposure_time_edit.text() == "2300.0"
     assert source.exposure_time_requests == [2300.0]
     widget.deleteLater()
 

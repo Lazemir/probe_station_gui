@@ -1596,3 +1596,78 @@ git diff --check 8fc83259e07f48bf0f222e80bb3e1d6c3241fd0e..HEAD
   `READY` with `0 Critical / 0 Important / 0 Minor`. No file was staged or
   committed before that verdict; the exact commit remains
   `refactor: separate klayout worker families`.
+
+#### Task 12a: Separate camera settings controls
+
+**Files:**
+- Create: `probe_station_gui/dialogs/camera_feature_page.py`
+- Create: `probe_station_gui/dialogs/camera_feature_editors.py`
+- Create: `probe_station_gui/dialogs/camera_exposure_controls.py`
+- Modify: `probe_station_gui/dialogs/camera_settings_dialog.py`
+- Modify: direct camera-settings tests only
+- Modify: `docs/superpowers/plans/2026-08-10-coordinate-system-coordinator.md`
+
+- [x] Observe separate strict absent-module REDs before each canonical owner.
+  Direct collection failed independently with the exact `ModuleNotFoundError`
+  for `camera_feature_editors`, `camera_feature_page`, and
+  `camera_exposure_controls`. A later completion-seam regression first failed
+  because the old three-argument completion port still accepted a returned
+  node; it passes after completion became latest-draft-only and the duplicate
+  node route was removed.
+- [x] Keep canonical `CameraSettingsWidget` in
+  `camera_settings_dialog.py`. The residual owns snapshot request UUIDs and
+  stale-response filtering, the `1500 ms` visible live-refresh timer, general
+  pending settings, ordered apply delivery, synchronous completion/reentrancy,
+  and final status/signal publication. It composes the two visible owners and
+  contains no old exposure-widget compatibility aliases.
+- [x] Make `CameraFeaturePage` own hidden-page lazy materialization and the
+  latest node collection. Make `CameraFeatureEditors` own the grid, typed
+  editors, sliders, value conversion, layout signatures, and focus-safe live
+  updates. Direct tests prove that hidden pages create no editors until shown
+  and same-layout refreshes neither rebuild nor overwrite a focused draft.
+- [x] Make `CameraExposureControls` own exposure widgets, policy snapshots,
+  pending mode/policy/time drafts, optical-session disablement, and the exact
+  mode -> policy -> exposure-time action order. Direct and integration tests
+  preserve TriggerWidth/software rules, manual exposure delivery, adjust-once,
+  latest-pending-only completion, synchronous `apply_finished`, and reentrant
+  advancement. The returned exposure node is routed once before the matching
+  draft is cleared.
+- [x] Use a direct acyclic owner graph: the residual imports exposure and page,
+  page imports editors, and neither child imports the residual or
+  `settings_dialog.py`. Each module exports only its canonical class; the old
+  `_FeatureListPage` definition is absent. Fresh forward/reverse imports and
+  exact definition/deletion/DAG/public-surface assertions pass.
+- [x] Preserve protected consumers byte-for-byte. `settings_dialog.py` and
+  `camera/worker.py` retain baseline blobs
+  `5f613460416a65b2f1711014eddd474cde2b761c` and
+  `d8da312589c4dc3cccd114af8c02db3d91e79d64`; no package export, camera worker,
+  GUI-thread, hardware-I/O, or acquisition lifecycle changed.
+- [x] Verification is fresh, offscreen, no-hardware, process-local
+  `QLocale.c()`, and uses unique basetemps. The final focused owner/UI/Main API
+  and settings integration gate passes `85`; broad camera/App/UI passes `1166`
+  plus `5` subtests; the complete suite passes `3044` plus `14` subtests with
+  only the inherited `BuiltinImporter.module_repr()` warning. Affected Ruff and
+  format, whole-tree compileall, `git diff --check`, import-order, AST, and
+  protected-byte gates pass.
+- [x] Metrics: the former owner was
+  `1268 LOC / 892 LLOC / 1157 SLOC / CC 421 / 73 blocks / max CC 28 / MI 0.00`.
+  Residual, exposure, editors, and page are respectively
+  `474 / 303 / 427 / CC 148 / MI 3.30`,
+  `412 / 301 / 359 / CC 137 / MI 4.81`,
+  `478 / 340 / 431 / CC 150 / MI 1.75`, and
+  `99 / 61 / 78 / CC 28 / MI 49.77` for LOC/LLOC/SLOC/complexity/MI.
+  Composition increases aggregate production complexity to
+  `CC 463 / 97 blocks / max CC 29`; these extra blocks are the explicit hidden
+  page and exposure lifecycle/query/delivery ports rather than duplicated
+  policy bodies. Lizard warnings decrease from `5` to `4`. Every touched
+  Python file has positive MI; all-tracked MI-zero decreases exactly
+  `13 -> 12` and active GUI/client/test MI-zero decreases `12 -> 11` with no
+  new MI-zero file.
+- [x] Freeze the complete evidence-bearing snapshot. A fresh fork-none
+  independent read-only review retained all `9` source/test/plan hashes,
+  repeated the focused `85`, Ruff/format, in-memory compile, imports, AST,
+  protected-byte, Radon, Lizard, and MI-zero gates, and returned `READY` with
+  `0 Critical / 0 Important / 0 Minor`. It additionally verified a
+  background-thread exposure completion reaches the GUI thread through the
+  signal proxy and classified the `+42 CC / +24 blocks` as justified explicit
+  composition ports with `0.00%` duplicated policy.
