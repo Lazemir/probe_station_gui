@@ -5,7 +5,6 @@ import pytest
 
 from probe_station_gui.camera.distortion import (
     GridCalibrationFrame,
-    fit_stage_geometry_from_observations,
 )
 from probe_station_gui.camera.geometry_feature_tracking import (
     build_geometry_feature_observations,
@@ -15,6 +14,7 @@ from probe_station_gui.camera.geometry_segmentation import (
     GeometryMaskFeature,
     GeometryMaskFrame,
 )
+from probe_station_gui.camera.stage_geometry_fit import fit_stage_geometry_from_observations
 
 
 def _synthetic_geometry_mask_frame(

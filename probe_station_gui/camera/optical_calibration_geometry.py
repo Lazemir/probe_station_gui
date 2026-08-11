@@ -13,8 +13,8 @@ from probe_station_gui.camera.distortion import (
     GridCalibrationFrame,
     StageGeometryCorrection,
     correction_from_payload,
-    fit_stage_geometry_from_observations,
 )
+from probe_station_gui.camera.stage_geometry_fit import fit_stage_geometry_from_observations
 from probe_station_gui.settings.objective_config import parse_pixels_to_mm_matrix
 
 

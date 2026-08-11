@@ -5,6 +5,15 @@ from PySide6.QtGui import QColor, QImage
 from PySide6.QtGui import QPainter, QPen
 
 from probe_station_gui.camera import distortion as distortion_module
+import probe_station_gui.camera.seam_radial_fit as seam_fit_module
+from probe_station_gui.camera.bright_grid_calibration import (
+    fit_distortion_from_grid_frames,
+)
+from probe_station_gui.camera.bright_grid_detection import (
+    _projection_line_centers,
+    detect_bright_feature_bounds,
+    detect_bright_grid,
+)
 from probe_station_gui.camera.distortion import (
     GridCalibrationFrame,
     RadialDistortionModel,
@@ -12,14 +21,16 @@ from probe_station_gui.camera.distortion import (
     apply_distortion_correction,
     apply_radial_distortion_correction,
     correction_from_payload,
-    detect_bright_feature_bounds,
-    detect_bright_grid,
     distortion_payload_from_points,
-    fit_seam_radial_distortion,
-    fit_distortion_from_grid_frames,
+)
+from probe_station_gui.camera.imaging import (
+    MicroscopeScaleCalibration,
+    MicroscopeScanTile,
+)
+from probe_station_gui.camera.seam_radial_fit import fit_seam_radial_distortion
+from probe_station_gui.camera.stage_geometry_fit import (
     fit_stage_geometry_from_grid_frames,
     fit_stage_geometry_from_observations,
-    _projection_line_centers,
 )
 
 
@@ -97,13 +108,13 @@ def test_seam_radial_distortion_fit_uses_dual_annealing(monkeypatch) -> None:
     reference = np.zeros((40, 60, 3), dtype=np.uint8)
     reference[:, 20:24] = 255
     shifted = reference.copy()
-    scale = distortion_module.MicroscopeScaleCalibration(
+    scale = MicroscopeScaleCalibration(
         pixel_size_x_um=1000.0,
         pixel_size_y_um=1000.0,
     )
     tiles = (
         (
-            distortion_module.MicroscopeScanTile(
+            MicroscopeScanTile(
                 index=1,
                 row=0,
                 column=0,
@@ -113,7 +124,7 @@ def test_seam_radial_distortion_fit_uses_dual_annealing(monkeypatch) -> None:
             reference,
         ),
         (
-            distortion_module.MicroscopeScanTile(
+            MicroscopeScanTile(
                 index=2,
                 row=0,
                 column=1,
@@ -149,7 +160,7 @@ def test_seam_radial_distortion_fit_uses_dual_annealing(monkeypatch) -> None:
             },
         )()
 
-    monkeypatch.setattr(distortion_module, "_dual_annealing", fake_dual_annealing)
+    monkeypatch.setattr(seam_fit_module, "_dual_annealing", fake_dual_annealing)
 
     fit = fit_seam_radial_distortion(
         tiles,
@@ -175,13 +186,13 @@ def test_seam_radial_distortion_fit_keeps_identity_when_optimizer_is_worse(
     reference = np.zeros((40, 60, 3), dtype=np.uint8)
     reference[:, 20:24] = 255
     shifted = reference.copy()
-    scale = distortion_module.MicroscopeScaleCalibration(
+    scale = MicroscopeScaleCalibration(
         pixel_size_x_um=1000.0,
         pixel_size_y_um=1000.0,
     )
     tiles = (
         (
-            distortion_module.MicroscopeScanTile(
+            MicroscopeScanTile(
                 index=1,
                 row=0,
                 column=0,
@@ -191,7 +202,7 @@ def test_seam_radial_distortion_fit_keeps_identity_when_optimizer_is_worse(
             reference,
         ),
         (
-            distortion_module.MicroscopeScanTile(
+            MicroscopeScanTile(
                 index=2,
                 row=0,
                 column=1,
@@ -216,7 +227,7 @@ def test_seam_radial_distortion_fit_keeps_identity_when_optimizer_is_worse(
             },
         )()
 
-    monkeypatch.setattr(distortion_module, "_dual_annealing", fake_dual_annealing)
+    monkeypatch.setattr(seam_fit_module, "_dual_annealing", fake_dual_annealing)
 
     fit = fit_seam_radial_distortion(
         tiles,
@@ -761,6 +772,19 @@ def test_distorted_single_grid_frame_uses_axis_mapping() -> None:
 
 
 def test_axis_interpolation_maps_are_reused_during_apply(monkeypatch) -> None:
+    map_compilations = 0
+    compile_maps = distortion_module._axis_interpolation_maps
+
+    def count_compilation(*args, **kwargs):
+        nonlocal map_compilations
+        map_compilations += 1
+        return compile_maps(*args, **kwargs)
+
+    monkeypatch.setattr(
+        distortion_module,
+        "_axis_interpolation_maps",
+        count_compilation,
+    )
     payload = fit_distortion_from_grid_frames(
         [
             GridCalibrationFrame(
@@ -778,17 +802,51 @@ def test_axis_interpolation_maps_are_reused_during_apply(monkeypatch) -> None:
     image = QImage(120, 90, QImage.Format_RGB32)
     image.fill(QColor("black"))
 
-    def fail_if_recomputed(*_args, **_kwargs):
-        raise AssertionError("axis maps should be precomputed")
+    apply_distortion_correction(image, correction)
+    apply_distortion_correction(image, correction)
+
+    assert map_compilations == 1
+
+
+def test_stage_geometry_maps_compile_once_and_qimage_owns_padded_result(
+    monkeypatch,
+) -> None:
+    payload = {
+        "model_version": 1,
+        "model_type": "stage_geometry",
+        "frame_size": [19, 16],
+        "pixels_to_mm": [[-0.001, 0.0], [0.0, -0.001]],
+        "center_px": [9.5, 8.0],
+        "k1": 0.02,
+        "k2": -0.01,
+        "p1": 0.001,
+        "p2": -0.001,
+    }
+    correction = correction_from_payload(payload)
+    image = QImage(19, 16, QImage.Format_RGB888)
+    image.fill(QColor("#102030"))
+    assert image.bytesPerLine() > image.width() * 3
+    map_compilations = 0
+    compile_maps = distortion_module._stage_geometry_inverse_maps
+
+    def count_compilation(*args, **kwargs):
+        nonlocal map_compilations
+        map_compilations += 1
+        return compile_maps(*args, **kwargs)
 
     monkeypatch.setattr(
         distortion_module,
-        "_axis_interpolation_maps",
-        fail_if_recomputed,
+        "_stage_geometry_inverse_maps",
+        count_compilation,
     )
 
-    apply_distortion_correction(image, correction)
-    apply_distortion_correction(image, correction)
+    first = apply_distortion_correction(image, correction)
+    second = apply_distortion_correction(image, correction)
+    image.fill(QColor("magenta"))
+
+    assert map_compilations == 1
+    assert first.pixelColor(9, 8) != QColor("magenta")
+    assert second.pixelColor(9, 8) == first.pixelColor(9, 8)
 
 
 def _synthetic_grid_image(

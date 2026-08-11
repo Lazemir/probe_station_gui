@@ -1041,3 +1041,65 @@ git diff --check 8fc83259e07f48bf0f222e80bb3e1d6c3241fd0e..HEAD
 - [x] Freeze the complete unstaged/untracked diff and require a fresh independent
   read-only review with no Critical or Important finding before staging or the
   exact commit `refactor: separate optical geometry processing`.
+
+#### Task 6b: Separate optical distortion fitting
+
+**Files:**
+- Create: `probe_station_gui/camera/bright_grid_detection.py`
+- Create: `probe_station_gui/camera/bright_grid_calibration.py`
+- Create: `probe_station_gui/camera/stage_geometry_fit.py`
+- Create: `probe_station_gui/camera/seam_radial_fit.py`
+- Modify: `probe_station_gui/camera/distortion.py`
+- Modify: `probe_station_gui/camera/optical_calibration_geometry.py`
+- Modify: `tests/camera/test_distortion.py`
+- Create: `tests/camera/test_distortion_fit_ownership.py`
+- Modify: `tests/camera/test_geometry_feature_tracking.py`
+- Modify: `docs/superpowers/plans/2026-08-10-coordinate-system-coordinator.md`
+
+- [x] Observe strict collection RED before production: direct owner imports
+  failed with the exact absent-module `ModuleNotFoundError` for
+  `bright_grid_calibration`, `stage_geometry_fit`, and `seam_radial_fit`.
+  After the first GREEN exposed a zero-MI combined grid owner, a second direct
+  interface RED failed for absent `bright_grid_detection` before morphology
+  and regular-grid policy were extracted from calibration.
+- [x] Keep `camera.distortion` as the genuine lightweight runtime owner of
+  persisted correction records, payload construction and fail-closed
+  validation, radial and Stage coordinate application, precompiled axis maps,
+  lazy cached Stage maps, and stride-aware detached QImage correction. Make
+  detection own morphology and regular-grid selection, calibration own axis
+  and grid fitting, Stage fitting own coverage/residual/coordinate policy, and
+  seam fitting own optimizer scoring and placement.
+- [x] Delete every moved definition from `camera.distortion` without a facade,
+  alias, re-export, or package export. The direct DAG is
+  `stage_geometry_fit -> distortion + function-local bright_grid_detection`,
+  `bright_grid_calibration -> bright_grid_detection + distortion`, and
+  `seam_radial_fit -> distortion + imaging`; detection is independent of the
+  runtime and the runtime has no reverse edge. The Stage grid-frame entry point
+  imports detection function-locally, so
+  runtime, live correction, and optical-orchestrator imports remain free of
+  OpenCV, SciPy, seam fitting, and eager geometry-processing owners.
+- [x] Preserve payload schemas and numeric thresholds, optimizer calls,
+  corrected-coordinate and persisted-Y conventions, grid spacing and regular
+  subsets, seam score/placement, map-cache counts, QImage row stride, source
+  ownership, and identity-copy behavior. Counter regressions prove axis maps
+  compile once during payload compilation and Stage maps compile once lazily;
+  padded RGB888 output remains detached from its source.
+- [x] Verification is fresh, offscreen, and no-hardware: exact Pass 6a/6b
+  geometry gate `65 passed`; focused owner/runtime/live-correction/Main lens and
+  optical gate `153 passed`; broad camera/App/UI gate `401 passed`; complete
+  process-local `QLocale.c()` suite `3016 passed` plus `14` subtests, with only
+  the inherited `BuiltinImporter.module_repr()` deprecation warning. Affected
+  and configured whole-tree Ruff, whole-tree compileall, `git diff --check`,
+  definition/literal/schema parity, forward/reverse import, AST deletion,
+  runtime/orchestrator/live import-purity, and protected-byte gates pass.
+- [x] Metrics: old runtime owner `2542 LOC / 1442 LLOC / CC 462 / MI 0.00`
+  becomes runtime plus four fitting/detection owners totaling
+  `2673 LOC / 1473 LLOC / CC 462`; their MI values are respectively
+  `5.70 / 9.30 / 8.08 / 17.73 / 23.80`. The exact `94` Radon blocks and
+  aggregate CC are preserved. The two Lizard warnings remain the inherited
+  bright-grid bounds and regular-subset hotspots; no warning is added. Every
+  touched/new Python file has positive MI. All-tracked MI-0 count decreases
+  `22 -> 21` and active GUI/test scope decreases `20 -> 19`, with no new MI-0.
+- [x] Freeze the complete unstaged/untracked diff and require a fresh independent
+  read-only review with no Critical or Important finding before staging or the
+  exact commit `refactor: separate optical distortion fitting`.
