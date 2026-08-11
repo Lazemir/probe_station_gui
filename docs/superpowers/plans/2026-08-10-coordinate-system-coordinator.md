@@ -973,3 +973,71 @@ git diff --check 8fc83259e07f48bf0f222e80bb3e1d6c3241fd0e..HEAD
 - [ ] Write the final report with commit SHAs, test counts, metric deltas, GUI
   evidence, known environment-only failures, and tracked-clean status. Do not
   commit generated Wily caches or temporary HTML reports.
+
+#### Task 6a: Separate optical geometry processing
+
+**Files:**
+- Create: `probe_station_gui/camera/geometry_segmentation.py`
+- Create: `probe_station_gui/camera/geometry_feature_tracking.py`
+- Create: `probe_station_gui/camera/geometry_alignment_preview.py`
+- Delete: `probe_station_gui/camera/geometry_mask.py`
+- Modify: `probe_station_gui/camera/optical_calibration_geometry.py`
+- Create: `tests/camera/test_geometry_segmentation.py`
+- Create: `tests/camera/test_geometry_feature_tracking.py`
+- Create: `tests/camera/test_geometry_alignment_preview.py`
+- Delete: `tests/camera/test_geometry_mask.py`
+- Modify: `tests/camera/test_optical_calibration_geometry.py`
+- Modify: `docs/superpowers/plans/2026-08-10-coordinate-system-coordinator.md`
+
+- [x] Observe strict interface RED before each production owner. Collection
+  failed first with the exact absent-module `ModuleNotFoundError` for
+  `geometry_segmentation`, then `geometry_feature_tracking`, then
+  `geometry_alignment_preview`. Each owner was made GREEN before the next
+  interface was introduced.
+- [x] Make segmentation the direct owner of RGB/QImage frame conversion,
+  padded-row handling, illumination-invariant masks, connected components,
+  skeleton topology, and real feature descriptors. Make tracking the Qt-free
+  owner of Stage prediction, compatibility gates, one-to-one assignment, track
+  spread, and the existing `StageFeatureObservation` result semantics. Make
+  preview composition the owner of strict signed 3x3 roles, fitted correction
+  maps, one shared crop, occupancy, valid-footprint RGB disagreement, and
+  detached `QImage.Format_RGB888` copies.
+- [x] Delete the old production and test monoliths without a compatibility
+  facade, forwarding alias, package export, or re-export. The dependency graph
+  is segmentation <- tracking and segmentation <- preview; preview never
+  imports tracking. `optical_calibration_geometry.fit_lens_artifact()` retains
+  function-local direct imports, so importing the optical orchestrator still
+  loads none of the three owners, OpenCV, `scipy.optimize`, or `scipy.spatial`.
+  The segment -> track -> fit -> restore persisted Y convention -> validate ->
+  preview order and every failure short-circuit remain unchanged.
+- [x] Preserve all `27` former geometry test items as `8 / 4 / 15` tests at the
+  three new interfaces. Regressions cover QImage row stride/source ownership,
+  mask stability and topology, cropped component work, unique Stage-predicted
+  assignment, match/spread/compatibility gates, recoverable fit data, fitted-map
+  reuse, signed affine grid roles, exact common crop, proportional RGB channels,
+  valid-footprint exclusion, detached QImage ownership, and malformed preview
+  failure. The inherited acceptance of arbitrary finite nonzero numeric mask
+  values remains unchanged rather than being fixed incidentally.
+- [x] Verification is fresh and no-hardware: exact geometry/orchestrator gate
+  `37 passed`; optical/camera/Main/UI focused gate `190 passed`; broad camera
+  and relevant App/UI gate `369 passed`; full process-local `QLocale.c()`
+  offscreen suite `3012 passed` plus `14` subtests. Affected Ruff, configured
+  whole-tree Ruff with inherited `E402/F401` ignored, whole-tree compileall,
+  `git diff --check`, forward/reverse imports, optical import purity, AST
+  deletion/ownership, and protected-byte gates pass. No GUI or hardware entry
+  point was run.
+- [x] Metrics: old production owner `1251 LOC / 730 LLOC / CC 250 / MI 0.00`
+  becomes three owners totaling `1395 LOC / 769 LLOC / CC 262`, with MI
+  `13.94 / 18.32 / 13.09`. The `+12` aggregate CC comprises `+8` for keeping
+  matrix and Stage-offset validation inside both independent tracking and
+  preview owners instead of adding a shallow shared module, plus `+4` function
+  bases from decomposing the former CC-29 signed-grid role validator. Old
+  tests `1192 LOC / 522 LLOC / CC 217 / MI 0.00` become three files totaling
+  `1235 LOC / 533 LLOC / CC 216`, with MI `22.21 / 24.86 / 13.67`.
+  Orchestrator/test MI remain positive at `26.63 / 33.69`; duplicate rate is
+  `0.00%`; the moved tracking interface retains its prior Lizard CCN-16 warning
+  without adding another warning. All-tracked MI-0 count decreases `24 -> 22`
+  and the active GUI/test scope decreases `22 -> 20`, with no new MI-0 file.
+- [x] Freeze the complete unstaged/untracked diff and require a fresh independent
+  read-only review with no Critical or Important finding before staging or the
+  exact commit `refactor: separate optical geometry processing`.

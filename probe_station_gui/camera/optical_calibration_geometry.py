@@ -94,12 +94,18 @@ def fit_lens_artifact(
     pixels_to_mm: PixelMatrix,
     limits: LensFitLimits,
 ) -> LensFitArtifact:
-    from probe_station_gui.camera import geometry_mask
+    from probe_station_gui.camera.geometry_alignment_preview import (
+        build_geometry_alignment_previews,
+    )
+    from probe_station_gui.camera.geometry_feature_tracking import (
+        build_geometry_feature_observations,
+    )
+    from probe_station_gui.camera.geometry_segmentation import segment_metal_geometry
 
     persisted_matrix = _required_matrix(pixels_to_mm)
     image_matrix = flip_pixel_matrix_y(persisted_matrix)
-    masks = tuple(geometry_mask.segment_metal_geometry(item.frame) for item in frames)
-    observations = geometry_mask.build_geometry_feature_observations(
+    masks = tuple(segment_metal_geometry(item.frame) for item in frames)
+    observations = build_geometry_feature_observations(
         frames,
         masks,
         frame_size=size_px,
@@ -116,7 +122,7 @@ def fit_lens_artifact(
         raise RuntimeError("Lens distortion fit returned an invalid payload.")
     _restore_payload_y_convention(payload)
     validate_lens_payload(payload, limits)
-    before, after = geometry_mask.build_geometry_alignment_previews(
+    before, after = build_geometry_alignment_previews(
         frames,
         masks,
         persisted_matrix,
