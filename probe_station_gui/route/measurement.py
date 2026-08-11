@@ -286,6 +286,7 @@ class RouteMeasurementRunner:
                 self._progress_started_at is not None
                 and self._last_run_result is None
             ),
+            "waiting": self.is_waiting(),
             "design_frame": self.design_frame_payload(),
             "result": (
                 dict(self._last_run_result)
