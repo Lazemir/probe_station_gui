@@ -161,6 +161,19 @@ def test_move_click_outside_plot_does_not_emit(pane, click_event) -> None:
     assert emitted == []
 
 
+def _dispatch_move_scene_event(pane, event) -> bool:
+    dispatch = pane._viewport.dispatch_scene_event(
+        event,
+        interaction=pane._plot_interaction,
+        presentation=pane._presentation,
+        drag_threshold=QApplication.startDragDistance(),
+        tolerance=None,
+    )
+    if dispatch.transition is not None:
+        pane._apply_interaction_transition(dispatch.transition)
+    return dispatch.handled
+
+
 def test_move_drag_suppresses_click_and_leaves_event_for_viewbox(
     pane, move_scene_event, click_event
 ) -> None:
@@ -169,9 +182,9 @@ def test_move_drag_suppresses_click_and_leaves_event_for_viewbox(
     emitted: list[tuple[float, float]] = []
     pane.move_requested.connect(lambda x, y: emitted.append((x, y)))
 
-    assert pane._handle_move_scene_event(move_scene_event.press(10, 10)) is False
-    assert pane._handle_move_scene_event(move_scene_event.move(40, 10)) is False
-    assert pane._handle_move_scene_event(move_scene_event.release(40, 10)) is False
+    assert _dispatch_move_scene_event(pane, move_scene_event.press(10, 10)) is False
+    assert _dispatch_move_scene_event(pane, move_scene_event.move(40, 10)) is False
+    assert _dispatch_move_scene_event(pane, move_scene_event.release(40, 10)) is False
     pane._on_mouse_clicked(click_event(double=False))
 
     assert emitted == []
@@ -200,7 +213,7 @@ def test_cancel_active_interaction_clears_pending_move_press(
     pane, move_scene_event
 ) -> None:
     pane.set_active_design_tool("move")
-    pane._handle_move_scene_event(move_scene_event.press(10, 10))
+    _dispatch_move_scene_event(pane, move_scene_event.press(10, 10))
 
     pane.cancel_active_interaction()
 

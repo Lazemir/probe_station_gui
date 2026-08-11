@@ -179,7 +179,7 @@ def _box(pane):
 def _assert_gds_focus(pane, document: DesignDocument) -> None:
     visible = _box(pane)
     padded = pad_bounds(document.bounds, GDS_FOCUS_PADDING_FRACTION)
-    frame = pane._navigation_frame
+    frame = pane._viewport.frame
     assert visible[0] <= padded[0]
     assert visible[1] <= padded[1]
     assert visible[2] >= padded[2]

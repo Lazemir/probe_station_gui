@@ -25,6 +25,7 @@ from probe_station_gui.design.model import DesignDocument, SnapResult
 from probe_station_gui.design.plot_interaction import PlotAction, SnapClickIntent
 from probe_station_gui.design.snap_protocol import ClickPublication
 from probe_station_gui.views import design_plot_pane as plot_module
+from probe_station_gui.views import design_plot_viewport as viewport_module
 from probe_station_gui.views import design_snap_runtime as snap_runtime_module
 from probe_station_gui.views.design_layout_window import DesignLayoutWindow
 from probe_station_gui.views.design_navigator_panel import DesignNavigatorPanel
@@ -77,6 +78,37 @@ def _complete_local_click(
     pane._apply_click_publication(ClickPublication(intent, result))
 
 
+def test_click_publication_rechecks_transient_action_after_hover_callback(
+    pane,
+    tmp_path: Path,
+) -> None:
+    pane.set_document(_document(tmp_path / "hover-reentry.gds"))
+    pane.set_navigation_enabled(True)
+    pane.set_active_design_tool("move")
+    moves: list[tuple[float, float]] = []
+    pane.move_requested.connect(lambda x, y: moves.append((x, y)))
+
+    def unload_after_hover(_result) -> None:
+        pane.hover_snap_changed.disconnect(unload_after_hover)
+        pane.set_document(None)
+
+    pane.hover_snap_changed.connect(unload_after_hover)
+    intent = SnapClickIntent(
+        action=PlotAction.MOVE,
+        raw_point=(2.0, 3.0),
+        payload=(),
+        shift=False,
+        control=False,
+        generation=pane._plot_interaction.generation,
+    )
+
+    pane._apply_click_publication(
+        ClickPublication(intent, SnapResult((2.0, 3.0), "free", 0.0))
+    )
+
+    assert moves == []
+
+
 def test_file_backed_document_never_calls_legacy_plot_or_global_snap(
     pane, monkeypatch, tmp_path: Path
 ) -> None:
@@ -91,7 +123,7 @@ def test_file_backed_document_never_calls_legacy_plot_or_global_snap(
 
     assert pane._raster_controller.config is not None
     assert len(_SnapWorker.instances) == 1
-    assert pane._layer_items == []
+    assert pane._renderer.state.layer_item_count == 0
 
 
 def test_pending_document_preview_keeps_tool_but_clears_transient_guide(
@@ -125,22 +157,22 @@ def test_pending_document_preview_keeps_tool_but_clears_transient_guide(
         padding=0.0,
     )
 
-    assert pane._document is candidate
-    assert pane._document_preview_active
+    assert pane._presentation.document is candidate
+    assert pane._presentation.preview_active
     assert not pane._plot.isHidden()
     assert pane.active_design_tool == "guide"
     assert pane.guide_anchor is None
-    assert pane._tool_sketch_points == []
-    assert not pane._tool_sketch_point_item.isVisible()
+    assert pane._presentation.plan.tool_sketch_points == ()
+    assert pane._renderer.state.overlays_visible is False
 
     pane.finish_document_preview(previous)
 
-    assert pane._document is previous
-    assert not pane._document_preview_active
+    assert pane._presentation.document is previous
+    assert not pane._presentation.preview_active
     assert pane.active_design_tool == "guide"
     assert pane.guide_anchor is None
-    assert pane._tool_sketch_points == []
-    assert pane._tool_sketch_point_item.isVisible()
+    assert pane._presentation.plan.tool_sketch_points == ()
+    assert pane._renderer.state.overlays_visible is True
     restored_range = pane._plot.getViewBox().viewRange()
     assert restored_range[0] == pytest.approx(previous_range[0])
     assert restored_range[1] == pytest.approx(previous_range[1])
@@ -169,7 +201,7 @@ def test_file_backed_layer_toggle_preserves_view_and_cached_navigation(
     document: DesignDocument,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    real_content_bounds = plot_module.content_bounds
+    real_content_bounds = viewport_module.content_bounds
     content_scans = 0
 
     def counted_content_bounds(*args, **kwargs):
@@ -177,7 +209,7 @@ def test_file_backed_layer_toggle_preserves_view_and_cached_navigation(
         content_scans += 1
         return real_content_bounds(*args, **kwargs)
 
-    monkeypatch.setattr(plot_module, "content_bounds", counted_content_bounds)
+    monkeypatch.setattr(viewport_module, "content_bounds", counted_content_bounds)
     pane.set_document(document)
     _view_box(pane).setRange(
         xRange=(20.0, 40.0),
@@ -185,15 +217,15 @@ def test_file_backed_layer_toggle_preserves_view_and_cached_navigation(
         padding=0.0,
     )
     before_view = _box(pane)
-    before_content = pane._navigation_content_bounds
-    before_frame = pane._navigation_frame
+    before_content = pane._viewport.content_bounds
+    before_frame = pane._viewport.frame
     scans_before_toggle = content_scans
 
     pane.set_document(document.with_visible_layers({(2, 0)}))
 
     assert _box(pane) == pytest.approx(before_view)
-    assert pane._navigation_content_bounds is before_content
-    assert pane._navigation_frame is before_frame
+    assert pane._viewport.content_bounds is before_content
+    assert pane._viewport.frame is before_frame
     assert content_scans == scans_before_toggle
     assert pane._raster_controller.documents[-1].visible_layers == frozenset({(2, 0)})
     assert pane._snap_coordinator.config.visible_layers == frozenset({(2, 0)})
@@ -312,7 +344,7 @@ def test_markup_snap_publication_uses_actual_euclidean_distance(
             guide_id="distance",
         )
     )
-    pane._snap_distance_threshold = lambda: 10.0
+    pane._viewport.snap_distance = lambda _radius_px: 10.0
 
     result = pane._resolve_snap_result((3.0, 4.0))
 
@@ -439,9 +471,9 @@ def test_snap_off_invalidates_inflight_hover_response(pane, tmp_path: Path) -> N
     changes.clear()
     worker.snap_ready.emit(_hover_response(request))
 
-    assert pane._hover_snap is None
+    assert pane._presentation.hover_snap is None
     assert changes == []
-    assert len(pane._hover_item.getData()[0]) == 0
+    assert pane._renderer.state.hover_segment == ()
 
 
 def test_extreme_hover_skips_worker_but_keeps_markup_snap(pane, tmp_path) -> None:
@@ -453,14 +485,17 @@ def test_extreme_hover_skips_worker_but_keeps_markup_snap(pane, tmp_path) -> Non
             (0.0, 0.0), (10.0, 0.0), guide_id="guide"
         )
     )
-    pane._snap_distance_threshold = lambda: 10_000_000.0
+    pane._viewport.snap_distance = lambda _radius_px: 10_000_000.0
     worker = pane._snap_runtime.active_worker
 
     pane._submit_file_backed_hover((5.0, 0.0))
 
     assert worker.hover_requests == []
     assert worker.cancel_hover_calls == 1
-    assert pane._hover_snap.mode in {"guide_center", "guide_intersection"}
+    assert pane._presentation.hover_snap.mode in {
+        "guide_center",
+        "guide_intersection",
+    }
 
 
 def test_extreme_move_click_executes_exact_cursor_once_without_worker(
@@ -471,7 +506,7 @@ def test_extreme_move_click_executes_exact_cursor_once_without_worker(
     pane.set_document(_document(source))
     emitted: list[tuple[float, float]] = []
     pane.move_requested.connect(lambda x, y: emitted.append((x, y)))
-    pane._snap_distance_threshold = lambda: 10_000_000.0
+    pane._viewport.snap_distance = lambda _radius_px: 10_000_000.0
 
     _submit_file_click(pane, "move", (25.0, 30.0))
 
@@ -492,9 +527,9 @@ def test_cursor_leave_invalidates_inflight_hover_response(pane, tmp_path: Path) 
     changes.clear()
     worker.snap_ready.emit(_hover_response(request))
 
-    assert pane._hover_snap is None
+    assert pane._presentation.hover_snap is None
     assert changes == []
-    assert len(pane._hover_item.getData()[0]) == 0
+    assert pane._renderer.state.hover_segment == ()
 
 
 @pytest.mark.parametrize(
@@ -528,7 +563,7 @@ def test_snap_disabled_executes_all_existing_click_actions_immediately(
 
 @pytest.mark.parametrize("mode", ["segment", "segment_center"])
 def test_hover_highlights_full_segment_for_line_and_center(pane, mode: str) -> None:
-    pane._set_hover_snap(
+    pane._renderer.set_hover(
         SnapResult(
             point=(5.0, 0.0),
             mode=mode,
@@ -538,9 +573,10 @@ def test_hover_highlights_full_segment_for_line_and_center(pane, mode: str) -> N
         )
     )
 
-    x_data, y_data = pane._hover_segment_item.getData()
-    assert tuple(x_data) == (0.0, 10.0)
-    assert tuple(y_data) == (0.0, 0.0)
+    assert pane._renderer.state.hover_segment == (
+        (0.0, 0.0),
+        (10.0, 0.0),
+    )
 
 
 @pytest.mark.parametrize(
@@ -708,7 +744,7 @@ def test_design_window_closed_preview_finish_clears_preview_before_reopen(
     window.show()
     qt_app.processEvents()
     window.set_document_preview(_document(tmp_path / "preview.gds"))
-    assert window._main_view._document_preview_active
+    assert window._main_view._presentation.preview_active
     window.close()
     qt_app.processEvents()
     set_document_calls: list[object] = []
@@ -722,7 +758,7 @@ def test_design_window_closed_preview_finish_clears_preview_before_reopen(
 
     window.finish_document_preview(document)
 
-    assert not window._main_view._document_preview_active
+    assert not window._main_view._presentation.preview_active
     assert set_document_calls == [None]
     assert window._main_view._snap_coordinator.config is None
 
@@ -733,10 +769,10 @@ def test_design_window_closed_preview_finish_clears_preview_before_reopen(
     assert window._main_view._snap_coordinator.config is not None
     next_preview = _document(tmp_path / "next-preview.gds")
     window.set_document_preview(next_preview)
-    assert window._main_view._document_preview_active
-    assert window._main_view._document_preview_previous_document is document
+    assert window._main_view._presentation.preview_active
+    assert window._main_view._presentation.preview_previous_document is document
     window.finish_document_preview(document)
-    assert not window._main_view._document_preview_active
+    assert not window._main_view._presentation.preview_active
     window._main_view.shutdown()
     window.deleteLater()
 

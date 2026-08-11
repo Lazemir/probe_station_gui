@@ -47,7 +47,7 @@ def qt_app() -> QApplication:
 @pytest.fixture
 def pane(qt_app: QApplication, tmp_path: Path) -> _DesignPlotPane:
     widget = _DesignPlotPane()
-    widget._snap_distance_threshold = lambda: 20.0
+    widget._viewport.snap_distance = lambda _radius_px: 20.0
     widget.set_document(
         DesignDocument(
             path=tmp_path / "selection-canvas.gds",
@@ -120,18 +120,11 @@ def test_markup_overlay_draws_only_guides(
 ) -> None:
     pane.set_markup(_markup(tmp_path))
 
-    assert pane._tool_sketch_segments == [
+    assert pane._presentation.plan.tool_sketch_segments == (
         ((0.0, 0.0), (10.0, 10.0)),
         ((0.0, 10.0), (10.0, 0.0)),
-    ]
-    for item in (
-        pane._tool_sketch_point_item,
-        pane._tool_sketch_midpoint_item,
-        pane._tool_sketch_intersection_item,
-    ):
-        x_data, y_data = item.getData()
-        assert len(x_data) == 0
-        assert len(y_data) == 0
+    )
+    assert pane._renderer.state.sketch_candidate_count == 0
 
 
 def test_hidden_markup_has_no_overlay_or_entity(
@@ -143,8 +136,11 @@ def test_hidden_markup_has_no_overlay_or_entity(
     pane.set_markup(hidden)
     pane.set_selectable_entities(project_entities(_route(), hidden))
 
-    assert pane._tool_sketch_segments == []
-    assert all(entity.owner.value == "route" for entity in pane._selectable_entities)
+    assert pane._presentation.plan.tool_sketch_segments == ()
+    assert all(
+        entity.owner.value == "route"
+        for entity in pane._presentation.selectable_entities
+    )
 
 
 def test_hiding_markup_prunes_existing_guide_entities_and_selection(
@@ -162,9 +158,12 @@ def test_hiding_markup_prunes_existing_guide_entities_and_selection(
 
     pane.set_markup(visible.with_visibility(False))
 
-    assert pane._selection.ids == frozenset({route_entity_id("p001")})
+    assert pane._presentation.plan.selection.ids == frozenset(
+        {route_entity_id("p001")}
+    )
     assert all(
-        entity.owner.value == "route" for entity in pane._selectable_entities
+        entity.owner.value == "route"
+        for entity in pane._presentation.selectable_entities
     )
 
 
@@ -184,13 +183,11 @@ def test_selection_highlight_accepts_multiple_route_points_and_guides(
         )
     )
 
-    route_x, route_y = pane._probe_route_selected_item.getData()
-    guide_x, guide_y = pane._markup_selected_item.getData()
-    assert list(zip(route_x, route_y, strict=True)) == [(2.0, 3.0)]
-    assert list(zip(guide_x[:2], guide_y[:2], strict=True)) == [
-        (0.0, 0.0),
-        (10.0, 10.0),
-    ]
+    state = pane._renderer.state
+    assert state.selected_route_centers == ((2.0, 3.0),)
+    assert state.selected_markup_segments == (
+        ((0.0, 0.0), (10.0, 10.0)),
+    )
 
 
 def test_guide_only_selection_does_not_keep_legacy_route_highlight(
@@ -205,31 +202,25 @@ def test_guide_only_selection_does_not_keep_legacy_route_highlight(
 
     pane.set_selection(SelectionModel(frozenset({markup_entity_id("a")})))
 
-    route_x, route_y = pane._probe_route_selected_item.getData()
-    assert len(route_x) == 0
-    assert len(route_y) == 0
+    assert pane._renderer.state.selected_route_centers == ()
 
 
 def test_selection_rectangle_matches_solidworks_direction_and_style(
     pane: _DesignPlotPane,
 ) -> None:
-    pane._render_selection_preview(
+    pane._renderer.set_selection_preview(
         SelectionPreview((0.0, 0.0), (10.0, 5.0), False)
     )
-    left_pen = pane._selection_rect_item.opts["pen"]
 
-    assert pane._selection_rect_mode == "contain"
-    assert left_pen.color().name() == "#2196f3"
-    assert left_pen.style() == Qt.SolidLine
+    assert pane._renderer.state.selection_rectangle_mode == "contain"
+    assert pane._renderer.state.selection_rectangle_color == "#2196f3"
 
-    pane._render_selection_preview(
+    pane._renderer.set_selection_preview(
         SelectionPreview((10.0, 5.0), (0.0, 0.0), True)
     )
-    right_pen = pane._selection_rect_item.opts["pen"]
 
-    assert pane._selection_rect_mode == "cross"
-    assert right_pen.color().name() == "#4caf50"
-    assert right_pen.style() == Qt.DashLine
+    assert pane._renderer.state.selection_rectangle_mode == "cross"
+    assert pane._renderer.state.selection_rectangle_color == "#4caf50"
 
 
 def test_selection_direction_uses_containment_or_crossing(
@@ -293,7 +284,10 @@ def test_shift_constrains_guide_preview_and_commit_to_same_endpoint(
         pane._plot_interaction.hover(result, shift=True, control=False)
     )
 
-    assert pane._tool_sketch_points == [(1.0, 2.0), (6.0, 2.0)]
+    assert pane._presentation.plan.tool_sketch_points == (
+        (1.0, 2.0),
+        (6.0, 2.0),
+    )
     _complete_click(
         pane,
         PlotAction.GUIDE_POINT,
@@ -334,7 +328,7 @@ def test_guide_uses_ctrl_diagonal_and_shift_ctrl_free(
         )
     )
 
-    assert pane._tool_sketch_points[-1] == pytest.approx(expected)
+    assert pane._presentation.plan.tool_sketch_points[-1] == pytest.approx(expected)
 
 
 def test_escape_cancels_only_unfinished_guide(pane: _DesignPlotPane) -> None:
@@ -385,7 +379,11 @@ def test_align_action_emits_snapped_point_and_supports_arbitrary_draft_overlay(
     )
 
     assert emitted == [(7.0, 8.0)]
-    assert pane._alignment_draft_points == [(1.0, 2.0), (3.0, 4.0), (5.0, 6.0)]
+    assert pane._presentation.plan.alignment_draft_points == (
+        (1.0, 2.0),
+        (3.0, 4.0),
+        (5.0, 6.0),
+    )
     assert pane.active_design_tool == "align"
 
 
@@ -394,7 +392,6 @@ def test_align_right_click_does_not_emit_legacy_calibration_point(
 ) -> None:
     from types import SimpleNamespace
 
-    pane._document = object()
     pane.set_active_design_tool("align")
     emitted: list[object] = []
     pane.calibration_point_selected.connect(lambda *args: emitted.append(args))
@@ -416,10 +413,14 @@ def test_mixed_array_preview_draws_points_and_dashed_segments(
         [SegmentGeometry((0.0, 0.0), (5.0, 0.0))],
     )
 
-    assert pane._mixed_preview_points == [(1.0, 2.0), (3.0, 4.0)]
-    assert pane._mixed_preview_segments == [
+    assert pane._presentation.plan.mixed_preview_points == (
+        (1.0, 2.0),
+        (3.0, 4.0),
+    )
+    assert pane._presentation.plan.mixed_preview_segments == (
         SegmentGeometry((0.0, 0.0), (5.0, 0.0))
-    ]
+        ,
+    )
 
 
 def test_layout_window_applies_one_selection_to_canvas_and_table(
@@ -437,7 +438,7 @@ def test_layout_window_applies_one_selection_to_canvas_and_table(
     window._apply_selection_request({markup_entity_id("a")}, "replace")
 
     assert window.selection.ids == frozenset({markup_entity_id("a")})
-    assert window._main_view._selection == window.selection
+    assert window._main_view._presentation.plan.selection == window.selection
     assert window.navigator_panel.tool_controls.selection == window.selection
     assert window.navigator_panel.route_controls.selected_rows() == []
     assert changes[-1] == window.selection
@@ -513,15 +514,19 @@ def test_layout_window_escape_cancels_transient_tool_state_and_selects(
         PlotAction.GUIDE_POINT,
         SnapResult((1.0, 2.0), "free", 0.0),
     )
-    window._main_view._tool_sketch_segments = [((0.0, 0.0), (3.0, 0.0))]
+    window._main_view._renderer.apply(
+        window._main_view._presentation.set_tool_sketch_segments,
+        [((0.0, 0.0), (3.0, 0.0))],
+    )
 
     window._cancel_active_interaction()
 
     assert window._main_view.guide_anchor is None
-    assert window._main_view._tool_sketch_points == []
-    assert window._main_view._tool_sketch_segments == [
+    assert window._main_view._presentation.plan.tool_sketch_points == ()
+    assert window._main_view._presentation.plan.tool_sketch_segments == (
         ((0.0, 0.0), (3.0, 0.0))
-    ]
+        ,
+    )
     assert (
         window.navigator_panel.tool_controls._ruler_length_label.text()
         == "1 measurements"
@@ -554,10 +559,10 @@ def test_layout_window_forwards_modifier_snapshots_to_ruler(
         False,
     )
 
-    assert window._main_view._tool_measure_points == [
+    assert window._main_view._presentation.plan.tool_measure_points == (
         (1.0, 2.0),
         (6.0, 2.0),
-    ]
+    )
     window._main_view.route_pick_requested.emit(
         "ruler",
         6.0,
@@ -565,9 +570,10 @@ def test_layout_window_forwards_modifier_snapshots_to_ruler(
         True,
         False,
     )
-    assert window._main_view._tool_measure_segments == [
+    assert window._main_view._presentation.plan.tool_measure_segments == (
         ((1.0, 2.0), (6.0, 2.0))
-    ]
+        ,
+    )
     window.close()
     window.deleteLater()
 
@@ -587,7 +593,9 @@ def test_alignment_accept_clears_plot_before_forwarding_accept(
         lambda points: observed.append(
             (
                 window._main_view.active_design_tool,
-                list(window._main_view._alignment_draft_points),
+                list(
+                    window._main_view._presentation.plan.alignment_draft_points
+                ),
                 points,
             )
         )
@@ -614,10 +622,12 @@ def test_focus_candidate_and_selected_point_have_distinct_overlays(
     pane.set_focus_candidate(candidate)
     pane.set_selected_focus_point((8.0, 9.0))
 
-    candidate_x, candidate_y = pane._focus_candidate_item.getData()
-    selected_x, selected_y = pane._selected_focus_item.getData()
-    assert list(candidate_x) == [4.0, 6.0, 6.0, 4.0, 4.0]
-    assert list(candidate_y) == [5.0, 5.0, 7.0, 7.0, 5.0]
-    assert list(selected_x) == [8.0]
-    assert list(selected_y) == [9.0]
+    assert pane._renderer.state.focus_candidate_outline == (
+        (4.0, 5.0),
+        (6.0, 5.0),
+        (6.0, 7.0),
+        (4.0, 7.0),
+        (4.0, 5.0),
+    )
+    assert pane._renderer.state.selected_focus_points == ((8.0, 9.0),)
     assert pane.selected_focus_point == (8.0, 9.0)

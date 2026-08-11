@@ -865,6 +865,71 @@ git commit -m "refactor: split coordinate adapter responsibilities"
   fatal recovery, import/ownership/static/protected-byte gates, and metrics. It
   returned READY with no Critical, Important, or Minor finding.
 
+#### Task 5e: Separate Design plot presentation
+
+**Files:**
+- Create: `probe_station_gui/design/plot_presentation.py`
+- Create: `probe_station_gui/views/design_plot_viewport.py`
+- Create: `probe_station_gui/views/design_plot_route_rendering.py`
+- Create: `probe_station_gui/views/design_plot_rendering.py`
+- Modify: `probe_station_gui/views/design_plot_pane.py`
+- Create: `tests/design/test_plot_presentation.py`
+- Create: `tests/ui/test_design_plot_viewport.py`
+- Create: `tests/ui/test_design_plot_route_rendering.py`
+- Create: `tests/ui/test_design_plot_rendering.py`
+- Split/delete: `tests/ui/test_design_navigator_panel.py`
+- Modify: focused Design plot ownership/parity tests
+- Modify: `docs/superpowers/plans/2026-08-10-coordinate-system-coordinator.md`
+
+- [x] Observe strict RED before production: collection failed independently for
+  all four absent presentation/viewport/render modules. Later contract REDs
+  covered normalized mutation/render application, navigation-before-render,
+  viewport input/publication normalization, snap-geometry completion, and a
+  synchronous hover callback invalidating a transient click before its effect.
+- [x] Make Qt-free `PlotPresentation` the sole owner of retained content,
+  identity matching, route/Markup navigation filtering, normalized overlay
+  state, selection pruning/hit testing, nested preview state, snap-geometry
+  completion, dirty regions, and immutable render plans.
+- [x] Make `DesignPlotViewport` the sole ViewBox/navigation/input adapter. It
+  owns cached bounds and limits, focus/capture/restore, resize without rescans,
+  fixed-pixel metrics, Qt event and snap-publication normalization, cursor and
+  plot visibility, and hover/click telemetry. Limits remain applied before
+  focus and click completion is recomputed only after synchronous hover effects.
+- [x] Make `DesignPlotRouteRenderer` own route/preview items, labels, detail
+  gates, immediate arrow invalidation, coalesced zero-delay rendering, visible
+  16-ms scale retry, and timer shutdown. `DesignPlotRenderer` composes it and
+  owns every other non-raster scene item plus dynamic remove-before-clear and
+  preview visibility; the pane retains raster ownership and emits all outward
+  signals.
+- [x] Preserve same-object/same-content document behavior, candidate preview
+  capture and identity-only restore, matching route/Markup limits, fixed-pixel
+  overlays, route detail thresholds, synchronous signal order, snap FIFO
+  revalidation, and terminal timers -> snap/runtime -> raster shutdown order.
+  AST gates prove no migrated navigation, presentation, non-raster item, label,
+  timer, or redraw ownership remains in the pane, and four unused pane facades
+  were deleted rather than forwarded.
+- [x] Mechanically split MI-0 `test_design_navigator_panel.py` by adapter seam
+  into enablement/document/registration, tool, route-selection, and route-run
+  safety files. All `35` original tests and bodies are preserved; the split
+  files pass `5 / 23 / 5 / 2` tests and have MI `34.00 / 18.07 / 45.52 / 44.55`.
+- [x] Fresh process-local `QLocale.c()` gates pass `155` focused tests, `853`
+  Design/UI tests, and the complete no-hardware suite at `3012 passed` plus
+  `14` subtests. Changed-file Ruff, whole-tree compileall, `git diff --check`,
+  forward/reverse imports, Qt-free import, deletion, and ownership gates pass.
+  The production whitelist is exactly the pane plus four new modules; all
+  protected bytes from `9bb7264` remain unchanged.
+- [x] Metrics: `design_plot_pane.py` decreases LOC `2374 -> 663`, LLOC
+  `1372 -> 444`, aggregate CC `521 -> 166`, and MI `0.00 -> 4.34`. New module
+  MI values are presentation `3.54`, viewport `2.33`, route rendering `22.88`,
+  and general rendering `7.56`; contract-test MI values are `34.84`, `26.06`,
+  `44.17`, and `42.76`. Repository MI-0 count decreases `24 -> 22` with no new
+  MI-0 file.
+- [x] A fresh independent read-only review reran `61` focused tests and audited
+  lifecycle/reentrancy, render ownership, route thresholds, viewport caching,
+  API parity, protected bytes, split-test equivalence, imports, static gates,
+  and MI. It returned READY with no Critical or Important finding; its sole
+  Minor corrected the viewport MI evidence above from `2.52` to `2.33`.
+
 - [ ] Run Wily/Radon for the complete branch and compare with the frozen
   baseline. Require:
 

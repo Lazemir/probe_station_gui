@@ -16,7 +16,7 @@ from PySide6.QtWidgets import QAbstractButton, QApplication
 
 from probe_station_gui.design.markup import GuideSegment
 from probe_station_gui.route.model import MeasurementRoute, NeedleOffset, RoutePoint
-from probe_station_gui.views import design_plot_pane as plot_module
+from probe_station_gui.views import design_plot_viewport as viewport_module
 from tests.ui.design_plot_klayout_support import (
     _assert_gds_focus,
     _box,
@@ -34,7 +34,7 @@ def test_open_frames_gds_but_internal_limits_include_distant_hidden_markup(
     pane.set_markup(distant_hidden_markup)
 
     _assert_gds_focus(pane, document)
-    assert pane._navigation_frame[2] > 1_000_000.0
+    assert pane._viewport.frame[2] > 1_000_000.0
 
 
 def test_route_and_markup_updates_expand_limits_without_changing_view(
@@ -47,7 +47,7 @@ def test_route_and_markup_updates_expand_limits_without_changing_view(
     pane.set_markup(distant_hidden_markup)
 
     assert _box(pane) == pytest.approx(before)
-    assert pane._navigation_frame[2] > 1_000_000.0
+    assert pane._viewport.frame[2] > 1_000_000.0
 
 
 def test_deleting_outer_content_shrinks_and_clamps_once(
@@ -63,8 +63,8 @@ def test_deleting_outer_content_shrinks_and_clamps_once(
 
     pane.set_probe_route(None, selected_route_point_index=-1)
 
-    assert pane._navigation_frame[2] < 1_000.0
-    assert _box(pane)[2] <= pane._navigation_frame[2]
+    assert pane._viewport.frame[2] < 1_000.0
+    assert _box(pane)[2] <= pane._viewport.frame[2]
 
 
 def test_shrink_preserves_an_already_valid_view(pane, document, distant_route) -> None:
@@ -87,10 +87,10 @@ def test_home_restores_gds_without_changing_content_limits(
 ) -> None:
     window.set_document(document)
     window.set_probe_route(distant_route, selected_route_point_index=-1)
-    frame = window._main_view._navigation_frame
+    frame = window._main_view._viewport.frame
     window._home_shortcut.activated.emit()
 
-    assert window._main_view._navigation_frame == frame
+    assert window._main_view._viewport.frame == frame
     _assert_gds_focus(window._main_view, document)
 
 
@@ -101,15 +101,15 @@ def test_needle_offset_update_expands_then_shrinks_navigation_frame(
     route.points.append(RoutePoint("local", "Local", (20.0, 20.0)))
     pane.set_document(document)
     pane.set_probe_route(route, selected_route_point_index=-1)
-    original = pane._navigation_frame
+    original = pane._viewport.frame
 
     route.needle_offsets = [NeedleOffset("N1", "Needle 1", 2_000_000.0, 0.0)]
     pane.set_probe_route(route, selected_route_point_index=-1)
-    assert pane._navigation_frame[2] > 2_000_000.0
+    assert pane._viewport.frame[2] > 2_000_000.0
 
     route.needle_offsets = [NeedleOffset("N1", "Needle 1", 0.0, 0.0)]
     pane.set_probe_route(route, selected_route_point_index=-1)
-    assert pane._navigation_frame == pytest.approx(original)
+    assert pane._viewport.frame == pytest.approx(original)
 
 
 def test_rotated_document_ignores_stale_content_until_models_are_refreshed(
@@ -118,7 +118,7 @@ def test_rotated_document_ignores_stale_content_until_models_are_refreshed(
     pane.set_document(document)
     pane.set_probe_route(distant_route, selected_route_point_index=-1)
     pane.set_markup(distant_hidden_markup)
-    assert pane._navigation_frame[2] > 1_000_000.0
+    assert pane._viewport.frame[2] > 1_000_000.0
 
     rotated = replace(
         document,
@@ -127,7 +127,7 @@ def test_rotated_document_ignores_stale_content_until_models_are_refreshed(
         source_load_id="rotated-load",
     )
     pane.set_document(rotated)
-    assert pane._navigation_frame[2] < 1_000.0
+    assert pane._viewport.frame[2] < 1_000.0
 
     rotated_route = MeasurementRoute.default_for_document(rotated)
     rotated_route.points.append(RoutePoint("far", "Far", (0.0, 1_000_000.0)))
@@ -143,7 +143,7 @@ def test_rotated_document_ignores_stale_content_until_models_are_refreshed(
     )
     pane.set_probe_route(rotated_route, selected_route_point_index=-1)
     pane.set_markup(rotated_markup)
-    assert pane._navigation_frame[3] > 1_000_000.0
+    assert pane._viewport.frame[3] > 1_000_000.0
 
 
 def test_design_window_exposes_no_fit_all_control_or_action(window) -> None:
@@ -183,7 +183,7 @@ def test_viewbox_cannot_pan_past_any_navigation_edge(
     pane, document, qt_app, dx, dy
 ) -> None:
     pane.set_document(document)
-    frame = pane._navigation_frame
+    frame = pane._viewport.frame
     view_box = _view_box(pane)
     view_box.setRange(
         xRange=(20.0, 80.0),
@@ -202,7 +202,7 @@ def test_viewbox_cannot_pan_past_any_navigation_edge(
 
 def test_wheel_zoom_out_stops_at_navigation_frame(pane, document, qt_app) -> None:
     pane.set_document(document)
-    frame = pane._navigation_frame
+    frame = pane._viewport.frame
     before = _box(pane)
     viewport = pane._plot.viewport()
     center = viewport.rect().center()
@@ -247,10 +247,10 @@ def test_resize_recomputes_aspect_frame_without_refocusing(
     pane.resize(900, 300)
     qt_app.processEvents()
 
-    frame = pane._navigation_frame
+    frame = pane._viewport.frame
     after = _box(pane)
     after_center = ((after[0] + after[2]) * 0.5, (after[1] + after[3]) * 0.5)
-    viewport_width, viewport_height = pane._viewport_size()
+    viewport_width, viewport_height = pane._viewport.viewport_size()
     frame_aspect = (frame[2] - frame[0]) / (frame[3] - frame[1])
     assert frame_aspect == pytest.approx(
         viewport_width / viewport_height,
@@ -262,7 +262,7 @@ def test_resize_recomputes_aspect_frame_without_refocusing(
 def test_resize_refits_cached_content_without_rescanning_models(
     pane, document, distant_route, qt_app, monkeypatch
 ) -> None:
-    real_content_bounds = plot_module.content_bounds
+    real_content_bounds = viewport_module.content_bounds
     calls = 0
 
     def counted_content_bounds(*args, **kwargs):
@@ -270,7 +270,7 @@ def test_resize_refits_cached_content_without_rescanning_models(
         calls += 1
         return real_content_bounds(*args, **kwargs)
 
-    monkeypatch.setattr(plot_module, "content_bounds", counted_content_bounds)
+    monkeypatch.setattr(viewport_module, "content_bounds", counted_content_bounds)
     pane.set_document(document)
     pane.set_probe_route(distant_route, selected_route_point_index=-1)
     scans_before_resize = calls
