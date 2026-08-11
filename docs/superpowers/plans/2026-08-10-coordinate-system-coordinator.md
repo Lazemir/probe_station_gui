@@ -797,6 +797,74 @@ git commit -m "refactor: split coordinate adapter responsibilities"
   focused Design/UI tests and `148` route/autofocus/contact tests; it returned
   READY with no Critical or Important findings.
 
+#### Task 5d: Isolate the Design plot input pipeline
+
+**Files:**
+- Create: `probe_station_gui/design/plot_interaction.py`
+- Create: `probe_station_gui/design/snap_coordinator.py`
+- Create: `probe_station_gui/design/snap_protocol.py`
+- Create: `probe_station_gui/views/design_snap_runtime.py`
+- Create: `tests/design/test_plot_interaction.py`
+- Create: `tests/design/test_snap_coordinator.py`
+- Create: `tests/ui/design_plot_klayout_fixtures.py`
+- Create: `tests/ui/design_plot_klayout_support.py`
+- Create: `tests/ui/test_design_plot_navigation.py`
+- Create: `tests/ui/test_design_plot_pipeline_ownership.py`
+- Create: `tests/ui/test_design_snap_runtime.py`
+- Modify: `probe_station_gui/views/design_plot_pane.py`
+- Modify: `tests/design/test_click_navigation.py`
+- Modify: `tests/ui/test_design_plot_klayout.py`
+- Modify: `tests/ui/test_design_plot_move.py`
+- Modify: `tests/ui/test_design_plot_selection.py`
+- Modify: `tests/ui/test_main_window_menus.py`
+- Modify: `docs/superpowers/plans/2026-08-10-coordinate-system-coordinator.md`
+
+- [x] Make Qt-free `PlotInteraction` the sole owner of input-session state:
+  action classification, tool/context generation, guide gestures, selection
+  rectangles, move-drag click suppression, and immutable effects. Pure tests
+  prove modifier parity and that preview/document-generation changes clear
+  transient gestures.
+- [x] Make Qt-free `SnapCoordinator` the sole owner of request identity,
+  local Markup/geometry arbitration, hover replacement, click FIFO ordering,
+  action-scoped invalidation, and immutable commands/publications/notices.
+  Dedicated regressions prove transient tool clicks are cancelled while queued
+  Calibration and Route Point actions survive unrelated tool/context changes;
+  a stale FIFO head is consumed exactly once and releases its ready tail.
+- [x] Move worker construction, signal adaptation, non-blocking retirement,
+  and finished-driven deletion behind `DesignSnapRuntime`. The pane is now a Qt
+  renderer/effect adapter and does not own worker queues, request generations,
+  click completions, or retired-worker lifetimes.
+- [x] Split the former KLayout test monolith into fixtures, support fakes, and
+  navigation/pipeline modules. A strict architecture RED then found three
+  remaining test-only click facades in the pane; tests were migrated to typed
+  `SnapClickIntent`/`ClickPublication` seams and the facades were deleted.
+- [x] Fresh focused process-local `QLocale.c()` gate passes `125` tests. Fresh
+  Design/UI/App/route/API gate passes `1697` tests plus `7` subtests. Fresh full
+  no-hardware gate passes `2983` tests plus `14` subtests in one process.
+- [x] Changed-file Ruff, whole-tree compileall, `git diff --check`, package
+  import-order, Qt-free ownership, runtime retirement, and deletion gates pass.
+  `klayout_types.py`, `klayout_workers.py`, `model.py`,
+  `design_klayout_raster.py`, and the complete `route/` package remain
+  byte-identical to `2272a67`.
+- [x] Metrics: `design_plot_pane.py` decreases LOC `2786 -> 2374`, LLOC
+  `1734 -> 1372`, and aggregate CC `633 -> 521`. New MI values are
+  `plot_interaction.py 5.62`, `snap_coordinator.py 0.48`,
+  `snap_protocol.py 39.53`, and `design_snap_runtime.py 27.82`; every new
+  Python module remains above MI 0. The pane itself remains MI 0 and therefore
+  stays in the residual selected-cluster queue for the next strict-TDD pass.
+- [x] The first frozen independent review found three Important parity and
+  lifecycle gaps. Strict RED/GREEN regressions now publish only one ready click
+  per adapter checkpoint so synchronous document/Markup/snap invalidation can
+  reject a ready FIFO tail; retire and delete a fatally stopped active worker,
+  cancel its pending work, and lazily attach a fresh worker on the next request;
+  and preserve the actual Euclidean Markup snap distance instead of reporting
+  zero. All focused, broad, full, static, protected-byte, and MI gates above
+  were rerun after these fixes.
+- [x] A fresh post-fix independent read-only review reran the focused gate
+  (`125` tests), the three prior-finding reproductions (`8` tests), real-worker
+  fatal recovery, import/ownership/static/protected-byte gates, and metrics. It
+  returned READY with no Critical, Important, or Minor finding.
+
 - [ ] Run Wily/Radon for the complete branch and compare with the frozen
   baseline. Require:
 

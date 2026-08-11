@@ -14,7 +14,13 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
 
 from probe_station_gui.design.markup import MarkupDocument
-from probe_station_gui.design.model import SnapResult
+from probe_station_gui.design.model import DesignDocument, SnapResult
+from probe_station_gui.design.plot_interaction import (
+    PlotAction,
+    SelectionPreview,
+    SnapClickIntent,
+)
+from probe_station_gui.design.snap_protocol import ClickPublication
 from probe_station_gui.design.selection_geometry import SegmentGeometry, SelectionRect
 from probe_station_gui.design.selection_model import (
     SelectionModel,
@@ -39,12 +45,46 @@ def qt_app() -> QApplication:
 
 
 @pytest.fixture
-def pane(qt_app: QApplication) -> _DesignPlotPane:
+def pane(qt_app: QApplication, tmp_path: Path) -> _DesignPlotPane:
     widget = _DesignPlotPane()
     widget._snap_distance_threshold = lambda: 20.0
+    widget.set_document(
+        DesignDocument(
+            path=tmp_path / "selection-canvas.gds",
+            library=None,
+            top_cell=None,
+            top_cell_name="TOP",
+            cell_names=("TOP",),
+            dbu=1e-6,
+            user_unit=1e-9,
+            bounds=(0.0, 0.0, 100.0, 50.0),
+            polygons_by_layer={},
+            visible_layers=frozenset(),
+        )
+    )
     yield widget
     widget.shutdown()
     widget.deleteLater()
+
+
+def _complete_click(
+    pane: _DesignPlotPane,
+    action: PlotAction,
+    result: SnapResult,
+    *,
+    payload: tuple[object, ...] = (),
+    shift: bool = False,
+    control: bool = False,
+) -> None:
+    intent = SnapClickIntent(
+        action=action,
+        raw_point=result.point,
+        payload=payload,
+        shift=shift,
+        control=control,
+        generation=pane._plot_interaction.generation,
+    )
+    pane._apply_click_publication(ClickPublication(intent, result))
 
 
 def _markup(tmp_path: Path, *, visible: bool = True) -> MarkupDocument:
@@ -74,7 +114,7 @@ def _route() -> MeasurementRoute:
     )
 
 
-def test_markup_overlay_draws_only_guides_but_keeps_all_snap_candidates(
+def test_markup_overlay_draws_only_guides(
     pane: _DesignPlotPane,
     tmp_path: Path,
 ) -> None:
@@ -84,17 +124,6 @@ def test_markup_overlay_draws_only_guides_but_keeps_all_snap_candidates(
         ((0.0, 0.0), (10.0, 10.0)),
         ((0.0, 10.0), (10.0, 0.0)),
     ]
-    assert pane._markup_snap_candidates
-    intersection = [
-        candidate
-        for candidate in pane._markup_snap_candidates
-        if candidate.mode == "guide_intersection"
-    ]
-    assert [candidate.point for candidate in intersection] == [(5.0, 5.0)]
-    assert {candidate.mode for candidate in pane._markup_snap_candidates} == {
-        "guide_end",
-        "guide_intersection",
-    }
     for item in (
         pane._tool_sketch_point_item,
         pane._tool_sketch_midpoint_item,
@@ -105,7 +134,7 @@ def test_markup_overlay_draws_only_guides_but_keeps_all_snap_candidates(
         assert len(y_data) == 0
 
 
-def test_hidden_markup_has_no_overlay_entity_or_snap_candidate(
+def test_hidden_markup_has_no_overlay_or_entity(
     pane: _DesignPlotPane,
     tmp_path: Path,
 ) -> None:
@@ -115,9 +144,7 @@ def test_hidden_markup_has_no_overlay_entity_or_snap_candidate(
     pane.set_selectable_entities(project_entities(_route(), hidden))
 
     assert pane._tool_sketch_segments == []
-    assert pane._markup_snap_candidates == ()
     assert all(entity.owner.value == "route" for entity in pane._selectable_entities)
-    assert pane._best_markup_snap((5.0, 5.0)) is None
 
 
 def test_hiding_markup_prunes_existing_guide_entities_and_selection(
@@ -139,22 +166,6 @@ def test_hiding_markup_prunes_existing_guide_entities_and_selection(
     assert all(
         entity.owner.value == "route" for entity in pane._selectable_entities
     )
-
-
-def test_markup_snap_names_end_center_and_intersection(
-    pane: _DesignPlotPane,
-    tmp_path: Path,
-) -> None:
-    markup = MarkupDocument.empty((_markup(tmp_path)).source_path)
-    markup = (
-        markup.append_guide((0.0, 0.0), (10.0, 0.0), guide_id="horizontal")
-        .append_guide((5.0, -5.0), (5.0, 5.0), guide_id="vertical")
-    )
-    pane.set_markup(markup)
-
-    assert pane._best_markup_snap((0.1, 0.0)).mode == "guide_end"
-    assert pane._best_markup_snap((9.9, 0.0)).mode == "guide_end"
-    assert pane._best_markup_snap((5.0, 0.1)).mode == "guide_intersection"
 
 
 def test_selection_highlight_accepts_multiple_route_points_and_guides(
@@ -202,14 +213,18 @@ def test_guide_only_selection_does_not_keep_legacy_route_highlight(
 def test_selection_rectangle_matches_solidworks_direction_and_style(
     pane: _DesignPlotPane,
 ) -> None:
-    pane._update_selection_rectangle((0.0, 0.0), (10.0, 5.0))
+    pane._render_selection_preview(
+        SelectionPreview((0.0, 0.0), (10.0, 5.0), False)
+    )
     left_pen = pane._selection_rect_item.opts["pen"]
 
     assert pane._selection_rect_mode == "contain"
     assert left_pen.color().name() == "#2196f3"
     assert left_pen.style() == Qt.SolidLine
 
-    pane._update_selection_rectangle((10.0, 5.0), (0.0, 0.0))
+    pane._render_selection_preview(
+        SelectionPreview((10.0, 5.0), (0.0, 0.0), True)
+    )
     right_pen = pane._selection_rect_item.opts["pen"]
 
     assert pane._selection_rect_mode == "cross"
@@ -231,7 +246,7 @@ def test_selection_direction_uses_containment_or_crossing(
     rect = SelectionRect.from_drag((0.0, 0.0), (10.0, 10.0))
 
     assert entities_in_rect(entities, rect, crossing=False) == set()
-    assert pane._selection_entity_ids((10.0, 10.0), (0.0, 0.0)) == {
+    assert entities_in_rect(entities, rect, crossing=True) == {
         markup_entity_id("crossing")
     }
 
@@ -244,11 +259,19 @@ def test_guide_click_click_commits_and_stays_active(
     pane.set_route_edit_enabled(True)
     pane.set_active_design_tool("guide")
 
-    pane._execute_click_action("guide_point", (), SnapResult((1.0, 2.0), "free", 0.0))
-    pane._execute_click_action("guide_point", (), SnapResult((5.0, 6.0), "free", 0.0))
+    _complete_click(
+        pane,
+        PlotAction.GUIDE_POINT,
+        SnapResult((1.0, 2.0), "free", 0.0),
+    )
+    _complete_click(
+        pane,
+        PlotAction.GUIDE_POINT,
+        SnapResult((5.0, 6.0), "free", 0.0),
+    )
 
     assert emitted == [((1.0, 2.0), (5.0, 6.0))]
-    assert pane._guide_anchor is None
+    assert pane.guide_anchor is None
     assert pane.active_design_tool == "guide"
 
 
@@ -259,19 +282,21 @@ def test_shift_constrains_guide_preview_and_commit_to_same_endpoint(
     pane.guide_requested.connect(lambda start, end: emitted.append((start, end)))
     pane.set_route_edit_enabled(True)
     pane.set_active_design_tool("guide")
-    pane._execute_click_action(
-        "guide_point",
-        (),
+    _complete_click(
+        pane,
+        PlotAction.GUIDE_POINT,
         SnapResult((1.0, 2.0), "free", 0.0),
     )
     result = SnapResult((6.0, 4.0), "vertex", 0.1)
 
-    pane._set_hover_snap(result, shift=True, control=False)
+    pane._apply_interaction_transition(
+        pane._plot_interaction.hover(result, shift=True, control=False)
+    )
 
     assert pane._tool_sketch_points == [(1.0, 2.0), (6.0, 2.0)]
-    pane._execute_click_action(
-        "guide_point",
-        (),
+    _complete_click(
+        pane,
+        PlotAction.GUIDE_POINT,
         result,
         shift=True,
         control=False,
@@ -295,12 +320,18 @@ def test_guide_uses_ctrl_diagonal_and_shift_ctrl_free(
 ) -> None:
     pane.set_route_edit_enabled(True)
     pane.set_active_design_tool("guide")
-    pane._accept_guide_point((1.0, 2.0))
+    _complete_click(
+        pane,
+        PlotAction.GUIDE_POINT,
+        SnapResult((1.0, 2.0), "free", 0.0),
+    )
 
-    pane._set_hover_snap(
-        SnapResult(raw, "vertex", 0.1),
-        shift=shift,
-        control=control,
+    pane._apply_interaction_transition(
+        pane._plot_interaction.hover(
+            SnapResult(raw, "vertex", 0.1),
+            shift=shift,
+            control=control,
+        )
     )
 
     assert pane._tool_sketch_points[-1] == pytest.approx(expected)
@@ -309,11 +340,15 @@ def test_guide_uses_ctrl_diagonal_and_shift_ctrl_free(
 def test_escape_cancels_only_unfinished_guide(pane: _DesignPlotPane) -> None:
     pane.set_route_edit_enabled(True)
     pane.set_active_design_tool("guide")
-    pane._execute_click_action("guide_point", (), SnapResult((1.0, 2.0), "free", 0.0))
+    _complete_click(
+        pane,
+        PlotAction.GUIDE_POINT,
+        SnapResult((1.0, 2.0), "free", 0.0),
+    )
 
     pane.cancel_active_interaction()
 
-    assert pane._guide_anchor is None
+    assert pane.guide_anchor is None
     assert pane.active_design_tool == "guide"
 
 
@@ -323,7 +358,11 @@ def test_point_action_stays_in_point_tool(pane: _DesignPlotPane) -> None:
     pane.set_route_edit_enabled(True)
     pane.set_active_design_tool("point")
 
-    pane._execute_click_action("point", (), SnapResult((4.0, 5.0), "free", 0.0))
+    _complete_click(
+        pane,
+        PlotAction.POINT,
+        SnapResult((4.0, 5.0), "free", 0.0),
+    )
 
     assert emitted == [(4.0, 5.0)]
     assert pane.active_design_tool == "point"
@@ -339,9 +378,9 @@ def test_align_action_emits_snapped_point_and_supports_arbitrary_draft_overlay(
     pane.set_active_design_tool("align")
     pane.set_alignment_draft_points([(1.0, 2.0), (3.0, 4.0), (5.0, 6.0)])
 
-    pane._execute_click_action(
-        "alignment_point",
-        (),
+    _complete_click(
+        pane,
+        PlotAction.ALIGNMENT_POINT,
         SnapResult((7.0, 8.0), "vertex", 0.1),
     )
 
@@ -463,13 +502,22 @@ def test_layout_window_escape_cancels_transient_tool_state_and_selects(
     window.navigator_panel.apply_route_pick("ruler", 0.0, 0.0)
     window.navigator_panel.apply_route_pick("ruler", 2.0, 0.0)
     window.navigator_panel.tool_controls._guide_tool_button.click()
-    window._main_view._guide_anchor = (1.0, 2.0)
-    window._main_view._tool_sketch_points = [(1.0, 2.0)]
+    window._main_view._apply_interaction_transition(
+        window._main_view._plot_interaction.set_context(
+            document_present=True,
+            preview_active=False,
+        )
+    )
+    _complete_click(
+        window._main_view,
+        PlotAction.GUIDE_POINT,
+        SnapResult((1.0, 2.0), "free", 0.0),
+    )
     window._main_view._tool_sketch_segments = [((0.0, 0.0), (3.0, 0.0))]
 
     window._cancel_active_interaction()
 
-    assert window._main_view._guide_anchor is None
+    assert window._main_view.guide_anchor is None
     assert window._main_view._tool_sketch_points == []
     assert window._main_view._tool_sketch_segments == [
         ((0.0, 0.0), (3.0, 0.0))

@@ -13,6 +13,9 @@ from PySide6.QtGui import QKeySequence
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QDockWidget, QMainWindow
 
+from probe_station_gui.design.model import SnapResult
+from probe_station_gui.design.plot_interaction import PlotAction, SnapClickIntent
+from probe_station_gui.design.snap_protocol import ClickPublication
 from probe_station_gui.views import main_window_menus
 from probe_station_gui.views.design_layout_window import DesignLayoutWindow
 from probe_station_gui.views.main_window_menus import setup_main_window_menus
@@ -24,6 +27,27 @@ def qt_app() -> QApplication:
     if app is None:
         app = QApplication([])
     return app
+
+
+def _complete_guide_anchor(design_window: DesignLayoutWindow) -> None:
+    pane = design_window._main_view
+    pane._apply_interaction_transition(
+        pane._plot_interaction.set_context(
+            document_present=True,
+            preview_active=False,
+        )
+    )
+    pane.set_route_edit_enabled(True)
+    result = SnapResult((1.0, 2.0), "free", 0.0)
+    intent = SnapClickIntent(
+        action=PlotAction.GUIDE_POINT,
+        raw_point=result.point,
+        payload=(),
+        shift=False,
+        control=False,
+        generation=pane._plot_interaction.generation,
+    )
+    pane._apply_click_publication(ClickPublication(intent, result))
 
 
 class _MenuOwner(QMainWindow):
@@ -223,7 +247,8 @@ def test_main_window_escape_does_not_block_active_design_tool_cancel(
     design_window.navigator_panel._replace_tool_context()
     design_window.navigator_panel._update_enabled_state()
     design_window.navigator_panel.tool_controls._guide_tool_button.click()
-    design_window._main_view._accept_guide_point((1.0, 2.0))
+    _complete_guide_anchor(design_window)
+    assert design_window._main_view.guide_anchor == (1.0, 2.0)
     design_window.show()
     design_window.activateWindow()
     design_window._main_view._plot.setFocus()
@@ -232,7 +257,7 @@ def test_main_window_escape_does_not_block_active_design_tool_cancel(
     QTest.keyClick(design_window._main_view._plot, Qt.Key_Escape)
     qt_app.processEvents()
 
-    assert design_window._main_view._guide_anchor is None
+    assert design_window._main_view.guide_anchor is None
     assert design_window._main_view.active_design_tool == "select"
     assert design_window.navigator_panel.tool_controls._select_tool_button.isChecked()
     assert ("cancel_pick", None) not in main_window.calls

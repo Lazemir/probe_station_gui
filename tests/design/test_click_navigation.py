@@ -1,12 +1,9 @@
 import os
-import types
 from pathlib import Path
-
-import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QItemSelectionModel, QPointF, QRectF, Qt
+from PySide6.QtCore import QItemSelectionModel
 from PySide6.QtWidgets import QAbstractItemView, QApplication
 
 import main as main_module
@@ -20,83 +17,13 @@ from probe_station_gui.design.selection_model import (
 )
 from probe_station_gui.route.model import MeasurementRoute
 from probe_station_gui.views.design_navigator_panel import DesignNavigatorPanel
-from probe_station_gui.views.design_plot_pane import _DesignPlotPane
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
-class _FakeSignal:
-    def __init__(self) -> None:
-        self.emissions: list[tuple[object, ...]] = []
-
-    def emit(self, *args: object) -> None:
-        self.emissions.append(args)
-
-
-class _FakeViewBox:
-    def mapSceneToView(self, position: QPointF) -> QPointF:  # noqa: N802 - Qt style
-        return QPointF(position)
-
-
-class _FakePlot:
-    def sceneBoundingRect(self) -> QRectF:  # noqa: N802 - Qt style
-        return QRectF(0.0, 0.0, 100.0, 100.0)
-
-    def getViewBox(self) -> _FakeViewBox:  # noqa: N802 - Qt style
-        return _FakeViewBox()
-
-
-class _FakeClickEvent:
-    def __init__(self, *, double: bool, button=Qt.LeftButton) -> None:
-        self._double = bool(double)
-        self._button = button
-
-    def button(self) -> object:
-        return self._button
-
-    def double(self) -> bool:
-        return self._double
-
-    def scenePos(self) -> QPointF:  # noqa: N802 - Qt style
-        return QPointF(10.0, 20.0)
-
-
-def _navigation_pane() -> types.SimpleNamespace:
-    move_requested = _FakeSignal()
-    pane = types.SimpleNamespace(
-        _plot=_FakePlot(),
-        _document=object(),
-        _route_pick_mode=None,
-        _route_edit_enabled=False,
-        _navigation_enabled=True,
-        _active_design_tool="select",
-        move_requested=move_requested,
-        route_pick_requested=_FakeSignal(),
-        route_point_requested=_FakeSignal(),
-        calibration_point_selected=_FakeSignal(),
-        selected_focus_point_changed=_FakeSignal(),
-        _is_double_click_event=_DesignPlotPane._is_double_click_event,
-        _set_hover_snap=lambda _snap, **_kwargs: None,
-        _resolve_snap_result=lambda raw: types.SimpleNamespace(
-            point=(raw[0] + 1.0, raw[1] + 2.0),
-            mode="raw",
-            distance=0.0,
-        ),
-        _emit_click_selection=lambda _point, _modifiers: None,
-    )
-    pane._execute_click_action = types.MethodType(
-        _DesignPlotPane._execute_click_action,
-        pane,
-    )
-    return pane
-
-
 def _qt_app() -> QApplication:
-    app = QApplication.instance()
-    if app is None:
-        app = QApplication([])
-    return app
+    return QApplication.instance() or QApplication([])
 
 
 def _make_document() -> DesignDocument:
@@ -112,58 +39,6 @@ def _make_document() -> DesignDocument:
         polygons_by_layer={},
         visible_layers=frozenset(),
     )
-
-
-def test_design_select_single_click_does_not_move() -> None:
-    pane = _navigation_pane()
-    pane._active_design_tool = "select"
-
-    _DesignPlotPane._on_mouse_clicked(pane, _FakeClickEvent(double=False))
-
-    assert pane.move_requested.emissions == []
-
-
-def test_design_select_double_click_does_not_move() -> None:
-    pane = _navigation_pane()
-    pane._active_design_tool = "select"
-
-    _DesignPlotPane._on_mouse_clicked(pane, _FakeClickEvent(double=True))
-
-    assert pane.move_requested.emissions == []
-
-
-@pytest.mark.parametrize("tool", ["array", "point", "guide"])
-def test_unhandled_explicit_tool_click_does_not_calibrate_or_move(tool: str) -> None:
-    pane = _navigation_pane()
-    pane._active_design_tool = tool
-    pane._route_edit_enabled = False
-
-    _DesignPlotPane._on_mouse_clicked(pane, _FakeClickEvent(double=False))
-
-    assert pane.calibration_point_selected.emissions == []
-    assert pane.move_requested.emissions == []
-
-
-@pytest.mark.parametrize(
-    ("button", "expected_slot"),
-    [(Qt.LeftButton, 0), (Qt.RightButton, 1)],
-)
-def test_explicit_legacy_click_keeps_calibration_fallback(
-    button: Qt.MouseButton,
-    expected_slot: int,
-) -> None:
-    pane = _navigation_pane()
-    pane._active_design_tool = "legacy"
-
-    _DesignPlotPane._on_mouse_clicked(
-        pane,
-        _FakeClickEvent(double=False, button=button),
-    )
-
-    assert pane.calibration_point_selected.emissions == [
-        (expected_slot, 11.0, 22.0)
-    ]
-    assert pane.move_requested.emissions == []
 
 
 def test_minimap_single_click_handler_opens_design_window(monkeypatch) -> None:

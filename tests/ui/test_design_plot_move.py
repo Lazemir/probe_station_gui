@@ -13,12 +13,7 @@ from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
-from probe_station_gui.design.klayout_types import (
-    KLayoutConfig,
-    PendingClick,
-    SnapResponse,
-)
-from probe_station_gui.design.model import SnapResult
+from probe_station_gui.design.model import DesignDocument, SnapResult
 from probe_station_gui.views.design_plot_pane import _DesignPlotPane
 
 
@@ -93,7 +88,20 @@ def pane(qt_app):
     widget.resize(640, 480)
     widget.show()
     qt_app.processEvents()
-    widget._document = SimpleNamespace(file_backed=False)
+    widget.set_document(
+        DesignDocument(
+            path=Path("move-test.gds"),
+            library=None,
+            top_cell=None,
+            top_cell_name="TOP",
+            cell_names=("TOP",),
+            dbu=1e-6,
+            user_unit=1e-9,
+            bounds=(0.0, 0.0, 100.0, 50.0),
+            polygons_by_layer={},
+            visible_layers=frozenset(),
+        )
+    )
     widget._resolve_snap_result = lambda point: SnapResult(point, "free", 0.0)
     yield widget
     widget.shutdown()
@@ -196,45 +204,4 @@ def test_cancel_active_interaction_clears_pending_move_press(
 
     pane.cancel_active_interaction()
 
-    assert pane._move_press_scene_pos is None
-    assert pane._move_dragging is False
-    assert pane._suppress_move_scene_click is False
-
-
-def test_escape_cancels_pending_file_backed_move(pane) -> None:
-    emitted: list[tuple[float, float]] = []
-    pane.move_requested.connect(lambda x, y: emitted.append((x, y)))
-    pane.set_active_design_tool("move")
-    config = KLayoutConfig(
-        path=Path("layout.gds"),
-        top_cell_name="TOP",
-        visible_layers=frozenset({(1, 0)}),
-        source_bounds=(0.0, 0.0, 100.0, 50.0),
-        display_bounds=(0.0, 0.0, 100.0, 50.0),
-        rotation_quarter_turns=0,
-        generation=3,
-    )
-    pane._klayout_config = config
-    pane._pending_clicks[7] = PendingClick(
-        request_id=7,
-        config_generation=3,
-        action="move",
-        raw_point=(10.0, 20.0),
-        markup_generation=pane._markup_generation,
-    )
-    pane.cancel_active_interaction()
-    pane.set_active_design_tool("select")
-    pane._on_file_backed_snap_ready(
-        SnapResponse(
-            request_id=7,
-            config_generation=3,
-            raw_point=(10.0, 20.0),
-            result=SnapResult((10.0, 20.0), "free", 0.0),
-            elapsed_ms=1.0,
-            shapes_inspected=0,
-            purpose="click",
-        )
-    )
-
-    assert emitted == []
-    assert pane._pending_clicks == {}
+    assert not pane._plot_interaction.move_active

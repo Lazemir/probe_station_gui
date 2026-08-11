@@ -2,13 +2,10 @@
 
 from __future__ import annotations
 
-from collections import deque
 import logging
 import math
 import os
-import threading
 from time import perf_counter, monotonic
-from typing import Callable
 
 from PySide6.QtCore import QEvent, QPointF, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor
@@ -39,35 +36,49 @@ from probe_station_gui.design.model import (
     Point2D,
     SnapResult,
 )
-from probe_station_gui.design.klayout_types import (
-    KLayoutConfig,
-    PendingClick,
-    RenderFailure,
-    SnapFailure,
-    SnapRequest,
-    SnapResponse,
+from probe_station_gui.design.klayout_types import RenderFailure
+from probe_station_gui.design.plot_interaction import (
+    ClickEffect,
+    GuidePreview,
+    HoverEffect,
+    InteractionTransition,
+    MouseButton,
+    PlotAction,
+    PlotClick,
+    PlotInteraction,
+    PointerModifiers,
+    ScheduleMoveSuppressionClear,
+    SelectionClick,
+    SelectionPreview,
+    SelectionRequest,
+    SnapClickIntent,
+    SnapHoverIntent,
 )
-from probe_station_gui.design.klayout_geometry import plan_snap_search
-from probe_station_gui.design.klayout_workers import KLayoutSnapWorker
 from probe_station_gui.design.selection_geometry import (
-    GuideSnapCandidate,
     SegmentGeometry,
     SelectionRect,
-    constrain_vector_endpoint,
     guide_snap_candidates,
 )
 from probe_station_gui.design.selection_model import (
     EntityOwner,
     SelectableDesignEntity,
     SelectionModel,
-    entities_in_rect,
     route_entity_id,
+)
+from probe_station_gui.design.snap_coordinator import (
+    ClickPublication,
+    HoverPublication,
+    SnapCoordinator,
+    SnapNotice,
+    SnapTransition,
+    SnapWorkerEvent,
 )
 from probe_station_gui.route.model import MeasurementRoute
 from probe_station_gui.views.design_klayout_raster import (
     KLayoutRasterController,
     KLayoutRasterItem,
 )
+from probe_station_gui.views.design_snap_runtime import DesignSnapRuntime
 
 try:  # pragma: no cover - optional runtime dependency
     import pyqtgraph as pg
@@ -94,9 +105,9 @@ def _route_matches_document(
     route: MeasurementRoute,
     document: DesignDocument,
 ) -> bool:
-    same_path = os.path.normcase(os.path.abspath(route.design.path)) == os.path.normcase(
-        os.path.abspath(os.fspath(document.path))
-    )
+    same_path = os.path.normcase(
+        os.path.abspath(route.design.path)
+    ) == os.path.normcase(os.path.abspath(os.fspath(document.path)))
     return (
         same_path
         and route.design.top_cell_name == str(document.top_cell_name)
@@ -134,7 +145,6 @@ class _DesignPlotPane(QWidget):
     route_pick_requested = Signal(str, float, float, bool, bool)
     hover_snap_changed = Signal(object)
     tool_hover_snap_changed = Signal(object, bool, bool)
-    snap_geometry_ready = Signal(int, object, object, object)
     selected_focus_point_changed = Signal(object)
     HOVER_SNAP_LOG_INTERVAL_S = 1.0
     HOVER_SNAP_SLOW_MS = 8.0
@@ -166,57 +176,30 @@ class _DesignPlotPane(QWidget):
         self._tool_sketch_points: list[Point2D] = []
         self._markup: MarkupDocument | None = None
         self._markup_document_key: DesignContentKey | None = None
-        self._markup_generation = 0
-        self._markup_snap_candidates: tuple[GuideSnapCandidate, ...] = ()
         self._selectable_entities: tuple[SelectableDesignEntity, ...] = ()
         self._selection = SelectionModel()
         self._selection_managed = False
-        self._active_design_tool = "legacy"
-        self._guide_anchor: Point2D | None = None
+        self._plot_interaction = PlotInteraction()
         self._mixed_preview_points: list[Point2D] = []
         self._mixed_preview_segments: list[SegmentGeometry] = []
         self._selection_rect_mode: str | None = None
-        self._select_press_scene_pos: QPointF | None = None
-        self._select_press_design_point: Point2D | None = None
-        self._select_press_entity_id: str | None = None
-        self._select_dragging = False
-        self._select_modifiers = Qt.NoModifier
-        self._move_press_scene_pos: QPointF | None = None
-        self._move_dragging = False
-        self._suppress_move_scene_click = False
         self._source_design_marks: list[Point2D | None] = [None, None]
         self._current_design_position: Point2D | None = None
         self._fov_design_size: Point2D | None = None
         self._check_design_marks: list[Point2D] = []
         self._focus_candidate: FocusCandidate | None = None
         self._selected_focus_point: Point2D | None = None
-        self._navigation_enabled = False
-        self._route_edit_enabled = False
-        self._route_pick_mode: str | None = None
-        self._snap_enabled = True
         self._layer_items: list[object] = []
         self._hover_snap: SnapResult | None = None
         self._pending_hover_scene_pos = None
         self._last_hover_log_at = 0.0
         self._last_hover_log_signature: tuple[float, float, str] | None = None
-        self._snap_generation = 0
-        self._snap_request_id = 0
-        self._latest_hover_request_id = 0
-        self._pending_clicks: dict[int, PendingClick] = {}
-        self._click_order: deque[int] = deque()
-        self._click_completions: dict[
-            int,
-            tuple[SnapResult | None, float | None],
-        ] = {}
-        self._pending_hover_markup: dict[
-            int,
-            tuple[SnapResult | None, bool, bool],
-        ] = {}
-        self._snap_worker: KLayoutSnapWorker | None = None
-        self._snap_worker_source_key = None
-        self._retired_snap_workers: set[object] = set()
-        self._snap_retirement_callbacks: dict[object, object] = {}
-        self._klayout_config: KLayoutConfig | None = None
+        self._snap_coordinator = SnapCoordinator(
+            screen_distance=self._screen_distance,
+        )
+        self._snap_runtime = DesignSnapRuntime(self)
+        self._snap_runtime.event_ready.connect(self._on_snap_worker_event)
+        self._snap_runtime.geometry_ready.connect(self._on_snap_geometry_ready)
         self._raster_item: KLayoutRasterItem | None = None
         self._raster_controller: KLayoutRasterController | None = None
         self._shutdown = False
@@ -228,10 +211,13 @@ class _DesignPlotPane(QWidget):
         self._route_geometry_deferred = False
         self._document_preview_active = False
         self._document_preview_previous_document: DesignDocument | None = None
-        self._document_preview_previous_view_range: tuple[
-            tuple[float, float],
-            tuple[float, float],
-        ] | None = None
+        self._document_preview_previous_view_range: (
+            tuple[
+                tuple[float, float],
+                tuple[float, float],
+            ]
+            | None
+        ) = None
         self._preview_overlay_items: tuple[object, ...] = ()
 
         layout = QVBoxLayout(self)
@@ -415,9 +401,15 @@ class _DesignPlotPane(QWidget):
             size=5.0,
             symbol="o",
         )
-        self._axis_triad_x_label = pg.TextItem(text="X", color="#ef5350", anchor=(0.0, 0.5))
-        self._axis_triad_y_label = pg.TextItem(text="Y", color="#66bb6a", anchor=(0.5, 1.0))
-        self._axis_triad_z_label = pg.TextItem(text="Z", color="#42a5f5", anchor=(1.0, 1.0))
+        self._axis_triad_x_label = pg.TextItem(
+            text="X", color="#ef5350", anchor=(0.0, 0.5)
+        )
+        self._axis_triad_y_label = pg.TextItem(
+            text="Y", color="#66bb6a", anchor=(0.5, 1.0)
+        )
+        self._axis_triad_z_label = pg.TextItem(
+            text="Z", color="#42a5f5", anchor=(1.0, 1.0)
+        )
         self._selected_target_item = pg.ScatterPlotItem(
             pen=pg.mkPen("#ff7043", width=2),
             brush=pg.mkBrush(255, 112, 67, 180),
@@ -478,7 +470,6 @@ class _DesignPlotPane(QWidget):
         self._route_geometry_redraw_timer.setSingleShot(True)
         self._route_geometry_redraw_timer.setInterval(0)
         self._route_geometry_redraw_timer.timeout.connect(self._redraw_route_geometry)
-        self.snap_geometry_ready.connect(self._on_snap_geometry_ready)
         self._plot.addItem(self._hover_item)
         self._plot.addItem(self._target_item)
         self._plot.addItem(self._probe_route_point_item)
@@ -674,7 +665,10 @@ class _DesignPlotPane(QWidget):
     def _schedule_route_geometry_redraw(self) -> None:
         if self._route_geometry_redraw_timer is None:
             return
-        if self._route_geometry_deferred and self._route_geometry_redraw_timer.isActive():
+        if (
+            self._route_geometry_deferred
+            and self._route_geometry_redraw_timer.isActive()
+        ):
             return
         self._route_geometry_deferred = True
         if not self._route_geometry_redraw_timer.isActive():
@@ -707,14 +701,10 @@ class _DesignPlotPane(QWidget):
 
     def set_document(self, document: DesignDocument | None) -> None:
         previous_content_key = (
-            _design_content_key(self._document)
-            if self._document is not None
-            else None
+            _design_content_key(self._document) if self._document is not None else None
         )
         new_content_key = (
-            _design_content_key(document)
-            if document is not None
-            else None
+            _design_content_key(document) if document is not None else None
         )
         same_document = document is self._document
         same_content = (
@@ -722,28 +712,24 @@ class _DesignPlotPane(QWidget):
             and document is not None
             and previous_content_key == new_content_key
         )
-        if not same_document and self._snap_worker is not None:
-            self._snap_worker.cancel_pending()
         if not same_document:
             self._focus_candidate = None
             self._selected_focus_point = None
+            self._apply_snap_transition(self._snap_coordinator.reset_document())
         self._document = document
+        self._apply_interaction_transition(
+            self._plot_interaction.set_context(
+                document_present=document is not None,
+                preview_active=self._document_preview_active,
+                document_generation=self._snap_coordinator.document_generation,
+            )
+        )
         if document is None:
-            self._snap_generation += 1
-            self._latest_hover_request_id = 0
-            self._reset_file_backed_click_order()
-            self._pending_hover_markup.clear()
-            self._set_hover_snap(None)
             self._detach_file_backed_document(timeout_s=0.0)
             self._clear_navigation_limits()
             self.set_status_message("No design loaded.")
             self._redraw_document()
         elif not same_document:
-            self._snap_generation += 1
-            self._latest_hover_request_id = 0
-            self._reset_file_backed_click_order()
-            self._pending_hover_markup.clear()
-            self._set_hover_snap(None)
             self.set_status_message("")
             if not same_content:
                 self._update_navigation_limits(
@@ -765,72 +751,16 @@ class _DesignPlotPane(QWidget):
             return
         controller.set_document(document)
         config = controller.config
-        self._klayout_config = config
         if config is None:
+            self._apply_snap_transition(self._snap_coordinator.configure(None))
             return
-        source_key = (config.path, config.source_load_id)
-        if (
-            self._snap_worker is not None
-            and self._snap_worker_source_key == source_key
-        ):
-            return
-        self._stop_snap_worker(timeout_s=0.0)
-        worker = KLayoutSnapWorker()
-        worker.snap_ready.connect(self._on_file_backed_snap_ready)
-        worker.failed.connect(self._on_klayout_snap_failed)
-        self._snap_worker = worker
-        self._snap_worker_source_key = source_key
+        self._apply_snap_transition(self._snap_coordinator.configure(config))
 
     def _detach_file_backed_document(self, *, timeout_s: float) -> None:
-        self._klayout_config = None
-        self._latest_hover_request_id = 0
-        self._reset_file_backed_click_order()
-        self._pending_hover_markup.clear()
-        self._stop_snap_worker(timeout_s=timeout_s)
+        del timeout_s
+        self._apply_snap_transition(self._snap_coordinator.configure(None))
         if self._raster_controller is not None:
             self._raster_controller.set_document(None)
-
-    def _stop_snap_worker(self, *, timeout_s: float) -> None:
-        worker = self._snap_worker
-        self._snap_worker = None
-        self._snap_worker_source_key = None
-        if worker is None:
-            return
-        try:
-            worker.snap_ready.disconnect(self._on_file_backed_snap_ready)
-        except (RuntimeError, TypeError):
-            pass
-        try:
-            worker.failed.disconnect(self._on_klayout_snap_failed)
-        except (RuntimeError, TypeError):
-            pass
-        finished = getattr(worker, "finished", None)
-        if finished is None:
-            worker.stop(timeout_s=timeout_s)
-            worker.deleteLater()
-            return
-        def callback(worker: object = worker) -> None:
-            self._finalize_retired_snap_worker(worker)
-
-        self._retired_snap_workers.add(worker)
-        self._snap_retirement_callbacks[worker] = callback
-        finished.connect(callback)
-        worker.stop(timeout_s=timeout_s)
-        if bool(getattr(worker, "is_finished", False)):
-            self._finalize_retired_snap_worker(worker)
-
-    def _finalize_retired_snap_worker(self, worker: object) -> None:
-        if worker not in self._retired_snap_workers:
-            return
-        callback = self._snap_retirement_callbacks.pop(worker, None)
-        finished = getattr(worker, "finished", None)
-        if callback is not None and finished is not None:
-            try:
-                finished.disconnect(callback)
-            except (RuntimeError, TypeError):
-                pass
-        self._retired_snap_workers.discard(worker)
-        worker.deleteLater()
 
     def _on_klayout_render_failed(self, failure: RenderFailure) -> None:
         logger.warning("KLayout design render failed: %s", failure.message)
@@ -844,31 +774,158 @@ class _DesignPlotPane(QWidget):
         if not self._snap_failure_visible:
             self.set_status_message("")
 
-    def _on_klayout_snap_failed(self, failure: SnapFailure) -> None:
-        config = self._klayout_config
-        if config is None or failure.config_generation != config.generation:
-            return
-        logger.warning("KLayout design snap failed: %s", failure.message)
-        if failure.purpose == "hover":
-            if failure.request_id != self._latest_hover_request_id:
-                return
-            self._latest_hover_request_id = 0
-            self._pending_hover_markup.pop(failure.request_id, None)
-            self._set_hover_snap(None)
-            return
-        if failure.purpose != "click":
-            return
-        pending = self._pending_clicks.get(failure.request_id)
-        if (
-            pending is None
-            or pending.config_generation != config.generation
-            or failure.request_id in self._click_completions
-        ):
-            return
+    def _on_snap_worker_event(self, event: SnapWorkerEvent) -> None:
+        self._apply_snap_transition(self._snap_coordinator.worker_event(event))
+
+    def _apply_snap_transition(self, transition: SnapTransition) -> None:
+        current = transition
+        while current.commands or current.publications or current.notices:
+            for notice in current.notices:
+                self._show_snap_notice(notice)
+            self._snap_runtime.apply(current.commands)
+            click_applied = False
+            for publication in current.publications:
+                if isinstance(publication, HoverPublication):
+                    self._apply_hover_publication(publication)
+                elif isinstance(publication, ClickPublication):
+                    self._apply_click_publication(publication)
+                    click_applied = True
+            if not click_applied:
+                break
+            current = self._snap_coordinator.continue_ready_clicks()
+
+    def _show_snap_notice(self, notice: SnapNotice) -> None:
+        logger.warning("KLayout design snap failed: %s", notice.message)
         self._snap_failure_visible = True
         self.set_status_message("Snap failed. Try again.")
         QTimer.singleShot(1500, self._clear_snap_failure_status)
-        self._complete_file_backed_click(failure.request_id, None)
+
+    def _apply_hover_publication(self, publication: HoverPublication) -> None:
+        if publication.generation is None:
+            transition = self._plot_interaction.hover(
+                publication.result,
+                shift=publication.shift,
+                control=publication.control,
+            )
+        else:
+            transition = self._plot_interaction.complete_hover(
+                SnapHoverIntent(
+                    raw_point=publication.raw_point or (0.0, 0.0),
+                    shift=publication.shift,
+                    control=publication.control,
+                    generation=publication.generation,
+                ),
+                publication.result,
+            )
+        self._apply_interaction_transition(transition)
+        if (
+            publication.result is not None
+            and publication.raw_point is not None
+            and publication.elapsed_ms is not None
+        ):
+            self._log_hover_snap(
+                publication.raw_point,
+                publication.result,
+                publication.elapsed_ms,
+            )
+
+    def _apply_click_publication(self, publication: ClickPublication) -> None:
+        intent = publication.intent
+        self._apply_interaction_transition(
+            self._plot_interaction.complete_hover(
+                SnapHoverIntent(
+                    intent.raw_point,
+                    intent.shift,
+                    intent.control,
+                    intent.generation,
+                ),
+                publication.result,
+            )
+        )
+        if publication.elapsed_ms is not None:
+            logger.debug(
+                "DESIGN SNAP click raw=(%.3f, %.3f) snapped=(%.3f, %.3f) "
+                "mode=%s dist=%.4f elapsed_ms=%.2f",
+                intent.raw_point[0],
+                intent.raw_point[1],
+                publication.result.point[0],
+                publication.result.point[1],
+                publication.result.mode,
+                publication.result.distance,
+                publication.elapsed_ms,
+            )
+        self._apply_interaction_transition(
+            self._plot_interaction.complete_click(intent, publication.result)
+        )
+
+    def _apply_interaction_transition(
+        self,
+        transition: InteractionTransition,
+    ) -> None:
+        if transition.invalidate_transient_snaps:
+            self._apply_snap_transition(
+                self._snap_coordinator.set_interaction_generation(transition.generation)
+            )
+        for effect in transition.effects:
+            if isinstance(effect, HoverEffect):
+                self._set_hover_snap(
+                    effect.result,
+                    shift=effect.shift,
+                    control=effect.control,
+                )
+            elif isinstance(effect, GuidePreview):
+                self._tool_sketch_points = list(effect.points)
+                self._redraw_tool_sketch()
+            elif isinstance(effect, ClickEffect):
+                self._emit_click_effect(effect)
+            elif isinstance(effect, SelectionClick):
+                self._selected_focus_point = effect.point
+                self._redraw_focus_reference_overlays()
+                self.selected_focus_point_changed.emit(effect.point)
+                self._emit_click_selection(effect.point, effect.modifiers)
+            elif isinstance(effect, SelectionPreview):
+                self._render_selection_preview(effect)
+            elif isinstance(effect, SelectionRequest):
+                self.entity_selection_requested.emit(
+                    set(effect.entity_ids),
+                    effect.mode,
+                )
+            elif isinstance(effect, ScheduleMoveSuppressionClear):
+                QTimer.singleShot(
+                    0,
+                    lambda generation=effect.generation: (
+                        self._plot_interaction.clear_move_suppression(generation)
+                    ),
+                )
+            elif isinstance(effect, SnapClickIntent):
+                self._dispatch_snap_click(effect)
+
+    def _emit_click_effect(self, effect: ClickEffect) -> None:
+        x_value, y_value = effect.point
+        if effect.action is PlotAction.ROUTE_PICK and effect.payload:
+            self.route_pick_requested.emit(
+                str(effect.payload[0]),
+                x_value,
+                y_value,
+                effect.shift,
+                effect.control,
+            )
+        elif effect.action is PlotAction.ROUTE_POINT:
+            self.route_point_requested.emit(x_value, y_value)
+        elif effect.action is PlotAction.POINT:
+            self.point_requested.emit(x_value, y_value)
+        elif effect.action is PlotAction.ALIGNMENT_POINT:
+            self.alignment_point_requested.emit(x_value, y_value)
+        elif effect.action is PlotAction.GUIDE_POINT and len(effect.points) == 2:
+            self.guide_requested.emit(effect.points[0], effect.points[1])
+        elif effect.action is PlotAction.MOVE:
+            self.move_requested.emit(x_value, y_value)
+        elif effect.action is PlotAction.CALIBRATION and effect.payload:
+            self.calibration_point_selected.emit(
+                int(effect.payload[0]),
+                x_value,
+                y_value,
+            )
 
     def _clear_snap_failure_status(self) -> None:
         if not self._snap_failure_visible:
@@ -1061,29 +1118,15 @@ class _DesignPlotPane(QWidget):
 
     @property
     def active_design_tool(self) -> str:
-        return self._active_design_tool
+        return self._plot_interaction.active_tool
+
+    @property
+    def guide_anchor(self) -> Point2D | None:
+        return self._plot_interaction.guide_anchor
 
     def set_active_design_tool(self, tool: str) -> None:
         normalized = str(tool).strip().lower()
-        if normalized not in {
-            "select",
-            "move",
-            "point",
-            "guide",
-            "ruler",
-            "array",
-            "align",
-            "legacy",
-        }:
-            raise ValueError(f"Unknown design tool {tool!r}.")
-        if self._active_design_tool == "move" and normalized != "move":
-            self._clear_move_pointer_state()
-            self._cancel_pending_tool_snaps()
-        if normalized != "guide":
-            self._guide_anchor = None
-            self._tool_sketch_points = []
-        self._active_design_tool = normalized
-        self._clear_selection_interaction()
+        self._apply_interaction_transition(self._plot_interaction.set_tool(normalized))
         if self._plot is not None:
             cursor = (
                 Qt.CrossCursor
@@ -1094,12 +1137,7 @@ class _DesignPlotPane(QWidget):
         self._redraw_overlays()
 
     def set_markup(self, markup: MarkupDocument | None) -> None:
-        if markup != self._markup:
-            self._markup_generation += 1
-            self._pending_hover_markup = {
-                request_id: (None, shift, control)
-                for request_id, (_result, shift, control) in self._pending_hover_markup.items()
-            }
+        markup_changed = markup != self._markup
         self._markup = markup
         self._markup_document_key = (
             _design_content_key(self._document)
@@ -1109,9 +1147,9 @@ class _DesignPlotPane(QWidget):
             else None
         )
         self._update_navigation_limits(recompute_content=True)
+        snap_candidates: tuple[object, ...] = ()
         if markup is None or not markup.visible:
             self._tool_sketch_segments = []
-            self._markup_snap_candidates = ()
             self._selectable_entities = tuple(
                 entity
                 for entity in self._selectable_entities
@@ -1125,7 +1163,11 @@ class _DesignPlotPane(QWidget):
             self._tool_sketch_segments = [
                 (geometry.start, geometry.end) for geometry in geometries
             ]
-            self._markup_snap_candidates = guide_snap_candidates(geometries)
+            snap_candidates = guide_snap_candidates(geometries)
+        if markup_changed:
+            self._apply_snap_transition(
+                self._snap_coordinator.set_markup_candidates(snap_candidates)
+            )
         self._redraw_overlays()
 
     def set_selectable_entities(
@@ -1153,117 +1195,57 @@ class _DesignPlotPane(QWidget):
         points: object,
         segments: object,
     ) -> None:
-        self._mixed_preview_points = [
-            (float(point[0]), float(point[1]))
-            for point in points
-            if isinstance(point, (list, tuple)) and len(point) == 2
-        ] if isinstance(points, (list, tuple)) else []
-        self._mixed_preview_segments = [
-            segment for segment in segments if isinstance(segment, SegmentGeometry)
-        ] if isinstance(segments, (list, tuple)) else []
+        self._mixed_preview_points = (
+            [
+                (float(point[0]), float(point[1]))
+                for point in points
+                if isinstance(point, (list, tuple)) and len(point) == 2
+            ]
+            if isinstance(points, (list, tuple))
+            else []
+        )
+        self._mixed_preview_segments = (
+            [segment for segment in segments if isinstance(segment, SegmentGeometry)]
+            if isinstance(segments, (list, tuple))
+            else []
+        )
         self._redraw_mixed_preview()
 
     def cancel_active_interaction(self) -> None:
-        self._cancel_pending_tool_snaps()
-        self._clear_move_pointer_state()
-        self._guide_anchor = None
-        self._tool_sketch_points = []
-        self._clear_selection_interaction()
+        self._apply_interaction_transition(self._plot_interaction.cancel())
         self._redraw_overlays()
 
-    def _cancel_pending_tool_snaps(self) -> None:
-        self._invalidate_file_backed_hover()
-        cancelled_actions = {
-            "point",
-            "guide_point",
-            "route_pick",
-            "alignment_point",
-            "move",
-        }
-        self._cancel_file_backed_clicks(
-            lambda pending: pending.action in cancelled_actions
-        )
-
-    def _clear_move_pointer_state(self) -> None:
-        self._move_press_scene_pos = None
-        self._move_dragging = False
-        self._suppress_move_scene_click = False
-
-    def _clear_move_click_suppression(self) -> None:
-        self._suppress_move_scene_click = False
-
     @staticmethod
-    def _constraint_flags(
+    def _pointer_modifiers(
         modifiers: Qt.KeyboardModifiers,
-    ) -> tuple[bool, bool]:
-        return (
-            bool(modifiers & Qt.ShiftModifier),
-            bool(modifiers & Qt.ControlModifier),
+    ) -> PointerModifiers:
+        return PointerModifiers(
+            shift=bool(modifiers & Qt.ShiftModifier),
+            control=bool(modifiers & Qt.ControlModifier),
+            other=modifiers
+            not in {
+                Qt.NoModifier,
+                Qt.ShiftModifier,
+                Qt.ControlModifier,
+                Qt.ShiftModifier | Qt.ControlModifier,
+            },
         )
 
-    def _best_markup_snap(self, raw_point: Point2D) -> SnapResult | None:
-        if not self._snap_enabled or not self._markup_snap_candidates:
-            return None
-        threshold = self._snap_distance_threshold()
-        if threshold is None:
-            return None
-        best: tuple[float, GuideSnapCandidate] | None = None
-        for candidate in self._markup_snap_candidates:
-            distance = math.hypot(
-                candidate.point[0] - raw_point[0],
-                candidate.point[1] - raw_point[1],
-            )
-            if distance > threshold:
-                continue
-            if best is None or distance < best[0]:
-                best = (distance, candidate)
-        if best is None:
-            return None
-        distance, candidate = best
-        return SnapResult(
-            point=candidate.point,
-            mode=candidate.mode,
-            distance=distance,
-            segment_start=candidate.segment_start,
-            segment_end=candidate.segment_end,
-        )
-
-    def _selection_entity_ids(
-        self,
-        start: Point2D,
-        end: Point2D,
-    ) -> set[str]:
-        crossing = end[0] < start[0]
-        return entities_in_rect(
-            self._selectable_entities,
-            SelectionRect.from_drag(start, end),
-            crossing=crossing,
-        )
-
-    def _update_selection_rectangle(
-        self,
-        start: Point2D,
-        end: Point2D,
-    ) -> None:
-        crossing = end[0] < start[0]
-        self._selection_rect_mode = "cross" if crossing else "contain"
-        color = "#4caf50" if crossing else "#2196f3"
-        style = Qt.DashLine if crossing else Qt.SolidLine
+    def _render_selection_preview(self, preview: SelectionPreview) -> None:
+        if preview.start is None or preview.end is None:
+            self._selection_rect_mode = None
+            if self._plot is not None and hasattr(self, "_selection_rect_item"):
+                self._selection_rect_item.setData([], [])
+            return
+        self._selection_rect_mode = "cross" if preview.crossing else "contain"
+        color = "#4caf50" if preview.crossing else "#2196f3"
+        style = Qt.DashLine if preview.crossing else Qt.SolidLine
         self._selection_rect_item.setPen(pg.mkPen(color, width=1.5, style=style))
-        rect = SelectionRect.from_drag(start, end)
+        rect = SelectionRect.from_drag(preview.start, preview.end)
         self._selection_rect_item.setData(
             [rect.left, rect.right, rect.right, rect.left, rect.left],
             [rect.bottom, rect.bottom, rect.top, rect.top, rect.bottom],
         )
-
-    def _clear_selection_interaction(self) -> None:
-        self._select_press_scene_pos = None
-        self._select_press_design_point = None
-        self._select_press_entity_id = None
-        self._select_dragging = False
-        self._selection_rect_mode = None
-        if self._plot is not None and hasattr(self, "_selection_rect_item"):
-            self._selection_rect_item.setData([], [])
 
     def set_source_design_marks(self, points: list[Point2D | None]) -> None:
         self._source_design_marks = list(points[:2])
@@ -1272,11 +1254,15 @@ class _DesignPlotPane(QWidget):
         self._redraw_overlays()
 
     def set_alignment_draft_points(self, points: object) -> None:
-        self._alignment_draft_points = [
-            (float(point[0]), float(point[1]))
-            for point in points
-            if isinstance(point, (list, tuple)) and len(point) == 2
-        ] if isinstance(points, (list, tuple)) else []
+        self._alignment_draft_points = (
+            [
+                (float(point[0]), float(point[1]))
+                for point in points
+                if isinstance(point, (list, tuple)) and len(point) == 2
+            ]
+            if isinstance(points, (list, tuple))
+            else []
+        )
         self._redraw_alignment_draft()
 
     def set_current_design_position(
@@ -1318,36 +1304,30 @@ class _DesignPlotPane(QWidget):
     def set_navigation_enabled(self, enabled: bool) -> None:
         """Enable click-to-move on the layout plot once registration is valid."""
 
-        self._navigation_enabled = bool(enabled)
+        self._apply_interaction_transition(
+            self._plot_interaction.set_navigation_enabled(enabled)
+        )
 
     def set_route_edit_enabled(self, enabled: bool) -> None:
         """Enable route point placement by left-clicking the layout plot."""
 
-        self._route_edit_enabled = bool(enabled)
+        self._apply_interaction_transition(
+            self._plot_interaction.set_route_edit_enabled(enabled)
+        )
 
     def set_route_pick_mode(self, mode: object) -> None:
         """Use the next left click as a route array helper point."""
 
-        self._route_pick_mode = str(mode) if mode else None
+        self._apply_interaction_transition(
+            self._plot_interaction.set_route_pick_mode(mode)
+        )
         if self._plot is not None:
-            self._plot.setCursor(
-                Qt.CrossCursor if self._route_pick_mode else Qt.ArrowCursor
-            )
+            self._plot.setCursor(Qt.CrossCursor if mode else Qt.ArrowCursor)
 
     def set_snap_enabled(self, enabled: bool) -> None:
         """Enable or disable geometry snapping for design clicks and hover."""
 
-        normalized = bool(enabled)
-        if normalized != self._snap_enabled:
-            self._markup_generation += 1
-            self._reset_file_backed_click_order()
-            self._pending_hover_markup.clear()
-            if not normalized and self._snap_worker is not None:
-                self._snap_worker.cancel_pending()
-        self._snap_enabled = normalized
-        if not self._snap_enabled:
-            self._pending_hover_markup.clear()
-            self._set_hover_snap(None)
+        self._apply_snap_transition(self._snap_coordinator.set_enabled(enabled))
 
     def focus_bounds(self) -> None:
         self.focus_gds_bounds()
@@ -1388,29 +1368,10 @@ class _DesignPlotPane(QWidget):
             return
         if document.has_snap_geometry():
             return
-        generation = self._snap_generation
-
-        def build_snap_geometry() -> None:
-            started = perf_counter()
-            try:
-                geometry = document.build_snap_geometry()
-            except Exception as exc:
-                try:
-                    self.snap_geometry_ready.emit(generation, document, None, exc)
-                except RuntimeError:
-                    pass
-                return
-            elapsed_ms = (perf_counter() - started) * 1000.0
-            try:
-                self.snap_geometry_ready.emit(generation, document, geometry, elapsed_ms)
-            except RuntimeError:
-                pass
-
-        threading.Thread(
-            target=build_snap_geometry,
-            name="DesignSnapGeometryBuild",
-            daemon=True,
-        ).start()
+        self._snap_runtime.build_geometry(
+            self._snap_coordinator.document_generation,
+            document,
+        )
 
     def _on_snap_geometry_ready(
         self,
@@ -1419,7 +1380,10 @@ class _DesignPlotPane(QWidget):
         geometry: object,
         result: object,
     ) -> None:
-        if generation != self._snap_generation or document is not self._document:
+        if (
+            not self._snap_coordinator.geometry_is_current(generation)
+            or document is not self._document
+        ):
             return
         if result is not None and not isinstance(result, (int, float)):
             logger.warning("Design snap geometry build failed: %s", result)
@@ -1429,7 +1393,10 @@ class _DesignPlotPane(QWidget):
         if len(geometry) < 3:
             return
         document.set_snap_geometry(*geometry)
-        if self._pending_hover_scene_pos is not None and not self._hover_timer.isActive():
+        if (
+            self._pending_hover_scene_pos is not None
+            and not self._hover_timer.isActive()
+        ):
             self._hover_timer.start()
 
     def _redraw_overlays(self) -> None:
@@ -1457,7 +1424,11 @@ class _DesignPlotPane(QWidget):
         self._redraw_focus_reference_overlays()
 
         selected_target = next(
-            (target for target in self._targets if target.id == self._selected_target_id),
+            (
+                target
+                for target in self._targets
+                if target.id == self._selected_target_id
+            ),
             None,
         )
         if selected_target is None:
@@ -1666,7 +1637,9 @@ class _DesignPlotPane(QWidget):
         connector_x: list[float] = []
         connector_y: list[float] = []
         for center in points:
-            for offset_index, offset in enumerate(self._probe_route_preview_offsets[:2]):
+            for offset_index, offset in enumerate(
+                self._probe_route_preview_offsets[:2]
+            ):
                 hit = (center[0] + offset[0], center[1] + offset[1])
                 if offset_index == 0:
                     needle_1_x.append(hit[0])
@@ -1735,7 +1708,9 @@ class _DesignPlotPane(QWidget):
         self._clear_tool_measure_labels()
         segments = list(self._tool_measure_segments)
         if len(self._tool_measure_points) == 2:
-            segments.append((self._tool_measure_points[0], self._tool_measure_points[1]))
+            segments.append(
+                (self._tool_measure_points[0], self._tool_measure_points[1])
+            )
         if not segments and not self._tool_measure_points:
             self._tool_measure_item.setData([], [])
             self._tool_measure_point_item.setData([], [])
@@ -1841,12 +1816,48 @@ class _DesignPlotPane(QWidget):
             for index in range(33)
         ]
         self._axis_triad_x_item.setData(
-            [base[0], x_end[0], float("nan"), x_end[0], x_end[0] - arrow, float("nan"), x_end[0], x_end[0] - arrow],
-            [base[1], x_end[1], float("nan"), x_end[1], x_end[1] + arrow * 0.55, float("nan"), x_end[1], x_end[1] - arrow * 0.55],
+            [
+                base[0],
+                x_end[0],
+                float("nan"),
+                x_end[0],
+                x_end[0] - arrow,
+                float("nan"),
+                x_end[0],
+                x_end[0] - arrow,
+            ],
+            [
+                base[1],
+                x_end[1],
+                float("nan"),
+                x_end[1],
+                x_end[1] + arrow * 0.55,
+                float("nan"),
+                x_end[1],
+                x_end[1] - arrow * 0.55,
+            ],
         )
         self._axis_triad_y_item.setData(
-            [base[0], y_end[0], float("nan"), y_end[0], y_end[0] - arrow * 0.55, float("nan"), y_end[0], y_end[0] + arrow * 0.55],
-            [base[1], y_end[1], float("nan"), y_end[1], y_end[1] - arrow, float("nan"), y_end[1], y_end[1] - arrow],
+            [
+                base[0],
+                y_end[0],
+                float("nan"),
+                y_end[0],
+                y_end[0] - arrow * 0.55,
+                float("nan"),
+                y_end[0],
+                y_end[0] + arrow * 0.55,
+            ],
+            [
+                base[1],
+                y_end[1],
+                float("nan"),
+                y_end[1],
+                y_end[1] - arrow,
+                float("nan"),
+                y_end[1],
+                y_end[1] - arrow,
+            ],
         )
         self._axis_triad_z_item.setData(
             [point[0] for point in circle_points],
@@ -1932,9 +1943,9 @@ class _DesignPlotPane(QWidget):
             or self._document is None
         ):
             return super().eventFilter(watched, event)
-        if self._active_design_tool == "move":
+        if self.active_design_tool == "move":
             return self._handle_move_scene_event(event)
-        if self._active_design_tool != "select":
+        if self.active_design_tool != "select":
             return super().eventFilter(watched, event)
         event_type = event.type()
         if event_type == QEvent.GraphicsSceneMousePress:
@@ -1946,52 +1957,45 @@ class _DesignPlotPane(QWidget):
             view_point = self._plot.getViewBox().mapSceneToView(position)
             design_point = (float(view_point.x()), float(view_point.y()))
             hit = self._hit_entity(design_point)
-            self._select_press_scene_pos = QPointF(position)
-            self._select_press_design_point = design_point
-            self._select_press_entity_id = hit.id if hit is not None else None
-            self._select_modifiers = event.modifiers()
-            self._select_dragging = False
+            self._apply_interaction_transition(
+                self._plot_interaction.selection_press(
+                    scene_point=(float(position.x()), float(position.y())),
+                    design_point=design_point,
+                    hit_entity_id=hit.id if hit is not None else None,
+                    modifiers=self._pointer_modifiers(event.modifiers()),
+                )
+            )
             event.accept()
             return True
         if event_type == QEvent.GraphicsSceneMouseMove:
-            if self._select_press_scene_pos is None:
+            if not self._plot_interaction.selection_active:
                 return super().eventFilter(watched, event)
-            if self._select_press_entity_id is not None:
-                event.accept()
-                return True
             position = event.scenePos()
-            distance = (
-                position - self._select_press_scene_pos
-            ).manhattanLength()
-            if distance >= QApplication.startDragDistance():
-                self._select_dragging = True
-            if self._select_dragging and self._select_press_design_point is not None:
-                view_point = self._plot.getViewBox().mapSceneToView(position)
-                current = (float(view_point.x()), float(view_point.y()))
-                self._update_selection_rectangle(
-                    self._select_press_design_point,
-                    current,
+            view_point = self._plot.getViewBox().mapSceneToView(position)
+            self._apply_interaction_transition(
+                self._plot_interaction.selection_motion(
+                    scene_point=(float(position.x()), float(position.y())),
+                    design_point=(float(view_point.x()), float(view_point.y())),
+                    drag_threshold=QApplication.startDragDistance(),
                 )
+            )
             event.accept()
             return True
         if event_type == QEvent.GraphicsSceneMouseRelease:
-            if event.button() != Qt.LeftButton or self._select_press_scene_pos is None:
+            if (
+                event.button() != Qt.LeftButton
+                or not self._plot_interaction.selection_active
+            ):
                 return super().eventFilter(watched, event)
             position = event.scenePos()
             view_point = self._plot.getViewBox().mapSceneToView(position)
             current = (float(view_point.x()), float(view_point.y()))
-            if self._select_dragging and self._select_press_design_point is not None:
-                matched = self._selection_entity_ids(
-                    self._select_press_design_point,
+            self._apply_interaction_transition(
+                self._plot_interaction.selection_release(
                     current,
+                    self._selectable_entities,
                 )
-            elif self._select_press_entity_id is not None:
-                matched = {self._select_press_entity_id}
-            else:
-                matched = set()
-            mode = self._selection_update_mode(self._select_modifiers)
-            self._clear_selection_interaction()
-            self.entity_selection_requested.emit(matched, mode)
+            )
             event.accept()
             return True
         return super().eventFilter(watched, event)
@@ -2002,27 +2006,28 @@ class _DesignPlotPane(QWidget):
             event_type == QEvent.GraphicsSceneMousePress
             and event.button() == Qt.LeftButton
         ):
-            self._move_press_scene_pos = QPointF(event.scenePos())
-            self._move_dragging = False
+            position = event.scenePos()
+            self._apply_interaction_transition(
+                self._plot_interaction.move_press(
+                    (float(position.x()), float(position.y()))
+                )
+            )
         elif (
             event_type == QEvent.GraphicsSceneMouseMove
-            and self._move_press_scene_pos is not None
+            and self._plot_interaction.move_active
         ):
-            distance = (
-                event.scenePos() - self._move_press_scene_pos
-            ).manhattanLength()
-            if distance >= QApplication.startDragDistance():
-                self._move_dragging = True
+            position = event.scenePos()
+            self._apply_interaction_transition(
+                self._plot_interaction.move_motion(
+                    (float(position.x()), float(position.y())),
+                    drag_threshold=QApplication.startDragDistance(),
+                )
+            )
         elif (
             event_type == QEvent.GraphicsSceneMouseRelease
             and event.button() == Qt.LeftButton
         ):
-            if self._move_press_scene_pos is not None:
-                self._suppress_move_scene_click = self._move_dragging
-            self._move_press_scene_pos = None
-            self._move_dragging = False
-            if self._suppress_move_scene_click:
-                QTimer.singleShot(0, self._clear_move_click_suppression)
+            self._apply_interaction_transition(self._plot_interaction.move_release())
         return False
 
     def _on_mouse_clicked(self, event) -> None:  # pragma: no cover - UI interaction
@@ -2032,246 +2037,51 @@ class _DesignPlotPane(QWidget):
             or getattr(self, "_document_preview_active", False)
         ):
             return
-        is_left_click = event.button() == Qt.LeftButton
-        is_double_click = self._is_double_click_event(event)
-        modifiers = getattr(event, "modifiers", lambda: Qt.NoModifier)()
-        shift_constraint, control_constraint = _DesignPlotPane._constraint_flags(
-            modifiers
-        )
-        active_tool = getattr(self, "_active_design_tool", "legacy")
-        if active_tool == "align" and not is_left_click:
+        position_getter = getattr(event, "scenePos", None)
+        if not callable(position_getter):
             return
-        alignment_click = active_tool == "align" and is_left_click
-        route_pick = (
-            active_tool != "move"
-            and self._route_pick_mode is not None
-            and is_left_click
-        )
-        guide_click = (
-            not route_pick
-            and active_tool == "guide"
-            and self._route_edit_enabled
-            and is_left_click
-        )
-        route_click = (
-            not route_pick
-            and self._route_edit_enabled
-            and is_left_click
-            and active_tool in {"legacy", "point"}
-        )
-        select_click = active_tool == "select" and is_left_click
-        move_click = (
-            active_tool == "move"
-            and self._navigation_enabled
-            and is_left_click
-            and modifiers == Qt.NoModifier
-        )
-        action: str
-        payload: tuple[object, ...]
-        if active_tool == "move":
-            if not move_click or is_double_click or self._suppress_move_scene_click:
-                return
-            action = "move"
-            payload = ()
-        elif alignment_click:
-            action = "alignment_point"
-            payload = ()
-        elif route_pick:
-            action = "route_pick"
-            payload: tuple[object, ...] = (str(self._route_pick_mode),)
-        elif guide_click:
-            action = "guide_point"
-            payload = ()
-        elif route_click:
-            action = (
-                "point" if active_tool == "point" else "route_point"
-            )
-            payload = ()
-        elif select_click:
-            action = "select"
-            payload = ()
-        elif active_tool == "legacy" and is_left_click:
-            action = "calibration"
-            payload = (0,)
-        elif active_tool == "legacy" and event.button() == Qt.RightButton:
-            action = "calibration"
-            payload = (1,)
-        else:
-            return
-        position = event.scenePos()
+        position = position_getter()
         if not self._plot.sceneBoundingRect().contains(position):
             return
         view_point = self._plot.getViewBox().mapSceneToView(position)
         raw_point = (float(view_point.x()), float(view_point.y()))
-        if action == "select":
-            self._selected_focus_point = raw_point
-            if hasattr(self, "_selected_focus_item"):
-                _DesignPlotPane._redraw_focus_reference_overlays(self)
-            self.selected_focus_point_changed.emit(raw_point)
-            self._emit_click_selection(raw_point, modifiers)
-            return
+        modifiers = getattr(event, "modifiers", lambda: Qt.NoModifier)()
+        self._apply_interaction_transition(
+            self._plot_interaction.click(
+                PlotClick(
+                    button=self._mouse_button(event.button()),
+                    point=raw_point,
+                    modifiers=self._pointer_modifiers(modifiers),
+                    double=self._is_double_click_event(event),
+                )
+            )
+        )
+
+    def _dispatch_snap_click(self, intent: SnapClickIntent) -> None:
         if bool(getattr(self._document, "file_backed", False)):
-            self._submit_file_backed_click(
-                action,
-                raw_point,
-                payload,
-                modifiers=modifiers,
+            threshold = self._snap_distance_threshold()
+            self._apply_snap_transition(
+                self._snap_coordinator.submit_click(
+                    intent,
+                    radius=0.0 if threshold is None else threshold,
+                )
             )
             return
         started = perf_counter()
-        snap_result = self._resolve_snap_result(raw_point)
+        snap_result = self._resolve_snap_result(intent.raw_point)
         elapsed_ms = (perf_counter() - started) * 1000.0
-        self._set_hover_snap(
-            snap_result,
-            shift=shift_constraint,
-            control=control_constraint,
-        )
-        logger.debug(
-            "DESIGN SNAP click raw=(%.3f, %.3f) snapped=(%.3f, %.3f) mode=%s dist=%.4f elapsed_ms=%.2f",
-            raw_point[0],
-            raw_point[1],
-            snap_result.point[0],
-            snap_result.point[1],
-            snap_result.mode,
-            snap_result.distance,
-            elapsed_ms,
-        )
-        self._execute_click_action(
-            action,
-            payload,
-            snap_result,
-            shift=shift_constraint,
-            control=control_constraint,
-        )
-
-    def _submit_file_backed_click(
-        self,
-        action: str,
-        raw_point: Point2D,
-        payload: tuple[object, ...] = (),
-        *,
-        modifiers: Qt.KeyboardModifiers = Qt.NoModifier,
-    ) -> None:
-        shift_constraint, control_constraint = self._constraint_flags(modifiers)
-        free_result = SnapResult(point=raw_point, mode="free", distance=0.0)
-        if not self._snap_enabled:
-            self._set_hover_snap(
-                free_result,
-                shift=shift_constraint,
-                control=control_constraint,
-            )
-            self._execute_click_action(
-                action,
-                payload,
-                free_result,
-                shift=shift_constraint,
-                control=control_constraint,
-            )
-            return
-        config = self._klayout_config
-        worker = self._snap_worker
-        if config is None or worker is None:
-            return
-        snap_threshold = self._snap_distance_threshold()
-        radius = 0.0 if snap_threshold is None else max(0.0, snap_threshold)
-        plan = plan_snap_search(raw_point, radius, config.display_bounds)
-        if not plan.accepted:
-            logger.debug("DESIGN SNAP click skipped reason=%s", plan.skip_reason)
-            self._invalidate_file_backed_hover()
-            fallback = self._file_snap_fallback(raw_point)
-            pending = self._enqueue_file_backed_click(
-                config,
-                action,
-                raw_point,
-                payload,
-                markup_result=None,
-                shift_constraint=shift_constraint,
-                control_constraint=control_constraint,
-            )
-            self._complete_file_backed_click(pending.request_id, fallback)
-            return
-        pending = self._enqueue_file_backed_click(
-            config,
-            action,
-            raw_point,
-            payload,
-            markup_result=self._best_markup_snap(raw_point),
-            shift_constraint=shift_constraint,
-            control_constraint=control_constraint,
-        )
-        worker.submit_click(
-            SnapRequest(
-                request_id=pending.request_id,
-                config=config,
-                point=raw_point,
-                radius=radius,
-                purpose="click",
-            )
-        )
-
-    def _execute_click_action(
-        self,
-        action: str,
-        payload: tuple[object, ...],
-        snap_result: SnapResult,
-        *,
-        shift: bool = False,
-        control: bool = False,
-    ) -> None:
-        x_value, y_value = snap_result.point
-        if action == "guide_point" and self._guide_anchor is not None:
-            x_value, y_value = constrain_vector_endpoint(
-                self._guide_anchor,
-                (x_value, y_value),
-                shift=shift,
-                control=control,
-            )
-        if action == "route_pick" and payload:
-            self.route_pick_requested.emit(
-                str(payload[0]),
-                x_value,
-                y_value,
-                bool(shift),
-                bool(control),
-            )
-        elif action == "route_point":
-            self.route_point_requested.emit(x_value, y_value)
-        elif action == "point":
-            self.point_requested.emit(x_value, y_value)
-        elif action == "alignment_point":
-            self.alignment_point_requested.emit(x_value, y_value)
-        elif action == "guide_point":
-            self._accept_guide_point((x_value, y_value))
-        elif action == "move":
-            self.move_requested.emit(x_value, y_value)
-        elif action == "calibration" and payload:
-            self.calibration_point_selected.emit(int(payload[0]), x_value, y_value)
-
-    def _accept_guide_point(self, point: Point2D) -> None:
-        if not self._route_edit_enabled or self._active_design_tool != "guide":
-            return
-        if self._guide_anchor is None:
-            self._guide_anchor = point
-            self._tool_sketch_points = [point]
-            self._redraw_overlays()
-            return
-        start = self._guide_anchor
-        self._guide_anchor = None
-        self._tool_sketch_points = []
-        if start != point:
-            self.guide_requested.emit(start, point)
-        self._redraw_overlays()
+        self._apply_click_publication(ClickPublication(intent, snap_result, elapsed_ms))
 
     def _emit_click_selection(
         self,
         point: Point2D,
-        modifiers: Qt.KeyboardModifiers,
+        modifiers: PointerModifiers,
     ) -> None:
         entity = self._hit_entity(point)
         matched = {entity.id} if entity is not None else set()
         self.entity_selection_requested.emit(
             matched,
-            self._selection_update_mode(modifiers),
+            "invert" if modifiers.control else "add" if modifiers.shift else "replace",
         )
 
     def _hit_entity(self, point: Point2D) -> SelectableDesignEntity | None:
@@ -2291,14 +2101,6 @@ class _DesignPlotPane(QWidget):
         )
 
     @staticmethod
-    def _selection_update_mode(modifiers: Qt.KeyboardModifiers) -> str:
-        if modifiers & Qt.ControlModifier:
-            return "invert"
-        if modifiers & Qt.ShiftModifier:
-            return "add"
-        return "replace"
-
-    @staticmethod
     def _is_double_click_event(event) -> bool:
         double = getattr(event, "double", None)
         if not callable(double):
@@ -2307,6 +2109,14 @@ class _DesignPlotPane(QWidget):
             return bool(double())
         except Exception:
             return False
+
+    @staticmethod
+    def _mouse_button(button: Qt.MouseButton) -> MouseButton:
+        if button == Qt.LeftButton:
+            return MouseButton.LEFT
+        if button == Qt.RightButton:
+            return MouseButton.RIGHT
+        return MouseButton.OTHER
 
     def _on_mouse_moved(self, position) -> None:  # pragma: no cover - UI interaction
         self._pending_hover_scene_pos = position
@@ -2319,27 +2129,30 @@ class _DesignPlotPane(QWidget):
             or self._document is None
             or getattr(self, "_document_preview_active", False)
         ):
-            self._set_hover_snap(None)
+            self._apply_interaction_transition(self._plot_interaction.hover(None))
             return
         position = self._pending_hover_scene_pos
         self._pending_hover_scene_pos = None
         if position is None or not self._plot.sceneBoundingRect().contains(position):
-            self._set_hover_snap(None)
+            self._apply_snap_transition(self._snap_coordinator.cancel_hover())
+            self._apply_interaction_transition(self._plot_interaction.hover(None))
             return
         view_point = self._plot.getViewBox().mapSceneToView(position)
         raw_point = (float(view_point.x()), float(view_point.y()))
         modifiers = QApplication.keyboardModifiers()
-        shift_constraint, control_constraint = self._constraint_flags(modifiers)
+        pointer = self._pointer_modifiers(modifiers)
         if self._document.file_backed:
             self._submit_file_backed_hover(raw_point, modifiers=modifiers)
             return
         started = perf_counter()
         snap_result = self._resolve_snap_result(raw_point)
         elapsed_ms = (perf_counter() - started) * 1000.0
-        self._set_hover_snap(
-            snap_result,
-            shift=shift_constraint,
-            control=control_constraint,
+        self._apply_interaction_transition(
+            self._plot_interaction.hover(
+                snap_result,
+                shift=pointer.shift,
+                control=pointer.control,
+            )
         )
         self._log_hover_snap(raw_point, snap_result, elapsed_ms)
 
@@ -2349,238 +2162,21 @@ class _DesignPlotPane(QWidget):
         *,
         modifiers: Qt.KeyboardModifiers = Qt.NoModifier,
     ) -> None:
-        if not self._snap_enabled:
-            self._set_hover_snap(None)
-            return
-        config = self._klayout_config
-        worker = self._snap_worker
         snap_threshold = self._snap_distance_threshold()
-        if config is None or worker is None or snap_threshold is None:
-            self._set_hover_snap(None)
+        if snap_threshold is None:
+            self._apply_interaction_transition(self._plot_interaction.hover(None))
             return
-        radius = max(0.0, snap_threshold)
-        plan = plan_snap_search(raw_point, radius, config.display_bounds)
-        if not plan.accepted:
-            logger.debug("DESIGN SNAP hover skipped reason=%s", plan.skip_reason)
-            self._latest_hover_request_id = 0
-            self._pending_hover_markup.clear()
-            worker.cancel_hover()
-            shift_constraint, control_constraint = self._constraint_flags(modifiers)
-            self._set_hover_snap(
-                self._file_snap_fallback(raw_point),
-                shift=shift_constraint,
-                control=control_constraint,
+        pointer = self._pointer_modifiers(modifiers)
+        self._apply_snap_transition(
+            self._snap_coordinator.submit_hover(
+                SnapHoverIntent(
+                    raw_point=raw_point,
+                    shift=pointer.shift,
+                    control=pointer.control,
+                    generation=self._plot_interaction.generation,
+                ),
+                radius=snap_threshold,
             )
-            return
-        self._snap_request_id += 1
-        self._latest_hover_request_id = self._snap_request_id
-        shift_constraint, control_constraint = self._constraint_flags(modifiers)
-        self._pending_hover_markup = {
-            self._snap_request_id: (
-                self._best_markup_snap(raw_point),
-                shift_constraint,
-                control_constraint,
-            )
-        }
-        worker.submit_hover(
-            SnapRequest(
-                request_id=self._snap_request_id,
-                config=config,
-                point=raw_point,
-                radius=radius,
-                purpose="hover",
-            )
-        )
-
-    def _enqueue_file_backed_click(
-        self,
-        config: KLayoutConfig,
-        action: str,
-        raw_point: Point2D,
-        payload: tuple[object, ...],
-        *,
-        markup_result: SnapResult | None,
-        shift_constraint: bool,
-        control_constraint: bool,
-    ) -> PendingClick:
-        self._snap_request_id += 1
-        pending = PendingClick(
-            request_id=self._snap_request_id,
-            config_generation=config.generation,
-            action=str(action),
-            raw_point=raw_point,
-            payload=tuple(payload),
-            markup_result=markup_result,
-            markup_generation=self._markup_generation,
-            shift_constraint=shift_constraint,
-            control_constraint=control_constraint,
-        )
-        self._pending_clicks[pending.request_id] = pending
-        self._click_order.append(pending.request_id)
-        return pending
-
-    def _complete_file_backed_click(
-        self,
-        request_id: int,
-        result: SnapResult | None,
-        *,
-        elapsed_ms: float | None = None,
-    ) -> None:
-        if (
-            request_id not in self._pending_clicks
-            or request_id in self._click_completions
-        ):
-            return
-        self._click_completions[request_id] = (result, elapsed_ms)
-        self._drain_file_backed_clicks()
-
-    def _drain_file_backed_clicks(self) -> None:
-        while (
-            self._click_order
-            and self._click_order[0] in self._click_completions
-        ):
-            request_id = self._click_order.popleft()
-            result, elapsed_ms = self._click_completions.pop(request_id)
-            pending = self._pending_clicks.pop(request_id, None)
-            config = self._klayout_config
-            if (
-                pending is None
-                or result is None
-                or config is None
-                or pending.config_generation != config.generation
-                or pending.markup_generation != self._markup_generation
-            ):
-                continue
-            self._set_hover_snap(
-                result,
-                shift=pending.shift_constraint,
-                control=pending.control_constraint,
-            )
-            if elapsed_ms is not None:
-                logger.debug(
-                    "DESIGN SNAP click raw=(%.3f, %.3f) snapped=(%.3f, %.3f) "
-                    "mode=%s dist=%.4f elapsed_ms=%.2f",
-                    pending.raw_point[0],
-                    pending.raw_point[1],
-                    result.point[0],
-                    result.point[1],
-                    result.mode,
-                    result.distance,
-                    elapsed_ms,
-                )
-            self._execute_click_action(
-                pending.action,
-                pending.payload,
-                result,
-                shift=pending.shift_constraint,
-                control=pending.control_constraint,
-            )
-
-    def _cancel_file_backed_clicks(
-        self,
-        predicate: Callable[[PendingClick], bool],
-    ) -> None:
-        ordered_ids = set(self._click_order)
-        for request_id, pending in tuple(self._pending_clicks.items()):
-            if not predicate(pending):
-                continue
-            if request_id in ordered_ids:
-                self._click_completions[request_id] = (None, None)
-            else:
-                self._pending_clicks.pop(request_id, None)
-        self._drain_file_backed_clicks()
-
-    def _reset_file_backed_click_order(self) -> None:
-        self._pending_clicks.clear()
-        self._click_order.clear()
-        self._click_completions.clear()
-
-    def _invalidate_file_backed_hover(self) -> None:
-        self._latest_hover_request_id = 0
-        self._pending_hover_markup.clear()
-        if self._snap_worker is not None:
-            self._snap_worker.cancel_hover()
-
-    def _on_file_backed_snap_ready(self, response: SnapResponse) -> None:
-        if response.unavailable_reason is not None:
-            logger.debug(
-                "DESIGN SNAP unavailable reason=%s request_id=%d purpose=%s",
-                response.unavailable_reason,
-                response.request_id,
-                response.purpose,
-            )
-        config = self._klayout_config
-        if config is None or response.config_generation != config.generation:
-            return
-        if response.purpose == "hover":
-            if response.request_id != self._latest_hover_request_id:
-                return
-            pending_hover = self._pending_hover_markup.pop(response.request_id, None)
-            if pending_hover is None:
-                markup_result = None
-                shift_constraint = False
-                control_constraint = False
-            else:
-                markup_result, shift_constraint, control_constraint = pending_hover
-            result = self._nearest_screen_result(
-                response.raw_point,
-                response.result,
-                markup_result,
-            )
-            self._set_hover_snap(
-                result,
-                shift=shift_constraint,
-                control=control_constraint,
-            )
-            self._log_hover_snap(
-                response.raw_point,
-                result,
-                response.elapsed_ms,
-            )
-            return
-        if response.purpose != "click":
-            return
-        pending = self._pending_clicks.get(response.request_id)
-        if (
-            pending is None
-            or pending.config_generation != config.generation
-        ):
-            return
-        if pending.markup_generation != self._markup_generation:
-            self._complete_file_backed_click(response.request_id, None)
-            return
-        result = self._nearest_screen_result(
-            pending.raw_point,
-            response.result,
-            pending.markup_result,
-        )
-        self._complete_file_backed_click(
-            response.request_id,
-            result,
-            elapsed_ms=response.elapsed_ms,
-        )
-
-    def _file_snap_fallback(self, raw_point: Point2D) -> SnapResult:
-        free = SnapResult(point=raw_point, mode="free", distance=0.0)
-        return self._nearest_screen_result(
-            raw_point,
-            free,
-            self._best_markup_snap(raw_point),
-        )
-
-    def _nearest_screen_result(
-        self,
-        raw_point: Point2D,
-        *results: SnapResult | None,
-    ) -> SnapResult:
-        available = [result for result in results if result is not None]
-        snapped = [result for result in available if result.mode != "free"]
-        candidates = snapped or available
-        if not candidates:
-            return SnapResult(point=raw_point, mode="free", distance=0.0)
-        return min(
-            candidates,
-            key=lambda result: self._screen_distance(raw_point, result.point),
         )
 
     def _screen_distance(self, first: Point2D, second: Point2D) -> float:
@@ -2599,21 +2195,26 @@ class _DesignPlotPane(QWidget):
 
     def _resolve_snap_result(self, raw_point: Point2D) -> SnapResult:
         free_result = SnapResult(point=raw_point, mode="free", distance=0.0)
-        if self._document is None or not self._snap_enabled:
+        if self._document is None or not self._snap_coordinator.enabled:
             return free_result
-        markup_result = self._best_markup_snap(raw_point)
-        if self._document.file_backed or not self._document.has_snap_geometry():
-            return self._nearest_screen_result(raw_point, free_result, markup_result)
         snap_threshold = self._snap_distance_threshold()
         if snap_threshold is None:
-            return self._nearest_screen_result(raw_point, free_result, markup_result)
-        snap_result = self._document.snap_point_info(
+            return self._snap_coordinator.resolve_local(
+                raw_point,
+                radius=0.0,
+                geometry_result=None,
+            )
+        snap_result = None
+        if not self._document.file_backed and self._document.has_snap_geometry():
+            snap_result = self._document.snap_point_info(
+                raw_point,
+                max_distance=snap_threshold,
+            )
+        return self._snap_coordinator.resolve_local(
             raw_point,
-            max_distance=snap_threshold,
+            radius=snap_threshold,
+            geometry_result=snap_result,
         )
-        if snap_result.distance > snap_threshold:
-            snap_result = free_result
-        return self._nearest_screen_result(raw_point, snap_result, markup_result)
 
     def _route_geometry_pixel_size(self) -> float | None:
         if self._plot is None or not self._plot.isVisible():
@@ -2644,7 +2245,10 @@ class _DesignPlotPane(QWidget):
         if (
             isinstance(pixel_size, tuple)
             and len(pixel_size) >= 2
-            and all(math.isfinite(float(value)) and abs(float(value)) > 0.0 for value in pixel_size[:2])
+            and all(
+                math.isfinite(float(value)) and abs(float(value)) > 0.0
+                for value in pixel_size[:2]
+            )
         ):
             return max(abs(float(pixel_size[0])), abs(float(pixel_size[1])))
         view_range = view_box.viewRange()
@@ -2658,7 +2262,9 @@ class _DesignPlotPane(QWidget):
         if len(x_range) < 2 or len(y_range) < 2:
             return None
         x_units = abs(float(x_range[1]) - float(x_range[0])) / float(scene_rect.width())
-        y_units = abs(float(y_range[1]) - float(y_range[0])) / float(scene_rect.height())
+        y_units = abs(float(y_range[1]) - float(y_range[0])) / float(
+            scene_rect.height()
+        )
         return max(x_units, y_units)
 
     def _set_hover_snap(
@@ -2668,21 +2274,7 @@ class _DesignPlotPane(QWidget):
         shift: bool = False,
         control: bool = False,
     ) -> None:
-        if snap_result is None:
-            self._latest_hover_request_id = 0
         self._hover_snap = snap_result
-        if self._active_design_tool == "guide" and self._guide_anchor is not None:
-            if snap_result is None:
-                self._tool_sketch_points = [self._guide_anchor]
-            else:
-                endpoint = constrain_vector_endpoint(
-                    self._guide_anchor,
-                    snap_result.point,
-                    shift=shift,
-                    control=control,
-                )
-                self._tool_sketch_points = [self._guide_anchor, endpoint]
-            self._redraw_tool_sketch()
         self._redraw_hover()
         self.hover_snap_changed.emit(snap_result)
         self.tool_hover_snap_changed.emit(
@@ -2700,7 +2292,8 @@ class _DesignPlotPane(QWidget):
         point = self._hover_snap.point
         self._hover_item.setData([point[0]], [point[1]])
         if (
-            self._hover_snap.mode in {
+            self._hover_snap.mode
+            in {
                 "segment",
                 "segment_center",
                 "guide_end",
@@ -2755,15 +2348,12 @@ class _DesignPlotPane(QWidget):
         if self._shutdown:
             return
         self._shutdown = True
-        self._reset_file_backed_click_order()
-        self._pending_hover_markup.clear()
-        self._latest_hover_request_id = 0
         if hasattr(self, "_hover_timer"):
             self._hover_timer.stop()
         if self._route_geometry_redraw_timer is not None:
             self._route_geometry_redraw_timer.stop()
-        self._stop_snap_worker(timeout_s=0.0)
-        self._klayout_config = None
+        self._apply_snap_transition(self._snap_coordinator.close())
+        self._snap_runtime.close()
         if self._raster_controller is not None:
             self._raster_controller.shutdown()
 
@@ -2782,5 +2372,3 @@ class _DesignPlotPane(QWidget):
     def _layer_color(layer_key: LayerKey) -> QColor:
         hue = int((layer_key[0] * 57 + layer_key[1] * 19) % 360)
         return QColor.fromHsv(hue, 180, 210, 180)
-
-
