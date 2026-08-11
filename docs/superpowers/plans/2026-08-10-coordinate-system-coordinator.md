@@ -1237,3 +1237,81 @@ git diff --check 8fc83259e07f48bf0f222e80bb3e1d6c3241fd0e..HEAD
   of the corrected evidence-bearing snapshot returned `READY` with
   `0 Critical / 0 Important / 0 Minor` before staging and the exact commit
   `refactor: separate probe station client domains`.
+
+#### Task 8a: Separate settings persistence domains
+
+**Files:**
+- Create: `probe_station_gui/settings/document.py`
+- Create: `probe_station_gui/settings/selection_persistence.py`
+- Create: `probe_station_gui/settings/runtime_documents.py`
+- Modify: `probe_station_gui/settings/manager.py`
+- Modify: `probe_station_gui/settings/software_coordinate_selection_store.py`
+- Create/modify: direct settings-owner and thin manager integration tests
+- Modify: `docs/superpowers/plans/2026-08-10-coordinate-system-coordinator.md`
+
+- [x] Capture the clean `a5d6393` baseline before editing. The settings manager
+  had `1388 LOC / 1166 SLOC / 841 LLOC`, aggregate Radon CC `204` over `82`
+  blocks, maximum CC `10`, and MI `0.00`; the selected focused baseline passed
+  `119` tests. All-tracked MI-0 was `18` and active GUI/test MI-0 was `17`.
+- [x] Observe independent absent-module collection RED for the document codec,
+  selection persistence, and runtime documents before adding production code.
+  Direct owner coverage then reached `25` cases; the owner plus Qt-store slice
+  reached `31 passed` after review regressions were added.
+- [x] Make `document.py` the canonical owner of `Settings`, deep cloning, the
+  stable JSON payload, raw-section assembly, legacy migration, normalization,
+  validation, and Telegram-token migration. Representative empty, packaged
+  default, legacy, and future-schema payloads compare exactly with the baseline
+  codec; camera exposure, logging, API, controls, software-coordinate degraded
+  payloads, and design-directory shapes remain unchanged.
+- [x] Make `selection_persistence.py` the canonical Qt-free owner of the frozen
+  selection snapshot, monotonic generation, startup winner, stale rejection,
+  and main/sidecar transaction. One persistence lock serializes ordinary main
+  saves and selection saves; state capture uses the injected RLock while file
+  I/O does not hold it, so GUI selection never waits for disk. Main settings are
+  atomically replaced before exact-v1 sidecar validation/write; invalid/future
+  sidecars are preserved on failure and restart resolves by greater generation
+  with main winning ties. The Qt worker imports the canonical snapshot directly.
+- [x] Make `runtime_documents.py` own controller, serial, and meter documents in
+  the config directory. UTF-8-SIG reads, UTF-8 writes, filenames, malformed
+  fallbacks, warnings, payloads, and auto-connect policy are preserved. A review
+  RED restored the exact error boundary: config-directory creation errors
+  propagate for all three documents; controller target-write errors propagate,
+  while serial/meter target-write errors warn and return.
+- [x] Keep `SettingsManager` as the platform/default/user-path composition root
+  and public load/save/apply/accessor interface. All `39` public method
+  signatures match the baseline AST. The manager contains no moved class or
+  private persistence/codec definitions, settings siblings have no reverse
+  manager import, fresh forward/reverse imports pass, and pure owner imports do
+  not load PySide6. Deleting any owner prevents manager import as expected.
+- [x] Replace moved-responsibility `SettingsManager.__new__`, private parser,
+  and private atomic-writer test seams with direct owners and fully initialized
+  temporary managers. Two App settings-integration tests were migrated without
+  changing protected production. A second review RED proved the initial test
+  environment could fall back to a user home on Linux; every real-manager test
+  now fixes platform behavior or supplies APPDATA, LOCALAPPDATA,
+  XDG_CONFIG_HOME, and XDG_STATE_HOME under its temporary fixture.
+- [x] Verification is fresh and no-hardware: focused settings/selection/store/
+  key-binding/connection/App tests pass `115`; broad settings/App/UI passes
+  `1025` plus `5` subtests; the complete offscreen process-local-`QLocale.c()`
+  suite passes `3021` plus `14` subtests with only the inherited
+  `BuiltinImporter.module_repr()` warning. All APPDATA, LOCALAPPDATA, XDG,
+  basetemp, and bytecode paths used unique system-temporary roots.
+- [x] Configured whole-tree Ruff and compileall, affected Ruff, `git diff
+  --check`, codec parity, canonical identity, normal/reverse import, Qt-free,
+  AST deletion/DAG, Windows path/encoding, and protected-production diff gates
+  pass. `main.py`, default settings, camera/API/stage/route/instrument/
+  coordinate/design/view/dialog production, clients, measure package, and
+  scripts remain byte-identical to the baseline.
+- [x] Metrics: `manager.py` decreases to
+  `552 LOC / 398 SLOC / 313 LLOC / MI 14.65 / CC 80` over `50` blocks with
+  maximum CC `5`. The new owners are document
+  `540 LOC / MI 24.84`, selection persistence `272 LOC / MI 26.83`, and runtime
+  documents `171 LOC / MI 39.42`; every new/touched Python file has positive MI.
+  Prospective all-tracked MI-0 decreases `18 -> 17` and active GUI/test MI-0
+  decreases `17 -> 16`, with no new MI-0 file.
+- [x] Freeze the corrected 16-file implementation snapshot and verify every
+  per-file SHA-256 independently. The first fresh read-only review found two
+  Important parity/isolation gaps; both were reproduced with strict temp-only
+  RED and fixed as described above. A fresh corrected-byte re-review returned
+  `READY` with `0 Critical / 0 Important / 0 Minor` before staging and the exact
+  commit `refactor: separate settings persistence domains`.

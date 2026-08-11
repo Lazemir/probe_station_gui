@@ -9,7 +9,9 @@ import time
 
 from PySide6.QtCore import QObject, Qt, Signal, Slot
 
-from probe_station_gui.settings.manager import SoftwareCoordinateSelectionSnapshot
+from probe_station_gui.settings.selection_persistence import (
+    SoftwareCoordinateSelectionSnapshot,
+)
 
 
 @dataclass(frozen=True)

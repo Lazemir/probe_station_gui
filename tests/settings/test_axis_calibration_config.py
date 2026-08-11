@@ -7,7 +7,8 @@ from probe_station_gui.settings.axis_calibration_config import (
     default_axis_calibrations,
     parse_axis_calibrations,
 )
-from probe_station_gui.settings.manager import Settings, SettingsManager
+from probe_station_gui.settings.document import Settings
+from probe_station_gui.settings.manager import SettingsManager
 
 
 def test_defaults_contain_all_six_disabled_axes() -> None:
@@ -142,9 +143,28 @@ def test_application_settings_clone_and_serialize_axis_calibrations() -> None:
     assert serialized["axis_calibrations"]["B"]["physical_points"] == [1.0, 92.0]
 
 
-def test_settings_manager_returns_independent_axis_calibration_configuration() -> None:
-    manager = SettingsManager.__new__(SettingsManager)
-    manager._settings = Settings()
+def test_settings_manager_returns_independent_axis_calibration_configuration(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("APPDATA", str(tmp_path / "appdata"))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "localappdata"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg-config"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "xdg-state"))
+    monkeypatch.setattr(
+        "probe_station_gui.settings.manager.platform.system",
+        lambda: "Linux",
+    )
+    monkeypatch.setattr(
+        "probe_station_gui.settings.manager.Path.home",
+        lambda: tmp_path.parent / "fallback-home",
+    )
+    monkeypatch.setattr(
+        "probe_station_gui.settings.manager.configure_logging",
+        lambda *_args: None,
+    )
+    manager = SettingsManager()
+    assert manager.config_dir() == tmp_path / "xdg-config" / "probe-station-gui"
 
     configuration = manager.axis_calibrations_configuration()
     configuration["X"].controller_points.append(1.0)

@@ -2,16 +2,31 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
 
-from probe_station_gui.settings.manager import Settings, SettingsManager
+from probe_station_gui.settings.document import Settings, SettingsDocumentCodec
+from probe_station_gui.settings.manager import SettingsManager
 from probe_station_gui.settings.sections import ExposurePolicySettings
 
 
 def manager_from_raw(raw: object) -> Settings:
-    manager = SettingsManager.__new__(SettingsManager)
-    manager._logger = logging.getLogger(__name__)
-    return manager._settings_from_raw(raw)
+    return SettingsDocumentCodec(
+        default_log_path="probe-station-gui.log",
+        logger=logging.getLogger(__name__),
+    ).decode(raw)
+
+
+def _manager(tmp_path, monkeypatch) -> SettingsManager:
+    monkeypatch.setenv("APPDATA", str(tmp_path / "appdata"))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "localappdata"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg-config"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "xdg-state"))
+    monkeypatch.setattr(
+        "probe_station_gui.settings.manager.platform.system",
+        lambda: "Windows",
+    )
+    return SettingsManager()
 
 
 def test_missing_exposure_policy_migrates_to_software_auto() -> None:
@@ -54,9 +69,11 @@ def test_exposure_policy_settings_clone_and_application_serialization_are_indepe
     }
 
 
-def test_settings_manager_returns_independent_exposure_policy_configuration() -> None:
-    manager = SettingsManager.__new__(SettingsManager)
-    manager._settings = Settings()
+def test_settings_manager_returns_independent_exposure_policy_configuration(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    manager = _manager(tmp_path, monkeypatch)
 
     configuration = manager.exposure_policy_configuration()
     configuration.auto_enabled = False
@@ -64,20 +81,21 @@ def test_settings_manager_returns_independent_exposure_policy_configuration() ->
     assert manager.settings.exposure_policy.auto_enabled is True
 
 
-def test_settings_manager_persists_exposure_policy_configuration(tmp_path) -> None:
-    manager = SettingsManager.__new__(SettingsManager)
-    manager._settings = Settings()
-    manager._config_dir = tmp_path
-    manager._config_path = tmp_path / "settings.json"
-    manager._logger = logging.getLogger(__name__)
-    manager._settings_lock = threading.RLock()
-    manager.apply = lambda: None
+def test_settings_manager_persists_exposure_policy_configuration(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    manager = _manager(tmp_path, monkeypatch)
 
     manager.set_exposure_policy_configuration(
         ExposurePolicySettings(auto_enabled=False, engine="camera")
     )
 
-    persisted = json.loads(manager._config_path.read_text(encoding="utf-8"))
+    persisted = json.loads(
+        (manager.config_dir() / SettingsManager.CONFIG_FILENAME).read_text(
+            encoding="utf-8"
+        )
+    )
     assert persisted["camera"]["exposure"] == {
         "auto_enabled": False,
         "engine": "camera",
@@ -86,25 +104,29 @@ def test_settings_manager_persists_exposure_policy_configuration(tmp_path) -> No
 
 def test_concurrent_policy_and_gui_transactions_preserve_both_settings(
     tmp_path,
+    monkeypatch,
 ) -> None:
-    class BlockingSaveManager(SettingsManager):
-        def _write_settings_file_atomic(self, data) -> None:
-            if threading.current_thread().name == "policy-save":
-                atomic_write_entered.set()
-                assert release_atomic_write.wait(1.0)
-            super()._write_settings_file_atomic(data)
-
     atomic_write_entered = threading.Event()
     release_atomic_write = threading.Event()
     gui_done = threading.Event()
     errors: list[BaseException] = []
-    manager = BlockingSaveManager.__new__(BlockingSaveManager)
-    manager._settings = Settings()
-    manager._config_dir = tmp_path
-    manager._config_path = tmp_path / "settings.json"
-    manager._logger = logging.getLogger(__name__)
-    manager._settings_lock = threading.RLock()
-    manager.apply = lambda: None
+    manager = _manager(tmp_path, monkeypatch)
+    settings_path = manager.config_dir() / SettingsManager.CONFIG_FILENAME
+    real_replace = os.replace
+
+    def blocked_replace(source, destination) -> None:
+        if (
+            threading.current_thread().name == "policy-save"
+            and destination == settings_path
+        ):
+            atomic_write_entered.set()
+            assert release_atomic_write.wait(1.0)
+        real_replace(source, destination)
+
+    monkeypatch.setattr(
+        "probe_station_gui.settings.selection_persistence.os.replace",
+        blocked_replace,
+    )
     stale_gui_settings = manager.settings.clone()
     stale_gui_settings.design_last_directory = "C:/measurements"
 
@@ -139,7 +161,7 @@ def test_concurrent_policy_and_gui_transactions_preserve_both_settings(
         policy_thread.join(1.0)
         gui_thread.join(1.0)
 
-    persisted = json.loads(manager._config_path.read_text(encoding="utf-8"))
+    persisted = json.loads(settings_path.read_text(encoding="utf-8"))
     assert errors == []
     assert not policy_thread.is_alive()
     assert not gui_thread.is_alive()

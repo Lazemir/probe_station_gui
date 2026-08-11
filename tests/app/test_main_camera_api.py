@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import logging
 import threading
 from dataclasses import dataclass
 from types import SimpleNamespace
@@ -135,19 +134,29 @@ def test_main_policy_persists_and_public_exposure_write_uses_controller_guard() 
 
 def test_settings_dialog_transaction_preserves_concurrent_exposure_policy(
     tmp_path,
+    monkeypatch,
 ) -> None:
-    manager = SettingsManager.__new__(SettingsManager)
-    manager._settings = Settings(
-        exposure_policy=ExposurePolicySettings(
-            auto_enabled=False,
-            engine="camera",
+    monkeypatch.setenv("APPDATA", str(tmp_path / "appdata"))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "localappdata"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg-config"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "xdg-state"))
+    monkeypatch.setattr(
+        "probe_station_gui.settings.manager.platform.system",
+        lambda: "Windows",
+    )
+    monkeypatch.setattr(
+        "probe_station_gui.settings.manager.configure_logging",
+        lambda *_args: None,
+    )
+    manager = SettingsManager()
+    manager.replace(
+        Settings(
+            exposure_policy=ExposurePolicySettings(
+                auto_enabled=False,
+                engine="camera",
+            )
         )
     )
-    manager._config_dir = tmp_path
-    manager._config_path = tmp_path / "settings.json"
-    manager._logger = logging.getLogger(__name__)
-    manager._settings_lock = threading.RLock()
-    manager.apply = lambda: None
     stale_dialog_settings = Settings()
     stale_dialog_settings.design_last_directory = "C:/dialog-selection"
     window = Main.__new__(Main)

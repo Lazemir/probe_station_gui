@@ -9,7 +9,8 @@ from probe_station_gui.settings.precision_approach import (
     parse_precision_approach_settings,
     precision_profile_is_effective,
 )
-from probe_station_gui.settings.manager import Settings, SettingsManager
+from probe_station_gui.settings.document import Settings
+from probe_station_gui.settings.manager import SettingsManager
 
 
 def test_precision_approach_defaults_cover_every_stage_axis() -> None:
@@ -115,9 +116,23 @@ def test_application_settings_clone_and_serialize_precision_profiles() -> None:
     }
 
 
-def test_settings_manager_returns_independent_precision_approach_configuration() -> None:
-    manager = SettingsManager.__new__(SettingsManager)
-    manager._settings = Settings()
+def test_settings_manager_returns_independent_precision_approach_configuration(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("APPDATA", str(tmp_path / "appdata"))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "localappdata"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg-config"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "xdg-state"))
+    monkeypatch.setattr(
+        "probe_station_gui.settings.manager.platform.system",
+        lambda: "Windows",
+    )
+    monkeypatch.setattr(
+        "probe_station_gui.settings.manager.configure_logging",
+        lambda *_args: None,
+    )
+    manager = SettingsManager()
 
     configuration = manager.precision_approach_configuration()
     configuration.profiles["Z"] = PrecisionApproachProfile(False, 9.0, -1)

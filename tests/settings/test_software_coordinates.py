@@ -3,7 +3,6 @@ import json
 import logging
 from importlib import resources
 from pathlib import Path
-import threading
 
 import pytest
 
@@ -12,7 +11,8 @@ from probe_station_gui.settings.software_coordinates import (
     SoftwareCoordinateSettings,
     parse_software_coordinate_settings,
 )
-from probe_station_gui.settings.manager import Settings, SettingsManager
+from probe_station_gui.settings.document import Settings, SettingsDocumentCodec
+from probe_station_gui.settings.manager import SettingsManager
 
 
 def _custom(*, z_zero_mm: float = 6.0, a_zero_mm: float = 7.0) -> CustomFrameSettings:
@@ -29,16 +29,23 @@ def _custom(*, z_zero_mm: float = 6.0, a_zero_mm: float = 7.0) -> CustomFrameSet
     )
 
 
-def _manager(tmp_path: Path | None = None) -> SettingsManager:
-    manager = SettingsManager.__new__(SettingsManager)
-    manager._logger = logging.getLogger(__name__)
-    if tmp_path is not None:
-        manager._config_dir = tmp_path
-        manager._config_path = tmp_path / "settings.json"
-        manager._settings_lock = threading.RLock()
-        manager._persistence_lock = threading.RLock()
-        manager.apply = lambda: None
-    return manager
+def _codec() -> SettingsDocumentCodec:
+    return SettingsDocumentCodec(
+        default_log_path="probe-station-gui.log",
+        logger=logging.getLogger(__name__),
+    )
+
+
+def _manager(tmp_path: Path, monkeypatch) -> SettingsManager:
+    monkeypatch.setenv("APPDATA", str(tmp_path / "appdata"))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "localappdata"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg-config"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "xdg-state"))
+    monkeypatch.setattr(
+        "probe_station_gui.settings.manager.platform.system",
+        lambda: "Windows",
+    )
+    return SettingsManager()
 
 
 def test_software_coordinate_defaults_use_assumed_machine_zero_pivot() -> None:
@@ -203,9 +210,7 @@ def test_unknown_current_root_fields_degrade_and_preserve_the_whole_section() ->
 def test_present_non_object_root_degrades_and_round_trips(
     raw_section: object,
 ) -> None:
-    settings = _manager()._settings_from_raw(
-        {"software_coordinates": raw_section}
-    )
+    settings = _codec().decode({"software_coordinates": raw_section})
 
     assert settings.software_coordinates.degraded
     assert settings.software_coordinates.materialization_blocked
@@ -216,7 +221,7 @@ def test_present_v1_root_with_missing_required_field_is_preserved() -> None:
     raw = SoftwareCoordinateSettings().to_dict()
     raw.pop("pivot")
 
-    parsed = _manager()._settings_from_raw({"software_coordinates": raw})
+    parsed = _codec().decode({"software_coordinates": raw})
 
     assert parsed.software_coordinates.degraded
     assert parsed.software_coordinates.materialization_blocked
@@ -227,7 +232,7 @@ def test_present_v1_root_with_wrong_json_type_is_preserved() -> None:
     raw = SoftwareCoordinateSettings().to_dict()
     raw["last_selected_frame_id"] = 42
 
-    parsed = _manager()._settings_from_raw({"software_coordinates": raw})
+    parsed = _codec().decode({"software_coordinates": raw})
 
     assert parsed.software_coordinates.degraded
     assert parsed.software_coordinates.materialization_blocked
@@ -235,22 +240,29 @@ def test_present_v1_root_with_wrong_json_type_is_preserved() -> None:
 
 
 def test_absent_software_coordinate_root_keeps_legacy_defaults() -> None:
-    parsed = _manager()._settings_from_raw({})
+    parsed = _codec().decode({})
 
     assert not parsed.software_coordinates.degraded
     assert not parsed.software_coordinates.materialization_blocked
     assert parsed.software_coordinates == SoftwareCoordinateSettings()
 
 
-def test_unrelated_settings_save_preserves_present_null_root(tmp_path: Path) -> None:
-    manager = _manager(tmp_path)
-    manager._settings = manager._settings_from_raw({"software_coordinates": None})
+def test_unrelated_settings_save_preserves_present_null_root(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    manager = _manager(tmp_path, monkeypatch)
+    manager.replace(_codec().decode({"software_coordinates": None}))
 
     manager.update_and_save(
         lambda settings: setattr(settings, "design_last_directory", "C:/designs")
     )
 
-    persisted = json.loads(manager._config_path.read_text(encoding="utf-8"))
+    persisted = json.loads(
+        (manager.config_dir() / SettingsManager.CONFIG_FILENAME).read_text(
+            encoding="utf-8"
+        )
+    )
     assert persisted["software_coordinates"] is None
     assert persisted["design_last_directory"] == "C:/designs"
 
@@ -288,11 +300,9 @@ def test_custom_frame_model_rejects_a_origin_without_z_origin() -> None:
 def test_application_settings_clone_and_parse_software_coordinate_settings() -> None:
     coordinates = SoftwareCoordinateSettings(custom_frames=(_custom(),))
     settings = Settings(software_coordinates=coordinates)
-    manager = SettingsManager.__new__(SettingsManager)
-    manager._logger = logging.getLogger(__name__)
 
     clone = settings.clone()
-    restored = manager._settings_from_raw(settings.to_dict())
+    restored = _codec().decode(settings.to_dict())
 
     assert clone.software_coordinates == coordinates
     assert restored.software_coordinates == coordinates

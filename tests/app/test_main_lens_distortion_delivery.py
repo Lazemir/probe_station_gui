@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import json
-import logging
-import threading
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -236,6 +234,7 @@ def test_completed_artifact_is_saved_to_captured_objective_after_restore_warning
 
 def test_completion_persists_to_captured_objective_after_active_objective_changes(
     tmp_path,
+    monkeypatch,
 ) -> None:
     calibrated = [[-0.0012, 0.0001], [-0.0002, -0.0011]]
     payload = {
@@ -263,9 +262,21 @@ def test_completion_persists_to_captured_objective_after_active_objective_change
         "lens-x20", 17, "lens", True, "complete", "X20", True,
         lens_artifact=artifact,
     )
-    manager = SettingsManager.__new__(SettingsManager)
-    manager._settings = Settings()
-    manager._settings.objectives = ObjectivesSettings(
+    monkeypatch.setenv("APPDATA", str(tmp_path / "appdata"))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "localappdata"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg-config"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "xdg-state"))
+    monkeypatch.setattr(
+        "probe_station_gui.settings.manager.platform.system",
+        lambda: "Windows",
+    )
+    monkeypatch.setattr(
+        "probe_station_gui.settings.manager.configure_logging",
+        lambda *_args: None,
+    )
+    manager = SettingsManager()
+    settings = Settings()
+    settings.objectives = ObjectivesSettings(
         active_name="X5",
         objectives={
             "X5": ObjectiveCalibrationSettings(
@@ -280,11 +291,7 @@ def test_completion_persists_to_captured_objective_after_active_objective_change
             ),
         },
     )
-    manager._config_dir = tmp_path
-    manager._config_path = tmp_path / "settings.json"
-    manager._logger = logging.getLogger(__name__)
-    manager._settings_lock = threading.RLock()
-    manager.apply = lambda: None
+    manager.replace(settings)
     window = Main.__new__(Main)
     window.settings_manager = manager
     window._optical_calibration_runtime = SimpleNamespace(
@@ -311,7 +318,11 @@ def test_completion_persists_to_captured_objective_after_active_objective_change
     assert x20.distortion_correction_configured is True
     assert x20.pixels_to_mm == calibrated
     assert x20.xy_calibration_configured is True
-    persisted = json.loads((tmp_path / "settings.json").read_text(encoding="utf-8"))
+    persisted = json.loads(
+        (manager.config_dir() / SettingsManager.CONFIG_FILENAME).read_text(
+            encoding="utf-8"
+        )
+    )
     assert persisted["objectives"]["active_name"] == "X5"
     assert persisted["objectives"]["objectives"]["X20"][
         "distortion_correction"

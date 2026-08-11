@@ -1,110 +1,46 @@
-import importlib.util
 import json
 import logging
+import os
 import platform
-import sys
 import tempfile
-import types
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-_ORIGINAL_PROBE_STATION_GUI = sys.modules.get("probe_station_gui")
-_ORIGINAL_LOGGING_CONFIG = sys.modules.get("probe_station_gui.shared.logging_config")
-_PYSIDE6_MODULES = ("PySide6", "PySide6.QtCore")
-_ORIGINAL_PYSIDE6 = {name: sys.modules.get(name) for name in _PYSIDE6_MODULES}
-
-
-def _install_pyside6_stubs() -> None:
-    qtcore = types.ModuleType("PySide6.QtCore")
-
-    class Qt:  # noqa: N801 - mimic Qt namespace
-        KeyboardModifier = int
-        KeyboardModifiers = int
-        Key_Left = 16777234
-        Key_Up = 16777235
-        Key_Right = 16777236
-        Key_Down = 16777237
-        Key_Space = 32
-        Key_Tab = 16777217
-        Key_Return = 16777220
-        Key_Enter = 16777221
-        Key_D = 68
-
-    qtcore.Qt = Qt
-
-    pyside6 = types.ModuleType("PySide6")
-    sys.modules["PySide6"] = pyside6
-    sys.modules["PySide6.QtCore"] = qtcore
-
-
-def _install_probe_station_stubs() -> None:
-    package = types.ModuleType("probe_station_gui")
-    package.__path__ = [str(Path(__file__).resolve().parents[2] / "probe_station_gui")]
-    logging_config = types.ModuleType("probe_station_gui.shared.logging_config")
-
-    def configure_logging(*_args, **_kwargs) -> None:
-        return None
-
-    logging_config.configure_logging = configure_logging
-    package.logging_config = logging_config
-    sys.modules["probe_station_gui"] = package
-    sys.modules["probe_station_gui.shared.logging_config"] = logging_config
-
-
-def _restore_probe_station_modules() -> None:
-    if _ORIGINAL_PROBE_STATION_GUI is None:
-        sys.modules.pop("probe_station_gui", None)
-    else:
-        sys.modules["probe_station_gui"] = _ORIGINAL_PROBE_STATION_GUI
-
-    if _ORIGINAL_LOGGING_CONFIG is None:
-        sys.modules.pop("probe_station_gui.shared.logging_config", None)
-    else:
-        sys.modules["probe_station_gui.shared.logging_config"] = _ORIGINAL_LOGGING_CONFIG
-
-
-def _restore_pyside6_modules() -> None:
-    for name in _PYSIDE6_MODULES:
-        original = _ORIGINAL_PYSIDE6[name]
-        if original is None:
-            sys.modules.pop(name, None)
-        else:
-            sys.modules[name] = original
-
-
-def _load_module(module_name: str, relative_path: str):
-    module_path = Path(__file__).resolve().parents[2] / relative_path
-    spec = importlib.util.spec_from_file_location(module_name, module_path)
-    module = importlib.util.module_from_spec(spec)
-    assert spec and spec.loader
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-_install_pyside6_stubs()
-_install_probe_station_stubs()
-qt_compat = _load_module("qt_compat_test", "probe_station_gui/shared/qt_compat.py")
-settings_manager = _load_module(
-    "settings_manager_test", "probe_station_gui/settings/manager.py"
+from probe_station_gui.notifications.telegram_settings import (
+    TELEGRAM_ALERT_TYPES,
+    TelegramSettings,
 )
-_restore_probe_station_modules()
-_restore_pyside6_modules()
-KeyBinding = settings_manager.KeyBinding
-ApiSettings = settings_manager.ApiSettings
-TelegramSettings = settings_manager.TelegramSettings
-TELEGRAM_ALERT_TYPES = settings_manager.TELEGRAM_ALERT_TYPES
-JogSettings = settings_manager.JogSettings
-ClickToMoveSettings = settings_manager.ClickToMoveSettings
-NeedleCalibrationSettings = settings_manager.NeedleCalibrationSettings
-LCR_METER_TYPE_KEITHLEY = settings_manager.LCR_METER_TYPE_KEITHLEY
-AxisCalibrationSettings = settings_manager.AxisCalibrationSettings
-OscillationSettings = settings_manager.OscillationSettings
-ObjectiveCalibrationSettings = settings_manager.ObjectiveCalibrationSettings
-ObjectivesSettings = settings_manager.ObjectivesSettings
-SavedStagePositionSettings = settings_manager.SavedStagePositionSettings
-SettingsManager = settings_manager.SettingsManager
-derive_native_scan_code_from_qt_key = qt_compat.derive_native_scan_code_from_qt_key
+from probe_station_gui.settings.axis_calibration_config import AxisCalibrationSettings
+from probe_station_gui.settings.controls_config import KeyBinding
+from probe_station_gui.settings.document import Settings, SettingsDocumentCodec
+from probe_station_gui.settings.jog_config import JogSettings
+from probe_station_gui.settings.manager import SettingsManager
+from probe_station_gui.settings.needle_calibration_config import (
+    LCR_METER_TYPE_KEITHLEY,
+    NeedleCalibrationSettings,
+    SavedStagePositionSettings,
+)
+from probe_station_gui.settings.objective_config import (
+    ObjectiveCalibrationSettings,
+    ObjectivesSettings,
+)
+from probe_station_gui.settings.oscillation_config import OscillationSettings
+from probe_station_gui.settings.runtime_documents import (
+    METER_CONNECTION_STATE_FILENAME,
+    SERIAL_CONNECTION_STATE_FILENAME,
+    RuntimeStateDocuments,
+)
+from probe_station_gui.settings.sections import ApiSettings, ClickToMoveSettings
+from probe_station_gui.shared.qt_compat import derive_native_scan_code_from_qt_key
+from probe_station_gui.stage.fluidnc_protocol import parse_fluidnc_axis_max_feedrates
+
+
+def _codec() -> SettingsDocumentCodec:
+    return SettingsDocumentCodec(
+        default_log_path="probe-station-gui.log",
+        logger=logging.getLogger(__name__),
+    )
 
 
 class KeyBindingRoundTripTest(unittest.TestCase):
@@ -288,10 +224,8 @@ class JogSettingsTest(unittest.TestCase):
         self.assertEqual(restored, settings)
 
     def test_parse_jog_normalizes_machine_control_settings(self) -> None:
-        manager = object.__new__(SettingsManager)
-
-        parsed = manager._parse_jog(
-            {
+        parsed = _codec().decode(
+            {"jog": {
                 "mode": "step",
                 "linear_distance_mm": "2.5",
                 "rotary_distance_deg": "3.5",
@@ -304,8 +238,8 @@ class JogSettingsTest(unittest.TestCase):
                 "needles_step_feedrate_mm_min": "11.5",
                 "turntable_feedrate_mm_min": "222.0",
                 "turntable_step_feedrate_mm_min": "111.0",
-            }
-        )
+            }}
+        ).jog
 
         self.assertEqual(parsed.mode, "step")
         self.assertEqual(parsed.linear_distance_mm, 2.5)
@@ -322,18 +256,16 @@ class JogSettingsTest(unittest.TestCase):
         self.assertEqual(parsed.turntable_step_feedrate_mm_min, 111.0)
 
     def test_parse_jog_clamps_legacy_sub_one_feedrates(self) -> None:
-        manager = object.__new__(SettingsManager)
-
-        parsed = manager._parse_jog(
-            {
+        parsed = _codec().decode(
+            {"jog": {
                 "manual_axis_feedrate_mm_min": "0.1",
                 "focus_feedrate_mm_min": "0.1",
                 "focus_step_feedrate_mm_min": "0.1",
                 "needles_step_feedrate_mm_min": "0.1",
                 "turntable_feedrate_mm_min": "0.1",
                 "turntable_step_feedrate_mm_min": "0.1",
-            }
-        )
+            }}
+        ).jog
 
         self.assertEqual(parsed.manual_axis_feedrate_mm_min, 1.0)
         self.assertEqual(parsed.focus_feedrate_mm_min, 1.0)
@@ -343,15 +275,12 @@ class JogSettingsTest(unittest.TestCase):
         self.assertEqual(parsed.turntable_step_feedrate_mm_min, 1.0)
 
     def test_parse_feedrates_clamps_legacy_sub_one_values(self) -> None:
-        manager = object.__new__(SettingsManager)
-
-        parsed = manager._parse_feedrates(
-            {
+        parsed = _codec().decode(
+            {"feedrates": {
                 "linear": {"presets": [0.1, 1.0, 3.0], "default": 0.1},
                 "rotary": {"presets": [0.1, 1.0, 90.0], "default": 0.1},
-            },
-            legacy_presets=[],
-        )
+            }}
+        ).feedrates
 
         self.assertEqual(parsed.linear.presets, [1.0, 3.0])
         self.assertEqual(parsed.linear.default, 1.0)
@@ -359,7 +288,7 @@ class JogSettingsTest(unittest.TestCase):
         self.assertEqual(parsed.rotary.default, 1.0)
 
     def test_parse_fluidnc_axis_max_feedrates(self) -> None:
-        rates = settings_manager.parse_fluidnc_axis_max_feedrates(
+        rates = parse_fluidnc_axis_max_feedrates(
             [
                 "axes:",
                 "  x:",
@@ -388,23 +317,28 @@ class ClickToMoveSettingsTest(unittest.TestCase):
         self.assertEqual(restored.pending_timeout_s, 12.5)
 
     def test_parse_click_to_move_clamps_invalid_timeout(self) -> None:
-        manager = object.__new__(SettingsManager)
-
-        low = manager._parse_click_to_move({"pending_timeout_s": -1})
-        high = manager._parse_click_to_move({"pending_timeout_s": 999})
-        fallback = manager._parse_click_to_move({"pending_timeout_s": "nan"})
+        codec = _codec()
+        low = codec.decode(
+            {"click_to_move": {"pending_timeout_s": -1}}
+        ).click_to_move
+        high = codec.decode(
+            {"click_to_move": {"pending_timeout_s": 999}}
+        ).click_to_move
+        fallback = codec.decode(
+            {"click_to_move": {"pending_timeout_s": "nan"}}
+        ).click_to_move
 
         self.assertEqual(
             low.pending_timeout_s,
-            SettingsManager.MIN_CLICK_TO_MOVE_PENDING_TIMEOUT_S,
+            SettingsDocumentCodec.MIN_CLICK_TO_MOVE_PENDING_TIMEOUT_S,
         )
         self.assertEqual(
             high.pending_timeout_s,
-            SettingsManager.MAX_CLICK_TO_MOVE_PENDING_TIMEOUT_S,
+            SettingsDocumentCodec.MAX_CLICK_TO_MOVE_PENDING_TIMEOUT_S,
         )
         self.assertEqual(
             fallback.pending_timeout_s,
-            SettingsManager.DEFAULT_CLICK_TO_MOVE_PENDING_TIMEOUT_S,
+            SettingsDocumentCodec.DEFAULT_CLICK_TO_MOVE_PENDING_TIMEOUT_S,
         )
 
 
@@ -453,15 +387,13 @@ class ApiSettingsTest(unittest.TestCase):
         self.assertEqual(restored, settings)
 
     def test_parse_api_normalizes_values(self) -> None:
-        manager = object.__new__(SettingsManager)
-
-        parsed = manager._parse_api(
-            {
+        parsed = _codec().decode(
+            {"api": {
                 "enabled": True,
                 "host": " 127.0.0.1 ",
                 "port": "8766",
-            }
-        )
+            }}
+        ).api
 
         self.assertTrue(parsed.enabled)
         self.assertEqual(parsed.host, "127.0.0.1")
@@ -486,21 +418,21 @@ class AxisCalibrationSettingsTest(unittest.TestCase):
 
 
 class SerialConnectionStateTest(unittest.TestCase):
-    def _manager_for_temp_dir(self, directory: Path) -> SettingsManager:
-        manager = object.__new__(SettingsManager)
-        manager._config_dir = directory
-        manager._logger = logging.getLogger("settings_manager_test")
-        return manager
+    def _documents_for_temp_dir(self, directory: Path) -> RuntimeStateDocuments:
+        return RuntimeStateDocuments(
+            directory,
+            logger=logging.getLogger("settings_manager_test"),
+        )
 
     def test_serial_auto_connect_defaults_to_disabled(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            manager = self._manager_for_temp_dir(Path(temp_dir))
+            manager = self._documents_for_temp_dir(Path(temp_dir))
 
             self.assertFalse(manager.serial_auto_connect_enabled())
 
     def test_serial_auto_connect_follows_last_saved_status(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            manager = self._manager_for_temp_dir(Path(temp_dir))
+            manager = self._documents_for_temp_dir(Path(temp_dir))
 
             manager.save_serial_connection_state(
                 True,
@@ -510,7 +442,7 @@ class SerialConnectionStateTest(unittest.TestCase):
 
             self.assertTrue(manager.serial_auto_connect_enabled())
             state_path = (
-                Path(temp_dir) / SettingsManager.SERIAL_CONNECTION_STATE_FILENAME
+                Path(temp_dir) / SERIAL_CONNECTION_STATE_FILENAME
             )
             with state_path.open("r", encoding="utf-8") as handle:
                 saved = json.load(handle)
@@ -524,7 +456,7 @@ class SerialConnectionStateTest(unittest.TestCase):
 
     def test_meter_auto_connect_follows_last_saved_status(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            manager = self._manager_for_temp_dir(Path(temp_dir))
+            manager = self._documents_for_temp_dir(Path(temp_dir))
 
             self.assertFalse(manager.meter_auto_connect_enabled())
 
@@ -536,7 +468,7 @@ class SerialConnectionStateTest(unittest.TestCase):
 
             self.assertTrue(manager.meter_auto_connect_enabled())
             state_path = (
-                Path(temp_dir) / SettingsManager.METER_CONNECTION_STATE_FILENAME
+                Path(temp_dir) / METER_CONNECTION_STATE_FILENAME
             )
             with state_path.open("r", encoding="utf-8") as handle:
                 saved = json.load(handle)
@@ -552,15 +484,25 @@ class SerialConnectionStateTest(unittest.TestCase):
 class SettingsLoadTest(unittest.TestCase):
     def test_load_accepts_utf8_bom_settings_file(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            config_path = Path(temp_dir) / SettingsManager.CONFIG_FILENAME
+            config_dir = Path(temp_dir) / "ProbeStationGUI"
+            config_dir.mkdir()
+            config_path = config_dir / SettingsManager.CONFIG_FILENAME
             config_path.write_text("\ufeff{}", encoding="utf-8")
-            manager = object.__new__(SettingsManager)
-            manager._config_path = config_path
-            manager._logger = logging.getLogger("settings_manager_test")
+            with patch.dict(
+                os.environ,
+                {
+                    "APPDATA": temp_dir,
+                    "LOCALAPPDATA": temp_dir,
+                    "XDG_CONFIG_HOME": str(Path(temp_dir) / "xdg-config"),
+                    "XDG_STATE_HOME": str(Path(temp_dir) / "xdg-state"),
+                },
+            ), patch(
+                "probe_station_gui.settings.manager.platform.system",
+                return_value="Windows",
+            ), patch("probe_station_gui.settings.manager.configure_logging"):
+                loaded = SettingsManager().settings
 
-            loaded = manager._load()
-
-            self.assertIsInstance(loaded, settings_manager.Settings)
+            self.assertIsInstance(loaded, Settings)
             bindings = loaded.controls.get("toggle_jog_step", [])
             self.assertEqual(len(bindings), 1)
             self.assertEqual(bindings[0].qt_key, 74)
