@@ -455,11 +455,14 @@ def test_layout_window_escape_cancels_transient_tool_state_and_selects(
 ) -> None:
     window = DesignLayoutWindow()
     window.navigator_panel._document = object()
-    window.navigator_panel._set_design_tool("guide")
+    window.navigator_panel._update_enabled_state()
+    window.navigator_panel._ruler_tool_button.click()
+    window.navigator_panel.apply_route_pick("ruler", 0.0, 0.0)
+    window.navigator_panel.apply_route_pick("ruler", 2.0, 0.0)
+    window.navigator_panel._guide_tool_button.click()
     window._main_view._guide_anchor = (1.0, 2.0)
     window._main_view._tool_sketch_points = [(1.0, 2.0)]
     window._main_view._tool_sketch_segments = [((0.0, 0.0), (3.0, 0.0))]
-    window.navigator_panel._ruler_segments = [((0.0, 0.0), (2.0, 0.0))]
 
     window._cancel_active_interaction()
 
@@ -468,11 +471,9 @@ def test_layout_window_escape_cancels_transient_tool_state_and_selects(
     assert window._main_view._tool_sketch_segments == [
         ((0.0, 0.0), (3.0, 0.0))
     ]
-    assert window.navigator_panel._ruler_segments == [
-        ((0.0, 0.0), (2.0, 0.0))
-    ]
+    assert window.navigator_panel._ruler_length_label.text() == "1 measurements"
     assert window._main_view.active_design_tool == "select"
-    assert window.navigator_panel._active_design_tool == "select"
+    assert window.navigator_panel._select_tool_button.isChecked()
     window.close()
     window.deleteLater()
 
@@ -482,7 +483,8 @@ def test_layout_window_forwards_modifier_snapshots_to_ruler(
 ) -> None:
     window = DesignLayoutWindow()
     window.navigator_panel._document = object()
-    window.navigator_panel._set_design_tool("ruler")
+    window.navigator_panel._update_enabled_state()
+    window.navigator_panel._ruler_tool_button.click()
 
     window._main_view.route_pick_requested.emit(
         "ruler",
@@ -508,8 +510,37 @@ def test_layout_window_forwards_modifier_snapshots_to_ruler(
         True,
         False,
     )
-    assert window.navigator_panel._ruler_segments == [
+    assert window._main_view._tool_measure_segments == [
         ((1.0, 2.0), (6.0, 2.0))
+    ]
+    window.close()
+    window.deleteLater()
+
+
+def test_alignment_accept_clears_plot_before_forwarding_accept(
+    qt_app: QApplication,
+) -> None:
+    window = DesignLayoutWindow()
+    window.navigator_panel._document = object()
+    window.navigator_panel._update_enabled_state()
+    window.navigator_panel._align_tool_button.click()
+    window.navigator_panel.append_alignment_point(1.0, 2.0)
+    window.navigator_panel.append_alignment_point(3.0, 4.0)
+    observed: list[tuple[str, list[tuple[float, float]], object]] = []
+    window.alignment_draft_accepted.connect(
+        lambda points: observed.append(
+            (
+                window._main_view.active_design_tool,
+                list(window._main_view._alignment_draft_points),
+                points,
+            )
+        )
+    )
+
+    window.navigator_panel.accept_alignment_draft()
+
+    assert observed == [
+        ("select", [], ((1.0, 2.0), (3.0, 4.0)))
     ]
     window.close()
     window.deleteLater()

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 from pathlib import Path
 
 from PySide6.QtCore import QItemSelectionModel, QPointF, QSize, Qt, Signal
@@ -44,9 +43,6 @@ from probe_station_gui.design.navigation_geometry import (
     format_bounds,
     format_mark_label,
     format_point,
-    route_pick_label_text,
-    vector_from_length_angle,
-    vector_length_angle,
 )
 from probe_station_gui.shared.wheel_guard import (
     GuardedComboBox as QComboBox,
@@ -60,15 +56,13 @@ from probe_station_gui.design.model import (
     Point2D,
     SnapResult,
 )
-from probe_station_gui.design.selection_geometry import constrain_vector_endpoint
 from probe_station_gui.design.selection_model import (
     EntityOwner,
-    MixedArrayRequest,
     SelectableDesignEntity,
     SelectionModel,
-    plan_mixed_array,
     route_entity_id,
 )
+import probe_station_gui.design.tool_session as design_tools
 from probe_station_gui.route.model import MeasurementRoute
 from probe_station_gui.views.design_navigator_enablement import (
     DesignNavigatorEnablement,
@@ -161,20 +155,13 @@ class DesignNavigatorPanel(QWidget):
         self._registration_instances: tuple[tuple[str, str], ...] = ()
         self._updating_registration_instances = False
         self._current_design_position: Point2D | None = None
-        self._active_design_tool = "select"
+        self._tool_session = design_tools.DesignToolSession()
         self._selection = SelectionModel()
         self._selectable_entities: tuple[SelectableDesignEntity, ...] = ()
         self._markup_visible = True
         self._markup_guide_count = 0
         self._guide_undo_available = False
         self._design_load_pending = False
-        self._route_pick_mode: str | None = None
-        self._route_pick_anchor_mode: str | None = None
-        self._route_pick_anchor_point: Point2D | None = None
-        self._ruler_anchor: Point2D | None = None
-        self._ruler_end: Point2D | None = None
-        self._ruler_segments: list[tuple[Point2D, Point2D]] = []
-        self._alignment_draft_points: list[Point2D] = []
         self._updating_route_controls = False
 
         root_layout = QVBoxLayout(self)
@@ -635,25 +622,25 @@ class DesignNavigatorPanel(QWidget):
             self._emit_route_measurement_move_to_selected
         )
         self._select_tool_button.clicked.connect(
-            lambda _checked=False: self._set_design_tool("select")
+            lambda _checked=False: self._activate_design_tool("select")
         )
         self._move_tool_button.clicked.connect(
-            lambda _checked=False: self._set_design_tool("move")
+            lambda _checked=False: self._activate_design_tool("move")
         )
         self._point_tool_button.clicked.connect(
-            lambda _checked=False: self._set_design_tool("point")
+            lambda _checked=False: self._activate_design_tool("point")
         )
         self._align_tool_button.clicked.connect(
-            lambda _checked=False: self._set_design_tool("align")
+            lambda _checked=False: self._activate_design_tool("align")
         )
         self._guide_tool_button.clicked.connect(
-            lambda _checked=False: self._set_design_tool("guide")
+            lambda _checked=False: self._activate_design_tool("guide")
         )
         self._ruler_tool_button.clicked.connect(
-            lambda _checked=False: self._set_design_tool("ruler")
+            lambda _checked=False: self._activate_design_tool("ruler")
         )
         self._array_tool_button.clicked.connect(
-            lambda _checked=False: self._set_design_tool("array")
+            lambda _checked=False: self._activate_design_tool("array")
         )
         self._rotate_tool_button.clicked.connect(
             lambda _checked=False: self.design_rotate_requested.emit(1)
@@ -666,21 +653,21 @@ class DesignNavigatorPanel(QWidget):
         )
         self._guide_undo_button.clicked.connect(self.guide_undo_requested.emit)
         self._guide_clear_button.clicked.connect(self.guide_clear_requested.emit)
-        self._ruler_clear_button.clicked.connect(self._clear_ruler)
+        self._ruler_clear_button.clicked.connect(self._clear_ruler_tool)
         self._ruler_cancel_button.clicked.connect(
-            lambda _checked=False: self._set_design_tool("select")
+            lambda _checked=False: self._activate_design_tool("select")
         )
-        self._alignment_undo_button.clicked.connect(self._undo_alignment_point)
-        self._alignment_clear_button.clicked.connect(self._clear_alignment_draft)
+        self._alignment_undo_button.clicked.connect(self._undo_alignment_draft)
+        self._alignment_clear_button.clicked.connect(self._clear_alignment_draft_adapter)
         self._alignment_done_button.clicked.connect(self.accept_alignment_draft)
         self._route_array_pick_dir1_button.clicked.connect(
-            lambda _checked=False: self._start_route_pick_mode("array_dir1")
+            lambda _checked=False: self._begin_array_direction("array_dir1")
         )
         self._route_array_pick_dir2_button.clicked.connect(
-            lambda _checked=False: self._start_route_pick_mode("array_dir2")
+            lambda _checked=False: self._begin_array_direction("array_dir2")
         )
-        self._route_array_create_button.clicked.connect(self._emit_route_array_requested)
-        self._route_array_cancel_button.clicked.connect(self._cancel_route_array)
+        self._route_array_create_button.clicked.connect(self._create_route_array)
+        self._route_array_cancel_button.clicked.connect(self._cancel_route_array_tool)
         for widget in (
             self._route_array_dir1_step_x_spin,
             self._route_array_dir1_step_y_spin,
@@ -691,9 +678,9 @@ class DesignNavigatorPanel(QWidget):
             self._route_array_serpentine_checkbox,
         ):
             if hasattr(widget, "valueChanged"):
-                widget.valueChanged.connect(self._update_route_array_preview)
+                widget.valueChanged.connect(self._on_array_controls_changed)
             else:
-                widget.toggled.connect(self._update_route_array_preview)
+                widget.toggled.connect(self._on_array_controls_changed)
         self._delete_shortcut = QShortcut(QKeySequence.Delete, self)
         self._delete_shortcut.setContext(Qt.WindowShortcut)
         self._delete_shortcut.activated.connect(
@@ -715,8 +702,7 @@ class DesignNavigatorPanel(QWidget):
 
         self._update_availability()
         self._update_enabled_state()
-        self._refresh_alignment_draft_ui()
-        self._set_design_tool("select")
+        self._apply_tool_transition(self._tool_session.activate("select"))
 
     def set_document(self, document: DesignDocument | None) -> None:
         if document is self._document:
@@ -724,7 +710,6 @@ class DesignNavigatorPanel(QWidget):
         self._document = document
         self._source_design_marks = [None, None]
         self._source_stage_marks = [None, None]
-        self._clear_alignment_draft()
         if document is None:
             self._document_label.setText("No design loaded.")
             self._top_cell_combo.blockSignals(True)
@@ -754,6 +739,7 @@ class DesignNavigatorPanel(QWidget):
                 self._layer_list.addItem(item)
             self._layer_list.blockSignals(False)
         self._update_mark_labels()
+        self._replace_tool_context(route_changed=True)
         self._update_enabled_state()
 
     def set_design_load_pending(self, pending: bool) -> None:
@@ -844,8 +830,8 @@ class DesignNavigatorPanel(QWidget):
             self._route_table.blockSignals(False)
         finally:
             self._updating_route_controls = False
+        self._replace_tool_context(route_changed=True)
         self._update_enabled_state()
-        self._update_route_array_preview()
 
     def set_selectable_entities(self, entities: object) -> None:
         if isinstance(entities, (list, tuple)) and all(
@@ -890,8 +876,8 @@ class DesignNavigatorPanel(QWidget):
             self._route_table.blockSignals(False)
             self._updating_route_controls = False
         self._selected_route_point_index = route_rows[0] if route_rows else -1
+        self._replace_tool_context()
         self._update_enabled_state()
-        self._update_route_array_preview()
 
     def set_markup_visible(self, visible: bool) -> None:
         self._markup_visible = bool(visible)
@@ -910,7 +896,6 @@ class DesignNavigatorPanel(QWidget):
                 )
             )
         self._update_enabled_state()
-        self._update_route_array_preview()
 
     def set_markup_state(self, *, visible: bool, guide_count: int) -> None:
         self._markup_guide_count = max(0, int(guide_count))
@@ -1005,6 +990,7 @@ class DesignNavigatorPanel(QWidget):
             self._route_run_status_label.setText("Route measurement running.")
         elif self._route_run_status_label.text() == "Route measurement running.":
             self._route_run_status_label.setText("Route measurement idle.")
+        self._replace_tool_context()
         self._update_enabled_state()
 
     def set_route_measurement_waiting(
@@ -1184,10 +1170,15 @@ class DesignNavigatorPanel(QWidget):
         shift: bool,
         control: bool,
     ) -> None:
-        self._update_tool_hover_preview(
-            snap_result,
-            shift=bool(shift),
-            control=bool(control),
+        if snap_result is None:
+            return
+        self._apply_tool_transition(
+            self._tool_session.hover(
+                snap_result.point,
+                shift=bool(shift),
+                control=bool(control),
+                generation=self._tool_session.context_generation,
+            )
         )
 
     def _update_mark_labels(self) -> None:
@@ -1269,10 +1260,11 @@ class DesignNavigatorPanel(QWidget):
     ) -> None:
         if state.has_document:
             return
-        if self._route_pick_mode is not None:
-            self._clear_route_pick_mode("Load a design to pick route geometry.")
-        if self._active_design_tool != "select":
-            self._set_design_tool("select")
+        if (
+            self._tool_session.pick_mode is not None
+            or self._tool_session.active_tool != "select"
+        ):
+            self._apply_tool_transition(self._tool_session.activate("select"))
 
     def _apply_design_tool_enabled_state(
         self,
@@ -1289,8 +1281,8 @@ class DesignNavigatorPanel(QWidget):
         self._markup_visibility_button.setEnabled(
             state.can_use_document_controls
         )
-        if self._active_design_tool == "move" and not state.can_move_design:
-            self._set_design_tool("select")
+        if self._tool_session.active_tool == "move" and not state.can_move_design:
+            self._apply_tool_transition(self._tool_session.activate("select"))
 
     def _apply_route_edit_enabled_state(
         self,
@@ -1560,15 +1552,114 @@ class DesignNavigatorPanel(QWidget):
             self._needle_2_dx_spin.value(),
             self._needle_2_dy_spin.value(),
         )
-        self._update_route_array_preview()
+        self._apply_tool_transition(self._tool_session.refresh_array_preview())
 
-    def _set_design_tool(self, tool: str) -> None:
-        if tool not in {"select", "move", "point", "guide", "ruler", "array", "align"}:
-            tool = "select"
-        previous_tool = self._active_design_tool
-        if previous_tool == "align" and tool != "align" and self._alignment_draft_points:
-            self._clear_alignment_draft(emit_discarded=True)
-        self._active_design_tool = tool
+    def _activate_design_tool(self, tool: str) -> None:
+        self._apply_tool_transition(self._tool_session.activate(tool))
+
+    def cancel_active_tool(self) -> None:
+        self._apply_tool_transition(self._tool_session.cancel())
+
+    def append_alignment_point(self, x_value: float, y_value: float) -> None:
+        self._apply_tool_transition(
+            self._tool_session.append_alignment_point(
+                (float(x_value), float(y_value))
+            )
+        )
+
+    def accept_alignment_draft(self) -> None:
+        self._apply_tool_transition(self._tool_session.accept_alignment())
+
+    def _undo_alignment_draft(self) -> None:
+        self._apply_tool_transition(self._tool_session.undo_alignment_point())
+
+    def _clear_alignment_draft_adapter(self, *_unused: object) -> None:
+        self._apply_tool_transition(self._tool_session.clear_alignment())
+
+    def _clear_ruler_tool(self) -> None:
+        self._apply_tool_transition(self._tool_session.clear_ruler())
+
+    def _begin_array_direction(self, mode: str) -> None:
+        self._replace_tool_context()
+        self._apply_tool_transition(
+            self._tool_session.begin_array_direction(mode)
+        )
+
+    def apply_route_pick(
+        self,
+        mode: str,
+        x_value: float,
+        y_value: float,
+        shift: bool = False,
+        control: bool = False,
+    ) -> None:
+        self._apply_tool_transition(
+            self._tool_session.pick(
+                (float(x_value), float(y_value)),
+                mode=mode,
+                generation=self._tool_session.context_generation,
+                shift=bool(shift),
+                control=bool(control),
+            )
+        )
+
+    def _create_route_array(self) -> None:
+        self._apply_tool_transition(self._tool_session.create_array())
+
+    def _cancel_route_array_tool(self) -> None:
+        self._apply_tool_transition(self._tool_session.cancel_array())
+
+    def _on_array_controls_changed(self, *_unused: object) -> None:
+        self._apply_tool_transition(
+            self._tool_session.configure_array(
+                self._array_configuration_from_controls()
+            )
+        )
+
+    def _array_configuration_from_controls(self) -> design_tools.ArrayToolConfiguration:
+        return design_tools.ArrayToolConfiguration(
+            direction_1_length=self._route_array_dir1_step_x_spin.value(),
+            direction_1_angle_degrees=self._route_array_dir1_step_y_spin.value(),
+            count_1=self._route_array_dir1_count_spin.value(),
+            direction_2_length=self._route_array_dir2_step_x_spin.value(),
+            direction_2_angle_degrees=self._route_array_dir2_step_y_spin.value(),
+            count_2=self._route_array_dir2_count_spin.value(),
+            serpentine=self._route_array_serpentine_checkbox.isChecked(),
+        )
+
+    def _replace_tool_context(self, *, route_changed: bool = False) -> None:
+        context = self._tool_session.context.replace_inputs(
+            document_token=(id(self._document) if self._document is not None else None),
+            selection_ids=self._selection.ids,
+            selectable_entities=self._selectable_entities,
+            edit_safe=not self._route_measurement_running,
+        )
+        if route_changed:
+            context = context.replace_route(self._route)
+        self._apply_tool_transition(
+            self._tool_session.replace_context(context)
+        )
+
+    def _apply_tool_transition(
+        self,
+        transition: design_tools.DesignToolTransition,
+    ) -> None:
+        if transition.stages:
+            for stage in transition.stages:
+                self._tool_session = stage.session.rebase_context_from(
+                    self._tool_session
+                )
+                self._render_tool_session()
+                for effect in stage.effects:
+                    self._emit_tool_effect(effect)
+            return
+        self._tool_session = transition.session
+        self._render_tool_session()
+        for effect in transition.effects:
+            self._emit_tool_effect(effect)
+
+    def _render_tool_session(self) -> None:
+        tool = self._tool_session.active_tool
         button_by_tool = {
             "select": self._select_tool_button,
             "move": self._move_tool_button,
@@ -1592,377 +1683,72 @@ class DesignNavigatorPanel(QWidget):
             "align": 6,
         }
         self._tool_stack.setCurrentIndex(stack_index_by_tool[tool])
-        self._clear_route_pick_mode("")
         self._tool_group.setVisible(True)
-        self.active_design_tool_changed.emit(tool)
-        if tool == "select":
-            self.route_preview_changed.emit(None)
-            self.mixed_array_preview_changed.emit([], [])
-            self.tool_measure_preview_changed.emit(None)
-            self._tool_status_label.setText("")
-        elif tool == "move":
-            self.route_preview_changed.emit(None)
-            self.mixed_array_preview_changed.emit([], [])
-            self.tool_measure_preview_changed.emit(None)
-            self._tool_status_label.setText("")
-        elif tool == "point":
-            self.route_preview_changed.emit(None)
-            self.mixed_array_preview_changed.emit([], [])
-            self.tool_measure_preview_changed.emit(None)
-            self._tool_status_label.setText("")
-        elif tool == "align":
-            self.route_preview_changed.emit(None)
-            self.mixed_array_preview_changed.emit([], [])
-            self.tool_measure_preview_changed.emit(None)
-            self._refresh_alignment_draft_ui()
-        elif tool == "guide":
-            self.route_preview_changed.emit(None)
-            self.mixed_array_preview_changed.emit([], [])
-            self.tool_measure_preview_changed.emit(None)
-            self._tool_status_label.setText("Click two points.")
-        elif tool == "ruler":
-            self.route_preview_changed.emit(None)
-            self.mixed_array_preview_changed.emit([], [])
-            self._ruler_anchor = None
-            self._ruler_end = None
-            self._update_ruler_labels()
-            self._tool_status_label.setText("")
-            self._route_pick_mode = "ruler"
-            self.route_pick_mode_changed.emit("ruler")
-        else:
-            self.tool_measure_preview_changed.emit(None)
-            self._tool_status_label.setText("Adjust array directions and counts.")
-            self._update_route_array_preview()
+        self._tool_status_label.setText(self._tool_session.status_message)
+        self._alignment_points_label.setText(self._tool_session.alignment_text)
+        has_alignment_points = bool(self._tool_session.alignment_draft)
+        self._alignment_undo_button.setEnabled(has_alignment_points)
+        self._alignment_clear_button.setEnabled(has_alignment_points)
+        self._alignment_done_button.setEnabled(self._tool_session.alignment_valid)
+        readout = self._tool_session.ruler_readout
+        self._ruler_start_label.setText(readout.start_text)
+        self._ruler_end_label.setText(readout.end_text)
+        self._ruler_delta_label.setText(readout.delta_text)
+        self._ruler_length_label.setText(readout.length_text)
+        self._render_array_configuration()
 
-    def cancel_active_tool(self) -> None:
-        if self._active_design_tool == "select":
-            self._clear_route_pick_mode("")
-            return
-        if self._active_design_tool == "ruler":
-            self._ruler_anchor = None
-            self._ruler_end = None
-            self._update_ruler_labels()
-            self.tool_measure_preview_changed.emit(None)
-        if self._active_design_tool == "align":
-            self._clear_alignment_draft(emit_discarded=True)
-        self._set_design_tool("select")
-
-    @property
-    def alignment_draft_points(self) -> tuple[Point2D, ...]:
-        return tuple(self._alignment_draft_points)
-
-    def append_alignment_point(self, x_value: float, y_value: float) -> None:
-        if self._active_design_tool != "align":
-            return
-        self._alignment_draft_points.append((float(x_value), float(y_value)))
-        self.alignment_draft_changed.emit(self.alignment_draft_points)
-        self._refresh_alignment_draft_ui()
-
-    def accept_alignment_draft(self) -> None:
-        if self._active_design_tool != "align" or not self._alignment_draft_is_valid():
-            return
-        points = self.alignment_draft_points
-        self._clear_alignment_draft()
-        self._set_design_tool("select")
-        self.alignment_draft_accepted.emit(points)
-
-    def _undo_alignment_point(self) -> None:
-        if not self._alignment_draft_points:
-            return
-        self._alignment_draft_points.pop()
-        self.alignment_draft_changed.emit(self.alignment_draft_points)
-        self._refresh_alignment_draft_ui()
-
-    def _clear_alignment_draft(self, *, emit_discarded: bool = False) -> None:
-        had_points = bool(self._alignment_draft_points)
-        self._alignment_draft_points.clear()
-        if had_points:
-            self.alignment_draft_changed.emit(())
-        if emit_discarded:
-            self.alignment_draft_discarded.emit()
-        self._refresh_alignment_draft_ui()
-
-    def _alignment_draft_is_valid(self) -> bool:
-        return (
-            len(self._alignment_draft_points) >= 2
-            and len(set(self._alignment_draft_points)) >= 2
+    def _render_array_configuration(self) -> None:
+        config = self._tool_session.array_configuration
+        values = (
+            (self._route_array_dir1_step_x_spin, config.direction_1_length),
+            (self._route_array_dir1_step_y_spin, config.direction_1_angle_degrees),
+            (self._route_array_dir1_count_spin, config.count_1),
+            (self._route_array_dir2_step_x_spin, config.direction_2_length),
+            (self._route_array_dir2_step_y_spin, config.direction_2_angle_degrees),
+            (self._route_array_dir2_count_spin, config.count_2),
+            (self._route_array_serpentine_checkbox, config.serpentine),
         )
-
-    def _refresh_alignment_draft_ui(self) -> None:
-        if not self._alignment_draft_points:
-            text = "Click geometry to add D1, D2, and more."
-        else:
-            text = "\n".join(
-                f"D{index}: {self._format_point(point)}"
-                for index, point in enumerate(self._alignment_draft_points, start=1)
-            )
-        self._alignment_points_label.setText(text)
-        self._alignment_undo_button.setEnabled(bool(self._alignment_draft_points))
-        self._alignment_clear_button.setEnabled(bool(self._alignment_draft_points))
-        self._alignment_done_button.setEnabled(self._alignment_draft_is_valid())
-
-    def _clear_ruler(self) -> None:
-        self._ruler_anchor = None
-        self._ruler_end = None
-        self._ruler_segments.clear()
-        self._update_ruler_labels()
-        self.tool_measure_preview_changed.emit(None)
-        self.tool_measurements_changed.emit([])
-        if self._active_design_tool == "ruler":
-            self._tool_status_label.setText("")
-
-    def _update_ruler_labels(self) -> None:
-        self._ruler_start_label.setText(
-            "Start: not set"
-            if self._ruler_anchor is None
-            else f"Start: {self._format_point(self._ruler_anchor)}"
-        )
-        self._ruler_end_label.setText(
-            "End: not set"
-            if self._ruler_end is None
-            else f"End: {self._format_point(self._ruler_end)}"
-        )
-        if self._ruler_anchor is None or self._ruler_end is None:
-            self._ruler_delta_label.setText("dX=0.000, dY=0.000")
-            self._ruler_length_label.setText("Length=0.000, Angle=0.000 deg")
-            if self._ruler_segments:
-                self._ruler_length_label.setText(
-                    f"{len(self._ruler_segments)} measurements"
-                )
-            return
-        dx = self._ruler_end[0] - self._ruler_anchor[0]
-        dy = self._ruler_end[1] - self._ruler_anchor[1]
-        length = math.hypot(dx, dy)
-        angle = math.degrees(math.atan2(dy, dx)) if length > 0.0 else 0.0
-        self._ruler_delta_label.setText(f"dX={dx:.3f}, dY={dy:.3f}")
-        self._ruler_length_label.setText(f"Length={length:.3f}, Angle={angle:.3f} deg")
-
-    def _start_route_pick_mode(self, mode: str) -> None:
-        if self._document is None:
-            self._tool_status_label.setText("Load a design to pick geometry.")
-            return
-        if self._active_design_tool != "array":
-            self._set_design_tool("array")
-        self._route_pick_mode = mode
-        self._route_pick_anchor_mode = None
-        self._route_pick_anchor_point = None
-        self.tool_measure_preview_changed.emit(None)
-        self._tool_status_label.setText(f"Click design for {self._route_pick_label_text(mode)}.")
-        self.route_pick_mode_changed.emit(mode)
-
-    def _clear_route_pick_mode(self, status: str = "") -> None:
-        self._route_pick_anchor_mode = None
-        self._route_pick_anchor_point = None
-        if self._route_pick_mode is not None:
-            self._route_pick_mode = None
-            self.route_pick_mode_changed.emit(None)
-        self.tool_measure_preview_changed.emit(None)
-        self._tool_status_label.setText(status)
-
-    def apply_route_pick(
-        self,
-        mode: str,
-        x_value: float,
-        y_value: float,
-        shift: bool = False,
-        control: bool = False,
-    ) -> None:
-        point = (float(x_value), float(y_value))
-        status = ""
-        if mode == "ruler":
-            if self._ruler_anchor is None:
-                self._ruler_anchor = point
-                self._ruler_end = None
-                self.tool_measure_preview_changed.emit([point])
+        for widget, value in values:
+            widget.blockSignals(True)
+            if isinstance(widget, QCheckBox):
+                widget.setChecked(bool(value))
             else:
-                point = constrain_vector_endpoint(
-                    self._ruler_anchor,
-                    point,
-                    shift=bool(shift),
-                    control=bool(control),
-                )
-                self._ruler_end = point
-                self._ruler_segments.append((self._ruler_anchor, point))
-                self.tool_measurements_changed.emit(list(self._ruler_segments))
-                self.tool_measure_preview_changed.emit(None)
-                self._ruler_anchor = None
-                self._ruler_end = None
-            self._update_ruler_labels()
-            self._route_pick_mode = "ruler"
-            self.route_pick_mode_changed.emit("ruler")
-            return
-        if mode == "array_dir1":
-            anchor = self._route_vector_anchor_or_none(mode, point, "Direction 1")
-            if anchor is None:
-                return
-            point = constrain_vector_endpoint(
-                anchor,
-                point,
-                shift=bool(shift),
-                control=bool(control),
-            )
-            step = (point[0] - anchor[0], point[1] - anchor[1])
-            length, angle = self._vector_length_angle(step)
-            self._route_array_dir1_step_x_spin.setValue(length)
-            self._route_array_dir1_step_y_spin.setValue(angle)
-            status = f"Direction 1 set to length={length:.3f}, angle={angle:.3f} deg."
-        elif mode == "array_dir2":
-            anchor = self._route_vector_anchor_or_none(mode, point, "Direction 2")
-            if anchor is None:
-                return
-            point = constrain_vector_endpoint(
-                anchor,
-                point,
-                shift=bool(shift),
-                control=bool(control),
-            )
-            step = (point[0] - anchor[0], point[1] - anchor[1])
-            length, angle = self._vector_length_angle(step)
-            self._route_array_dir2_step_x_spin.setValue(length)
-            self._route_array_dir2_step_y_spin.setValue(angle)
-            status = f"Direction 2 set to length={length:.3f}, angle={angle:.3f} deg."
-        else:
-            status = "Unknown route pick mode."
-        self._clear_route_pick_mode(status)
-        self._update_route_array_preview()
+                widget.setValue(value)
+            widget.blockSignals(False)
 
-    def _route_vector_anchor_or_none(
-        self,
-        mode: str,
-        point: Point2D,
-        label: str,
-    ) -> Point2D | None:
-        if self._route_pick_anchor_mode != mode or self._route_pick_anchor_point is None:
-            self._route_pick_anchor_mode = mode
-            self._route_pick_anchor_point = point
-            self.tool_measure_preview_changed.emit([point])
-            self._tool_status_label.setText(
-                f"{label} vector starts at {self._format_point(point)}; click endpoint."
+    def _emit_tool_effect(self, effect: design_tools.DesignToolEffect) -> None:
+        kind = effect.kind
+        value = effect.value
+        if kind is design_tools.DesignToolEffectKind.ACTIVE_TOOL_CHANGED:
+            self.active_design_tool_changed.emit(str(value))
+        elif kind is design_tools.DesignToolEffectKind.PICK_MODE_CHANGED:
+            self.route_pick_mode_changed.emit(value)
+        elif kind is design_tools.DesignToolEffectKind.ROUTE_PREVIEW_CHANGED:
+            self.route_preview_changed.emit(value)
+        elif kind is design_tools.DesignToolEffectKind.MEASURE_PREVIEW_CHANGED:
+            self.tool_measure_preview_changed.emit(
+                None if value is None else list(value)
             )
-            return None
-        return self._route_pick_anchor_point
-
-    def _emit_route_array_requested(self) -> None:
-        if not self._selection.ids:
-            return
-        request = MixedArrayRequest(
-            direction_1=self._route_array_dir1_step(),
-            count_1=self._route_array_dir1_count_spin.value(),
-            direction_2=self._route_array_dir2_step(),
-            count_2=self._route_array_dir2_count_spin.value(),
-            serpentine=self._route_array_serpentine_checkbox.isChecked(),
-            source_ids=self._selection.ids,
-        )
-        self.mixed_array_requested.emit(request)
-        self._set_design_tool("select")
-
-    def _cancel_route_array(self) -> None:
-        self.route_preview_changed.emit(None)
-        self.mixed_array_preview_changed.emit([], [])
-        self._set_design_tool("select")
-
-    def _update_tool_hover_preview(
-        self,
-        snap_result: SnapResult | None,
-        *,
-        shift: bool = False,
-        control: bool = False,
-    ) -> None:
-        if snap_result is None:
-            return
-        point = snap_result.point
-        if self._active_design_tool == "ruler":
-            if self._ruler_anchor is not None and self._ruler_end is None:
-                point = constrain_vector_endpoint(
-                    self._ruler_anchor,
-                    point,
-                    shift=bool(shift),
-                    control=bool(control),
-                )
-                self.tool_measure_preview_changed.emit([self._ruler_anchor, point])
-                self._ruler_end = point
-                self._update_ruler_labels()
-                self._ruler_end = None
-            return
-        if self._active_design_tool != "array":
-            return
-        if self._route_pick_mode == "array_dir1" and self._route_pick_anchor_point is not None:
-            point = constrain_vector_endpoint(
-                self._route_pick_anchor_point,
-                point,
-                shift=bool(shift),
-                control=bool(control),
+        elif kind is design_tools.DesignToolEffectKind.MEASUREMENTS_CHANGED:
+            self.tool_measurements_changed.emit(list(value))
+        elif kind is design_tools.DesignToolEffectKind.ALIGNMENT_CHANGED:
+            self.alignment_draft_changed.emit(tuple(value))
+        elif kind is design_tools.DesignToolEffectKind.ALIGNMENT_ACCEPTED:
+            self.alignment_draft_accepted.emit(tuple(value))
+        elif kind is design_tools.DesignToolEffectKind.ALIGNMENT_DISCARDED:
+            self.alignment_draft_discarded.emit()
+        elif kind is design_tools.DesignToolEffectKind.MIXED_ARRAY_REQUESTED:
+            self.mixed_array_requested.emit(value)
+        elif kind is design_tools.DesignToolEffectKind.MIXED_ARRAY_PREVIEW_CHANGED:
+            preview = (
+                value
+                if isinstance(value, design_tools.MixedArrayPreview)
+                else design_tools.MixedArrayPreview()
             )
-            step = (
-                point[0] - self._route_pick_anchor_point[0],
-                point[1] - self._route_pick_anchor_point[1],
+            self.mixed_array_preview_changed.emit(
+                list(preview.route_points),
+                list(preview.guide_segments),
             )
-            self.tool_measure_preview_changed.emit([self._route_pick_anchor_point, point])
-            self._update_route_array_preview(dir1_override=step)
-        elif self._route_pick_mode == "array_dir2" and self._route_pick_anchor_point is not None:
-            point = constrain_vector_endpoint(
-                self._route_pick_anchor_point,
-                point,
-                shift=bool(shift),
-                control=bool(control),
-            )
-            step = (
-                point[0] - self._route_pick_anchor_point[0],
-                point[1] - self._route_pick_anchor_point[1],
-            )
-            self.tool_measure_preview_changed.emit([self._route_pick_anchor_point, point])
-            self._update_route_array_preview(dir2_override=step)
-
-    def _update_route_array_preview(
-        self,
-        *_unused: object,
-        dir1_override: Point2D | None = None,
-        dir2_override: Point2D | None = None,
-    ) -> None:
-        if (
-            self._document is None
-            or self._active_design_tool != "array"
-            or not self._selection.ids
-        ):
-            self.route_preview_changed.emit(None)
-            self.mixed_array_preview_changed.emit([], [])
-            return
-        dir1 = dir1_override or self._route_array_dir1_step()
-        dir2 = dir2_override or self._route_array_dir2_step()
-        request = MixedArrayRequest(
-            direction_1=dir1,
-            count_1=self._route_array_dir1_count_spin.value(),
-            direction_2=dir2,
-            count_2=self._route_array_dir2_count_spin.value(),
-            serpentine=self._route_array_serpentine_checkbox.isChecked(),
-            source_ids=self._selection.ids,
-        )
-        plan = plan_mixed_array(
-            self._selectable_entities,
-            self._selection.ids,
-            request,
-            route=self._route,
-            edit_safe=not self._route_measurement_running,
-        )
-        if not plan.accepted:
-            self.mixed_array_preview_changed.emit([], [])
-            return
-        self.mixed_array_preview_changed.emit(
-            [point.camera_center for point in plan.route_copies],
-            [guide.geometry() for guide in plan.guide_copies],
-        )
-
-    def _route_array_dir1_step(self) -> Point2D:
-        return self._vector_from_length_angle(
-            self._route_array_dir1_step_x_spin.value(),
-            self._route_array_dir1_step_y_spin.value(),
-        )
-
-    def _route_array_dir2_step(self) -> Point2D:
-        return self._vector_from_length_angle(
-            self._route_array_dir2_step_x_spin.value(),
-            self._route_array_dir2_step_y_spin.value(),
-        )
 
     def _current_route_offset_vectors(self) -> list[Point2D]:
         if self._route is not None and len(self._route.needle_offsets) >= 2:
@@ -1974,18 +1760,6 @@ class DesignNavigatorPanel(QWidget):
             (self._needle_1_dx_spin.value(), self._needle_1_dy_spin.value()),
             (self._needle_2_dx_spin.value(), self._needle_2_dy_spin.value()),
         ]
-
-    @staticmethod
-    def _vector_from_length_angle(length: float, angle_degrees: float) -> Point2D:
-        return vector_from_length_angle(length, angle_degrees)
-
-    @staticmethod
-    def _vector_length_angle(vector: Point2D) -> tuple[float, float]:
-        return vector_length_angle(vector)
-
-    @staticmethod
-    def _route_pick_label_text(mode: str) -> str:
-        return route_pick_label_text(mode)
 
     def _choose_design_file(self) -> None:  # pragma: no cover - UI interaction
         start_directory = self._design_dialog_directory
@@ -2091,7 +1865,7 @@ class DesignNavigatorPanel(QWidget):
         else:
             self.selection_requested.emit(route_ids, "replace")
         self._update_enabled_state()
-        self._update_route_array_preview()
+        self._apply_tool_transition(self._tool_session.refresh_array_preview())
 
     def _route_selection_modifiers(self) -> Qt.KeyboardModifiers:
         return QApplication.keyboardModifiers()

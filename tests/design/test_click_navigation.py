@@ -212,7 +212,7 @@ def test_route_array_request_uses_shared_selected_entity_ids() -> None:
     emitted: list[MixedArrayRequest] = []
     panel.mixed_array_requested.connect(emitted.append)
 
-    panel._emit_route_array_requested()
+    panel._route_array_create_button.click()
 
     assert emitted[-1].source_ids == frozenset(
         {route_entity_id("p001"), route_entity_id("p003")}

@@ -12,6 +12,7 @@ pytest.importorskip("PySide6")
 from PySide6.QtCore import QItemSelectionModel, Qt
 from PySide6.QtWidgets import QApplication
 
+import probe_station_gui.design.tool_context as tool_contexts
 from probe_station_gui.design.model import SnapResult
 from probe_station_gui.design.selection_geometry import PointGeometry, SegmentGeometry
 from probe_station_gui.design.selection_model import (
@@ -61,10 +62,11 @@ def test_design_navigator_disables_document_and_route_controls_without_design(
     qt_app: QApplication,
 ) -> None:
     panel = DesignNavigatorPanel()
-    panel._route_pick_mode = "array_origin"
-    panel._active_design_tool = "ruler"
-
+    panel._document = object()
     panel._update_enabled_state()
+    panel._ruler_tool_button.click()
+
+    panel.set_document(None)
 
     assert not panel._unload_design_button.isEnabled()
     assert not panel._top_cell_combo.isEnabled()
@@ -76,8 +78,7 @@ def test_design_navigator_disables_document_and_route_controls_without_design(
     assert not panel._ruler_tool_button.isEnabled()
     assert not panel._array_tool_button.isEnabled()
     assert not panel._rotate_tool_button.isEnabled()
-    assert panel._route_pick_mode is None
-    assert panel._active_design_tool == "select"
+    assert panel._select_tool_button.isChecked()
 
     panel.deleteLater()
 
@@ -248,9 +249,9 @@ def test_move_tool_is_adjacent_to_select_and_requires_registration(qt_app) -> No
     assert panel._move_tool_button.isEnabled() is True
 
     panel._move_tool_button.click()
-    assert panel._active_design_tool == "move"
+    assert panel._move_tool_button.isChecked()
     panel.set_design_registration_active(False)
-    assert panel._active_design_tool == "select"
+    assert panel._select_tool_button.isChecked()
     panel.deleteLater()
 
 
@@ -262,7 +263,7 @@ def test_route_run_disables_move_tool(qt_app) -> None:
     panel._move_tool_button.click()
     panel.set_route_measurement_running(True)
     assert panel._move_tool_button.isEnabled() is False
-    assert panel._active_design_tool == "select"
+    assert panel._select_tool_button.isChecked()
     panel.deleteLater()
 
 
@@ -276,7 +277,7 @@ def test_design_load_disables_move_tool_and_returns_to_select(qt_app) -> None:
     panel.set_design_load_pending(True)
 
     assert panel._move_tool_button.isEnabled() is False
-    assert panel._active_design_tool == "select"
+    assert panel._select_tool_button.isChecked()
     panel.deleteLater()
 
 
@@ -290,12 +291,10 @@ def test_move_tool_is_exclusive_and_escape_returns_select(qt_app) -> None:
     panel._move_tool_button.click()
     assert panel._move_tool_button.isChecked()
     assert not panel._select_tool_button.isChecked()
-    assert panel._active_design_tool == "move"
 
     panel.cancel_active_tool()
     assert panel._select_tool_button.isChecked()
     assert not panel._move_tool_button.isChecked()
-    assert panel._active_design_tool == "select"
     assert tools[-2:] == ["move", "select"]
     panel.deleteLater()
 
@@ -316,8 +315,7 @@ def test_align_tool_builds_numbered_draft_with_undo_clear_and_done(
     panel.append_alignment_point(5.0, 6.0)
     panel.append_alignment_point(9.0, 3.0)
 
-    assert panel._active_design_tool == "align"
-    assert panel.alignment_draft_points == (
+    assert changed[-1] == (
         (1.0, 2.0),
         (5.0, 6.0),
         (9.0, 3.0),
@@ -327,11 +325,11 @@ def test_align_tool_builds_numbered_draft_with_undo_clear_and_done(
     assert panel._alignment_done_button.isEnabled()
 
     panel._alignment_undo_button.click()
-    assert panel.alignment_draft_points == ((1.0, 2.0), (5.0, 6.0))
+    assert changed[-1] == ((1.0, 2.0), (5.0, 6.0))
     panel._alignment_done_button.click()
 
     assert accepted == [((1.0, 2.0), (5.0, 6.0))]
-    assert panel._active_design_tool == "select"
+    assert panel._select_tool_button.isChecked()
     assert changed
     panel.deleteLater()
 
@@ -348,8 +346,8 @@ def test_align_done_requires_two_distinct_points_and_clear_keeps_tool_active(
 
     assert not panel._alignment_done_button.isEnabled()
     panel._alignment_clear_button.click()
-    assert panel.alignment_draft_points == ()
-    assert panel._active_design_tool == "align"
+    assert panel._alignment_points_label.text() == "Click geometry to add D1, D2, and more."
+    assert panel._align_tool_button.isChecked()
     panel.deleteLater()
 
 
@@ -369,9 +367,58 @@ def test_escape_discards_align_draft_and_returns_to_select(
 
     panel.cancel_active_tool()
 
-    assert panel.alignment_draft_points == ()
-    assert panel._active_design_tool == "select"
+    assert panel._alignment_points_label.text() == "Click geometry to add D1, D2, and more."
+    assert panel._select_tool_button.isChecked()
     assert discarded == [True]
+    panel.deleteLater()
+
+
+def test_align_discard_observers_see_align_until_next_tool_commits(
+    qt_app: QApplication,
+) -> None:
+    panel = DesignNavigatorPanel()
+    panel._document = object()
+    panel._update_enabled_state()
+    panel._align_tool_button.click()
+    panel.append_alignment_point(1.0, 2.0)
+    observed: list[tuple[object, ...]] = []
+    panel.alignment_draft_changed.connect(
+        lambda points: observed.append(
+            (
+                "changed",
+                points,
+                panel._align_tool_button.isChecked(),
+                panel._guide_tool_button.isChecked(),
+            )
+        )
+    )
+    panel.alignment_draft_discarded.connect(
+        lambda: observed.append(
+            (
+                "discarded",
+                panel._align_tool_button.isChecked(),
+                panel._guide_tool_button.isChecked(),
+            )
+        )
+    )
+    panel.active_design_tool_changed.connect(
+        lambda tool: observed.append(
+            (
+                "active",
+                tool,
+                panel._align_tool_button.isChecked(),
+                panel._guide_tool_button.isChecked(),
+            )
+        )
+    )
+
+    panel._guide_tool_button.click()
+
+    assert observed == [
+        ("changed", (), True, False),
+        ("discarded", True, False),
+        ("active", "guide", False, True),
+    ]
     panel.deleteLater()
 
 
@@ -397,7 +444,8 @@ def test_ruler_preview_and_commit_share_shift_constraint(
 ) -> None:
     panel = DesignNavigatorPanel()
     panel._document = object()
-    panel._set_design_tool("ruler")
+    panel._update_enabled_state()
+    panel._ruler_tool_button.click()
     previews: list[object] = []
     completed: list[object] = []
     panel.tool_measure_preview_changed.connect(previews.append)
@@ -421,10 +469,11 @@ def test_array_directions_use_ctrl_diagonal_for_commit_and_preview(
 ) -> None:
     panel = DesignNavigatorPanel()
     panel._document = object()
+    panel._update_enabled_state()
     previews: list[object] = []
     panel.tool_measure_preview_changed.connect(previews.append)
 
-    panel._start_route_pick_mode("array_dir1")
+    panel._route_array_pick_dir1_button.click()
     panel.apply_route_pick("array_dir1", 0.0, 0.0, False, False)
     panel.apply_route_pick("array_dir1", 4.0, 3.0, False, True)
 
@@ -434,7 +483,7 @@ def test_array_directions_use_ctrl_diagonal_for_commit_and_preview(
     )
     assert panel._route_array_dir1_step_y_spin.value() == pytest.approx(45.0)
 
-    panel._start_route_pick_mode("array_dir2")
+    panel._route_array_pick_dir2_button.click()
     panel.apply_route_pick("array_dir2", 0.0, 0.0, False, False)
     panel.set_tool_hover_snap(
         SnapResult((4.0, -3.0), "vertex", 0.1),
@@ -451,16 +500,19 @@ def test_escape_exits_ruler_but_preserves_completed_segments(
 ) -> None:
     panel = DesignNavigatorPanel()
     panel._document = object()
-    panel._set_design_tool("ruler")
+    panel._update_enabled_state()
+    panel._ruler_tool_button.click()
+    completed: list[object] = []
+    panel.tool_measurements_changed.connect(completed.append)
     panel.apply_route_pick("ruler", 0.0, 0.0)
     panel.apply_route_pick("ruler", 2.0, 0.0)
     panel.apply_route_pick("ruler", 5.0, 5.0)
 
     panel.cancel_active_tool()
 
-    assert panel._active_design_tool == "select"
-    assert panel._ruler_anchor is None
-    assert panel._ruler_segments == [((0.0, 0.0), (2.0, 0.0))]
+    assert panel._select_tool_button.isChecked()
+    assert completed == [[((0.0, 0.0), (2.0, 0.0))]]
+    assert panel._ruler_length_label.text() == "1 measurements"
     panel.deleteLater()
 
 
@@ -471,11 +523,15 @@ def test_escape_returns_drawing_tools_to_select(
 ) -> None:
     panel = DesignNavigatorPanel()
     panel._document = object()
-    panel._set_design_tool(tool)
+    panel._update_enabled_state()
+    {
+        "point": panel._point_tool_button,
+        "guide": panel._guide_tool_button,
+        "array": panel._array_tool_button,
+    }[tool].click()
 
     panel.cancel_active_tool()
 
-    assert panel._active_design_tool == "select"
     assert panel._select_tool_button.isChecked()
     panel.deleteLater()
 
@@ -554,6 +610,98 @@ def test_array_create_requires_one_selected_visible_entity(
     assert panel._route_array_create_button.isEnabled()
     panel.set_markup_visible(False)
     assert not panel._route_array_create_button.isEnabled()
+    panel.deleteLater()
+
+
+def test_array_request_observer_sees_array_until_select_effect(
+    qt_app: QApplication,
+) -> None:
+    panel = DesignNavigatorPanel()
+    panel._document = object()
+    guide = SelectableDesignEntity(
+        markup_entity_id("g1"),
+        EntityOwner.MARKUP,
+        "g1",
+        SegmentGeometry((0.0, 0.0), (1.0, 0.0)),
+    )
+    panel.set_selectable_entities([guide])
+    panel.set_selection(SelectionModel(frozenset({guide.id})))
+    panel._array_tool_button.click()
+    observed: list[tuple[object, ...]] = []
+
+    def observe_request(_request: object) -> None:
+        observed.append(
+            (
+                "request",
+                panel._array_tool_button.isChecked(),
+                panel._select_tool_button.isChecked(),
+            )
+        )
+        panel.set_selection(SelectionModel())
+
+    panel.mixed_array_requested.connect(observe_request)
+    panel.active_design_tool_changed.connect(
+        lambda tool: observed.append(
+            (
+                "active",
+                tool,
+                panel._array_tool_button.isChecked(),
+                panel._select_tool_button.isChecked(),
+            )
+        )
+    )
+
+    panel._route_array_create_button.click()
+
+    assert observed == [
+        ("request", True, False),
+        ("active", "select", False, True),
+    ]
+    assert not panel._tool_session.context.selection_ids
+    panel.deleteLater()
+
+
+def test_selection_refresh_reuses_the_route_snapshot(
+    qt_app: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    capture_calls: list[MeasurementRoute] = []
+    original_capture = tool_contexts._RouteSnapshot.capture.__func__
+
+    def counted_capture(
+        cls: type[tool_contexts._RouteSnapshot],
+        route: MeasurementRoute,
+    ) -> tool_contexts._RouteSnapshot:
+        capture_calls.append(route)
+        return original_capture(cls, route)
+
+    monkeypatch.setattr(
+        tool_contexts._RouteSnapshot,
+        "capture",
+        classmethod(counted_capture),
+    )
+    panel = DesignNavigatorPanel()
+    panel._document = object()
+    route = _route(point_count=2)
+    panel.set_route(route, selected_route_point_index=0)
+    entities = [
+        SelectableDesignEntity(
+            route_entity_id(point.id),
+            EntityOwner.ROUTE,
+            point.id,
+            PointGeometry(point.camera_center),
+            route_index=index,
+        )
+        for index, point in enumerate(route.points)
+    ]
+    captures_after_route = len(capture_calls)
+
+    panel.set_selectable_entities(entities)
+    panel.set_selection(SelectionModel(frozenset({entities[0].id})))
+    panel.set_selection(SelectionModel(frozenset({entities[1].id})))
+
+    assert captures_after_route == 1
+    assert len(capture_calls) == captures_after_route
     panel.deleteLater()
 
 

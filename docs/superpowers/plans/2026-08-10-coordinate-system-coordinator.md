@@ -658,6 +658,72 @@ git commit -m "refactor: split coordinate adapter responsibilities"
   `design_layout_window.py 31.25`, `layout_state.py 43.54`, and
   `test_layout_state.py 38.35`.
 
+#### Task 5b: Centralize the Design tool session
+
+**Files:**
+- Create: `probe_station_gui/design/tool_context.py`
+- Create: `probe_station_gui/design/tool_session.py`
+- Create: `tests/design/test_tool_session.py`
+- Modify: `probe_station_gui/views/design_navigator_panel.py`
+- Modify: `tests/design/test_click_navigation.py`
+- Modify: `tests/ui/test_design_navigator_panel.py`
+- Modify: `tests/ui/test_design_plot_selection.py`
+- Modify: `tests/ui/test_main_window_menus.py`
+- Modify: `docs/superpowers/plans/2026-08-10-coordinate-system-coordinator.md`
+
+- [x] Observe strict RED before production code: collection first failed with
+  `ModuleNotFoundError` for `design.tool_session`. Later focused REDs rejected a
+  stale-generation pick API, an accidental panel compatibility export, and a
+  missing legacy Array activation effect before each corresponding fix. Review
+  REDs then proved early terminal rendering, nested mutable metadata, repeated
+  route capture on selection, and full-route deepcopy on every Array hover.
+- [x] Make frozen, Qt-free `DesignToolSession` the one owner of active tool,
+  ruler draft and durable segments, alignment draft, Array configuration and
+  direction pick, detached preview context, and immutable effects/intents. Pure
+  tests cover begin/update/finish/cancel, accept/discard, tool switches,
+  repeated Escape, context replacement, detached route input, and stale hover
+  and pick generations. `DesignToolContext` uses a separate Qt-free immutable
+  support module with an indexed, deeply frozen route snapshot.
+- [x] Reduce `DesignNavigatorPanel` to a Qt rendering/effect adapter. Remove the
+  legacy mutable tool fields and policy helpers without a compatibility facade
+  or eager package export. Preserve signal order and payload copies: alignment
+  clears before discard/accept, Array intent precedes Select, and completed
+  ruler segments survive cancellation until explicit Clear. Immutable staged
+  checkpoints preserve observer-visible Align/Array state and rebase context
+  changes made by synchronous intent handlers before continuing.
+- [x] Capture the full route only when the document or route changes. Ordinary
+  selection/edit-safety refreshes reuse the frozen snapshot, while Array
+  previews materialize selected route sources only. Counter regressions prove
+  selection adds no capture and two hover updates add no route metadata
+  deepcopies; a 10k-point diagnostic reduced mean hover time from the reviewer's
+  `191.6 ms` to `0.082 ms` (timing is evidence, not the test gate).
+- [x] Keep `design_plot_pane.py`, `design_layout_window.py`, `layout_state.py`,
+  and the complete `route/` package byte-identical to `965806d`. Route
+  Pause/Interrupt/Resume controls remain outside the session and pass the broad
+  and full route-control regressions.
+- [x] Focused tool-session/Design UI gate: `149 passed`; broad
+  Design/UI/route-control gate: `1,322 passed` plus `5` subtests; full
+  process-local `QLocale.c()` no-hardware gate: `2,957 passed` plus `14`
+  subtests.
+- [x] Import-order checks pass in both directions without exposing
+  `DesignToolSession` from the panel module. Changed-file Ruff, whole-tree
+  compileall, deletion checks, and `git diff --check` pass.
+- [x] Metrics: `main.py` remains LOC `10917`, LLOC `5946`, aggregate CC `1904`
+  (average `3.565543`); `design_navigator_panel.py` decreases LOC
+  `2164 -> 1938` and aggregate CC `312 -> 269`. New MI values are
+  `tool_context.py 34.83`, `tool_session.py 6.01`, and
+  `test_tool_session.py 18.18`; no new MI-0 file is introduced.
+- [x] The first frozen independent review found three Important ordering,
+  deep-immutability, and GUI-thread performance gaps. Each received a strict
+  failing regression before the generalized staged-transition and indexed
+  snapshot fixes.
+- [x] A fresh post-fix independent read-only review rechecked all three prior
+  findings, canonical preview geometry/stale-source behavior, protected bytes,
+  imports, tests, and metrics, then returned READY with no Critical or
+  Important findings. Its one Minor notes that preview-only generated IDs may
+  differ from the canonical full-route plan; only geometry leaves the session,
+  and `DesignLayoutState` remains the canonical commit authority.
+
 - [ ] Run Wily/Radon for the complete branch and compare with the frozen
   baseline. Require:
 
