@@ -199,8 +199,8 @@ from probe_station_gui.camera.auto_exposure import (
 )
 from probe_station_gui.camera.exposure_policy import (
     ExposurePolicyController,
-    OpticalSessionManager,
 )
+from probe_station_gui.camera.optical_session import OpticalSessionManager
 from probe_station_gui.camera.exposure_policy_qt import ExposurePolicyQtAdapter
 from probe_station_gui.camera.live_correction import (
     LatestFrameProcessor,

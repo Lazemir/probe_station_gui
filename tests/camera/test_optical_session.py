@@ -9,15 +9,15 @@ import pytest
 from probe_station_gui.camera.exposure_policy import (
     ExposurePolicyBusyError,
     ExposurePolicyError,
-    OpticalSessionManager,
 )
+from probe_station_gui.camera.optical_session import OpticalSessionManager
 from probe_station_gui.camera.optical_calibration_lifecycle import (
     OpticalCalibrationLifecycle,
 )
 from probe_station_gui.camera.optical_calibration_runtime import (
     FlatFieldCalibrationRequest,
 )
-from tests.camera.test_exposure_policy import PolicyRig
+from tests.camera.exposure_policy_test_support import PolicyRig
 
 
 def _close_lease_while_policy_lock_is_contended(rig, lease) -> dict[str, object]:
@@ -313,7 +313,7 @@ def test_manual_hardware_final_once_restores_fixed_exposure_after_partial_mutati
     sessions = OpticalSessionManager(rig.controller)
     lease = sessions.open("scan")
     fixed_exposure = rig.camera.state["ExposureTime"]
-    original_write = rig.controller._settings_write
+    original_write = rig.controller._adjustment._settings_write
 
     def fail_after_partial_once(settings):
         if settings == [("ExposureAuto", "Once")]:
@@ -322,7 +322,7 @@ def test_manual_hardware_final_once_restores_fixed_exposure_after_partial_mutati
             return {"accepted": False, "message": "native Once partially failed"}
         return original_write(settings)
 
-    rig.controller._settings_write = fail_after_partial_once
+    rig.controller._adjustment._settings_write = fail_after_partial_once
 
     result = lease.close()
 
@@ -339,7 +339,7 @@ def test_manual_final_off_failure_restores_fixed_exposure_and_returns_warning() 
     sessions = OpticalSessionManager(rig.controller)
     lease = sessions.open("scan")
     fixed_exposure = rig.camera.state["ExposureTime"]
-    original_write = rig.controller._settings_write
+    original_write = rig.controller._adjustment._settings_write
     fail_next_off = True
 
     def final_once(config=None):
@@ -354,8 +354,8 @@ def test_manual_final_off_failure_restores_fixed_exposure_and_returns_warning() 
             return {"accepted": False, "message": "final Off failed"}
         return original_write(settings)
 
-    rig.controller._software_once = final_once
-    rig.controller._settings_write = fail_one_off
+    rig.controller._adjustment._software_once = final_once
+    rig.controller._adjustment._settings_write = fail_one_off
 
     result = lease.close()
 
@@ -372,7 +372,7 @@ def test_manual_final_once_warning_includes_fixed_exposure_restore_failure() -> 
     sessions = OpticalSessionManager(rig.controller)
     lease = sessions.open("scan")
     fixed_exposure = rig.camera.state["ExposureTime"]
-    original_write = rig.controller._settings_write
+    original_write = rig.controller._adjustment._settings_write
 
     def final_once(config=None):
         del config
@@ -388,8 +388,8 @@ def test_manual_final_once_warning_includes_fixed_exposure_restore_failure() -> 
             return {"accepted": False, "message": "fixed exposure restore failed"}
         return original_write(settings)
 
-    rig.controller._software_once = final_once
-    rig.controller._settings_write = fail_fixed_restore
+    rig.controller._adjustment._software_once = final_once
+    rig.controller._adjustment._settings_write = fail_fixed_restore
 
     result = lease.close()
 
@@ -404,14 +404,14 @@ def test_manual_final_once_runs_when_fixed_exposure_snapshot_read_fails() -> Non
     sessions = OpticalSessionManager(rig.controller)
     lease = sessions.open("scan")
     before_close = rig.software_once_calls
-    original_read = rig.controller._settings_read
+    original_read = rig.controller._adjustment._settings_read
 
     def fail_exposure_snapshot(names):
         if names == ["ExposureTime"]:
             return {"accepted": False, "message": "snapshot read failed"}
         return original_read(names)
 
-    rig.controller._settings_read = fail_exposure_snapshot
+    rig.controller._adjustment._settings_read = fail_exposure_snapshot
 
     result = lease.close()
 
@@ -426,7 +426,7 @@ def test_manual_final_once_runs_when_fixed_exposure_value_is_none() -> None:
     sessions = OpticalSessionManager(rig.controller)
     lease = sessions.open("scan")
     before_close = rig.software_once_calls
-    original_read = rig.controller._settings_read
+    original_read = rig.controller._adjustment._settings_read
 
     def none_exposure_snapshot(names):
         if names == ["ExposureTime"]:
@@ -436,7 +436,7 @@ def test_manual_final_once_runs_when_fixed_exposure_value_is_none() -> None:
             }
         return original_read(names)
 
-    rig.controller._settings_read = none_exposure_snapshot
+    rig.controller._adjustment._settings_read = none_exposure_snapshot
 
     result = lease.close()
 
@@ -471,3 +471,42 @@ def test_lease_close_is_idempotent() -> None:
     assert first["accepted"] is True
     assert second == first
     assert rig.software_once_calls == 1
+
+
+def test_closed_token_is_stale_for_direct_close_and_new_parent() -> None:
+    rig = PolicyRig(auto_enabled=False, engine="software")
+    sessions = OpticalSessionManager(rig.controller)
+    outer = sessions.open("scan")
+    nested = sessions.open("autofocus", parent_token=outer.token)
+    stale_token = nested.token
+
+    nested.close()
+
+    with pytest.raises(ExposurePolicyError, match="not active"):
+        sessions.close(stale_token)
+    with pytest.raises(ExposurePolicyError, match="parent token"):
+        sessions.open("focus retry", parent_token=stale_token)
+
+    outer.close()
+
+
+def test_shutdown_rejects_active_session_then_completes_after_close() -> None:
+    rig = PolicyRig(auto_enabled=True, engine="software")
+    sessions = OpticalSessionManager(rig.controller)
+    rig.controller.start()
+    lease = sessions.open("scan")
+
+    with pytest.raises(ExposurePolicyError, match="optical session"):
+        rig.controller.shutdown(timeout_s=1.0)
+
+    requested = rig.controller.snapshot()
+    assert requested["shutdown_requested"] is True
+    assert requested["shutdown_complete"] is False
+    assert requested["session_active"] is True
+
+    result = lease.close()
+    rig.controller.shutdown(timeout_s=1.0)
+
+    assert result == {"accepted": True, "nested": False}
+    assert rig.controller.snapshot()["shutdown_complete"] is True
+    assert rig.camera.state["ExposureAuto"] == "Off"

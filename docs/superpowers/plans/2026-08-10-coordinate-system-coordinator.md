@@ -1315,3 +1315,104 @@ git diff --check 8fc83259e07f48bf0f222e80bb3e1d6c3241fd0e..HEAD
   RED and fixed as described above. A fresh corrected-byte re-review returned
   `READY` with `0 Critical / 0 Important / 0 Minor` before staging and the exact
   commit `refactor: separate settings persistence domains`.
+
+#### Task 9a: Separate optical exposure sessions
+
+**Files:**
+- Create: `probe_station_gui/camera/optical_session.py`
+- Create: `probe_station_gui/camera/exposure_adjustment.py`
+- Modify: `probe_station_gui/camera/exposure_policy.py`
+- Modify: `probe_station_gui/camera/__init__.py`
+- Modify: `main.py` (direct owner import only)
+- Delete: `tests/camera/test_exposure_policy.py`
+- Create: `tests/camera/exposure_policy_test_support.py`
+- Create: `tests/camera/test_exposure_adjustment.py`
+- Create: `tests/camera/test_exposure_policy_transitions.py`
+- Create: `tests/camera/test_exposure_policy_monitor.py`
+- Create: `tests/camera/test_exposure_policy_lifecycle.py`
+- Modify: `tests/camera/test_optical_session.py`
+- Modify: `docs/superpowers/plans/2026-08-10-coordinate-system-coordinator.md`
+
+- [x] Capture the clean `81e0dad` baseline before editing. The exposure-policy
+  module had `1035 LOC / 735 LLOC / CC 233 / MI 0.00`; its monolithic test had
+  `768 LOC / 544 LLOC / CC 169 / MI 0.00`. The policy plus optical-session
+  baseline collected `48` items and passed six consecutive times; the broader
+  exposure/session/API/server baseline passed `95` tests plus `2` subtests.
+- [x] Observe strict absent-interface RED before each production extraction.
+  Direct collection first failed with exact `ModuleNotFoundError` for
+  `probe_station_gui.camera.optical_session`; after that owner became GREEN,
+  the independent adjustment interface failed with exact
+  `ModuleNotFoundError` for `probe_station_gui.camera.exposure_adjustment`.
+- [x] Make `optical_session.py` the canonical owner of the session record,
+  `OpticalSessionManager`, and `OpticalSessionLease`. It owns exclusive/nested
+  open and close, policy/camera snapshots, fixed-manual restoration, rollback,
+  stale-token and child ordering, idempotent lease close, and ordered cleanup
+  error aggregation. Session operations keep the controller's blocking command
+  gate while ordinary controller commands retain non-queued busy rejection.
+- [x] Make `exposure_adjustment.py` a deep behavioral owner, not a helper bag.
+  It owns software/native one-shot execution, recoverable nonconvergence and
+  scene-change retry suppression, fresh-frame watermarks, monitor brightness
+  decisions, normalized camera-node reads/writes, and camera snapshot/restore.
+  The one-way runtime graph is `exposure_policy -> exposure_adjustment ->
+  auto_exposure` and `optical_session -> exposure_policy`; no owner reverse
+  imports the session manager or controller.
+- [x] Keep `ExposurePolicyController`, policy/error identities, persistence,
+  monitor publication/wake, shutdown, and state-callback orchestration canonical
+  in `exposure_policy.py`. No callback is invoked under the command or state
+  lock; callback order, fresh payload copies, exception swallowing, native-Off
+  shutdown ordering, no acquisition stop/restart, API payload/error mapping,
+  manual writes, policy rollback, and camera-node callback ordering remain
+  unchanged.
+- [x] Remove all session definitions, aliases, wrappers, and re-exports from the
+  old policy module. The package root retains its exact seven-name `__all__`
+  while directly exposing the canonical session identities. Fresh forward and
+  reverse import orders pass; `main.py` changes only from the old import source
+  to the canonical optical-session owner, and all other protected production
+  paths are byte-identical to the baseline.
+- [x] Split all `24` original policy test definitions by transitions,
+  monitor/retry, and lifecycle/shutdown. Twenty function ASTs are byte-for-byte
+  semantic matches; the other four differ only in deliberate private seam
+  paths from the controller to its canonical adjustment owner. Both support
+  class ASTs are exact matches and have one shared non-test identity. Four
+  direct adjustment and two session regressions bring the focused collection
+  to `54` items, including stale tokens and active-session shutdown.
+- [x] Verification is fresh, offscreen, process-local `QLocale.c()`, and
+  no-hardware: the final split passes `54`; all `54` timing/concurrency items
+  pass in five consecutive clean processes; normal and reverse split order pass
+  `54` each; focused exposure/session/auto/API broker/server/Qt/dialog/settings
+  passes `133` plus `2` subtests; broad camera/App/UI passes `1148` plus `5`
+  subtests before review. After the review correction, broad camera/App/UI
+  passes `1149` plus `5` subtests and the final complete suite passes `3027`
+  plus `14` subtests with
+  only the inherited `BuiltinImporter.module_repr()` warning. The known
+  load-sensitive monitor/retry case did not fail in any raw run, and no
+  production timer was changed for scheduling.
+- [x] Affected and configured whole-tree Ruff, whole-tree compileall, `git diff
+  --check`, direct-definition/deletion/DAG/public-identity gates, protected-byte
+  checks, and Radon/Wily/Lizard gates pass. Lizard retains exactly the moved
+  `OpticalSessionManager.open` warning while improving its CCN `17 -> 16`; no
+  warning is added.
+- [x] Metrics: the controller is now
+  `497 LOC / 338 LLOC / CC 100 / MI 12.18`; adjustment is
+  `351 LOC / 214 LLOC / CC 84 / MI 18.23`; optical sessions are
+  `268 LOC / 209 LLOC / CC 58 / MI 23.77`. The explicit collaborator boundary
+  redistributes production CC from `233 -> 242` while removing both MI-zero
+  monoliths. Every new architectural and split-test Python file has positive MI
+  (minimum `12.18`); the pre-existing import-only `main.py` remains MI zero.
+  Prospective all-tracked MI-zero decreases exactly `17 -> 15` and active
+  GUI/test MI-zero decreases `16 -> 14`, with no new MI-zero file. A disposable
+  fresh-Git Wily archive independently confirms controller MI `0 -> 12.1765`
+  and CC `233 -> 100`, plus positive MI for every new owner and split test.
+- [x] A first fresh independent review returned `READY` with
+  `0 Critical / 0 Important / 1 Minor`. Its sole observation was an empty-error
+  text drift in snapshot-restore aggregation. A strict direct RED reproduced
+  `RuntimeError` where the baseline preserved an empty string; the corrected
+  owner now uses exact baseline `str(exc)` aggregation, the dead normalization
+  helper is deleted, and the new regression plus final gates above are GREEN.
+- [x] Freeze the complete unstaged/untracked evidence-bearing source snapshot.
+  A second fresh independent read-only review of the corrected owner and exact
+  hashes returned `READY` with `0 Critical / 0 Important / 0 Minor`, repeated
+  normal and reverse order at `54 passed` each, and independently confirmed the
+  direct DAG, identities, AST migration, Radon/Lizard metrics, and protected
+  scope before staging and the exact commit
+  `refactor: separate optical exposure sessions`.

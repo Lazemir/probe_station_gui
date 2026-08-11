@@ -6,9 +6,8 @@ from .exposure_policy import (
     ExposurePolicyBusyError,
     ExposurePolicyController,
     ExposurePolicyError,
-    OpticalSessionLease,
-    OpticalSessionManager,
 )
+from .optical_session import OpticalSessionLease, OpticalSessionManager
 
 __all__ = [
     "ExposureEngine",
