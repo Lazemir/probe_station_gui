@@ -724,6 +724,79 @@ git commit -m "refactor: split coordinate adapter responsibilities"
   differ from the canonical full-route plan; only geometry leaves the session,
   and `DesignLayoutState` remains the canonical commit authority.
 
+#### Task 5c: Separate Design navigator Qt adapters
+
+**Files:**
+- Create: `probe_station_gui/views/design_document_controls.py`
+- Create: `probe_station_gui/views/design_registration_controls.py`
+- Create: `probe_station_gui/views/design_route_controls.py`
+- Create: `probe_station_gui/views/design_route_run_controls.py`
+- Create: `probe_station_gui/views/design_tool_controls.py`
+- Create: `tests/ui/test_design_navigator_sections.py`
+- Modify: `probe_station_gui/views/design_navigator_panel.py`
+- Modify: `tests/design/test_click_navigation.py`
+- Modify: `tests/ui/test_design_navigator_panel.py`
+- Modify: `tests/ui/test_design_plot_klayout.py`
+- Modify: `tests/ui/test_design_plot_selection.py`
+- Modify: `tests/ui/test_main_window_menus.py`
+- Modify: `docs/superpowers/plans/2026-08-10-coordinate-system-coordinator.md`
+
+- [x] Observe strict RED before production code. Collection first failed with
+  `ModuleNotFoundError` for `views.design_document_controls`; after the first
+  three adapters existed, a second collection RED failed for the absent
+  `views.design_route_controls` before route/tool production extraction.
+- [x] Extract document, registration, route-file/table, route-run, and tool Qt
+  adapters. `DesignNavigatorPanel` remains the public compositor/facade: an AST
+  comparison proves that no public method signature or Qt signal changed, and
+  production callers do not read child-private widget state. The panel has no
+  compatibility widget aliases and neither the panel nor lazy `views` exports
+  `DesignToolSession`.
+- [x] Keep `DesignRouteRunControls` as the sole panel-side owner of one
+  `RouteRunControlState`. Regressions prove Pause request -> Interrupt,
+  Interrupt remains available until requested, only safe waiting/pause ack ->
+  Resume, external-measurement waiting -> Interrupt, stopped state clears
+  waiting/pending state, and waiting Measure emits the existing `measure`
+  confirmation. API route-control names and the external workflow are
+  unchanged.
+- [x] Preserve tool-session effect order, shared route selection, detached
+  toolbar/options widget identity, registration UUID/no-echo behavior, and
+  document top-cell/layer no-echo behavior. Focused navigator/adapter gate:
+  `39 passed`; focused Design/UI facade gate before the added adapter
+  characterizations: `139 passed`; safety gate covering Main/API control,
+  autofocus, photo/contact placement, contact lifecycle, and safe-Z recovery:
+  `172 passed`.
+- [x] Keep `main.py`, `design_plot_pane.py`, `design_layout_window.py`,
+  `layout_state.py`, `tool_context.py`, `tool_session.py`, `stage/autofocus_flow.py`,
+  and the complete `route/` production package byte-identical to `c659f56`.
+  Import-order checks pass panel/layout and panel/route-dialog in both
+  directions; lazy exports remain cycle-free. Changed-file Ruff, compileall,
+  deletion/ownership searches, protected hashes, and `git diff --check` pass.
+- [x] Metrics: `main.py` remains LOC `10917`, aggregate CC `1904`;
+  `design_navigator_panel.py` decreases LOC `1938 -> 634` and aggregate CC
+  `269 -> 73`, with MI `15.42`. New MI values are document `40.87`,
+  registration `31.60`, route `24.92`, route-run `40.56`, tool `5.27`, and
+  adapter tests `30.77`; no new MI-0 file is introduced.
+- [x] The first frozen independent review found one Important parity gap:
+  hiding Markup pruned the adapter selection without refreshing the owned tool
+  session, leaving Array preview geometry stale. Two strict RED regressions
+  reproduced both programmatic and user-toggle paths. The child adapter now
+  refreshes its current immutable context inputs after hidden-Markup pruning
+  and before Array direction capture, so preview clear is emitted before the
+  outward visibility signal. Post-fix focused Design/UI and route-safety gates
+  pass `143` and `172` tests respectively.
+- [x] Broad Design/UI/App gate reached `1170 passed` plus `5` subtests. The
+  raw post-fix full process-local `QLocale.c()` no-hardware run reached
+  `2964 passed` plus `14` subtests; repeated broad/full runs exposed the same
+  unrelated exact-timer miss in untouched `test_microscope_interaction.py`.
+  The deterministic final split gate passes `2964` tests plus `14` subtests
+  with that node deselected, then passes the node `1/1` in a clean process. No
+  out-of-scope timing change was made.
+- [x] A fresh post-fix independent read-only review rechecked the Markup
+  context/effect ordering, complete extraction parity, route safety, protected
+  bytes, imports, API surface, and metrics. Its independent gates passed `143`
+  focused Design/UI tests and `148` route/autofocus/contact tests; it returned
+  READY with no Critical or Important findings.
+
 - [ ] Run Wily/Radon for the complete branch and compare with the frozen
   baseline. Require:
 

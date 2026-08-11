@@ -399,8 +399,8 @@ def test_layout_window_applies_one_selection_to_canvas_and_table(
 
     assert window.selection.ids == frozenset({markup_entity_id("a")})
     assert window._main_view._selection == window.selection
-    assert window.navigator_panel._selection == window.selection
-    assert window.navigator_panel._selected_route_row_indices() == []
+    assert window.navigator_panel.tool_controls.selection == window.selection
+    assert window.navigator_panel.route_controls.selected_rows() == []
     assert changes[-1] == window.selection
     window.close()
     window.deleteLater()
@@ -410,12 +410,13 @@ def test_layout_window_toolbar_drives_canvas_tool(
     qt_app: QApplication,
 ) -> None:
     window = DesignLayoutWindow()
-    window.navigator_panel._document = object()
+    window.navigator_panel.document_controls._document = object()
+    window.navigator_panel._replace_tool_context()
     window.navigator_panel._update_enabled_state()
 
-    window.navigator_panel._point_tool_button.click()
+    window.navigator_panel.tool_controls._point_tool_button.click()
     assert window._main_view.active_design_tool == "point"
-    window.navigator_panel._guide_tool_button.click()
+    window.navigator_panel.tool_controls._guide_tool_button.click()
     assert window._main_view.active_design_tool == "guide"
 
     window.close()
@@ -434,11 +435,12 @@ def test_layout_window_enter_accepts_align_draft(
     qt_app: QApplication,
 ) -> None:
     window = DesignLayoutWindow()
-    window.navigator_panel._document = object()
+    window.navigator_panel.document_controls._document = object()
+    window.navigator_panel._replace_tool_context()
     window.navigator_panel._update_enabled_state()
     accepted: list[object] = []
     window.alignment_draft_accepted.connect(accepted.append)
-    window.navigator_panel._align_tool_button.click()
+    window.navigator_panel.tool_controls._align_tool_button.click()
     window.navigator_panel.append_alignment_point(1.0, 2.0)
     window.navigator_panel.append_alignment_point(3.0, 4.0)
 
@@ -454,12 +456,13 @@ def test_layout_window_escape_cancels_transient_tool_state_and_selects(
     qt_app: QApplication,
 ) -> None:
     window = DesignLayoutWindow()
-    window.navigator_panel._document = object()
+    window.navigator_panel.document_controls._document = object()
+    window.navigator_panel._replace_tool_context()
     window.navigator_panel._update_enabled_state()
-    window.navigator_panel._ruler_tool_button.click()
+    window.navigator_panel.tool_controls._ruler_tool_button.click()
     window.navigator_panel.apply_route_pick("ruler", 0.0, 0.0)
     window.navigator_panel.apply_route_pick("ruler", 2.0, 0.0)
-    window.navigator_panel._guide_tool_button.click()
+    window.navigator_panel.tool_controls._guide_tool_button.click()
     window._main_view._guide_anchor = (1.0, 2.0)
     window._main_view._tool_sketch_points = [(1.0, 2.0)]
     window._main_view._tool_sketch_segments = [((0.0, 0.0), (3.0, 0.0))]
@@ -471,9 +474,12 @@ def test_layout_window_escape_cancels_transient_tool_state_and_selects(
     assert window._main_view._tool_sketch_segments == [
         ((0.0, 0.0), (3.0, 0.0))
     ]
-    assert window.navigator_panel._ruler_length_label.text() == "1 measurements"
+    assert (
+        window.navigator_panel.tool_controls._ruler_length_label.text()
+        == "1 measurements"
+    )
     assert window._main_view.active_design_tool == "select"
-    assert window.navigator_panel._select_tool_button.isChecked()
+    assert window.navigator_panel.tool_controls._select_tool_button.isChecked()
     window.close()
     window.deleteLater()
 
@@ -482,9 +488,10 @@ def test_layout_window_forwards_modifier_snapshots_to_ruler(
     qt_app: QApplication,
 ) -> None:
     window = DesignLayoutWindow()
-    window.navigator_panel._document = object()
+    window.navigator_panel.document_controls._document = object()
+    window.navigator_panel._replace_tool_context()
     window.navigator_panel._update_enabled_state()
-    window.navigator_panel._ruler_tool_button.click()
+    window.navigator_panel.tool_controls._ruler_tool_button.click()
 
     window._main_view.route_pick_requested.emit(
         "ruler",
@@ -521,9 +528,10 @@ def test_alignment_accept_clears_plot_before_forwarding_accept(
     qt_app: QApplication,
 ) -> None:
     window = DesignLayoutWindow()
-    window.navigator_panel._document = object()
+    window.navigator_panel.document_controls._document = object()
+    window.navigator_panel._replace_tool_context()
     window.navigator_panel._update_enabled_state()
-    window.navigator_panel._align_tool_button.click()
+    window.navigator_panel.tool_controls._align_tool_button.click()
     window.navigator_panel.append_alignment_point(1.0, 2.0)
     window.navigator_panel.append_alignment_point(3.0, 4.0)
     observed: list[tuple[str, list[tuple[float, float]], object]] = []

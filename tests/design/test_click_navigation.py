@@ -192,10 +192,13 @@ def test_route_array_request_uses_shared_selected_entity_ids() -> None:
     panel.set_route(route, selected_route_point_index=0)
     panel.set_selectable_entities(project_entities(route, None))
 
-    assert panel._route_table.selectionMode() == QAbstractItemView.ExtendedSelection
+    assert (
+        panel.route_controls.route_table.selectionMode()
+        == QAbstractItemView.ExtendedSelection
+    )
 
-    selection_model = panel._route_table.selectionModel()
-    model = panel._route_table.model()
+    selection_model = panel.route_controls.route_table.selectionModel()
+    model = panel.route_controls.route_table.model()
     selection_model.select(
         model.index(0, 0),
         QItemSelectionModel.Select | QItemSelectionModel.Rows,
@@ -212,12 +215,12 @@ def test_route_array_request_uses_shared_selected_entity_ids() -> None:
     emitted: list[MixedArrayRequest] = []
     panel.mixed_array_requested.connect(emitted.append)
 
-    panel._route_array_create_button.click()
+    panel.tool_controls._route_array_create_button.click()
 
     assert emitted[-1].source_ids == frozenset(
         {route_entity_id("p001"), route_entity_id("p003")}
     )
-    assert panel._selected_route_point_index == 0
+    assert panel.route_controls.selected_index == 0
 
 
 def test_route_multi_selection_survives_route_refresh() -> None:
@@ -234,11 +237,11 @@ def test_route_multi_selection_survives_route_refresh() -> None:
         lambda index: panel.set_route(route, selected_route_point_index=index)
     )
 
-    selection_model = panel._route_table.selectionModel()
-    model = panel._route_table.model()
+    selection_model = panel.route_controls.route_table.selectionModel()
+    model = panel.route_controls.route_table.model()
     selection_model.select(
         model.index(2, 0),
         QItemSelectionModel.Select | QItemSelectionModel.Rows,
     )
 
-    assert panel._selected_route_row_indices() == [0, 2]
+    assert panel.route_controls.selected_rows() == [0, 2]

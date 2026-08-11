@@ -219,9 +219,10 @@ def test_main_window_escape_does_not_block_active_design_tool_cancel(
     main_window.show()
 
     design_window = DesignLayoutWindow()
-    design_window.navigator_panel._document = object()
+    design_window.navigator_panel.document_controls._document = object()
+    design_window.navigator_panel._replace_tool_context()
     design_window.navigator_panel._update_enabled_state()
-    design_window.navigator_panel._guide_tool_button.click()
+    design_window.navigator_panel.tool_controls._guide_tool_button.click()
     design_window._main_view._accept_guide_point((1.0, 2.0))
     design_window.show()
     design_window.activateWindow()
@@ -233,7 +234,7 @@ def test_main_window_escape_does_not_block_active_design_tool_cancel(
 
     assert design_window._main_view._guide_anchor is None
     assert design_window._main_view.active_design_tool == "select"
-    assert design_window.navigator_panel._select_tool_button.isChecked()
+    assert design_window.navigator_panel.tool_controls._select_tool_button.isChecked()
     assert ("cancel_pick", None) not in main_window.calls
     assert ("measure_exit", None) not in main_window.calls
 

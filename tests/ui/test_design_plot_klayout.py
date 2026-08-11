@@ -1197,12 +1197,12 @@ def test_design_window_disables_escape_during_pending_document_preview(
     window.set_design_load_pending(True)
 
     assert not window._escape_shortcut.isEnabled()
-    assert not window.navigator_panel._delete_shortcut.isEnabled()
+    assert not window.navigator_panel.tool_controls._delete_shortcut.isEnabled()
 
     window.set_design_load_pending(False)
 
     assert window._escape_shortcut.isEnabled()
-    assert window.navigator_panel._delete_shortcut.isEnabled()
+    assert window.navigator_panel.tool_controls._delete_shortcut.isEnabled()
     window.deleteLater()
 
 
