@@ -373,7 +373,56 @@ Coordinate System selection/restore intent, custom materialization, runtime
 authority blocks, Design usability lease, display plan, and coordinate motion
 projection.
 
-- [ ] **Step 1: Add selection/projection RED tests**
+**Actual Task 3 implementation:**
+
+- Created coordinator modules:
+  `probe_station_gui/coordinates/application_runtime.py`,
+  `coordinator_design_lease.py`, `coordinator_motion.py`,
+  `coordinator_selection.py`, and `source_identity.py`.
+- Created GUI adapters: `probe_station_gui/views/main_window_coordinate_entry.py`,
+  `main_window_coordinate_motion.py`, and `main_window_coordinate_step.py`.
+- Modified coordinator/domain files: `probe_station_gui/coordinates/__init__.py`,
+  `coordinator.py`, `coordinator_activation.py`, `coordinator_contact.py`,
+  `coordinator_focus.py`, `coordinator_model.py`, `coordinator_persistence.py`,
+  `coordinator_registration.py`, `coordinator_registration_capture.py`,
+  `design_calibration.py`, `lifecycle.py`, `presentation.py`, `registry.py`, and
+  `software_frames.py`; plus `probe_station_gui/design/frame_registration.py`,
+  `navigation_adapter.py`, `session.py`, and `session_state.py`.
+- Modified runtime adapters: `main.py`,
+  `probe_station_gui/stage/axis_coordinates.py`, `controller.py`,
+  `coordinate_targets.py`, `machine_coordinates.py`, `move_lifecycle.py`, and
+  `position_update.py`; plus `probe_station_gui/views/joystick_window.py`,
+  `main_window_connection_flow.py`, `main_window_docks.py`,
+  `main_window_homing.py`, `main_window_stage_position_panel.py`, and
+  `stage_position_panel.py`.
+- Created tests: `tests/coordinates/test_application_coordinate_runtime.py`,
+  `test_coordinator_selection.py`,
+  `tests/app/test_main_coordinate_system_adapter.py`,
+  `test_main_design_markup_navigation.py`, and
+  `test_main_design_registration_adapters.py`.
+- Migrated/modified application tests:
+  `tests/app/main_coordinate_feedrate_support.py`, `test_main_camera_api.py`,
+  `test_main_coordinate_feedrate.py`, `test_main_design_navigation.py`,
+  `test_main_meter_contact_actions.py`, `test_main_microscope_scan.py`,
+  `test_main_objective_alignment.py`, `test_main_planned_move_prediction.py`,
+  `test_main_route_measurement_session.py`,
+  `test_main_software_coordinate_pivot.py`, and
+  `test_main_stage_coordinate_controls.py`.
+- Migrated/modified domain and adapter tests:
+  `tests/coordinates/coordinator_registration_support.py`,
+  `test_coordinator_persistence.py`, `test_coordinator_registration_activation.py`,
+  `test_coordinator_registration_capture.py`,
+  `test_coordinator_registration_operator_cancel.py`,
+  `test_coordinator_registration_rollback_rendering.py`, `test_lifecycle.py`,
+  `test_presentation.py`, and `test_public_api.py`;
+  `tests/design/test_navigation_adapter.py`;
+  `tests/stage/test_controller_universal_axis_calibration.py`,
+  `test_machine_coordinate_snapshot.py`, `test_move_lifecycle.py`, and
+  `test_position_update.py`; and `tests/ui/test_joystick_feedrate.py`,
+  `test_main_window_connection_flow.py`, `test_main_window_docks.py`,
+  `test_main_window_homing.py`, and `test_stage_position_panel.py`.
+
+- [x] **Step 1: Add selection/projection RED tests**
 
 Prove through the coordinator:
 
@@ -391,13 +440,13 @@ Prove through the coordinator:
 - WASD/display/motion projection use the same selected snapshot;
 - invalid pivot falls back once, renders once, and persists the final decision.
 
-- [ ] **Step 2: Run the strict RED gate**
+- [x] **Step 2: Run the strict RED gate**
 
 ```powershell
 C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m pytest tests\coordinates\test_coordinator_selection.py -q --basetemp $env:TEMP\coordinate-coordinator-task3-red
 ```
 
-- [ ] **Step 3: Add explicit selection/observation operations**
+- [x] **Step 3: Add explicit selection/observation operations**
 
 Implement `select_system()`, `observe_authority()`,
 `synchronize_custom_systems()`, `snapshot()`, and current Design lease/project
@@ -409,7 +458,7 @@ Selection persistence remains intentionally fire-and-forget. Main executes the
 intent through the existing selection store; only failure is reported back as
 an adapter notice. Do not add a fake durable-success acknowledgement.
 
-- [ ] **Step 4: Finish ownership migration**
+- [x] **Step 4: Finish ownership migration**
 
 Move registry and coordinate-relevant session ownership fully behind the
 coordinator. Stage-position and connection helpers render snapshots and execute
@@ -424,7 +473,7 @@ Replace post-home and live B/status call sites in `main_window_homing.py` and
 Their tests must prove authority loss and recovery refresh the retained selected
 Coordinate System without a compatibility helper.
 
-- [ ] **Step 5: Split the MI-0 test monolith by interface**
+- [x] **Step 5: Split the MI-0 test monolith by interface**
 
 Move remaining coordinate-domain characterizations into:
 
@@ -438,7 +487,7 @@ Extract shared immutable builders to
 navigation tests in `test_main_design_navigation.py`; do not preserve private
 Main state fixtures.
 
-- [ ] **Step 6: Verify, measure, review, commit**
+- [x] **Step 6: Verify, measure, review, commit**
 
 ```powershell
 C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m pytest tests\coordinates tests\ui\test_stage_position_panel.py tests\ui\test_main_window_connection_flow.py tests\app\test_main_coordinate_system_adapter.py tests\app\test_main_stage_coordinate_controls.py tests\app\test_main_software_coordinate_pivot.py tests\app\test_main_design_navigation.py tests\app\test_main_route_measurement_session.py tests\route -q --basetemp $env:TEMP\coordinate-coordinator-task3-green
@@ -446,9 +495,25 @@ C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m pytest tests\
 
 Run Ruff, compileall, diff-check, per-file Wily/Radon, and independent review.
 
+Final Task 3 evidence:
+
+- focused motion/API/Step cluster: `97 passed`;
+- one-process full no-hardware suite with `QLocale.c()`: `2921 passed`,
+  `14 subtests passed`;
+- public facade/import-order/runtime purity cluster: `6 passed`;
+- Ruff over every changed or created Python file, compileall, and diff-check:
+  clean;
+- forbidden legacy-owner/direct coordinate-session/filesystem-hot-path searches:
+  no matches;
+- `main.py`: LOC `10933`, LLOC `5950`, SLOC `10313`, average CC `3.5655`
+  versus the Task 2 baseline LOC `11117`, average CC `3.69`;
+- every created Python file has MI above zero (minimum `2.66`);
+- independent frozen-snapshot review: `READY`, with no remaining Critical or
+  Important findings.
+
 ```powershell
 git add probe_station_gui/coordinates/coordinator.py probe_station_gui/coordinates/coordinator_model.py probe_station_gui/coordinates/coordinator_selection.py probe_station_gui/coordinates/presentation.py probe_station_gui/coordinates/software_frames.py probe_station_gui/views/main_window_stage_position_panel.py probe_station_gui/views/main_window_connection_flow.py probe_station_gui/views/main_window_homing.py probe_station_gui/stage/position_update.py probe_station_gui/settings/software_coordinate_selection_store.py main.py tests/coordinates tests/ui/test_stage_position_panel.py tests/ui/test_main_window_connection_flow.py tests/ui/test_main_window_homing.py tests/stage/test_position_update.py tests/settings/test_software_coordinate_selection_store.py tests/app/test_main_coordinate_system_adapter.py tests/app/test_main_stage_coordinate_controls.py tests/app/test_main_software_coordinate_pivot.py tests/app/test_main_design_navigation.py
-git commit -m "refactor: complete coordinate system coordinator"
+git commit -m "refactor: centralize coordinate system presentation"
 ```
 
 ---

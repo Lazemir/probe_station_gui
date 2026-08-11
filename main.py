@@ -104,15 +104,20 @@ from probe_station_gui import (
     StageController,
 )
 from probe_station_gui.coordinates import (
-    CoordinateFrameRegistry,
     CoordinateFrameStoreWorker,
-    CoordinateSystemCoordinator,
-    FrameRecordsPublication,
     PhysicalMachinePose,
+)
+from probe_station_gui.coordinates.application_runtime import (
+    create_application_coordinate_runtime,
 )
 from probe_station_gui.coordinates.coordinator_model import (
     AutofocusResult as CoordinateAutofocusResult,
     CoordinateAdapterCompletion,
+    CoordinateMotionLease,
+    CoordinateMotionProjection,
+    CustomSystemsRequest,
+    DesignCalibrationObservation,
+    DesignCoordinateLease,
     FocusCandidateRequest,
     FocusMoveResult,
     FocusReferenceRequest,
@@ -122,12 +127,12 @@ from probe_station_gui.coordinates.coordinator_model import (
     PhysicalAReadResult,
     ReadPhysicalAIntent,
     RegistrationCaptureRequest,
+    RegistrationAlignmentRequest,
+    RegistrationCheckMarkRequest,
+    RegistrationInvalidationRequest,
     RegistrationOpticalObservation,
-)
-from probe_station_gui.coordinates.lifecycle import (
-    CoordinateFrameLifecycle,
-    DesignFrameUsabilitySnapshot,
-    DesignUsabilityContext,
+    RegistrationSourceMarkRequest,
+    RegistrationSourceMarksRequest,
 )
 from probe_station_gui.coordinates.rotation_geometry import (
     RotationGeometrySnapshot,
@@ -135,10 +140,7 @@ from probe_station_gui.coordinates.rotation_geometry import (
 )
 from probe_station_gui.coordinates.design_calibration import (
     design_calibration_fingerprints,
-    reconcile_design_calibrations,
 )
-from probe_station_gui.coordinates.provenance import design_frame_provenance_error
-from probe_station_gui.coordinates.software_frames import materialize_custom_frames
 from probe_station_gui.design.focus_candidate import select_central_focus_candidate
 from probe_station_gui.design.klayout_types import (
     KLayoutConfig,
@@ -242,6 +244,7 @@ from probe_station_gui.stage.api_moves import (
 from probe_station_gui.stage.coordinate_targets import (
     CoordinateTargetConfig,
     CoordinateTargetMoveState,
+    normalize_api_coordinate_input_mode,
     plan_coordinate_target_start,
     resolve_stage_axis_target,
     stage_axis_target_limit_error,
@@ -259,11 +262,13 @@ from probe_station_gui.shared.wheel_guard import GuardedComboBox as QComboBox
 from probe_station_gui.stage.controller import StageControllerError
 from probe_station_gui.stage.types import StageTaskToken
 from probe_station_gui.views import (
+    main_window_coordinate_entry as coordinate_entry,
+    main_window_coordinate_motion as coordinate_motion,
+    main_window_coordinate_step as coordinate_step,
     main_window_stage_position_panel as stage_position_panel_adapter,
 )
 from probe_station_gui.views.stage_position_panel import (
     StagePositionPanel,
-    format_stage_axis_value,
 )
 from probe_station_gui.views.microscope_interaction import (
     ClickMoveBindings,
@@ -946,12 +951,14 @@ class Main(QMainWindow):
             )
         )
         self._pending_stage_axis_targets: dict[str, tuple[float, float]] = {}
+        self._pending_coordinate_motion_lease: CoordinateMotionLease | None = None
         self._exact_step_accumulator = ExactStepAccumulator(self.STAGE_AXIS_NAMES)
         self._exact_step_pending_axes: set[str] = set()
+        self._exact_step_motion_lease: CoordinateMotionLease | None = None
+        self._exact_step_pose_rebase_allowed = False
         self._exact_step_window_elapsed = False
         self._stage_position_panel: StagePositionPanel | None = None
         self._latest_physical_machine_pose: PhysicalMachinePose | None = None
-        self._coordinate_frame_lifecycle = CoordinateFrameLifecycle()
         self._design_snap_enabled = True
         self._last_reported_b_position: float | None = None
         self._last_camera_frame_ui_timestamp: float | None = None
@@ -1036,20 +1043,18 @@ class Main(QMainWindow):
         self._route_telegram = RouteTelegramPhotoState()
         self._contact_seek_thread: threading.Thread | None = None
         self._contact_seek_stop_requested = threading.Event()
-        self._design_session = DesignSession()
-        self._coordinate_frame_registry = CoordinateFrameRegistry()
-        self._coordinate_system_coordinator = CoordinateSystemCoordinator(
-            registry=self._coordinate_frame_registry,
-            session=self._design_session,
-            lifecycle=self._coordinate_frame_lifecycle,
+        software_coordinates = self.settings_manager.settings.software_coordinates
+        coordinate_runtime = create_application_coordinate_runtime(
+            restore_frame_id=software_coordinates.last_selected_frame_id,
         )
+        self._coordinate_runtime = coordinate_runtime
+        self._design_session = DesignSession()
+        self._coordinate_system_coordinator = coordinate_runtime.coordinator
         self._coordinate_frame_store = CoordinateFrameStoreWorker(
             self,
             path=self.settings_manager.coordinate_frames_path(),
         )
-        self._coordinate_frames_loaded = False
         self._active_design_frame_metadata: DesignFrameMetadata | None = None
-        self._coordinate_frame_authority_blocked_axes: set[str] = set()
         self._active_route_design_frame_snapshot = None
         self._focus_structure_bounds_worker: KLayoutStructureBoundsWorker | None = None
         self._focus_structure_request_id = 0
@@ -1059,10 +1064,10 @@ class Main(QMainWindow):
         self._pending_focus_structure_design_bounds: tuple[float, float, float, float] | None = None
         self._design_focus_signals_connected = False
         self._coordinate_frame_store.loaded.connect(
-            self._on_coordinate_frames_loaded
+            self._on_coordinate_frame_document_loaded
         )
         self._coordinate_frame_store.saved.connect(
-            self._on_coordinate_frames_saved
+            self._on_coordinate_frame_document_saved
         )
         self._coordinate_frame_store.failed.connect(
             self._on_coordinate_frame_store_failed
@@ -2074,34 +2079,41 @@ class Main(QMainWindow):
             feedrate=feedrate,
             current_feedrate=self._current_linear_feedrate(),
             min_feedrate=self.MIN_FEEDRATE_MM_MIN,
-            resolve_axis_target=self._resolve_stage_axis_target,
-            axis_target_limit_error=self._stage_axis_target_limit_error,
+            resolve_axis_target=self._resolve_api_stage_axis_target,
+            axis_target_limit_error=self._machine_axis_target_limit_error,
         )
         if isinstance(move_plan, dict):
             return move_plan
         if self._coordinate_targets.has_active_move() or self.stage_controller.is_busy():
             return api_coordinate_move_busy_response()
-        if not self._start_coordinate_targets_move(move_plan.target_map, feedrate_mm_min=move_plan.feedrate_mm_min, source_label="API"):
+        if not self._start_coordinate_targets_move(
+            move_plan.target_map,
+            feedrate_mm_min=move_plan.feedrate_mm_min,
+            source_label="API",
+            limit_targets={
+                axis: float(display_target)
+                for axis, (_raw_target, display_target) in move_plan.target_map.items()
+            },
+        ):
             return api_coordinate_move_start_failed_response()
-        return api_coordinate_move_success_response(move_plan, coordinate_display=self.stage_controller.coordinate_display_name())
+        return api_coordinate_move_success_response(
+            move_plan,
+            coordinate_display="Machine",
+        )
 
     def _api_stage_status(self) -> dict[str, Any]:
         latest_position = self.stage_controller.latest_stage_position()
-        return self._stage_status_payload(
+        payload = self._stage_status_payload(
             latest_position,
-            display_position={
-                axis: float(value)
-                for axis, value in self._stage_axis_display_values.items()
-            },
+            display_position=self._api_machine_display_position(),
             accepted=True,
         )
+        payload["coordinate_display"] = "Machine"
+        return payload
 
     def _surface_map_stage_status(self) -> dict[str, Any]:
         latest_position = self.stage_controller.latest_stage_position()
-        display_position = {
-            axis: float(value)
-            for axis, value in self._stage_axis_display_values.items()
-        }
+        display_position = self._api_machine_display_position()
         if isinstance(latest_position, (tuple, list)):
             for axis, value in zip(self.STAGE_AXIS_NAMES, latest_position):
                 display_position.setdefault(axis, float(value))
@@ -2177,7 +2189,7 @@ class Main(QMainWindow):
                     "accepted": False,
                     "message": f"Invalid {axis} target: {display_target}.",
                 }
-            raw_target, resolved_display_target = self._resolve_stage_axis_target(
+            raw_target, resolved_display_target = self._resolve_api_stage_axis_target(
                 axis,
                 display_value,
                 "G90",
@@ -2198,6 +2210,10 @@ class Main(QMainWindow):
             targets,
             feedrate_mm_min=feedrate,
             source_label="Surface Map",
+            limit_targets={
+                axis: display_target
+                for axis, (_raw_target, display_target) in targets.items()
+            },
         )
         return {
             "accepted": bool(accepted),
@@ -2215,8 +2231,8 @@ class Main(QMainWindow):
                 "message": "No probe route is loaded.",
             }
         registration_valid = (
-            self._design_session.registration is not None
-            and self._design_session.registration.valid
+            self._coordinate_system_coordinator.snapshot()
+            .registration.registration_valid
         )
         contacts = [
             api_route_point_payload(
@@ -3283,7 +3299,7 @@ class Main(QMainWindow):
                 "status_code": 503,
                 "message": "Serial connection is not available.",
             }
-        frame_usability = self._snapshot_active_design_frame_usability()
+        frame_usability = self._coordinate_system_coordinator.current_design_lease()
         if not frame_usability.usable:
             return {
                 "accepted": False,
@@ -3313,7 +3329,9 @@ class Main(QMainWindow):
         )
         if not start_decision.accepted:
             return start_decision.rejection_payload()
-        if not self._design_frame_usability_snapshot_is_current(frame_usability):
+        if not self._coordinate_system_coordinator.design_lease_is_current(
+            frame_usability
+        ):
             return {
                 "accepted": False,
                 "status_code": 409,
@@ -3624,12 +3642,14 @@ class Main(QMainWindow):
                     "status_code": 409,
                     "message": "Stitch debug scan requires full pixel-to-stage calibration.",
                 }
-        design_session = getattr(self, "_design_session", None)
+        design_lease = self._coordinate_system_coordinator.current_design_lease()
         try:
             launch_snapshot = self._capture_microscope_scan_launch_snapshot(
                 scale=scale,
-                document=getattr(design_session, "document", None),
-                registration=getattr(design_session, "registration", None),
+                document=design_lease.document,
+                frame_usability_snapshot=(
+                    design_lease if design_lease.usable else None
+                ),
             )
         except (AttributeError, IndexError, TypeError, ValueError) as exc:
             return {
@@ -3774,7 +3794,10 @@ class Main(QMainWindow):
                 self.serial_connection is not None and self.serial_connection.is_open
             ),
             route=self._design_session.route,
-            registration=self._design_session.registration,
+            registration=(
+                self._coordinate_system_coordinator.snapshot()
+                .registration.registration_projection
+            ),
             points_factory=self._route_measurement_points,
             route_offset_xy=getattr(self, "_api_route_offset_xy", (0.0, 0.0)),
             structure_number_for_point=self._api_structure_number_for_measurement_point,
@@ -4183,7 +4206,7 @@ class Main(QMainWindow):
         *,
         scale: object,
         document: object | None,
-        frame_usability_snapshot: DesignFrameUsabilitySnapshot | None = None,
+        frame_usability_snapshot: DesignCoordinateLease | None = None,
         registration: object | None = None,
     ) -> _MicroscopeScanLaunchSnapshot:
         objective_name, magnification = self._active_objective_metadata()
@@ -4204,10 +4227,9 @@ class Main(QMainWindow):
                     or "Design coordinate frame is unavailable."
                 )
             basis = tuple(
-                self._camera_stage_xy_from_design_usability_snapshot(
+                self._coordinate_system_coordinator.project_design_to_camera_stage(
                     frame_usability_snapshot,
                     point,
-                    require_current=False,
                 )
                 for point in ((0.0, 0.0), (1.0, 0.0), (0.0, 1.0))
             )
@@ -4376,167 +4398,47 @@ class Main(QMainWindow):
     def _design_xy_from_raw_stage_xy(
         self, raw_stage_xy: tuple[float, float]
     ) -> tuple[float, float] | None:
-        camera_stage_xy = self._camera_stage_xy_from_raw_stage_xy(raw_stage_xy)
-        return self._design_session.design_from_stage(camera_stage_xy)
+        lease = self._coordinate_system_coordinator.current_design_lease()
+        return self._coordinate_system_coordinator.project_raw_stage_to_design(
+            lease,
+            raw_stage_xy,
+        )
 
     def _raw_stage_xy_from_design_xy(
         self, design_xy: tuple[float, float]
     ) -> tuple[float, float] | None:
-        usability = self._snapshot_active_design_frame_usability()
-        return self._raw_stage_xy_from_design_usability_snapshot(
-            usability,
+        lease = self._coordinate_system_coordinator.current_design_lease()
+        return self._coordinate_system_coordinator.project_design_to_raw_stage(
+            lease,
             design_xy,
         )
 
-    def _snapshot_active_design_frame_usability(
+    def _project_gui_coordinate_motion(
         self,
-    ) -> DesignFrameUsabilitySnapshot:
-        load_complete = bool(getattr(self, "_coordinate_frames_loaded", False))
-        session = getattr(self, "_design_session", None)
-        document = getattr(session, "document", None)
-        frame_id = getattr(session, "active_frame_id", None)
-        registry = getattr(self, "_coordinate_frame_registry", None)
-        record = registry.get(frame_id) if registry is not None and frame_id else None
-        blocked_axes = frozenset(
-            str(axis).strip().upper()
-            for axis in getattr(
-                self,
-                "_coordinate_frame_authority_blocked_axes",
-                set(),
-            )
-        )
-        controller = getattr(self, "stage_controller", None)
-        machine_snapshot_getter = getattr(
-            controller,
-            "latest_machine_coordinate_snapshot",
-            None,
-        )
-        try:
-            machine_snapshot = (
-                machine_snapshot_getter()
-                if callable(machine_snapshot_getter)
-                else None
-            )
-        except Exception:
-            machine_snapshot = None
-        try:
-            pivot_value = self._rotation_geometry_snapshot().pivot_machine_xy
-            pivot = (float(pivot_value[0]), float(pivot_value[1]))
-        except Exception:
-            pivot = None
-        try:
-            objective_offset_value = self._active_objective_xy_offset()
-            objective_offset = (
-                float(objective_offset_value[0]),
-                float(objective_offset_value[1]),
-            )
-        except Exception:
-            objective_offset = (float("nan"), float("nan"))
-        lifecycle = getattr(self, "_coordinate_frame_lifecycle", None)
-        if lifecycle is None:
-            lifecycle = CoordinateFrameLifecycle()
-            self._coordinate_frame_lifecycle = lifecycle
-        return lifecycle.design_usability(
-            DesignUsabilityContext(
-                frames_loaded=load_complete,
-                record=record,
-                selected_frame_id=None if frame_id is None else str(frame_id),
-                authority_blocked_axes=blocked_axes,
-                pivot_machine_xy=pivot,
-                document=document,
-                machine_coordinate_snapshot=machine_snapshot,
-                objective_xy_offset=objective_offset,
-            )
-        )
-
-    def _design_frame_usability_snapshot_is_current(
-        self,
-        snapshot: DesignFrameUsabilitySnapshot,
-    ) -> bool:
-        if not snapshot.usable:
-            return False
-        current = self._snapshot_active_design_frame_usability()
-        return bool(
-            current.usable
-            and current.frame_id == snapshot.frame_id
-            and current.frame_version == snapshot.frame_version
-            and current.transform == snapshot.transform
-        )
-
-    def _raw_stage_xy_from_design_usability_snapshot(
-        self,
-        usability: DesignFrameUsabilitySnapshot,
-        design_xy: tuple[float, float],
+        axis_values: tuple[tuple[str, float], ...],
         *,
-        require_current: bool = True,
-    ) -> tuple[float, float] | None:
-        if (
-            not usability.usable
-            or usability.transform is None
-            or usability.document is None
-            or usability.metadata is None
-            or usability.machine_coordinate_snapshot is None
-            or usability.pivot_machine_xy is None
-            or (
-                require_current
-                and not self._design_frame_usability_snapshot_is_current(usability)
-            )
-        ):
-            return None
-        turns = int(usability.document.rotation_quarter_turns) % 4
-        canonical = usability.document.rotate_point(
-            (float(design_xy[0]), float(design_xy[1])),
-            -turns,
-        )
-        machine_snapshot = usability.machine_coordinate_snapshot
-        physical_xy = usability.transform.frame_xy_to_machine(
-            (
-                canonical[0] * usability.metadata.design_unit_mm,
-                canonical[1] * usability.metadata.design_unit_mm,
-            ),
-            machine_b_deg=machine_snapshot.physical_machine_pose.require("B"),
-            pivot_machine_xy=usability.pivot_machine_xy,
-        )
-        return (
-            machine_snapshot.physical_machine_to_configured_controller(
-                "X", physical_xy[0]
-            ),
-            machine_snapshot.physical_machine_to_configured_controller(
-                "Y", physical_xy[1]
-            ),
+        mode: str,
+        lease: CoordinateMotionLease | None = None,
+        allow_pose_rebase: bool = False,
+    ) -> CoordinateMotionProjection | None:
+        return coordinate_motion.project_gui_coordinate_motion(
+            self,
+            axis_values,
+            mode=mode,
+            lease=lease,
+            allow_pose_rebase=allow_pose_rebase,
         )
 
-    def _camera_stage_xy_from_design_usability_snapshot(
+    def _project_gui_relative_motion(
         self,
-        usability: DesignFrameUsabilitySnapshot,
-        design_xy: tuple[float, float],
-        *,
-        require_current: bool = True,
-    ) -> tuple[float, float] | None:
-        raw_xy = self._raw_stage_xy_from_design_usability_snapshot(
-            usability,
-            design_xy,
-            require_current=require_current,
+        requested_distances: tuple[tuple[str, float], ...],
+        lease: object | None,
+    ) -> CoordinateMotionProjection:
+        return coordinate_motion.project_gui_relative_motion(
+            self,
+            requested_distances,
+            lease,
         )
-        if raw_xy is None:
-            return None
-        return offsets.raw_stage_to_camera_stage(
-            raw_xy,
-            usability.objective_xy_offset,
-        )
-
-    def _active_design_frame_provenance_error(self) -> str | None:
-        if not bool(getattr(self, "_coordinate_frames_loaded", False)):
-            return "Design coordinate provenance is being checked."
-        session = getattr(self, "_design_session", None)
-        frame_id = getattr(session, "active_frame_id", None)
-        if frame_id is None:
-            return None
-        registry = getattr(self, "_coordinate_frame_registry", None)
-        record = registry.get(frame_id) if registry is not None else None
-        if record is None:
-            return "Design coordinate frame is unavailable."
-        return design_frame_provenance_error(record)
 
     def _on_stage_axis_escape_pressed(self, axis_name: str) -> None:
         panel = getattr(self, "_stage_position_panel", None)
@@ -4545,6 +4447,8 @@ class Main(QMainWindow):
         axis = axis_name.strip().upper()
         panel.discard_return_commit(axis)
         panel.pop_pending_target(axis)
+        if not self._pending_stage_axis_targets:
+            self._pending_coordinate_motion_lease = None
         panel.reset_axis_field(axis, self._stage_axis_display_values.get(axis))
         field = panel.field(axis)
         if field is not None:
@@ -4556,17 +4460,24 @@ class Main(QMainWindow):
 
     def _on_stage_coordinate_mode_changed(self) -> None:
         self._clear_exact_step_targets()
+        self._pending_coordinate_motion_lease = None
         if self._pending_stage_axis_targets and self._stage_position_panel is not None:
             self._stage_position_panel.clear_pending_target_state()
             stage_position_panel_adapter.update_stage_position_display(
                 self,
                 self.stage_controller.latest_stage_position(),
             )
+            stage_position_panel_adapter.refresh_coordinate_frame_display(self)
             self._show_status("Cleared pending coordinate edits after input mode change.", 2000)
         self._update_stage_coordinate_apply_state()
 
     def _on_software_coordinate_system_changed(self, frame_id: str) -> None:
+        joystick = getattr(self, "joystick_panel", None)
+        cancel_jog_input = getattr(joystick, "cancel_jog_input", None)
+        if callable(cancel_jog_input):
+            cancel_jog_input()
         self._clear_exact_step_targets()
+        self._clear_pending_stage_coordinate_targets()
         stage_position_panel_adapter.select_gui_coordinate_frame(self, frame_id)
 
     def _refresh_software_coordinate_display(self) -> None:
@@ -4652,6 +4563,7 @@ class Main(QMainWindow):
         )
 
     def _clear_pending_stage_coordinate_targets(self) -> bool:
+        self._pending_coordinate_motion_lease = None
         panel = getattr(self, "_stage_position_panel", None)
         if panel is None:
             return False
@@ -4704,14 +4616,12 @@ class Main(QMainWindow):
         self._manual_alignment_pick_slot = None
         self._manual_alignment_points = [None, None]
         self._pending_alignment_preparation = None
-        transition = self._coordinate_system_coordinator.cancel_registration(
-            RegistrationCancellation.MARK_SET_CHANGED,
+        transition = self._coordinate_system_coordinator.set_registration_source_mark(
+            RegistrationSourceMarkRequest(snapped_point, slot=slot)
         )
         connection_flow.apply_coordinate_transition(self, transition)
-        self._design_session.clear_source_stage_marks()
         self._last_selected_design_point = snapped_point
         self._set_design_snap_enabled(True)
-        self._design_session.set_source_design_mark(slot, snapped_point)
         self._refresh_design_panel()
         self._set_alignment_panel_expanded()
         slot_label = "1" if slot == 0 else "2"
@@ -4741,11 +4651,14 @@ class Main(QMainWindow):
         if len(normalized) < 2 or len(set(normalized)) < 2:
             self._show_status("Align requires at least two distinct design points.", 5000)
             return
-        registry = getattr(self, "_coordinate_frame_registry", None)
-        frame_id = getattr(self._design_session, "active_frame_id", None)
-        record = registry.get(frame_id) if registry is not None and frame_id else None
+        coordinate_snapshot = self._coordinate_system_coordinator.snapshot()
+        frame_id = coordinate_snapshot.registration.active_frame_id
+        record = next(
+            (item for item in coordinate_snapshot.records if item.frame_id == frame_id),
+            None,
+        )
         if (
-            not bool(getattr(self, "_coordinate_frames_loaded", False))
+            not coordinate_snapshot.frames_loaded
             or record is None
             or self._design_session.document is None
         ):
@@ -4756,17 +4669,19 @@ class Main(QMainWindow):
             return
         if not self._start_fresh_design_frame_for_source_replacement():
             return
-        frame_id = self._design_session.active_frame_id
-        record = registry.get(frame_id) if frame_id is not None else None
+        coordinate_snapshot = self._coordinate_system_coordinator.snapshot()
+        frame_id = coordinate_snapshot.registration.active_frame_id
+        record = next(
+            (item for item in coordinate_snapshot.records if item.frame_id == frame_id),
+            None,
+        )
         if record is None:
             self._show_status("Design coordinate frame is unavailable.", 6000)
             return
-        transition = self._coordinate_system_coordinator.cancel_registration(
-            RegistrationCancellation.MARK_SET_CHANGED,
+        transition = self._coordinate_system_coordinator.replace_registration_source_marks(
+            RegistrationSourceMarksRequest(normalized)
         )
         connection_flow.apply_coordinate_transition(self, transition)
-        self._design_session.source_design_marks = normalized
-        self._design_session.clear_source_stage_marks()
         self._alignment_design_draft = normalized
         self._alignment_stage_draft = [None] * len(normalized)
         self._alignment_draft_fit_residuals = None
@@ -4813,6 +4728,19 @@ class Main(QMainWindow):
             position_mode=coordinate_settings.position_mode,
             startup_mode=coordinate_settings.startup_mode,
             preferred_system=coordinate_settings.preferred_system,
+        )
+        latest_snapshot = getattr(
+            self.stage_controller,
+            "latest_machine_coordinate_snapshot",
+            None,
+        )
+        machine_snapshot = (
+            latest_snapshot() if callable(latest_snapshot) else None
+        )
+        self._latest_physical_machine_pose = (
+            machine_snapshot.physical_machine_pose
+            if machine_snapshot is not None
+            else PhysicalMachinePose({})
         )
         if apply_objective_runtime:
             self._apply_objective_settings()
@@ -4889,28 +4817,31 @@ class Main(QMainWindow):
             settings_to_apply.software_coordinates.pivot
             != existing_coordinates.pivot
         )
-        prepared_coordinate_records = None
-        if custom_frames_changed and bool(
-            getattr(self, "_coordinate_frames_loaded", False)
+        axis_calibrations_changed = (
+            settings_to_apply.axis_calibrations
+            != self.settings_manager.settings.axis_calibrations
+        )
+        custom_transition = None
+        if (
+            custom_frames_changed
+            and self._coordinate_system_coordinator.snapshot().frames_loaded
         ):
             try:
-                prepared_coordinate_records = materialize_custom_frames(
-                    self._coordinate_frame_registry.snapshot().records,
-                    settings_to_apply.software_coordinates,
+                custom_transition = (
+                    self._coordinate_system_coordinator.synchronize_custom_systems(
+                        CustomSystemsRequest(settings_to_apply.software_coordinates)
+                    )
                 )
             except (TypeError, ValueError) as exc:
                 settings_to_apply.software_coordinates = existing_coordinates.clone()
                 self._show_status(str(exc), 6000)
                 coordinates_changed = False
-        prepared_design_relink: tuple[object, object] | None = None
         if pivot_changed:
-            session = getattr(self, "_design_session", None)
-            registry = getattr(self, "_coordinate_frame_registry", None)
-            frame_id = getattr(session, "active_frame_id", None)
-            record = registry.get(frame_id) if registry is not None and frame_id else None
-            if record is not None:
+            coordinate_snapshot = self._coordinate_system_coordinator.snapshot()
+            frame_id = coordinate_snapshot.registration.active_frame_id
+            if frame_id is not None:
                 try:
-                    geometry = rotation_geometry_snapshot(
+                    rotation_geometry_snapshot(
                         settings_to_apply.software_coordinates
                     )
                     snapshot = stage_controller.latest_machine_coordinate_snapshot()
@@ -4919,14 +4850,7 @@ class Main(QMainWindow):
                             "A current Machine-coordinate snapshot is required "
                             "to change the B-axis pivot."
                         )
-                    projection = session.prepare_active_frame_link(
-                        record,
-                        machine_point_for_navigation=(
-                            self._design_navigation_xy_from_physical_machine_xy
-                        ),
-                        machine_b_deg=snapshot.physical_machine_pose.require("B"),
-                        pivot_machine_xy=geometry.pivot_machine_xy,
-                    )
+                    snapshot.physical_machine_pose.require("B")
                 except (DesignModelError, TypeError, ValueError) as exc:
                     settings_to_apply.software_coordinates.pivot = (
                         existing_coordinates.pivot.clone()
@@ -4937,12 +4861,10 @@ class Main(QMainWindow):
                         != existing_coordinates
                     )
                     self._show_status(str(exc), 6000)
-                else:
-                    prepared_design_relink = (record, projection)
+        current_objectives = self.settings_manager.objectives_configuration()
         active_objective_update_rejected = False
         objective_mutation_busy = self._objective_mutation_busy()
         if objective_mutation_busy:
-            current_objectives = self.settings_manager.objectives_configuration()
             current_active_name = normalize_objective_name(
                 current_objectives.active_name
             )
@@ -4968,22 +4890,22 @@ class Main(QMainWindow):
                     submitted_objectives.objectives[current_active_name] = (
                         current_active_profile.clone()
                     )
+        submitted_objectives = settings_to_apply.objectives
+        current_active_name = normalize_objective_name(current_objectives.active_name)
+        submitted_active_name = normalize_objective_name(
+            submitted_objectives.active_name
+        )
+        objective_authority_changed = (
+            submitted_active_name != current_active_name
+            or submitted_objectives.objectives.get(submitted_active_name)
+            != current_objectives.objectives.get(current_active_name)
+        )
         self.settings_manager.replace_and_save(
             settings_to_apply,
             preserve_exposure_policy=True,
         )
-        if prepared_coordinate_records is not None:
-            self._coordinate_frame_registry.reset(prepared_coordinate_records)
-        if prepared_design_relink is not None:
-            prepared_record, projection = prepared_design_relink
-            current_record = self._coordinate_frame_registry.get(
-                prepared_record.frame_id
-            )
-            if current_record is not None:
-                self._design_session.apply_active_frame_link(
-                    current_record,
-                    projection,
-                )
+        if custom_transition is not None:
+            connection_flow.apply_coordinate_transition(self, custom_transition)
         reconcile_calibrations = getattr(
             self,
             "_reconcile_design_calibration_fingerprints",
@@ -4998,6 +4920,12 @@ class Main(QMainWindow):
             self._apply_settings(apply_objective_runtime=False)
         else:
             self._apply_settings()
+        if (
+            pivot_changed
+            or objective_authority_changed
+            or axis_calibrations_changed
+        ):
+            connection_flow.observe_coordinate_authority(self)
         if active_objective_update_rejected:
             self._show_status(
                 "Stage is busy; active objective settings not changed.",
@@ -5005,41 +4933,21 @@ class Main(QMainWindow):
             )
         logger.info("Settings updated from dialog")
 
-    def _materialize_software_coordinate_frames(self) -> None:
-        """Install settings-backed custom frames after the durable document loads."""
-
-        registry = getattr(self, "_coordinate_frame_registry", None)
-        if registry is None or not bool(getattr(self, "_coordinate_frames_loaded", False)):
-            return
-        try:
-            records = materialize_custom_frames(
-                registry.snapshot().records,
-                self.settings_manager.settings.software_coordinates,
-            )
-        except (TypeError, ValueError) as exc:
-            self._show_status(f"Custom coordinate settings could not be loaded: {exc}", 6000)
-            return
-        registry.reset(records)
-
     def _reconcile_design_calibration_fingerprints(self) -> bool:
         """Fail closed when stored Design registration used different curves."""
 
-        registry = getattr(self, "_coordinate_frame_registry", None)
-        if registry is None or not bool(getattr(self, "_coordinate_frames_loaded", False)):
+        coordinate_snapshot = self._coordinate_system_coordinator.snapshot()
+        if not coordinate_snapshot.frames_loaded:
             return False
-        records, changed = reconcile_design_calibrations(
-            registry.snapshot().records,
-            self.settings_manager.settings.axis_calibrations,
-        )
-        if not changed:
-            return False
-        # The registry is made unavailable before this asynchronous write.  If
-        # persistence fails, the next startup re-runs this reconciliation.
-        transition = self._coordinate_system_coordinator.publish_frame_records(
-            FrameRecordsPublication(records=tuple(records))
+        transition = self._coordinate_system_coordinator.observe_design_calibrations(
+            DesignCalibrationObservation(
+                design_calibration_fingerprints(
+                    self.settings_manager.settings.axis_calibrations
+                )
+            )
         )
         connection_flow.apply_coordinate_transition(self, transition)
-        return True
+        return transition.view_changed
 
     def _design_metadata_with_calibration_fingerprints(
         self,
@@ -5291,6 +5199,7 @@ class Main(QMainWindow):
             self._refresh_design_position()
         if getattr(plan, "refresh_calibration_ui", False):
             self._refresh_objective_calibration_ui()
+        connection_flow.observe_coordinate_authority(self)
         if show_status:
             self._show_plan_status(plan)
         return True
@@ -6093,8 +6002,10 @@ class Main(QMainWindow):
     def _collapse_alignment_panel_if_ready(self) -> None:
         if self.alignment_dock is None or not self._design_window_is_open():
             return
-        registration = self._design_session.registration
-        if registration is not None and registration.valid:
+        if (
+            self._coordinate_system_coordinator.snapshot()
+            .registration.registration_valid
+        ):
             self.alignment_dock.set_collapsed(True)
 
     def _collapse_alignment_panel_if_design_open(self) -> None:
@@ -6154,8 +6065,8 @@ class Main(QMainWindow):
 
     def _reset_alignment_capture_points(self) -> None:
         if self._design_backed_alignment_active():
-            transition = self._coordinate_system_coordinator.cancel_registration(
-                RegistrationCancellation.MARK_SET_CHANGED,
+            transition = (
+                self._coordinate_system_coordinator.clear_registration_source_stage_marks()
             )
             connection_flow.apply_coordinate_transition(self, transition)
             self._pending_alignment_preparation = None
@@ -6164,7 +6075,6 @@ class Main(QMainWindow):
                 self._alignment_design_draft
             )
             self._alignment_draft_fit_residuals = None
-            self._design_session.clear_source_stage_marks()
             self._set_design_snap_enabled(True)
         else:
             self._reset_manual_alignment(cancel_pick=False)
@@ -6393,7 +6303,10 @@ class Main(QMainWindow):
         if plan.points is not None:
             self._manual_alignment_points = plan.points
         if plan.apply_prepared_alignment and plan.preparation is not None:
-            self._design_session.apply_prepared_alignment(plan.preparation)
+            transition = self._coordinate_system_coordinator.apply_registration_alignment(
+                RegistrationAlignmentRequest(plan.preparation)
+            )
+            connection_flow.apply_coordinate_transition(self, transition)
             self._finish_alignment_draft()
         if plan.pending_preparation is not None:
             self._pending_alignment_preparation = plan.pending_preparation
@@ -6420,11 +6333,12 @@ class Main(QMainWindow):
     def _on_alignment_b_rotation_started(self) -> None:
         if self._pending_alignment_preparation is None:
             return
-        self._design_session.invalidate_registration(
-            "Design registration stale after B-axis rotation started."
+        transition = self._coordinate_system_coordinator.invalidate_registration(
+            RegistrationInvalidationRequest(
+                "Design registration stale after B-axis rotation started."
+            )
         )
-        self._refresh_design_panel()
-        self._refresh_design_position()
+        connection_flow.apply_coordinate_transition(self, transition)
 
     def _finish_alignment_draft(self) -> None:
         self._alignment_design_draft = ()
@@ -6450,7 +6364,8 @@ class Main(QMainWindow):
                 getattr(self, "_manual_alignment_capture_context", None) is not None
             )
             self.alignment_panel.set_registration_status(
-                self._design_session.registration_status
+                self._coordinate_system_coordinator.snapshot()
+                .registration.registration_status
             )
             if self._alignment_draft_fit_residuals is not None:
                 self.alignment_panel.set_fit_residuals(
@@ -6480,11 +6395,10 @@ class Main(QMainWindow):
             )
 
     def _can_display_design_position(self) -> bool:
-        registration = self._design_session.registration
         return bool(
             self._design_session.document is not None
-            and registration is not None
-            and registration.valid
+            and self._coordinate_system_coordinator.snapshot()
+            .registration.registration_valid
         )
 
     def _format_coordinate_label(
@@ -6524,7 +6438,10 @@ class Main(QMainWindow):
     def _resolve_chip_coordinates(
         self, fluidnc_xy: tuple[float, float]
     ) -> tuple[float, float] | None:
-        registration = self._design_session.registration
+        registration = (
+            self._coordinate_system_coordinator.snapshot()
+            .registration.registration_projection
+        )
         if registration is None or not registration.valid:
             return None
         if not registration.source_stage_marks:
@@ -6745,112 +6662,41 @@ class Main(QMainWindow):
         mode: str,
         feedrate_mm_min: float,
     ) -> None:
-        """Accumulate exact Step targets and route them through coordinate moves."""
-
-        axis = axis.strip().upper()
-        if axis not in self.STAGE_AXIS_NAMES:
-            return
-        if not stage_position_panel_adapter.gui_coordinate_motion_editing_enabled(self):
-            self._clear_exact_step_targets()
-            self._show_status("Select Machine to use Step.", 3000)
-            return
-        mode = mode.strip().upper()
-        if mode not in {"G90", "G91"}:
-            self._show_status(f"Unsupported manual move mode: {mode}.", 3000)
-            return
-        if self.stage_controller.is_busy() and not self._coordinate_targets.has_active_move():
-            self._show_status("Stage is busy. Ignoring manual axis move.", 3000)
-            return
-        baseline = self._coordinate_targets.display_targets.get(axis)
-        if baseline is None:
-            baseline = self._stage_axis_display_values.get(axis)
-        if baseline is None:
-            self._show_status(f"{axis} coordinate is unavailable.", 3000)
-            return
-        current_pending = self._exact_step_accumulator.targets.get(axis)
-        try:
-            display_target = (
-                float(value_mm)
-                if mode == "G90"
-                else float(
-                    current_pending if current_pending is not None else baseline
-                )
-                + float(value_mm)
-            )
-        except (TypeError, ValueError):
-            self._show_status(f"Invalid {axis} target coordinate.", 3000)
-            return
-        raw_target = self._raw_target_from_display_value(axis, display_target)
-        if raw_target is None:
-            self._show_status(f"{axis} coordinate is unavailable.", 3000)
-            return
-        limit_error = self._stage_axis_target_limit_error(axis, display_target)
-        if limit_error is not None:
-            self._show_status(limit_error, 4000)
-            return
-        self._exact_step_accumulator.set_absolute(axis, display_target)
-        self._exact_step_pending_axes.add(axis)
-        self._pending_stage_axis_targets[axis] = (float(raw_target), display_target)
-        stage_position_panel_adapter.refresh_stage_axis_styles(self)
-        self._update_stage_coordinate_apply_state()
-        if (
-            not self._exact_step_timer.isActive()
-            and not self._exact_step_window_elapsed
-        ):
-            self._exact_step_timer.start()
+        coordinate_step.on_manual_axis_move_requested(
+            self,
+            axis,
+            value_mm,
+            mode,
+            feedrate_mm_min,
+        )
 
     def _on_exact_step_window_elapsed(self) -> None:
         self._exact_step_window_elapsed = True
         self._dispatch_exact_step_targets()
 
     def _dispatch_exact_step_targets(self) -> bool:
-        if not self._exact_step_window_elapsed:
-            return False
-        if not stage_position_panel_adapter.gui_coordinate_motion_editing_enabled(self):
-            self._clear_exact_step_targets()
-            return False
-        if self._coordinate_targets.has_active_move() or self.stage_controller.is_busy():
-            return False
-        display_targets = dict(self._exact_step_accumulator.targets)
-        if not display_targets:
-            self._exact_step_window_elapsed = False
-            return False
-        targets: dict[str, tuple[float, float]] = {}
-        for axis, display_target in display_targets.items():
-            raw_target = self._raw_target_from_display_value(axis, display_target)
-            if raw_target is None:
-                self._show_status(f"{axis} coordinate is unavailable.", 3000)
-                self._clear_exact_step_targets()
-                return False
-            limit_error = self._stage_axis_target_limit_error(axis, display_target)
-            if limit_error is not None:
-                self._show_status(limit_error, 4000)
-                self._clear_exact_step_targets()
-                return False
-            targets[axis] = (float(raw_target), float(display_target))
-        self._exact_step_accumulator.drain()
-        self._exact_step_window_elapsed = False
-        accepted = self._start_coordinate_targets_move(
-            targets,
-            feedrate_mm_min=self._coordinate_feedrate_for_axes(targets),
-            source_label="Step",
-        )
-        if accepted:
-            self._exact_step_pending_axes.difference_update(targets)
-        else:
-            self._clear_exact_step_targets()
-        return accepted
+        return coordinate_step.dispatch_exact_step_targets(self)
 
     def _on_coordinate_move_finished(
         self,
         success: bool,
         finished_display_targets: dict[str, float],
+        finished_display_basis: object | None,
     ) -> None:
         if not success:
             self._clear_exact_step_targets()
             return
         accumulator = getattr(self, "_exact_step_accumulator", None)
         if accumulator is None:
+            return
+        queued_display_basis = coordinate_motion.motion_basis(
+            getattr(self, "_exact_step_motion_lease", None)
+        )
+        if finished_display_basis != queued_display_basis:
+            stage_position_panel_adapter.refresh_stage_axis_styles(self)
+            self._update_stage_coordinate_apply_state()
+            if not self._exact_step_timer.isActive():
+                self._dispatch_exact_step_targets()
             return
         for axis, reached_target in finished_display_targets.items():
             pending_target = accumulator.targets.get(axis)
@@ -6879,6 +6725,8 @@ class Main(QMainWindow):
         for axis in getattr(self, "_exact_step_pending_axes", set()):
             self._pending_stage_axis_targets.pop(axis, None)
         self._exact_step_pending_axes = set()
+        self._exact_step_motion_lease = None
+        self._exact_step_pose_rebase_allowed = False
         self._exact_step_window_elapsed = False
         if (
             getattr(self, "_stage_position_panel", None) is not None
@@ -7395,10 +7243,21 @@ class Main(QMainWindow):
         frame_metadata = self._design_metadata_with_calibration_fingerprints(
             context.frame_metadata
         )
+        workspace_after = connection_flow.capture_design_workspace(
+            self,
+            session_state=context.session.snapshot_state(),
+            frame_metadata=frame_metadata,
+            markup=markup,
+            direct_guide_ids=(),
+            pending_visibility=None,
+            last_selected_design_point=context.plan.last_selected_design_point,
+            pending_alignment_preparation=None,
+        )
         transition = connection_flow.activate_current_design(
             self,
             session_state=context.session.snapshot_state(),
             frame_metadata=frame_metadata,
+            workspace_after=workspace_after,
         )
         if transition is None or not transition.accepted:
             self._design_markup_pending_visibility = None
@@ -7407,10 +7266,6 @@ class Main(QMainWindow):
                 show_window=context.show_window,
             )
             return
-        self._active_design_frame_metadata = frame_metadata
-        self._design_markup = markup
-        self._design_markup_direct_guide_ids = []
-        self._design_markup_pending_visibility = None
         self._apply_design_load_success_plan(context.plan, context.show_window)
         self._finish_design_markup_load_ui(
             context.plan.document,
@@ -7651,10 +7506,10 @@ class Main(QMainWindow):
         logger.warning("Software coordinate selection save failed: %s", message)
         self._show_status("Coordinate selection could not be saved.", 6000)
 
-    def _on_coordinate_frames_loaded(self, result: object) -> None:
+    def _on_coordinate_frame_document_loaded(self, result: object) -> None:
         connection_flow.handle_coordinate_frame_loaded(self, result)
 
-    def _on_coordinate_frames_saved(self, result: object) -> None:
+    def _on_coordinate_frame_document_saved(self, result: object) -> None:
         connection_flow.handle_coordinate_frame_saved(self, result)
 
     def _on_coordinate_frame_store_failed(self, failure: object) -> None:
@@ -7662,85 +7517,6 @@ class Main(QMainWindow):
         message = str(getattr(failure, "message", "Unknown persistence error."))
         logger.warning("Coordinate frame %s failed: %s", operation, message)
         connection_flow.handle_coordinate_frame_failed(self, failure)
-
-    def _apply_coordinate_frame_authority_blocks(
-        self,
-        stage_position: tuple[float, ...] | None = None,
-    ) -> None:
-        registry = getattr(self, "_coordinate_frame_registry", None)
-        session = getattr(self, "_design_session", None)
-        if registry is None or session is None:
-            return
-        provenance_error = self._active_design_frame_provenance_error()
-        if provenance_error is not None:
-            self._coordinate_frame_authority_blocked_axes = {"X", "Y", "B"}
-            session.invalidate_registration(provenance_error)
-            return
-        unavailable = {
-            axis
-            for axis in ("X", "Y")
-            if not self.stage_controller.axes_are_homed({axis})
-        }
-        physical_b = self._tracked_physical_b_for_design_frame(stage_position)
-        try:
-            pivot = self._rotation_geometry_snapshot().pivot_machine_xy
-        except DesignModelError:
-            pivot = None
-        if physical_b is None:
-            unavailable.add("B")
-        if pivot is None:
-            unavailable.update({"X", "Y", "B"})
-        self._coordinate_frame_authority_blocked_axes = unavailable
-        if session.active_frame_id is None:
-            if (
-                physical_b is not None
-                and session.legacy_registration_waiting_for_b
-            ):
-                connection_flow.activate_current_design(self)
-            return
-        record = registry.get(session.active_frame_id)
-        if record is None:
-            return
-        if pivot is None:
-            session.invalidate_registration(
-                "B-axis rotation geometry is unavailable."
-            )
-            return
-        effective = (
-            record.with_authority_block(
-                unavailable,
-                "Controller coordinate authority is unavailable.",
-            )
-            if unavailable
-            else record
-        )
-        try:
-            session.link_active_frame(
-                effective,
-                machine_point_for_navigation=(
-                    self._design_navigation_xy_from_physical_machine_xy
-                ),
-                machine_b_deg=physical_b,
-                pivot_machine_xy=pivot,
-            )
-        except DesignModelError as exc:
-            self._coordinate_frame_authority_blocked_axes = {"X", "Y", "B"}
-            session.link_active_frame(
-                effective.with_authority_block({"X", "Y", "B"}, str(exc)),
-                machine_b_deg=physical_b,
-                pivot_machine_xy=pivot,
-            )
-
-    def _tracked_physical_b_for_design_frame(
-        self,
-        stage_position: tuple[float, ...] | None = None,
-    ) -> float | None:
-        try:
-            snapshot = self.stage_controller.latest_machine_coordinate_snapshot()
-            physical_b = snapshot.physical_machine_pose.require("B")
-        except Exception:
-            return None
-        return physical_b if math.isfinite(physical_b) else None
 
     def _show_navigation_status(self, plan: object) -> None:
         message = getattr(plan, "status_message", None)
@@ -7764,13 +7540,15 @@ class Main(QMainWindow):
             return
         self._design_load_generation += 1
         loaded_document = self._design_session.document
-        plan = design_navigation.unload_design_document(self._design_session)
+        candidate_session = self._snapshot_design_session()
+        plan = design_navigation.unload_design_document(candidate_session)
         if not plan.accepted:
             return
         connection_flow.apply_coordinate_transition(
             self,
             self._coordinate_system_coordinator.close_design(),
         )
+        self._design_session.apply_state(candidate_session.snapshot_state())
         if loaded_document is not None:
             self._delete_persisted_design_markup(loaded_document.path)
         self._design_markup_load_request_id = None
@@ -7788,25 +7566,35 @@ class Main(QMainWindow):
     def _set_design_top_cell(self, top_cell_name: str) -> None:
         if not self._design_mutation_ready():
             return
-        transition = self._coordinate_system_coordinator.cancel_registration(
-            RegistrationCancellation.TOP_CELL_CHANGED,
-        )
-        connection_flow.apply_coordinate_transition(self, transition)
+        candidate_session = self._snapshot_design_session()
         try:
-            plan = design_navigation.set_design_top_cell(self._design_session, top_cell_name)
+            plan = design_navigation.set_design_top_cell(candidate_session, top_cell_name)
         except DesignModelError as exc:
             self._show_status(str(exc), 6000)
             return
         metadata = getattr(self, "_active_design_frame_metadata", None)
-        if metadata is not None and self._design_session.document is not None:
-            self._active_design_frame_metadata = replace(
+        document = candidate_session.document
+        if metadata is not None and document is not None:
+            metadata = replace(
                 metadata,
-                top_cell_name=self._design_session.document.top_cell_name,
-                design_unit_mm=float(self._design_session.document.dbu) * 1e3,
+                top_cell_name=document.top_cell_name,
+                design_unit_mm=float(document.dbu) * 1e3,
             )
-            connection_flow.activate_current_design(self)
-        self._pending_alignment_preparation = None
-        self._last_selected_design_point = None
+        workspace_after = connection_flow.capture_design_workspace(
+            self,
+            session_state=candidate_session.snapshot_state(),
+            frame_metadata=metadata,
+            last_selected_design_point=None,
+            pending_alignment_preparation=None,
+        )
+        transition = connection_flow.activate_current_design(
+            self,
+            session_state=candidate_session.snapshot_state(),
+            frame_metadata=metadata,
+            workspace_after=workspace_after,
+        )
+        if transition is None or not transition.accepted:
+            return
         self._refresh_design_panel()
         self._refresh_design_position()
         self._show_navigation_status(plan)
@@ -7814,14 +7602,26 @@ class Main(QMainWindow):
     def _set_design_layer_visibility(self, layer: int, datatype: int, visible: bool) -> None:
         if not self._design_mutation_ready():
             return
+        candidate_session = self._snapshot_design_session()
         try:
             plan = design_navigation.set_design_layer_visibility(
-                self._design_session, layer, datatype, visible
+                candidate_session, layer, datatype, visible
             )
         except DesignModelError as exc:
             self._show_status(str(exc), 5000)
             return
         if not plan.accepted:
+            return
+        workspace_after = connection_flow.capture_design_workspace(
+            self,
+            session_state=candidate_session.snapshot_state(),
+        )
+        transition = connection_flow.activate_current_design(
+            self,
+            session_state=candidate_session.snapshot_state(),
+            workspace_after=workspace_after,
+        )
+        if transition is None or not transition.accepted:
             return
         self._refresh_design_panel()
 
@@ -7832,8 +7632,10 @@ class Main(QMainWindow):
         if document is None:
             self._show_status("Load a design before rotating it.", 4000)
             return
-        registration = self._design_session.registration
-        if registration is not None and registration.valid:
+        if (
+            self._coordinate_system_coordinator.snapshot()
+            .registration.registration_valid
+        ):
             self._show_status(
                 "Clear design registration before rotating the design.",
                 5000,
@@ -7849,10 +7651,6 @@ class Main(QMainWindow):
         if route_measurement_thread is not None and route_measurement_thread.is_alive():
             self._show_status("Stop route measurement before rotating the design.", 5000)
             return
-        transition = self._coordinate_system_coordinator.cancel_registration(
-            RegistrationCancellation.DESIGN_CHANGED
-        )
-        connection_flow.apply_coordinate_transition(self, transition)
         delta = int(quarter_turn_delta) % 4
         if delta == 0:
             delta = 1
@@ -7864,9 +7662,10 @@ class Main(QMainWindow):
             if markup is not None
             else None
         )
+        candidate_session = self._snapshot_design_session()
         try:
             plan = design_navigation.rotate_design_document(
-                self._design_session,
+                candidate_session,
                 delta,
                 self._last_selected_design_point,
                 can_rotate=True,
@@ -7874,9 +7673,20 @@ class Main(QMainWindow):
         except DesignModelError as exc:
             self._show_status(str(exc), 5000)
             return
-        self._design_markup = rotated_markup
-        self._last_selected_design_point = plan.last_selected_design_point
-        self._pending_alignment_preparation = None
+        workspace_after = connection_flow.capture_design_workspace(
+            self,
+            session_state=candidate_session.snapshot_state(),
+            markup=rotated_markup,
+            last_selected_design_point=plan.last_selected_design_point,
+            pending_alignment_preparation=None,
+        )
+        transition = connection_flow.activate_current_design(
+            self,
+            session_state=candidate_session.snapshot_state(),
+            workspace_after=workspace_after,
+        )
+        if transition is None or not transition.accepted:
+            return
         self._refresh_design_panel()
         self._refresh_design_position()
         if rotated_markup != markup:
@@ -8460,7 +8270,7 @@ class Main(QMainWindow):
         self,
         configuration: RouteMeasurementRunConfiguration,
     ) -> RouteMeasurementStartPlan | None:
-        frame_usability = self._snapshot_active_design_frame_usability()
+        frame_usability = self._coordinate_system_coordinator.current_design_lease()
         if not frame_usability.usable:
             self._show_status(
                 str(
@@ -8485,7 +8295,7 @@ class Main(QMainWindow):
             structure_number_for_point=self._api_structure_number_for_measurement_point,
             design_frame_snapshot=frame_snapshot,
         )
-        if decision.accepted and not self._design_frame_usability_snapshot_is_current(
+        if decision.accepted and not self._coordinate_system_coordinator.design_lease_is_current(
             frame_usability
         ):
             self._show_status(
@@ -8508,9 +8318,9 @@ class Main(QMainWindow):
 
     def _snapshot_active_route_design_frame(
         self,
-        usability: DesignFrameUsabilitySnapshot | None = None,
+        usability: DesignCoordinateLease | None = None,
     ):
-        active = usability or self._snapshot_active_design_frame_usability()
+        active = usability or self._coordinate_system_coordinator.current_design_lease()
         if not active.usable:
             return None
         return snapshot_route_design_frame(
@@ -8612,11 +8422,11 @@ class Main(QMainWindow):
         self,
         route: MeasurementRoute,
         *,
-        frame_usability_snapshot: DesignFrameUsabilitySnapshot | None = None,
+        frame_usability_snapshot: DesignCoordinateLease | None = None,
     ) -> list[RouteMeasurementPoint]:
         usability = (
             frame_usability_snapshot
-            or self._snapshot_active_design_frame_usability()
+            or self._coordinate_system_coordinator.current_design_lease()
         )
         if not usability.usable:
             raise DesignModelError(
@@ -8630,7 +8440,7 @@ class Main(QMainWindow):
         return route_measurement_points_for_route(
             route,
             stage_from_design=lambda design_xy: (
-                self._camera_stage_xy_from_design_usability_snapshot(
+                self._coordinate_system_coordinator.project_design_to_camera_stage(
                     usability,
                     design_xy,
                 )
@@ -9640,11 +9450,10 @@ class Main(QMainWindow):
     def _add_design_source_mark(self, x_value: float, y_value: float) -> None:
         if not self._design_mutation_ready():
             return
-        transition = self._coordinate_system_coordinator.cancel_registration(
-            RegistrationCancellation.MARK_SET_CHANGED,
+        transition = self._coordinate_system_coordinator.set_registration_source_mark(
+            RegistrationSourceMarkRequest((x_value, y_value))
         )
         connection_flow.apply_coordinate_transition(self, transition)
-        self._design_session.add_source_design_mark((x_value, y_value))
         self._refresh_design_panel()
         self._show_status(
             f"Design source mark captured at X={x_value:.3f}, Y={y_value:.3f}.",
@@ -9654,11 +9463,10 @@ class Main(QMainWindow):
     def _add_design_check_mark(self, x_value: float, y_value: float) -> None:
         if not self._design_mutation_ready():
             return
-        transition = self._coordinate_system_coordinator.cancel_registration(
-            RegistrationCancellation.MARK_SET_CHANGED,
+        transition = self._coordinate_system_coordinator.add_registration_check_mark(
+            RegistrationCheckMarkRequest((x_value, y_value))
         )
         connection_flow.apply_coordinate_transition(self, transition)
-        self._design_session.add_check_design_mark((x_value, y_value))
         self._refresh_design_panel()
         self._show_status(
             f"Design check mark captured at X={x_value:.3f}, Y={y_value:.3f}.",
@@ -9744,7 +9552,10 @@ class Main(QMainWindow):
 
     def _reconcile_missing_design_registration_instance(self) -> None:
         snapshot = self._coordinate_system_coordinator.snapshot().registration
-        if snapshot.active_frame_id == self._design_session.active_frame_id:
+        if (
+            snapshot.active_frame_id
+            == self._coordinate_system_coordinator.current_design_lease().frame_id
+        ):
             return
         connection_flow.activate_current_design(self)
 
@@ -9753,7 +9564,11 @@ class Main(QMainWindow):
             self._show_status("Design editing is locked.", 4000)
             return
         selected_id = str(frame_id).strip()
-        if selected_id == self._design_session.active_frame_id:
+        if (
+            selected_id
+            == self._coordinate_system_coordinator.snapshot()
+            .registration.active_frame_id
+        ):
             return
         transition = connection_flow.activate_current_design(
             self,
@@ -9776,15 +9591,12 @@ class Main(QMainWindow):
 
     def _invalidate_design_registration(self, reason: str) -> None:
         self._pending_alignment_preparation = None
-        self._design_session.invalidate_registration(reason)
+        transition = self._coordinate_system_coordinator.invalidate_registration(
+            RegistrationInvalidationRequest(reason)
+        )
+        connection_flow.apply_coordinate_transition(self, transition)
         if self._design_session.document is not None:
             self._set_design_snap_enabled(True)
-        self._refresh_design_panel()
-        latest = self.stage_controller.latest_stage_position()
-        if latest is not None and len(latest) >= 2:
-            self._update_design_position((float(latest[0]), float(latest[1])))
-        else:
-            self._update_design_position(None)
 
     def _on_design_target_selected(self, target_id: str) -> None:
         design_navigation.select_design_target(self._design_session, target_id)
@@ -9884,13 +9696,6 @@ class Main(QMainWindow):
             plan.stage_xy[1],
         )
         return True
-
-    def _active_design_frame_record(self):
-        registry = getattr(self, "_coordinate_frame_registry", None)
-        frame_id = getattr(self._design_session, "active_frame_id", None)
-        if registry is None or frame_id is None:
-            return None
-        return registry.get(frame_id)
 
     def _find_design_focus_reference(self) -> None:
         document = self._design_session.document
@@ -10195,14 +10000,24 @@ class Main(QMainWindow):
         panel = self.design_navigator_panel
         self._connect_design_focus_signals()
         route_measurement_thread = getattr(self, "_route_measurement_thread", None)
+        coordinate_snapshot = self._coordinate_system_coordinator.snapshot()
         p = design_navigation.design_panel_presentation(
             self._design_session,
+            coordinate_snapshot.registration,
             route_running=route_measurement_thread is not None and route_measurement_thread.is_alive(),
             pending_alignment_preparation=self._pending_alignment_preparation is not None,
             design_snap_enabled=self._design_snap_enabled,
         )
         registration_instances = self._design_registration_instances()
-        active_frame_id = self._design_session.active_frame_id
+        active_frame_id = coordinate_snapshot.registration.active_frame_id
+        active_record = next(
+            (
+                record
+                for record in coordinate_snapshot.records
+                if record.frame_id == active_frame_id
+            ),
+            None,
+        )
         if panel is not None:
             panel.set_document(p.document)
             panel.set_design_registration_active(p.registration_valid)
@@ -10218,11 +10033,16 @@ class Main(QMainWindow):
                 )
             panel.set_registration_marks(p.source_design_marks, p.check_design_marks)
             panel.set_stage_registration_marks(p.source_stage_marks)
-            record = self._active_design_frame_record()
             if hasattr(panel, "set_focus_reference_state"):
                 panel.set_focus_reference_state(
-                    z_ready=bool(record is not None and record.readiness["Z"].available),
-                    a_ready=bool(record is not None and record.readiness["A"].available),
+                    z_ready=bool(
+                        active_record is not None
+                        and active_record.readiness["Z"].available
+                    ),
+                    a_ready=bool(
+                        active_record is not None
+                        and active_record.readiness["A"].available
+                    ),
                 )
         if self.design_layout_window is not None:
             self.design_layout_window.set_snap_enabled(p.design_snap_enabled)
@@ -10250,103 +10070,10 @@ class Main(QMainWindow):
         connection_flow.persist_controller_state_if_available(self)
 
     def _on_stage_axis_editing_finished(self, axis_name: str) -> bool | None:
-        panel = getattr(self, "_stage_position_panel", None)
-        if panel is None or panel.is_programmatic_update:
-            return None
-        if not stage_position_panel_adapter.gui_coordinate_motion_editing_enabled(self):
-            panel.clear_pending_target_state()
-            self._show_status("Select Machine to edit position fields.", 3000)
-            return False
-        axis = axis_name.strip().upper()
-        commit_from_return = panel.consume_return_commit(axis)
-        field = panel.field(axis)
-        if field is None or not field.isEnabled() or not field.isModified():
-            return None
-
-        def reject(message: str, timeout_ms: int) -> bool:
-            panel.pop_pending_target(axis)
-            panel.reset_axis_field(axis, self._stage_axis_display_values.get(axis))
-            stage_position_panel_adapter.refresh_stage_axis_styles(self)
-            self._update_stage_coordinate_apply_state()
-            self._show_status(message, timeout_ms)
-            return False
-
-        text = field.text().strip().replace(",", ".")
-        try:
-            display_target = float(text)
-        except (TypeError, ValueError):
-            return reject(f"Invalid {axis} target coordinate.", 3000)
-        input_mode = panel.selected_input_mode()
-        raw_target, resolved_display_target = self._resolve_stage_axis_target(axis, display_target, input_mode)
-        if raw_target is None:
-            return reject(f"{axis} coordinate is unavailable.", 3000)
-        limit_error = self._stage_axis_target_limit_error(axis, resolved_display_target)
-        if limit_error is not None:
-            return reject(limit_error, 4000)
-        field.blockSignals(True)
-        field.setText(format_stage_axis_value(display_target))
-        field.setModified(False)
-        if commit_from_return:
-            field.clearFocus()
-        field.blockSignals(False)
-        if commit_from_return:
-            self.view.setFocus(Qt.OtherFocusReason)
-        panel.set_pending_target(axis, raw_target, resolved_display_target)
-        stage_position_panel_adapter.refresh_stage_axis_styles(self)
-        self._update_stage_coordinate_apply_state()
-        return True
+        return coordinate_entry.on_stage_axis_editing_finished(self, axis_name)
 
     def _apply_pending_stage_coordinate_targets(self) -> None:
-        if not stage_position_panel_adapter.gui_coordinate_motion_editing_enabled(self):
-            self._pending_stage_axis_targets.clear()
-            panel = getattr(self, "_stage_position_panel", None)
-            if panel is not None:
-                panel.clear_pending_target_state()
-            self._update_stage_coordinate_apply_state()
-            self._show_status("Select Machine to apply position fields.", 3000)
-            return
-        had_error = False
-        for axis in self.STAGE_AXIS_NAMES:
-            field = self._stage_axis_fields.get(axis)
-            if field is not None and field.isEnabled() and field.isModified():
-                if self._on_stage_axis_editing_finished(axis) is False:
-                    had_error = True
-        if had_error:
-            self._update_stage_coordinate_apply_state()
-            return
-        if not self._pending_stage_axis_targets:
-            self._show_status("No coordinate changes to apply.", 2000)
-            return
-        if self._coordinate_targets.has_active_move() or self.stage_controller.is_busy():
-            self._show_status("Stage is busy. Ignoring coordinate targets.", 3000)
-            self._update_stage_coordinate_apply_state()
-            return
-        targets = dict(self._pending_stage_axis_targets)
-        self.view.setFocus(Qt.OtherFocusReason)
-        self._set_joystick_control_mode_for_coordinate_apply()
-        feedrate = self._coordinate_feedrate_for_axes(targets)
-        self._start_coordinate_targets_move(
-            targets,
-            feedrate_mm_min=feedrate,
-            source_label="coordinate fields",
-        )
-        self._update_stage_coordinate_apply_state()
-
-    def _set_joystick_control_mode_for_coordinate_apply(self) -> None:
-        joystick = self.joystick_panel
-        if joystick is None:
-            return
-        setter = getattr(joystick, "set_control_mode", None)
-        if callable(setter):
-            try:
-                setter("jog", emit_changed=True)
-                return
-            except TypeError:
-                setter("jog")
-                return
-        private_setter = getattr(joystick, "_set_control_mode", None)
-        if callable(private_setter):
-            private_setter("jog", emit_changed=True)
+        coordinate_entry.apply_pending_stage_coordinate_targets(self)
 
     def _start_coordinate_axis_move(
         self,
@@ -10372,7 +10099,22 @@ class Main(QMainWindow):
         *,
         feedrate_mm_min: float,
         source_label: str,
+        limit_targets: dict[str, float] | None = None,
+        display_basis: object | None = None,
     ) -> bool:
+        def limit_error(axis: str, display_target: float) -> str | None:
+            target = (
+                display_target
+                if limit_targets is None
+                else limit_targets.get(axis, display_target)
+            )
+            checker = (
+                self._stage_axis_target_limit_error
+                if limit_targets is None
+                else self._machine_axis_target_limit_error
+            )
+            return checker(axis, target)
+
         decision = plan_coordinate_target_start(
             self._coordinate_targets.config,
             targets=targets,
@@ -10380,7 +10122,7 @@ class Main(QMainWindow):
             source_label=source_label,
             seed_position=stage_position_update.seed_motion_prediction_position(self),
             latest_stage_position=self.stage_controller.latest_stage_position(),
-            axis_target_limit_error=self._stage_axis_target_limit_error,
+            axis_target_limit_error=limit_error,
             axis_max_feedrates=self.stage_controller.axis_max_feedrates(),
             monotonic_s=time.monotonic(),
         )
@@ -10397,6 +10139,7 @@ class Main(QMainWindow):
         for axis in plan.remove_pending_axes:
             self._pending_stage_axis_targets.pop(axis, None)
         self._coordinate_targets.apply_start_plan(plan)
+        self._coordinate_targets.display_basis = display_basis
         stage_position_panel_adapter.set_stage_motion_axes(
             self,
             set(plan.ordered_axes),
@@ -10533,6 +10276,59 @@ class Main(QMainWindow):
             input_mode=input_mode,
         )
 
+    def _api_machine_display_position(self) -> dict[str, float]:
+        snapshot = self._api_machine_coordinate_snapshot()
+        if snapshot is None:
+            return {}
+        return {
+            axis: float(value)
+            for axis, value in snapshot.physical_machine_pose.values.items()
+            if axis in self.STAGE_AXIS_NAMES
+        }
+
+    def _api_machine_coordinate_snapshot(self) -> object | None:
+        for getter_name in (
+            "latest_motion_coordinate_snapshot",
+            "latest_machine_coordinate_snapshot",
+        ):
+            getter = getattr(self.stage_controller, getter_name, None)
+            if not callable(getter):
+                continue
+            snapshot = getter()
+            if snapshot is not None:
+                return snapshot
+        return None
+
+    def _resolve_api_stage_axis_target(
+        self,
+        axis_name: str,
+        input_value: float,
+        input_mode: str,
+    ) -> tuple[float | None, float]:
+        axis = str(axis_name).strip().upper()
+        value = float(input_value)
+        if axis not in self.STAGE_AXIS_NAMES:
+            return None, value
+        snapshot = self._api_machine_coordinate_snapshot()
+        if snapshot is None:
+            return None, value
+        mode = normalize_api_coordinate_input_mode(input_mode) or "G90"
+        if mode == "G91":
+            current = snapshot.physical_machine_pose.values.get(axis)
+            if current is None:
+                return None, value
+            physical_target = float(current) + value
+        else:
+            physical_target = value
+        try:
+            raw_target = snapshot.physical_machine_to_configured_controller(
+                axis,
+                physical_target,
+            )
+        except (TypeError, ValueError):
+            return None, physical_target
+        return float(raw_target), physical_target
+
     def _stage_axis_target_limit_error(
         self,
         axis_name: str,
@@ -10543,6 +10339,18 @@ class Main(QMainWindow):
             display_target,
             homed_axes=self._stage_axis_homed,
             axis_display_limits=self.stage_controller.axis_display_limits,
+        )
+
+    def _machine_axis_target_limit_error(
+        self,
+        axis_name: str,
+        physical_machine_target: float,
+    ) -> str | None:
+        return stage_axis_target_limit_error(
+            axis_name,
+            physical_machine_target,
+            homed_axes=self._stage_axis_homed,
+            axis_display_limits=self.stage_controller.axis_machine_display_limits,
         )
 
     def _refresh_controller_status(self) -> None:
@@ -10577,8 +10385,10 @@ class Main(QMainWindow):
         if stage_xy is not None:
             design_xy = self._design_xy_from_raw_stage_xy(stage_xy)
             fov_design_size = self._resolve_design_fov_size()
+        coordinate_snapshot = self._coordinate_system_coordinator.snapshot()
         p = design_navigation.design_position_presentation(
             self._design_session,
+            coordinate_snapshot.registration,
             stage_xy=stage_xy,
             design_xy=design_xy,
             fov_design_size=fov_design_size,
@@ -10634,7 +10444,10 @@ class Main(QMainWindow):
     def _resolve_design_fov_size(self) -> tuple[float, float] | None:
         import numpy as np
 
-        registration = self._design_session.registration
+        registration = (
+            self._coordinate_system_coordinator.snapshot()
+            .registration.registration_projection
+        )
         if registration is None or not registration.valid:
             return None
         stage_fov = self.stage_controller.current_fov_size_mm()
@@ -10692,7 +10505,7 @@ class Main(QMainWindow):
         if self._show_microscope_scan_start_rejection(preflight):
             return
         document = self._design_session.document
-        frame_usability = self._snapshot_active_design_frame_usability()
+        frame_usability = self._coordinate_system_coordinator.current_design_lease()
         design_preflight = microscope_scan.start_design_decision(
             document=document,
             registration_valid=frame_usability.usable,
@@ -10724,7 +10537,9 @@ class Main(QMainWindow):
         except (AttributeError, IndexError, TypeError, ValueError):
             self._show_status("Design registration is invalid.", 6000)
             return
-        if not self._design_frame_usability_snapshot_is_current(frame_usability):
+        if not self._coordinate_system_coordinator.design_lease_is_current(
+            frame_usability
+        ):
             self._show_status(
                 "Design coordinate frame changed before scan start.",
                 6000,
@@ -10981,8 +10796,9 @@ class Main(QMainWindow):
         return True
 
     def _design_registration_is_active(self) -> bool:
-        return sample_handling.design_registration_is_active(
-            getattr(self, "_design_session", None)
+        return bool(
+            self._coordinate_system_coordinator.snapshot()
+            .registration.registration_valid
         )
 
     def _run_sample_unload(

@@ -7,6 +7,7 @@ import logging
 import math
 import sys
 import time
+from collections.abc import Callable
 from typing import Dict, List, Optional, Tuple, TYPE_CHECKING
 
 import serial
@@ -54,6 +55,11 @@ if TYPE_CHECKING:
     from probe_station_gui.stage.controller import StageController
 
 logger = logging.getLogger(__name__)
+
+RelativeMotionProjector = Callable[
+    [tuple[tuple[str, float], ...], object | None],
+    object,
+]
 
 
 class JoystickWindow(JoystickFeedrateMixin, QWidget):
@@ -261,6 +267,8 @@ class JoystickWindow(JoystickFeedrateMixin, QWidget):
 
         self.serial_connection: Optional[serial.Serial] = None
         self.stage_controller: Optional["StageController"] = None
+        self._relative_motion_projector: RelativeMotionProjector | None = None
+        self._active_jog_projection_lease: object | None = None
         self._active_axes: Optional[tuple[tuple[str, int], ...]] = None
         self._key_stack: list[Tuple[str, object]] = []
         self._key_press_times: dict[Tuple[str, object], float] = {}
@@ -839,6 +847,13 @@ class JoystickWindow(JoystickFeedrateMixin, QWidget):
     def set_stage_controller(self, stage_controller: Optional["StageController"]) -> None:
         self.stage_controller = stage_controller
 
+    def set_relative_motion_projector(
+        self,
+        projector: RelativeMotionProjector | None,
+    ) -> None:
+        self._relative_motion_projector = projector
+        self._active_jog_projection_lease = None
+
     def start_jog(self, axis: str, direction: int) -> None:
         logger.debug("TIMING start_jog_requested axis=%s direction=%s", axis, direction)
         if not self._move_safety_check():
@@ -853,11 +868,14 @@ class JoystickWindow(JoystickFeedrateMixin, QWidget):
         axes = self._active_axes
         if not axes:
             return
+        projection_lease = getattr(self, "_active_jog_projection_lease", None)
         self.stop_jog()
+        self._active_jog_projection_lease = projection_lease
         self._apply_axes(axes)
 
     def stop_jog(self) -> None:
         had_active_axes = self._active_axes is not None
+        self._active_jog_projection_lease = None
         logger.debug(
             "TIMING stop_jog_requested active_axes=%s key_stack=%s",
             self._active_axes,
@@ -881,6 +899,16 @@ class JoystickWindow(JoystickFeedrateMixin, QWidget):
             self.jog_stopped.emit()
         logger.debug("Stop jog command issued")
 
+    def cancel_jog_input(self) -> None:
+        """Stop motion and forget held inputs before changing its coordinate basis."""
+
+        self._pending_jog_axes = None
+        self._clear_pending_key_activations()
+        self._key_stack.clear()
+        self._key_press_times.clear()
+        self._sync_physical_key_watchdog()
+        self.stop_jog()
+
     def _apply_axes(self, axes: tuple[tuple[str, int], ...]) -> None:
         if not self._move_safety_check():
             self.stop_jog()
@@ -893,17 +921,40 @@ class JoystickWindow(JoystickFeedrateMixin, QWidget):
             return
         if not self.serial_connection or not self.serial_connection.is_open:
             self._active_axes = None
+            self._active_jog_projection_lease = None
             return
         feedrate = self._feedrate_for_axes(axes_sorted)
         if feedrate is None:
             self.stop_jog()
             return
+        projection_lease = getattr(self, "_active_jog_projection_lease", None)
         if self._active_axes is not None:
             self.stop_jog()
-        commanded_distances = [
+        requested_distances = tuple(
             (axis, direction * self._distance_for_axis(axis))
             for axis, direction in axes_sorted
-        ]
+        )
+        projector = getattr(self, "_relative_motion_projector", None)
+        next_projection_lease: object | None = None
+        if projector is None:
+            commanded_distances = list(requested_distances)
+        else:
+            try:
+                projection = projector(requested_distances, projection_lease)
+                if not bool(projection.accepted):
+                    reason = str(projection.reason or "Jog movement is unavailable.")
+                    self._active_jog_projection_lease = None
+                    self._show_warning(reason)
+                    self.jog_command_changed.emit(tuple(), float(feedrate))
+                    return
+                commanded_distances = list(projection.raw_distances)
+                next_projection_lease = projection.lease
+            except Exception as error:  # pragma: no cover - UI safety guard
+                self._active_jog_projection_lease = None
+                self._show_warning(str(error))
+                logger.exception("Failed to project jog command: %s", error)
+                self.jog_command_changed.emit(tuple(), float(feedrate))
+                return
         if self.stage_controller is not None:
             try:
                 commanded_distances = list(
@@ -912,11 +963,13 @@ class JoystickWindow(JoystickFeedrateMixin, QWidget):
                     )
                 )
             except Exception as error:  # pragma: no cover - UI safety guard
+                self._active_jog_projection_lease = None
                 self._show_warning(str(error))
                 logger.exception("Failed to constrain jog command: %s", error)
                 self.jog_command_changed.emit(tuple(), float(feedrate))
                 return
         if not commanded_distances:
+            self._active_jog_projection_lease = None
             self.jog_command_changed.emit(tuple(), float(feedrate))
             return
         parts = [f"{axis}{distance:.3f}" for axis, distance in commanded_distances]
@@ -928,12 +981,19 @@ class JoystickWindow(JoystickFeedrateMixin, QWidget):
             command.strip(),
         )
         if not self.send_command(command):
+            self._active_jog_projection_lease = None
             self.jog_command_changed.emit(tuple(), float(feedrate))
             return
-        commanded_axes = {axis for axis, _distance in commanded_distances}
-        self._active_axes = tuple(
-            (axis, direction) for axis, direction in axes_sorted if axis in commanded_axes
-        )
+        self._active_jog_projection_lease = next_projection_lease
+        if projector is None:
+            commanded_axes = {axis for axis, _distance in commanded_distances}
+            self._active_axes = tuple(
+                (axis, direction)
+                for axis, direction in axes_sorted
+                if axis in commanded_axes
+            )
+        else:
+            self._active_axes = axes_sorted
         self.jog_command_changed.emit(tuple(commanded_distances), float(feedrate))
         logger.debug("TIMING jog_command_sent command=%s", command.strip())
 

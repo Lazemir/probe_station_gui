@@ -1,7 +1,9 @@
+import inspect
 import subprocess
 import sys
 
 import probe_station_gui.coordinates as coordinates
+from probe_station_gui.coordinates.coordinator import CoordinateSystemCoordinator
 from probe_station_gui.coordinates.model import (
     STAGE_AXES,
     VISIBLE_STAGE_AXES,
@@ -19,9 +21,7 @@ from probe_station_gui.coordinates.persistence import (
     FrameLoadDiagnostic,
 )
 from probe_station_gui.coordinates.registry import (
-    CoordinateFrameRegistry,
     FrameVersionConflict,
-    RegistrySnapshot,
     invalidate_axes,
 )
 from probe_station_gui.coordinates.transforms import BFrameTransform, rotate_xy
@@ -41,33 +41,30 @@ def test_coordinates_package_exports_stable_core_and_store_types() -> None:
         "VISIBLE_STAGE_AXES",
         "AxisReadiness",
         "BFrameTransform",
-        "CoordinateFrameLifecycle",
         "CoordinateAdapterCompletion",
+        "CoordinateAuthorityObservation",
+        "CoordinateMotionLease",
+        "CoordinateMotionProjection",
+        "CoordinateMotionRequest",
         "CoordinateNotice",
         "CoordinateSystemCoordinator",
         "CoordinateSystemSnapshot",
         "CoordinateTransition",
         "CoordinateFrameDocument",
         "CoordinateFrameRecord",
-        "CoordinateFrameRegistry",
         "CoordinateFrameStoreWorker",
-        "DesignFrameUsabilitySnapshot",
-        "DesignSessionCheckpoint",
-        "DesignSessionFrameLink",
-        "DesignUsabilityContext",
+        "CoordinateSystemSelection",
+        "CustomSystemsRequest",
+        "DesignCoordinateLease",
         "FilesystemCoordinateFrameBackend",
         "FrameKind",
-        "FrameRecordsPublication",
         "FrameLoadDiagnostic",
-        "FrameSelectionContext",
-        "FrameSelectionDecision",
         "FrameVersionConflict",
         "PhysicalMachinePose",
         "MACHINE_FRAME_ID",
         "LoadCoordinateFramesIntent",
         "MachineProfileObservation",
         "ReadinessStatus",
-        "RegistrySnapshot",
         "SaveCoordinateFramesIntent",
         "invalidate_axes",
         "normalize_axis_values",
@@ -79,18 +76,26 @@ def test_coordinates_package_exports_stable_core_and_store_types() -> None:
     assert coordinates.BFrameTransform is BFrameTransform
     assert coordinates.CoordinateFrameDocument is CoordinateFrameDocument
     assert coordinates.CoordinateFrameRecord is CoordinateFrameRecord
-    assert coordinates.CoordinateFrameRegistry is CoordinateFrameRegistry
     assert coordinates.CoordinateFrameStoreWorker is CoordinateFrameStoreWorker
+    assert coordinates.CoordinateSystemCoordinator is CoordinateSystemCoordinator
     assert coordinates.FilesystemCoordinateFrameBackend is FilesystemCoordinateFrameBackend
     assert coordinates.FrameKind is FrameKind
     assert coordinates.FrameLoadDiagnostic is FrameLoadDiagnostic
     assert coordinates.FrameVersionConflict is FrameVersionConflict
     assert coordinates.PhysicalMachinePose is PhysicalMachinePose
     assert coordinates.ReadinessStatus is ReadinessStatus
-    assert coordinates.RegistrySnapshot is RegistrySnapshot
     assert coordinates.invalidate_axes is invalidate_axes
     assert coordinates.normalize_axis_values is normalize_axis_values
     assert coordinates.rotate_xy is rotate_xy
+
+
+def test_coordinator_public_constructor_owns_its_session_and_remains_closeable() -> None:
+    parameters = inspect.signature(CoordinateSystemCoordinator.__init__).parameters
+
+    assert tuple(parameters) == ("self", "restore_frame_id")
+    assert parameters["restore_frame_id"].kind is inspect.Parameter.KEYWORD_ONLY
+    assert parameters["restore_frame_id"].default is None
+    assert callable(CoordinateSystemCoordinator.close)
 
 
 def test_software_coordinate_settings_types_remain_importable() -> None:
@@ -112,6 +117,7 @@ def test_design_and_coordinates_packages_are_import_order_independent() -> None:
     for script in (
         "import probe_station_gui.design.session; import probe_station_gui.coordinates",
         "import probe_station_gui.coordinates; import probe_station_gui.design.session",
+        "import probe_station_gui.route.point_execution; import probe_station_gui.coordinates",
     ):
         completed = subprocess.run(
             [sys.executable, "-c", script],

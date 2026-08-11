@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 import math
-from pathlib import Path
 from typing import Callable
 
 from probe_station_gui.design import objective_offsets
@@ -42,6 +41,7 @@ from .coordinator_model import (
     _RegistrationTransitionParts,
 )
 from .registry import CoordinateFrameRegistry
+from .source_identity import source_identity
 
 
 @dataclass(frozen=True)
@@ -347,7 +347,7 @@ class CoordinateFocusWorkflow:
         if document is None:
             return None
         try:
-            source_path = str(Path(document.path).expanduser().resolve())
+            source_path = source_identity(document.path)
         except OSError:
             return None
         return RegistrationContext(

@@ -350,6 +350,81 @@ def test_cached_machine_coordinate_snapshot_uses_same_status_generation() -> Non
         controller.shutdown()
 
 
+def test_machine_display_limits_ignore_active_work_origin() -> None:
+    controller = StageController()
+    try:
+        settings = default_axis_calibrations()
+        settings["X"] = AxisCalibrationSettings(
+            enabled=True,
+            controller_points=[0.0, 10.0, 20.0],
+            physical_points=[0.0, 12.0, 30.0],
+        )
+        controller.apply_axis_calibrations(settings)
+        controller._position_reporting_mode = "work"
+        controller._active_work_coordinate_system = "G54"
+        controller._controller_coordinate_offsets["G54"] = (
+            10.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+        )
+        controller._axis_limits["X"] = (0.0, 20.0)
+
+        assert controller.axis_display_limits("X") == pytest.approx((-12.0, 18.0))
+        assert controller.axis_machine_display_limits("X") == pytest.approx(
+            (0.0, 30.0)
+        )
+    finally:
+        controller.shutdown()
+
+
+def test_replacing_calibration_remaps_cached_machine_snapshot_without_new_status() -> None:
+    controller = StageController()
+    try:
+        controller._position_reporting_mode = "machine"
+        controller._update_cached_positions(
+            _Status(
+                state="Idle",
+                synchronized_machine_position=(1.0, 2.0, 3.0),
+                display_position=(1.0, 2.0, 3.0),
+            )
+        )
+        before = controller.latest_machine_coordinate_snapshot()
+        assert before is not None
+        assert before.physical_machine_pose.require("X") == pytest.approx(1.0)
+
+        controller.apply_axis_calibrations(_curve("X"))
+
+        remapped = controller.latest_machine_coordinate_snapshot()
+        assert remapped is not None
+        assert remapped.raw_machine_position == before.raw_machine_position
+        assert remapped.physical_machine_pose.require("X") == pytest.approx(2.0)
+    finally:
+        controller.shutdown()
+
+
+def test_active_jog_keeps_separate_motion_snapshot_for_coordinate_projection() -> None:
+    controller = StageController()
+    try:
+        controller._position_reporting_mode = "machine"
+        controller._update_cached_positions(
+            _Status(
+                state="Jog",
+                synchronized_machine_position=(1.0, 2.0, 3.0, 4.0, 5.0),
+                display_position=(1.0, 2.0, 3.0, 4.0, 5.0),
+            )
+        )
+
+        assert controller.latest_machine_coordinate_snapshot() is None
+        motion_snapshot = controller.latest_motion_coordinate_snapshot()
+        assert isinstance(motion_snapshot, MachineCoordinateSnapshot)
+        assert motion_snapshot.physical_machine_pose.require("B") == pytest.approx(5.0)
+    finally:
+        controller.shutdown()
+
+
 def test_machine_coordinate_snapshot_request_runs_query_only_in_background_target() -> None:
     controller = StageController()
     started: dict[str, object] = {}

@@ -317,6 +317,7 @@ class StageController(
         self._last_machine_position: Optional[tuple[float, ...]] = None
         self._last_synchronized_machine_position: Optional[tuple[float, ...]] = None
         self._last_machine_coordinate_snapshot: MachineCoordinateSnapshot | None = None
+        self._last_motion_coordinate_snapshot: MachineCoordinateSnapshot | None = None
         self._latest_frame: Optional[np.ndarray] = None
         self._frame_counter = 0
         self._frame_history: deque[tuple[int, float, np.ndarray]] = deque(maxlen=256)
@@ -697,9 +698,13 @@ class StageController(
         system = preferred_system.strip().upper()
         if system not in self.WORK_COORDINATE_SYSTEMS:
             system = self.DEFAULT_WORK_COORDINATE_SYSTEM
+        reporting_mode_changed = reporting_mode != self._position_reporting_mode
         self._position_reporting_mode = reporting_mode
         self._coordinate_startup_mode = mode
         self._preferred_work_coordinate_system = system
+        if reporting_mode_changed:
+            self._last_machine_coordinate_snapshot = None
+            self._last_motion_coordinate_snapshot = None
 
     def active_coordinate_system(self) -> str | None:
         """Return the currently active work coordinate system, if known."""
@@ -1272,6 +1277,13 @@ class StageController(
 
         return self._last_machine_coordinate_snapshot
 
+    def latest_motion_coordinate_snapshot(
+        self,
+    ) -> MachineCoordinateSnapshot | None:
+        """Return a synchronized snapshot for display and live motion projection."""
+
+        return self._last_motion_coordinate_snapshot
+
     def axis_calibration_preview_position(
         self,
         axis: str,
@@ -1390,6 +1402,16 @@ class StageController(
             if synchronized_machine is not None
             else None
         )
+        try:
+            self._last_motion_coordinate_snapshot = (
+                MachineCoordinateSnapshot.from_motion_status(
+                    status,
+                    self._axis_calibration_mapper(),
+                    self.AXIS_INDEX,
+                )
+            )
+        except MachineCoordinateSnapshotUnavailable:
+            self._last_motion_coordinate_snapshot = None
         try:
             self._last_machine_coordinate_snapshot = (
                 MachineCoordinateSnapshot.from_status(

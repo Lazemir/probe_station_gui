@@ -3,6 +3,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from probe_station_gui.views import main_window_homing as homing_ui
+from probe_station_gui.views import main_window_connection_flow as connection_flow
 
 
 class _StageController:
@@ -68,9 +69,6 @@ def _owner(events: list[object]) -> SimpleNamespace:
         _update_stage_coordinate_apply_state=lambda: events.append(("apply_state",)),
         _invalidate_design_registration=lambda message: events.append(
             ("invalidate", message)
-        ),
-        _apply_coordinate_frame_authority_blocks=lambda: events.append(
-            ("authority",)
         ),
     )
     stage_controller.owner = owner
@@ -184,6 +182,11 @@ def test_successful_homing_finish_refreshes_authority_without_staling_registrati
             singleShot=lambda delay, callback: timer_calls.append((delay, callback))
         ),
     )
+    monkeypatch.setattr(
+        connection_flow,
+        "observe_coordinate_authority",
+        lambda _owner: events.append(("authority",)),
+    )
     owner = _owner(events)
     owner._homing_active_key = "X"
     owner._pending_homing_axes = ["Z"]
@@ -198,6 +201,28 @@ def test_successful_homing_finish_refreshes_authority_without_staling_registrati
     assert len(timer_calls) == 1
     assert timer_calls[0][0] == 0
     assert callable(timer_calls[0][1])
+
+
+def test_homing_status_loss_immediately_refreshes_coordinate_authority(
+    monkeypatch,
+) -> None:
+    events: list[object] = []
+    owner = _owner(events)
+    monkeypatch.setattr(
+        homing_ui.stage_position_panel,
+        "update_stage_position_display",
+        lambda _owner, position: events.append(("display", position)),
+    )
+    monkeypatch.setattr(
+        connection_flow,
+        "observe_coordinate_authority",
+        lambda _owner: events.append(("authority",)),
+    )
+
+    homing_ui.on_homing_status_changed(owner, {"X"})
+
+    assert events[-1] == ("authority",)
+    assert events.count(("authority",)) == 1
 
 
 def test_limit_axis_update_normalizes_axes_and_preserves_manual_jog_prediction(
@@ -220,3 +245,33 @@ def test_limit_axis_update_normalizes_axes_and_preserves_manual_jog_prediction(
     assert owner._stage_limit_axes == {"X", "B"}
     assert ("display", (9.0, 8.0, 7.0)) in events
     assert ("latest_position",) not in events
+
+
+def test_limit_axis_update_restores_selected_coordinate_display(monkeypatch) -> None:
+    events: list[object] = []
+    owner = _owner(events)
+    owner._stage_axis_display_values = {"X": 1.0}
+
+    def render_raw(_owner: object, position: object) -> None:
+        events.append(("display", position))
+        owner._stage_axis_display_values["X"] = 10.0
+
+    def render_selected(_owner: object) -> None:
+        events.append(("selected",))
+        owner._stage_axis_display_values["X"] = 1.0
+
+    monkeypatch.setattr(
+        homing_ui.stage_position_panel,
+        "update_stage_position_display",
+        render_raw,
+    )
+    monkeypatch.setattr(
+        homing_ui.stage_position_panel,
+        "refresh_coordinate_frame_display",
+        render_selected,
+    )
+
+    homing_ui.on_limit_axes_changed(owner, ["X"])
+
+    assert events[-1] == ("selected",)
+    assert owner._stage_axis_display_values["X"] == 1.0

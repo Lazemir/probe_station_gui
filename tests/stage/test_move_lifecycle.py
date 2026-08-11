@@ -3,6 +3,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 import types
 
+from probe_station_gui.coordinates.coordinator_model import (
+    CoordinateSystemSnapshot,
+    CoordinateTransition,
+)
 from probe_station_gui.stage import move_lifecycle
 from probe_station_gui.stage.coordinate_targets import (
     CoordinateTargetConfig,
@@ -188,6 +192,14 @@ class _Owner:
                 preparation
             ),
         )
+        self._coordinate_system_coordinator = types.SimpleNamespace(
+            apply_registration_alignment=lambda request: (
+                self._design_session.applied.append(request.preparation)
+                or CoordinateTransition(
+                    CoordinateSystemSnapshot(False, (), None)
+                )
+            )
+        )
         self.design_navigator_panel = None
         self.statuses: list[tuple[str, int]] = []
         self.status_refreshes: list[tuple[int, ...]] = []
@@ -197,6 +209,9 @@ class _Owner:
         self.pending_stage_coordinate_clears = 0
         self.axis_style_refreshes = 0
         self.apply_state_refreshes = 0
+        self.coordinate_move_completions: list[
+            tuple[bool, dict[str, float], object | None]
+        ] = []
         self.homing_starts = 0
         self.design_snap_updates: list[bool] = []
         self.design_panel_refreshes = 0
@@ -285,6 +300,20 @@ class _Owner:
 
     def _update_stage_coordinate_apply_state(self) -> None:
         self.apply_state_refreshes += 1
+
+    def _on_coordinate_move_finished(
+        self,
+        success: bool,
+        finished_display_targets: dict[str, float],
+        finished_display_basis: object | None,
+    ) -> None:
+        self.coordinate_move_completions.append(
+            (
+                bool(success),
+                dict(finished_display_targets),
+                finished_display_basis,
+            )
+        )
 
     def _start_next_pending_homing_action(self) -> None:
         self.homing_starts += 1
@@ -474,12 +503,17 @@ def test_move_finish_feedrate_reissue_cancel_keeps_tracking_and_suppresses_statu
 def test_move_finish_normal_failure_clears_tracking_and_cross_then_reports_status() -> None:
     owner = _Owner()
     owner._coordinate_targets.active_axis = "X"
+    owner._coordinate_targets.display_targets = {"X": 12.0}
+    owner._coordinate_targets.display_basis = ("design", "frame-a")
 
     move_lifecycle.on_move_finished(owner, False, "Limit reached.")
 
     assert owner._microscope_interaction.finish_calls == [False]
     assert owner._coordinate_targets.has_active_move() is False
     assert owner._stage_motion_axes == set()
+    assert owner.coordinate_move_completions == [
+        (False, {"X": 12.0}, ("design", "frame-a"))
+    ]
     assert owner.statuses == [("Limit reached.", 5000)]
     assert owner.cancel_refreshes == 1
 
@@ -502,6 +536,8 @@ def test_finish_coordinate_move_if_idle_schedules_pending_homing_action() -> Non
     owner._coordinate_targets.active_axes = {"X"}
     owner._coordinate_targets.target_position = (1.0, 0.0, 0.0, 0.0, 0.0, 0.0)
     owner._coordinate_targets.started_at = 1.0
+    owner._coordinate_targets.display_targets = {"X": 1.0}
+    owner._coordinate_targets.display_basis = ("custom", "frame-b")
     owner._pending_homing_axes = ["Z"]
     scheduled: list[int] = []
 
@@ -517,5 +553,8 @@ def test_finish_coordinate_move_if_idle_schedules_pending_homing_action() -> Non
     )
 
     assert owner._coordinate_targets.has_active_move() is False
+    assert owner.coordinate_move_completions == [
+        (True, {"X": 1.0}, ("custom", "frame-b"))
+    ]
     assert scheduled == [0]
     assert owner.stage_controller.home_axis_requests == ["Z"]

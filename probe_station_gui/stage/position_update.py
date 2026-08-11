@@ -32,7 +32,7 @@ class StagePositionUpdateOwner(Protocol):
     _planned_move_stop_status_timestamp: float | None
     _pending_alignment_preparation: Any
     _last_reported_b_position: float | None
-    _design_session: Any
+    _coordinate_system_coordinator: Any
     _current_design_stage_xy: tuple[float, float] | None
     contact_calibration_window: Any
     stage_controller: Any
@@ -142,6 +142,10 @@ def publish_stage_position_estimate(
         else None
     )
     stage_position_panel.update_stage_position_display(owner, position)
+    connection_flow.observe_coordinate_authority(
+        owner,
+        getattr(owner, "_latest_physical_machine_pose", None),
+    )
     owner._update_coordinate_display(center_xy=design_stage_xy)
     owner._update_design_position(design_stage_xy)
 
@@ -220,8 +224,12 @@ def on_stage_position_changed(
     position: object,
 ) -> None:
     if not isinstance(position, tuple) or len(position) < 2:
-        owner._latest_physical_machine_pose = None
+        owner._latest_physical_machine_pose = PhysicalMachinePose({})
         stage_position_panel.update_stage_position_display(owner, position)
+        connection_flow.observe_coordinate_authority(
+            owner,
+            owner._latest_physical_machine_pose,
+        )
         return
     owner._latest_physical_machine_pose = (
         physical_machine_pose_from_controller(
@@ -239,8 +247,7 @@ def on_stage_position_changed(
     xy_homed = owner.stage_controller.axes_are_homed({"X", "Y"})
     xyz_homed = owner.stage_controller.axes_are_homed({"X", "Y", "Z"})
     manual_prediction_available = owner._manual_jog_prediction.prediction_available(now)
-    design_session = getattr(owner, "_design_session", None)
-    registration = getattr(design_session, "registration", None)
+    coordinate_snapshot = owner._coordinate_system_coordinator.snapshot()
     signal_plan = _build_stage_position_signal_plan(
         owner,
         position,
@@ -248,7 +255,9 @@ def on_stage_position_changed(
         xy_homed=xy_homed,
         xyz_homed=xyz_homed,
         manual_prediction_available=manual_prediction_available,
-        registration=registration,
+        registration_valid=(
+            coordinate_snapshot.registration.registration_valid
+        ),
     )
     if signal_plan.status.mark_coordinate_move_active:
         owner._coordinate_targets.seen_active_state = True
@@ -257,7 +266,7 @@ def on_stage_position_changed(
             signal_plan.status.contact_calibration_position
         )
     center_xy = signal_plan.status.center_xy
-    _apply_b_axis_registration(owner, signal_plan, current_position)
+    _track_b_axis_position(owner, signal_plan)
     if signal_plan.status.use_unhomed_fallback:
         _apply_unhomed_fallback(owner, position, signal_plan, center_xy, latest_state)
         return
@@ -267,8 +276,16 @@ def on_stage_position_changed(
             owner._format_optional_point(center_xy),
             latest_state,
         )
+        connection_flow.observe_coordinate_authority(
+            owner,
+            owner._latest_physical_machine_pose,
+        )
         return
     if _ignore_manual_idle_sample(owner, center_xy, now, latest_state):
+        connection_flow.observe_coordinate_authority(
+            owner,
+            owner._latest_physical_machine_pose,
+        )
         return
     center_xy = _reconciled_stage_xy(owner, signal_plan, center_xy, latest_state)
     display_position = position_with_stage_xy(
@@ -303,7 +320,7 @@ def _build_stage_position_signal_plan(
     xy_homed: bool,
     xyz_homed: bool,
     manual_prediction_available: bool,
-    registration: object | None,
+    registration_valid: bool,
 ) -> Any:
     return stage_position_signal_plan(
         position,
@@ -320,9 +337,7 @@ def _build_stage_position_signal_plan(
         last_reported_b_position=owner._last_reported_b_position,
         tolerance_deg=owner.B_POSITION_CHANGE_TOLERANCE_DEG,
         pending_alignment_preparation=owner._pending_alignment_preparation,
-        registration_valid=bool(
-            registration is not None and getattr(registration, "valid", False)
-        ),
+        registration_valid=registration_valid,
         manual_jog_stage_position=owner._manual_jog_prediction.stage_position,
         coordinate_move_stage_position=owner._coordinate_targets.stage_position,
         planned_move_started_at=owner._planned_move_started_at,
@@ -344,20 +359,9 @@ def _build_stage_position_signal_plan(
     )
 
 
-def _apply_b_axis_registration(
-    owner: StagePositionUpdateOwner,
-    signal_plan: Any,
-    stage_position: tuple[float, ...] | None,
-) -> None:
+def _track_b_axis_position(owner: StagePositionUpdateOwner, signal_plan: Any) -> None:
     if signal_plan.b_axis.current_b is not None:
         owner._last_reported_b_position = signal_plan.b_axis.current_b
-    refresh_authority = getattr(
-        owner,
-        "_apply_coordinate_frame_authority_blocks",
-        None,
-    )
-    if callable(refresh_authority):
-        refresh_authority(stage_position)
 
 
 def _apply_unhomed_fallback(
@@ -369,6 +373,10 @@ def _apply_unhomed_fallback(
 ) -> None:
     _ = center_xy
     stage_position_panel.update_stage_position_display(owner, position)
+    connection_flow.observe_coordinate_authority(
+        owner,
+        owner._latest_physical_machine_pose,
+    )
     owner._manual_jog_prediction.stage_position = None
     owner._manual_jog_prediction.stage_xy = None
     owner._planned_move_stage_xy = None

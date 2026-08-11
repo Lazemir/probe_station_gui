@@ -1,14 +1,22 @@
 import time
 import types
 import unittest
+from collections.abc import Callable
+from dataclasses import dataclass
 from unittest import mock
 
 from tests.app.import_reset import restore_real_imports_for_main
 
 
-restore_real_imports_for_main(clear_probe_station_gui=True)
+restore_real_imports_for_main()
 import main as main_module
 from main import Main
+from probe_station_gui.coordinates.coordinator_model import (
+    CoordinateAuthorityObservation,
+    CoordinateSystemSnapshot,
+    CoordinateTransition,
+    RegistrationWorkflowSnapshot,
+)
 from probe_station_gui.stage.coordinate_targets import (
     CoordinateTargetConfig,
     CoordinateTargetMoveState,
@@ -20,12 +28,42 @@ from probe_station_gui.stage.manual_jog_prediction import (
 from probe_station_gui.stage import position_update
 
 
+class _IdentityAxisCalibrationMapper:
+    @staticmethod
+    def controller_to_physical(_axis: str, value: float) -> float:
+        return float(value)
+
+
+def _ignore_authority_observation(
+    _observation: CoordinateAuthorityObservation,
+) -> None:
+    return
+
+
+@dataclass(frozen=True)
+class _FakeCoordinateSystemCoordinator:
+    current: CoordinateSystemSnapshot
+    authority_observer: Callable[[CoordinateAuthorityObservation], None]
+
+    def snapshot(self) -> CoordinateSystemSnapshot:
+        return self.current
+
+    def observe_authority(
+        self,
+        observation: CoordinateAuthorityObservation,
+    ) -> CoordinateTransition:
+        self.authority_observer(observation)
+        return CoordinateTransition(self.current)
+
+
 class _FakeStageController:
     DEFAULT_FEEDRATE = 600.0
 
     def __init__(self, *, state: str = "run") -> None:
         self.state = state
         self.position = (0.0, 0.0, 4.0, 0.0, 0.0)
+        self.machine_position = self.position
+        self.mapper = _IdentityAxisCalibrationMapper()
         self.status_timestamp = 10.0
         self.last_jog_write_time: float | None = None
         self.move_requests: list[tuple[float, float]] = []
@@ -38,6 +76,12 @@ class _FakeStageController:
 
     def latest_stage_position(self) -> tuple[float, ...]:
         return self.position
+
+    def latest_synchronized_machine_position(self) -> tuple[float, ...]:
+        return self.machine_position
+
+    def _axis_calibration_mapper(self) -> _IdentityAxisCalibrationMapper:
+        return self.mapper
 
     def last_status_timestamp(self) -> float:
         return self.status_timestamp
@@ -74,6 +118,10 @@ class _DesignRestoreStageController:
 def _make_main(
     *,
     state: str = "run",
+    registration_valid: bool = False,
+    authority_observer: Callable[
+        [CoordinateAuthorityObservation], None
+    ] = _ignore_authority_observation,
 ) -> tuple[
     Main,
     list[tuple[float, ...]],
@@ -86,6 +134,17 @@ def _make_main(
     smooth_calls: list[tuple[tuple[float, float], tuple[float, float]]] = []
 
     window.stage_controller = _FakeStageController(state=state)
+    window._coordinate_system_coordinator = _FakeCoordinateSystemCoordinator(
+        CoordinateSystemSnapshot(
+            frames_loaded=False,
+            records=(),
+            document=None,
+            registration=RegistrationWorkflowSnapshot(
+                registration_valid=registration_valid
+            ),
+        ),
+        authority_observer,
+    )
     window.contact_calibration_window = None
     window._pending_alignment_preparation = None
     window._last_reported_b_position = None
@@ -186,6 +245,9 @@ def _make_design_restore_main(
     }
     window._pending_persisted_design_position = expected_position
     window._design_session = types.SimpleNamespace(document=None)
+    window._coordinate_system_coordinator = types.SimpleNamespace(
+        current_design_lease=lambda: types.SimpleNamespace(document=None)
+    )
     window._show_status = lambda message, _timeout=0: statuses.append(message)
     window.settings_manager = types.SimpleNamespace(
         save_controller_state=lambda _state: saved_without_design.append(True)
@@ -394,67 +456,70 @@ class MainPlannedMovePredictionTest(unittest.TestCase):
         self.assertEqual(cleared, ["clear"])
         self.assertEqual(published, [])
 
-    def test_b_axis_motion_reprojects_registration_without_invalidating_it(self) -> None:
-        window, _published, _reconciles, _smooth_calls = _make_main(state="run")
-        invalidations: list[str] = []
-        authority_updates: list[tuple[float, ...] | None] = []
-        window._design_session = types.SimpleNamespace(
-            registration=types.SimpleNamespace(valid=True)
+    def test_b_axis_motion_reprojects_registration_without_invalidating_it(
+        self,
+    ) -> None:
+        authority_observations: list[CoordinateAuthorityObservation] = []
+        window, _published, _reconciles, _smooth_calls = _make_main(
+            state="run",
+            registration_valid=True,
+            authority_observer=authority_observations.append,
         )
+        invalidations: list[str] = []
         window._invalidate_design_registration = lambda reason: invalidations.append(
             reason
         )
-        window._apply_coordinate_frame_authority_blocks = (
-            lambda position=None: authority_updates.append(position)
-        )
+        window.stage_controller.machine_position = (0.0, 0.0, 4.0, 0.0, 5.5)
         window._last_reported_b_position = 5.0
 
         position_update.on_stage_position_changed(window, (0.0, 0.0, 4.0, 0.0, 5.5))
 
         self.assertEqual(invalidations, [])
-        self.assertEqual(authority_updates, [(0.0, 0.0, 4.0, 0.0, 5.5)])
+        self.assertEqual(
+            authority_observations[-1].physical_pose.to_dict(),
+            {"X": 0.0, "Y": 0.0, "Z": 4.0, "A": 0.0, "B": 5.5},
+        )
         self.assertEqual(window._last_reported_b_position, 5.5)
 
-        below_tolerance, _published, _reconciles, _smooth_calls = _make_main(state="run")
-        below_tolerance._design_session = types.SimpleNamespace(
-            registration=types.SimpleNamespace(valid=True)
+        below_tolerance, _published, _reconciles, _smooth_calls = _make_main(
+            state="run",
+            registration_valid=True,
         )
-        below_tolerance._invalidate_design_registration = (
-            lambda reason: invalidations.append(f"unexpected:{reason}")
+        below_tolerance._invalidate_design_registration = lambda reason: (
+            invalidations.append(f"unexpected:{reason}")
         )
-        below_tolerance._apply_coordinate_frame_authority_blocks = lambda *_args: None
         below_tolerance._last_reported_b_position = 5.0
 
-        position_update.on_stage_position_changed(below_tolerance, (0.0, 0.0, 4.0, 0.0, 5.0))
+        position_update.on_stage_position_changed(
+            below_tolerance, (0.0, 0.0, 4.0, 0.0, 5.0)
+        )
 
         pending_alignment, _published, _reconciles, _smooth_calls = _make_main(
-            state="run"
-        )
-        pending_alignment._design_session = types.SimpleNamespace(
-            registration=types.SimpleNamespace(valid=True)
+            state="run",
+            registration_valid=True,
         )
         pending_alignment._pending_alignment_preparation = object()
-        pending_alignment._invalidate_design_registration = (
-            lambda reason: invalidations.append(f"unexpected:{reason}")
+        pending_alignment._invalidate_design_registration = lambda reason: (
+            invalidations.append(f"unexpected:{reason}")
         )
-        pending_alignment._apply_coordinate_frame_authority_blocks = lambda *_args: None
         pending_alignment._last_reported_b_position = 5.0
 
-        position_update.on_stage_position_changed(pending_alignment, (0.0, 0.0, 4.0, 0.0, 5.5))
+        position_update.on_stage_position_changed(
+            pending_alignment, (0.0, 0.0, 4.0, 0.0, 5.5)
+        )
 
         invalid_registration, _published, _reconciles, _smooth_calls = _make_main(
-            state="run"
+            state="run",
+            registration_valid=False,
         )
-        invalid_registration._design_session = types.SimpleNamespace(
-            registration=types.SimpleNamespace(valid=False)
+        invalid_registration._invalidate_design_registration = lambda reason: (
+            invalidations.append(f"unexpected:{reason}")
         )
-        invalid_registration._invalidate_design_registration = (
-            lambda reason: invalidations.append(f"unexpected:{reason}")
-        )
-        invalid_registration._apply_coordinate_frame_authority_blocks = lambda *_args: None
         invalid_registration._last_reported_b_position = 5.0
 
-        position_update.on_stage_position_changed(invalid_registration, (0.0, 0.0, 4.0, 0.0, 5.5))
+        position_update.on_stage_position_changed(
+            invalid_registration, (0.0, 0.0, 4.0, 0.0, 5.5)
+        )
 
         self.assertEqual(invalidations, [])
 

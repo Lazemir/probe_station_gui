@@ -75,20 +75,26 @@ class CoordinateFrameRegistry:
 
     def snapshot(self) -> RegistrySnapshot:
         with self._lock:
-            records = tuple(
-                sorted(
-                    self._records.values(),
-                    key=lambda record: (
-                        {
-                            FrameKind.MACHINE: 0,
-                            FrameKind.DESIGN: 1,
-                            FrameKind.CUSTOM: 2,
-                        }[record.kind],
-                        record.name,
-                    ),
-                )
-            )
+            records = _canonical_records(self._records.values())
             return RegistrySnapshot(self._generation, records)
+
+
+def _canonical_records(
+    records: Iterable[CoordinateFrameRecord],
+) -> tuple[CoordinateFrameRecord, ...]:
+    return tuple(
+        sorted(
+            records,
+            key=lambda record: (
+                {
+                    FrameKind.MACHINE: 0,
+                    FrameKind.DESIGN: 1,
+                    FrameKind.CUSTOM: 2,
+                }[record.kind],
+                record.name,
+            ),
+        )
+    )
 
 
 def invalidate_axes(

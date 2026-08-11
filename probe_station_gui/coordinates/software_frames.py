@@ -7,6 +7,7 @@ from collections.abc import Iterable
 from probe_station_gui.settings.software_coordinates import SoftwareCoordinateSettings
 
 from .model import AxisReadiness, CoordinateFrameRecord, FrameKind, ReadinessStatus
+from .registry import _canonical_records
 from .transforms import BFrameTransform
 
 
@@ -46,7 +47,7 @@ def materialize_custom_frames(
     retained = [record for record in existing if record.kind is not FrameKind.CUSTOM]
     for frame in settings.custom_frames:
         retained.append(prepared_custom[frame.frame_id])
-    return tuple(retained)
+    return _canonical_records(retained)
 
 
 def _materialize_one(settings_frame, existing: CoordinateFrameRecord | None) -> CoordinateFrameRecord:

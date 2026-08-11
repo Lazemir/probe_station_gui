@@ -467,15 +467,12 @@ assert image.height() == 4
         window.settings_manager = types.SimpleNamespace(
             objectives_configuration=lambda: settings.objectives
         )
-        window._design_session = types.SimpleNamespace(
-            stage_from_design=lambda _design_xy: (1.0, 2.0)
-        )
         usability = types.SimpleNamespace(usable=True, rejection_reason=None)
-        window._snapshot_active_design_frame_usability = lambda: usability
-        window._camera_stage_xy_from_design_usability_snapshot = (
-            lambda snapshot, _design_xy, *, require_current=True: (
-                (1.0, 2.0) if snapshot is usability and require_current else None
-            )
+        window._coordinate_system_coordinator = types.SimpleNamespace(
+            current_design_lease=lambda: usability,
+            project_design_to_camera_stage=lambda snapshot, _design_xy: (
+                (1.0, 2.0) if snapshot is usability else None
+            ),
         )
         route_point = types.SimpleNamespace(
             enabled=True,
@@ -541,8 +538,10 @@ assert image.height() == 4
         window = Main.__new__(Main)
         invalidations: list[str] = []
         remembered: list[bool] = []
-        window._design_session = types.SimpleNamespace(
-            registration=types.SimpleNamespace(valid=True)
+        window._coordinate_system_coordinator = types.SimpleNamespace(
+            snapshot=lambda: types.SimpleNamespace(
+                registration=types.SimpleNamespace(registration_valid=True)
+            )
         )
         window._stage_serial_ready = lambda: True
         window._sample_handling_active = lambda: False
@@ -586,8 +585,10 @@ assert image.height() == 4
     def test_sample_unload_confirm_clears_registration_before_start(self) -> None:
         window = Main.__new__(Main)
         events: list[object] = []
-        window._design_session = types.SimpleNamespace(
-            registration=types.SimpleNamespace(valid=True)
+        window._coordinate_system_coordinator = types.SimpleNamespace(
+            snapshot=lambda: types.SimpleNamespace(
+                registration=types.SimpleNamespace(registration_valid=True)
+            )
         )
         window._stage_serial_ready = lambda: True
         window._sample_handling_active = lambda: False
@@ -645,7 +646,11 @@ assert image.height() == 4
         window = Main.__new__(Main)
         invalidations: list[str] = []
         remembered: list[bool] = []
-        window._design_session = types.SimpleNamespace(registration=None)
+        window._coordinate_system_coordinator = types.SimpleNamespace(
+            snapshot=lambda: types.SimpleNamespace(
+                registration=types.SimpleNamespace(registration_valid=False)
+            )
+        )
         window._stage_serial_ready = lambda: True
         window._sample_handling_active = lambda: False
         window._invalidate_design_registration = lambda reason: invalidations.append(

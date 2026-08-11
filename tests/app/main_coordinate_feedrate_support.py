@@ -10,7 +10,6 @@ from tests.app.import_reset import restore_real_imports_for_main
 restore_real_imports_for_main()
 import main as main_module
 from main import Main
-from probe_station_gui.coordinates.lifecycle import CoordinateFrameLifecycle
 from probe_station_gui.design.contact_navigation import api_route_adjusted_stage_xy
 from probe_station_gui.dialogs import (
     route_measurement_dialog as route_measurement_dialog_module,
@@ -49,6 +48,7 @@ from probe_station_gui.stage.manual_jog_prediction import (
     ManualJogPredictionConfig,
     ManualJogPredictionState,
 )
+from probe_station_gui.views.stage_position_panel import format_stage_axis_value
 
 
 __all__ = (
@@ -358,7 +358,7 @@ class _FakeStagePositionPanel:
             )
             field.setEnabled(True)
             if not field.hasFocus():
-                field.setText(main_module.format_stage_axis_value(axis_plan.visible_value))
+                field.setText(format_stage_axis_value(axis_plan.visible_value))
                 field.setModified(False)
             field.setToolTip(axis_plan.tooltip)
             field.styles.append(
@@ -420,7 +420,7 @@ class _FakeStagePositionPanel:
         self.cleared_display_values.append(dict(display_values))
         for axis_name, field in self.axis_fields.items():
             if axis_name in display_values:
-                field.setText(main_module.format_stage_axis_value(display_values[axis_name]))
+                field.setText(format_stage_axis_value(display_values[axis_name]))
             else:
                 field.clear()
             field.setModified(False)
@@ -631,7 +631,6 @@ def _make_main(current_feedrate: float = 120.0) -> tuple[
     list[str],
 ]:
     window = Main.__new__(Main)
-    window._coordinate_frame_lifecycle = CoordinateFrameLifecycle()
     stage_controller = _FakeStageController()
     joystick = _FakeJoystick(current_feedrate)
     timer = _FakeTimer()
@@ -674,6 +673,7 @@ def _make_main(current_feedrate: float = 120.0) -> tuple[
     window._manual_jog_timer = timer
     window._current_linear_feedrate = lambda: current_feedrate
     window._stage_axis_target_limit_error = lambda _axis, _target: None
+    window._machine_axis_target_limit_error = lambda _axis, _target: None
     window.view = _FakeView()
 
     def position_with_axis_values(
@@ -817,7 +817,6 @@ def _make_route_start_main(
 
     window._route_measurement_thread = thread
     window.serial_connection = types.SimpleNamespace(is_open=serial_open)
-    window._coordinate_frames_loaded = True
     window._design_session = types.SimpleNamespace(
         route=types.SimpleNamespace(points=[object()], name="route"),
         registration=types.SimpleNamespace(valid=True),
@@ -828,9 +827,9 @@ def _make_route_start_main(
         frame_id="design-a",
         frame_version=4,
     )
-    window._snapshot_active_design_frame_usability = lambda: frame_usability
-    window._design_frame_usability_snapshot_is_current = (
-        lambda snapshot: snapshot is frame_usability
+    window._coordinate_system_coordinator = types.SimpleNamespace(
+        current_design_lease=lambda: frame_usability,
+        design_lease_is_current=lambda snapshot: snapshot is frame_usability,
     )
     window._snapshot_active_route_design_frame = lambda _usability=None: (
         main_module.snapshot_route_design_frame(

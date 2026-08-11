@@ -1,5 +1,7 @@
 """Software coordinate primitives and transforms."""
 
+from importlib import import_module
+
 from .model import (
     AxisReadiness,
     CoordinateFrameRecord,
@@ -11,50 +13,42 @@ from .model import (
     normalize_axis_values,
 )
 from .registry import (
-    CoordinateFrameRegistry,
     FrameVersionConflict,
-    RegistrySnapshot,
     invalidate_axes,
 )
 from .transforms import BFrameTransform, rotate_xy
-from .lifecycle import (
-    MACHINE_FRAME_ID,
-    CoordinateFrameLifecycle,
-    DesignFrameUsabilitySnapshot,
-    DesignUsabilityContext,
-    FrameSelectionContext,
-    FrameSelectionDecision,
-)
-from .coordinator import CoordinateSystemCoordinator
+from .lifecycle import MACHINE_FRAME_ID
 from .coordinator_model import (
     CoordinateAdapterCompletion,
+    CoordinateAuthorityObservation,
+    CoordinateMotionLease,
+    CoordinateMotionProjection,
+    CoordinateMotionRequest,
     CoordinateNotice,
     CoordinateSystemSnapshot,
     CoordinateTransition,
-    DesignSessionCheckpoint,
-    DesignSessionFrameLink,
-    FrameRecordsPublication,
+    CoordinateSystemSelection,
+    CustomSystemsRequest,
+    DesignCoordinateLease,
     LoadCoordinateFramesIntent,
     MachineProfileObservation,
     SaveCoordinateFramesIntent,
 )
 
-_PERSISTENCE_EXPORTS = frozenset(
-    {
-        "CoordinateFrameDocument",
-        "CoordinateFrameStoreWorker",
-        "FilesystemCoordinateFrameBackend",
-        "FrameLoadDiagnostic",
-    }
-)
+_LAZY_EXPORT_MODULES = {
+    "CoordinateSystemCoordinator": "coordinator",
+    "CoordinateFrameDocument": "persistence",
+    "CoordinateFrameStoreWorker": "persistence",
+    "FilesystemCoordinateFrameBackend": "persistence",
+    "FrameLoadDiagnostic": "persistence",
+}
 
 
 def __getattr__(name: str) -> object:
-    if name not in _PERSISTENCE_EXPORTS:
+    module_name = _LAZY_EXPORT_MODULES.get(name)
+    if module_name is None:
         raise AttributeError(name)
-    from . import persistence
-
-    value = getattr(persistence, name)
+    value = getattr(import_module(f".{module_name}", __name__), name)
     globals()[name] = value
     return value
 
@@ -63,33 +57,30 @@ __all__ = [
     "VISIBLE_STAGE_AXES",
     "AxisReadiness",
     "BFrameTransform",
-    "CoordinateFrameLifecycle",
     "CoordinateAdapterCompletion",
+    "CoordinateAuthorityObservation",
+    "CoordinateMotionLease",
+    "CoordinateMotionProjection",
+    "CoordinateMotionRequest",
     "CoordinateNotice",
     "CoordinateSystemCoordinator",
     "CoordinateSystemSnapshot",
     "CoordinateTransition",
     "CoordinateFrameDocument",
     "CoordinateFrameRecord",
-    "CoordinateFrameRegistry",
     "CoordinateFrameStoreWorker",
-    "DesignFrameUsabilitySnapshot",
-    "DesignSessionCheckpoint",
-    "DesignSessionFrameLink",
-    "DesignUsabilityContext",
+    "CoordinateSystemSelection",
+    "CustomSystemsRequest",
+    "DesignCoordinateLease",
     "FilesystemCoordinateFrameBackend",
     "FrameKind",
-    "FrameRecordsPublication",
     "FrameLoadDiagnostic",
-    "FrameSelectionContext",
-    "FrameSelectionDecision",
     "FrameVersionConflict",
     "PhysicalMachinePose",
     "MACHINE_FRAME_ID",
     "LoadCoordinateFramesIntent",
     "MachineProfileObservation",
     "ReadinessStatus",
-    "RegistrySnapshot",
     "SaveCoordinateFramesIntent",
     "invalidate_axes",
     "normalize_axis_values",

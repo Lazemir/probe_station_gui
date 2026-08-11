@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from pathlib import Path
 from typing import Callable
 
 from probe_station_gui.design import objective_offsets
@@ -37,6 +36,7 @@ from .coordinator_model import (
     _RegistrationTransitionParts,
 )
 from .registry import CoordinateFrameRegistry
+from .source_identity import source_identity as canonical_source_identity
 from .transforms import rotate_xy
 
 
@@ -312,7 +312,7 @@ class RegistrationCaptureWorkflow:
             return self._rollback_transition(token, rollback)
         try:
             source_identity = (
-                str(Path(document.path).expanduser().resolve()),
+                canonical_source_identity(document.path),
                 str(document.source_load_id),
             )
         except OSError as exc:
@@ -480,7 +480,7 @@ class RegistrationCaptureWorkflow:
         )
         try:
             source_identity = (
-                str(Path(document.path).expanduser().resolve()),
+                canonical_source_identity(document.path),
                 str(document.source_load_id),
             )
         except (AttributeError, OSError):
@@ -625,7 +625,7 @@ class RegistrationCaptureWorkflow:
             return None
         try:
             source_identity = (
-                str(Path(document.path).expanduser().resolve()),
+                canonical_source_identity(document.path),
                 str(document.source_load_id),
             )
             metadata = None if record is None else DesignFrameMetadata.from_mapping(record.metadata)

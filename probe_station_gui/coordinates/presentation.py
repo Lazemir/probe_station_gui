@@ -5,15 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Iterable
 
-from .lifecycle import (
-    MACHINE_FRAME_ID,
-    CoordinateFrameLifecycle,
-    FrameSelectionContext,
-    FrameSelectionDecision,
-)
+from .lifecycle import MACHINE_FRAME_ID
 from .model import (
     CoordinateFrameRecord,
-    FrameKind,
     PhysicalMachinePose,
     ReadinessStatus,
     VISIBLE_STAGE_AXES,
@@ -49,59 +43,6 @@ class CoordinateDisplayPlan:
 
 def _normalized_axes(axes: Iterable[str]) -> frozenset[str]:
     return frozenset(str(axis).strip().upper() for axis in axes)
-
-
-def _frame_group(kind: FrameKind) -> str:
-    return {
-        FrameKind.MACHINE: "Machine",
-        FrameKind.DESIGN: "Designs",
-        FrameKind.CUSTOM: "Custom",
-    }[kind]
-
-
-def _selector_entries(
-    snapshot: RegistrySnapshot,
-    *,
-    homed_axes: frozenset[str],
-    authority_axes: frozenset[str],
-) -> tuple[CoordinateSelectorEntry, ...]:
-    entries = [
-        CoordinateSelectorEntry(
-            frame_id=MACHINE_FRAME_ID,
-            name="Machine",
-            group="Machine",
-            enabled=True,
-        )
-    ]
-    records = sorted(
-        (record for record in snapshot.records if record.kind is not FrameKind.MACHINE),
-        key=lambda record: (
-            0 if record.kind is FrameKind.DESIGN else 1,
-            record.name.casefold(),
-            record.frame_id,
-        ),
-    )
-    lifecycle = CoordinateFrameLifecycle()
-    for record in records:
-        decision = lifecycle.plan_selection(
-            FrameSelectionContext(
-                records=snapshot.records,
-                requested_frame_id=record.frame_id,
-                explicit=True,
-                homed_axes=homed_axes,
-                authority_axes=authority_axes,
-            )
-        )
-        entries.append(
-            CoordinateSelectorEntry(
-                frame_id=record.frame_id,
-                name=record.name,
-                group=_frame_group(record.kind),
-                enabled=decision.available,
-                reason=decision.reason or "",
-            )
-        )
-    return tuple(entries)
 
 
 def _machine_axis_display(
@@ -154,7 +95,7 @@ def _authority_reason(axis: str, authority_axes: frozenset[str]) -> str | None:
         "X": ("X", "Y", "B"),
         "Y": ("X", "Y", "B"),
         "Z": ("Z",),
-        "A": ("A",),
+        "A": ("A", "Z"),
         "B": ("B",),
     }[axis]
     missing = [dependency for dependency in dependencies if dependency not in authority_axes]
@@ -223,36 +164,18 @@ def build_coordinate_display_plan(
     pivot_machine_xy: tuple[float, float],
     homed_axes: Iterable[str],
     authority_axes: Iterable[str],
-    allow_unavailable_selection_for_preview: bool = False,
-    selection_decision: FrameSelectionDecision | None = None,
+    selector_entries: tuple[CoordinateSelectorEntry, ...],
+    selection_available: bool,
+    selection_reason: str | None = None,
 ) -> CoordinateDisplayPlan:
     """Build one immutable selector and axis-display snapshot without I/O."""
 
     homed = _normalized_axes(homed_axes)
     authority = _normalized_axes(authority_axes)
-    entries = _selector_entries(
-        snapshot,
-        homed_axes=homed,
-        authority_axes=authority,
-    )
+    entries = tuple(selector_entries)
     records = {record.frame_id: record for record in snapshot.records}
     requested = str(selected_frame_id or MACHINE_FRAME_ID)
-    decision = selection_decision
-    if decision is None:
-        decision = CoordinateFrameLifecycle(
-            selected_frame_id=requested,
-        ).plan_selection(
-            FrameSelectionContext(
-                records=snapshot.records,
-                requested_frame_id=requested,
-                explicit=False,
-                homed_axes=homed,
-                authority_axes=authority,
-            )
-        )
-    selected = decision.selected_frame_id
-    selection_available = decision.available
-    selection_reason = decision.reason
+    selected = requested
     record = None if selected == MACHINE_FRAME_ID else records.get(selected)
 
     if record is None:
@@ -277,12 +200,13 @@ def build_coordinate_display_plan(
         )
     else:
         values = _frame_axis_values(record, physical_pose, pivot_machine_xy)
+        frame_authority = authority.intersection(homed.union({"B"}))
         axis_updates = tuple(
             _frame_axis_display(
                 record,
                 axis,
                 values=values,
-                authority_axes=authority,
+                authority_axes=frame_authority,
             )
             for axis in VISIBLE_STAGE_AXES
         )

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from dataclasses import dataclass
 from types import SimpleNamespace
 
 from PySide6.QtCore import QByteArray
@@ -13,8 +14,17 @@ from tests.app.import_reset import restore_real_imports_for_main
 restore_real_imports_for_main()
 
 from main import Main
+from probe_station_gui.coordinates.coordinator_model import CoordinateSystemSnapshot
 from probe_station_gui.settings.sections import ExposurePolicySettings
 from probe_station_gui.settings.manager import Settings, SettingsManager
+
+
+@dataclass(frozen=True)
+class _StaticCoordinateSystemCoordinator:
+    current: CoordinateSystemSnapshot
+
+    def snapshot(self) -> CoordinateSystemSnapshot:
+        return self.current
 
 
 class _CameraBroker:
@@ -142,6 +152,9 @@ def test_settings_dialog_transaction_preserves_concurrent_exposure_policy(
     stale_dialog_settings.design_last_directory = "C:/dialog-selection"
     window = Main.__new__(Main)
     window.settings_manager = manager
+    window._coordinate_system_coordinator = _StaticCoordinateSystemCoordinator(
+        CoordinateSystemSnapshot(False, (), None)
+    )
     window._apply_settings = lambda: None
     window._optical_calibration_runtime = SimpleNamespace(
         state=lambda: SimpleNamespace(

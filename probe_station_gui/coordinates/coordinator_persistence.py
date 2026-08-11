@@ -28,6 +28,7 @@ from .lifecycle import (
 from .model import CoordinateFrameRecord
 from .provenance import mark_design_frame_provenance_pending
 from .registry import CoordinateFrameRegistry
+from .source_identity import source_identity
 from .store_model import (
     CoordinateFrameLoadResult,
     CoordinateFrameStoreFailure,
@@ -100,7 +101,6 @@ class CoordinatePersistenceReducer:
             frames_loaded=self._frames_loaded,
             records=self._registry.snapshot().records,
             document=self._document,
-            selected_frame_id=self._lifecycle.selected_frame_id,
         )
 
     def start(self, profile: MachineProfileObservation) -> CoordinateTransition:
@@ -373,7 +373,7 @@ class CoordinatePersistenceReducer:
         if document is None or frame_id is None:
             return None
         try:
-            source_path = str(document.path.expanduser().resolve())
+            source_path = source_identity(document.path)
         except OSError:
             return None
         return _SessionRollbackLease(
@@ -397,7 +397,7 @@ class CoordinatePersistenceReducer:
         if document is None:
             return False
         try:
-            source_path = str(document.path.expanduser().resolve())
+            source_path = source_identity(document.path)
         except OSError:
             return False
         return bool(
@@ -494,7 +494,7 @@ class CoordinatePersistenceReducer:
         if document is None:
             return False
         try:
-            source_path = str(document.path.expanduser().resolve())
+            source_path = source_identity(document.path)
         except OSError:
             return False
         return bool(

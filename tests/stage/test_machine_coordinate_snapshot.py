@@ -97,3 +97,18 @@ def test_snapshot_fails_closed_without_stationary_same_generation_provenance(
 ) -> None:
     with pytest.raises(MachineCoordinateSnapshotUnavailable):
         MachineCoordinateSnapshot.from_status(status, _mapper(), AXIS_INDEX)
+
+
+def test_motion_snapshot_accepts_synchronized_jog_status_without_weakening_capture() -> None:
+    status = _status()
+    status.state = "Jog"
+
+    snapshot = MachineCoordinateSnapshot.from_motion_status(
+        status,
+        _mapper(),
+        AXIS_INDEX,
+    )
+
+    assert snapshot.physical_machine_pose.require("X") == pytest.approx(21.0)
+    with pytest.raises(MachineCoordinateSnapshotUnavailable):
+        MachineCoordinateSnapshot.from_status(status, _mapper(), AXIS_INDEX)

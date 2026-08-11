@@ -10,10 +10,12 @@ from typing import Callable
 from probe_station_gui.coordinates.coordinator_model import (
     DesignSessionCheckpoint,
     FrameRecordsPublication,
+    RegistrationWorkflowSnapshot,
 )
 from probe_station_gui.coordinates.model import CoordinateFrameRecord
 from probe_station_gui.coordinates.registry import CoordinateFrameRegistry
 from probe_station_gui.coordinates.provenance import design_frame_provenance_error
+from probe_station_gui.coordinates.source_identity import source_identity
 from probe_station_gui.design.frame_registration import (
     DesignFrameMetadata,
     design_frame_for_loaded_document,
@@ -319,9 +321,9 @@ def activate_design_frame_for_document(
             if session.active_frame_id == requested_frame_id:
                 session.clear_registration()
             raise DesignModelError(provenance_error)
-        resolved_path = document.path.expanduser().resolve()
+        document_source = source_identity(document.path)
         mismatch_message = None
-        if _frame_source_path(selected) != resolved_path:
+        if _frame_source_path(selected) != document_source:
             mismatch_message = "Coordinate frame belongs to a different design file."
         elif _frame_top_cell(selected) != document.top_cell_name:
             mismatch_message = (
@@ -332,12 +334,12 @@ def activate_design_frame_for_document(
                 session.clear_registration()
             raise DesignModelError(mismatch_message)
     if selected is None:
-        resolved_path = document.path.expanduser().resolve()
+        document_source = source_identity(document.path)
         selected = next(
             (
                 record
                 for record in records
-                if _frame_source_path(record) == resolved_path
+                if _frame_source_path(record) == document_source
                 and _frame_top_cell(record) == document.top_cell_name
             ),
             None,
@@ -437,10 +439,11 @@ def prepare_design_frame_activation(
     return PreparedDesignFrameActivation(activation, projection)
 
 
-def _frame_source_path(record: CoordinateFrameRecord) -> Path | None:
+def _frame_source_path(record: CoordinateFrameRecord) -> str | None:
     try:
-        return Path(DesignFrameMetadata.from_mapping(record.metadata).source_path).resolve()
-    except (KeyError, TypeError, ValueError, OSError):
+        metadata = DesignFrameMetadata.from_mapping(record.metadata)
+        return source_identity(metadata.source_path)
+    except (KeyError, TypeError, ValueError):
         return None
 
 
@@ -1050,18 +1053,32 @@ def plan_design_coordinate_move(
 
 def design_panel_presentation(
     session: DesignSession,
+    registration: RegistrationWorkflowSnapshot,
     route_running: bool,
     pending_alignment_preparation: bool,
     design_snap_enabled: bool,
 ) -> DesignPanelPresentation:
     current_target = session.current_target()
-    registration_valid = (
-        session.registration is not None and session.registration.valid
-    )
+    design_count = len(registration.source_design_marks)
+    stage_count = len(registration.source_stage_marks)
+    if design_count < 2:
+        calibration_prompt = (
+            "Pick mark 1 with left click and mark 2 with right click in the design window."
+        )
+    elif stage_count < design_count:
+        calibration_prompt = f"Center chip mark {stage_count + 1} and capture it."
+    elif registration.registration_valid:
+        calibration_prompt = (
+            "Calibration complete. Use the minimap or click in the design window to navigate."
+        )
+    else:
+        calibration_prompt = (
+            f"{design_count} mark pairs captured. Waiting for chip rotation to finish."
+        )
     return DesignPanelPresentation(
         document=session.document,
         design_snap_enabled=bool(design_snap_enabled),
-        registration_valid=registration_valid,
+        registration_valid=registration.registration_valid,
         targets=list(session.targets),
         selected_target_id=current_target.id if current_target else None,
         route=session.route,
@@ -1070,17 +1087,18 @@ def design_panel_presentation(
         calibration_prompt=(
             "Calibration step 4/4: chip rotation is in progress."
             if pending_alignment_preparation
-            else session.calibration_prompt()
+            else calibration_prompt
         ),
-        registration_status=session.registration_status,
-        source_design_marks=tuple(session.source_design_marks_compact()),
-        check_design_marks=tuple(session.check_design_marks),
-        source_stage_marks=tuple(session.source_stage_marks_compact()),
+        registration_status=registration.registration_status,
+        source_design_marks=tuple(registration.source_design_marks),
+        check_design_marks=tuple(registration.check_design_marks),
+        source_stage_marks=tuple(registration.source_stage_marks),
     )
 
 
 def design_position_presentation(
     session: DesignSession,
+    registration: RegistrationWorkflowSnapshot,
     stage_xy: Point2D | None,
     design_xy: Point2D | None,
     fov_design_size: Point2D | None,
@@ -1097,8 +1115,8 @@ def design_position_presentation(
         stage_xy=stage_xy,
         current_design_position=design_xy,
         fov_design_size=fov_design_size,
-        source_design_marks=tuple(session.source_design_marks_compact()),
-        check_design_marks=tuple(session.check_design_marks),
+        source_design_marks=tuple(registration.source_design_marks),
+        check_design_marks=tuple(registration.check_design_marks),
     )
 
 

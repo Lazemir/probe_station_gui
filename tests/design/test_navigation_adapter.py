@@ -8,6 +8,7 @@ import pytest
 
 from probe_station_gui.coordinates.coordinator_model import DesignSessionCheckpoint
 from probe_station_gui.coordinates.registry import CoordinateFrameRegistry
+from probe_station_gui.coordinates.coordinator_model import RegistrationWorkflowSnapshot
 from probe_station_gui.coordinates.provenance import (
     RUNTIME_PROVENANCE_REASON,
     RUNTIME_PROVENANCE_STATUS,
@@ -287,15 +288,21 @@ def test_panel_and_position_presentations_include_navigation_state(tmp_path: Pat
     session.add_route_point((1.0, 2.0))
     session.source_design_marks = [(0.0, 0.0), None]
     session.check_design_marks = [(5.0, 6.0)]
+    registration = RegistrationWorkflowSnapshot(
+        source_design_marks=((0.0, 0.0),),
+        check_design_marks=((5.0, 6.0),),
+    )
 
     panel = design_panel_presentation(
         session,
+        registration,
         route_running=True,
         pending_alignment_preparation=True,
         design_snap_enabled=False,
     )
     position = design_position_presentation(
         session,
+        registration,
         stage_xy=(7.0, 8.0),
         design_xy=(9.0, 10.0),
         fov_design_size=(11.0, 12.0),

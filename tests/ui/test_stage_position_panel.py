@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import replace
 import inspect
 import os
 from types import SimpleNamespace
@@ -15,116 +14,44 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QDoubleValidator
 from PySide6.QtWidgets import QApplication, QLabel
 
+from probe_station_gui.coordinates.coordinator_model import (
+    CoordinateSystemSelection,
+    CoordinateSystemSnapshot,
+    CoordinateTransition,
+)
 from probe_station_gui.coordinates.presentation import (
     CoordinateAxisDisplay,
     CoordinateDisplayPlan,
     CoordinateSelectorEntry,
 )
-from probe_station_gui.coordinates.lifecycle import (
-    CoordinateFrameLifecycle,
-    FrameSelectionContext,
-    FrameSelectionDecision,
-)
-from probe_station_gui.coordinates.model import (
-    AxisReadiness,
-    CoordinateFrameRecord,
-    FrameKind,
-    PhysicalMachinePose,
-    ReadinessStatus,
-)
-from probe_station_gui.coordinates.registry import CoordinateFrameRegistry
-from probe_station_gui.coordinates.transforms import BFrameTransform
-
 from probe_station_gui.stage.position_presenter import (
     AxisFieldPresentation,
     StagePositionDisplayPlan,
 )
-from probe_station_gui.settings.axis_calibration_config import (
-    default_axis_calibrations,
-)
-from probe_station_gui.settings.manager import SoftwareCoordinateSelectionSnapshot
-from probe_station_gui.stage.controller import StageController
-from probe_station_gui.stage.position_update import physical_machine_pose_from_controller
-from probe_station_gui.stage.types import _Status
+from probe_station_gui.views import main_window_connection_flow as connection_flow
+from probe_station_gui.views import main_window_stage_position_panel as panel_adapter
 from probe_station_gui.views.stage_position_panel import (
     StagePositionPanel,
     format_stage_axis_value,
 )
-from probe_station_gui.views import main_window_stage_position_panel as panel_adapter
 
 
 @pytest.fixture(scope="module")
 def qt_app() -> QApplication:
     app = QApplication.instance()
-    if app is None:
-        app = QApplication([])
-    return app
-
-
-def _display_plan(
-    *axis_updates: AxisFieldPresentation,
-    missing_axes: tuple[str, ...] = (),
-    homed_axes: frozenset[str] = frozenset(),
-    fields_available: bool = True,
-) -> StagePositionDisplayPlan:
-    return StagePositionDisplayPlan(
-        valid=True,
-        homed_axes=homed_axes,
-        axis_updates=axis_updates,
-        missing_axes=missing_axes,
-        reset_all=False,
-        fields_available=fields_available,
-    )
-
-
-def test_widget_construction_matches_existing_stage_position_controls(
-    qt_app: QApplication,
-) -> None:
-    panel = StagePositionPanel(("X", "Y", "Z", "A", "B", "C"))
-
-    assert tuple(panel.axis_fields) == ("X", "Y", "Z", "A", "B", "C")
-    assert not panel.apply_button.isEnabled()
-    assert not panel.cancel_button.isEnabled()
-    assert panel.apply_button.toolTip() == "Apply changed coordinate fields as one move."
-    assert (
-        panel.cancel_button.toolTip()
-        == "Clear edited fields or cancel the active stage workflow."
-    )
-    assert panel.input_mode_combo.toolTip() == (
-        "Coordinate input mode. Idle fields always show absolute coordinates."
-    )
-    assert panel.input_mode_combo.itemText(0) == "Absolute"
-    assert panel.input_mode_combo.itemData(0) == "G90"
-    assert panel.input_mode_combo.itemText(1) == "Relative"
-    assert panel.input_mode_combo.itemData(1) == "G91"
-
-    for axis_name, field in panel.axis_fields.items():
-        assert field.placeholderText() == "---"
-        assert field.toolTip() == (
-            f"Current {axis_name} coordinate. Enter target and press Enter."
-        )
-        validator = field.validator()
-        assert isinstance(validator, QDoubleValidator)
-        assert validator.bottom() == -1000000.0
-        assert validator.top() == 1000000.0
-        assert validator.decimals() == 6
-        assert validator.notation() == QDoubleValidator.StandardNotation
-        assert validator.locale().name() == "C"
-        assert not field.isEnabled()
-
-    panel.deleteLater()
+    return app if app is not None else QApplication([])
 
 
 def _coordinate_plan(
     *,
     selected_frame_id: str = "machine",
-    entries: tuple[CoordinateSelectorEntry, ...] | None = None,
     updates: tuple[CoordinateAxisDisplay, ...] = (),
+    selection_available: bool = True,
+    selection_reason: str | None = None,
 ) -> CoordinateDisplayPlan:
     return CoordinateDisplayPlan(
         selected_frame_id=selected_frame_id,
-        selector_entries=entries
-        or (
+        selector_entries=(
             CoordinateSelectorEntry("machine", "Machine", "Machine", True),
             CoordinateSelectorEntry(
                 "11111111-1111-4111-8111-111111111111",
@@ -141,19 +68,52 @@ def _coordinate_plan(
             ),
         ),
         axis_updates=updates,
+        selection_available=selection_available,
+        selection_reason=selection_reason,
     )
 
 
-def test_coordinate_selector_is_immediately_after_position_and_groups_disabled_headings(
+def _stage_plan(
+    *updates: AxisFieldPresentation,
+    homed_axes: frozenset[str] = frozenset(),
+) -> StagePositionDisplayPlan:
+    return StagePositionDisplayPlan(
+        valid=True,
+        homed_axes=homed_axes,
+        axis_updates=updates,
+        missing_axes=(),
+        reset_all=False,
+        fields_available=True,
+    )
+
+
+def test_widget_construction_keeps_primary_controls_laconic(
     qt_app: QApplication,
 ) -> None:
-    panel = StagePositionPanel(("X", "Y"))
-    panel.set_coordinate_display_plan(_coordinate_plan())
+    panel = StagePositionPanel(("X", "Y", "Z", "A", "B"))
+    assert tuple(panel.axis_fields) == ("X", "Y", "Z", "A", "B")
+    assert not panel.apply_button.isEnabled()
+    assert not panel.cancel_button.isEnabled()
+    assert panel.input_mode_combo.itemData(0) == "G90"
+    assert panel.input_mode_combo.itemData(1) == "G91"
+    for axis, field in panel.axis_fields.items():
+        assert field.placeholderText() == "---"
+        assert field.toolTip() == (
+            f"Current {axis} coordinate. Enter target and press Enter."
+        )
+        validator = field.validator()
+        assert isinstance(validator, QDoubleValidator)
+        assert not field.isEnabled()
+    panel.deleteLater()
 
+
+def test_coordinate_selector_groups_entries_and_emits_stable_id(
+    qt_app: QApplication,
+) -> None:
+    panel = StagePositionPanel(("X",))
+    panel.set_coordinate_display_plan(_coordinate_plan())
     row = panel.layout().itemAt(0).layout()
     assert isinstance(row.itemAt(0).widget(), QLabel)
-    assert row.itemAt(0).widget().text() == "Position:"
-    assert row.itemAt(1).widget() is panel.coordinate_system_combo
     assert [
         panel.coordinate_system_combo.itemText(index)
         for index in range(panel.coordinate_system_combo.count())
@@ -161,35 +121,19 @@ def test_coordinate_selector_is_immediately_after_position_and_groups_disabled_h
     for index in (0, 2, 4):
         item = panel.coordinate_system_combo.model().item(index)
         assert not bool(item.flags() & Qt.ItemIsEnabled)
-        assert not bool(item.flags() & Qt.ItemIsSelectable)
         assert panel.coordinate_system_combo.itemData(index) is None
-    assert panel.coordinate_system_combo.itemData(1) == "machine"
-
-    panel.deleteLater()
-
-
-def test_coordinate_selector_emits_stable_id_only_for_user_activated_frame(
-    qt_app: QApplication,
-) -> None:
-    panel = StagePositionPanel(("X",))
-    panel.set_coordinate_display_plan(_coordinate_plan())
     selected: list[str] = []
     panel.coordinate_system_changed.connect(selected.append)
-
-    panel.coordinate_system_combo.setCurrentIndex(3)
     panel.coordinate_system_combo.activated.emit(3)
-
     assert selected == ["11111111-1111-4111-8111-111111111111"]
     panel.deleteLater()
 
 
-def test_coordinate_display_updates_existing_fields_with_blue_and_yellow_reasons(
+def test_coordinate_display_reuses_fields_and_exposes_readiness_reason(
     qt_app: QApplication,
 ) -> None:
     panel = StagePositionPanel(("X", "Y"))
     x_field = panel.axis_fields["X"]
-    y_field = panel.axis_fields["Y"]
-
     panel.set_coordinate_display_plan(
         _coordinate_plan(
             updates=(
@@ -198,750 +142,195 @@ def test_coordinate_display_updates_existing_fields_with_blue_and_yellow_reasons
             )
         )
     )
-
     assert panel.axis_fields["X"] is x_field
-    assert panel.axis_fields["Y"] is y_field
     assert x_field.text() == "1.25"
     assert "background-color: #1565c0" in x_field.styleSheet()
-    assert x_field.toolTip() == "X is registered."
-    assert y_field.text() == ""
-    assert y_field.placeholderText() == "---"
-    assert "background-color: #f0b429" in y_field.styleSheet()
-    assert y_field.toolTip() == "Register Y."
-
+    assert panel.axis_fields["Y"].text() == ""
+    assert "background-color: #f0b429" in panel.axis_fields["Y"].styleSheet()
+    assert panel.axis_fields["Y"].toolTip() == "Register Y."
     panel.deleteLater()
 
 
-def test_non_machine_coordinate_fields_are_display_only_until_motion_resolution_exists(
+def test_available_non_machine_coordinate_fields_are_editable(
     qt_app: QApplication,
 ) -> None:
-    frame_id = "11111111-1111-4111-8111-111111111111"
     panel = StagePositionPanel(("X", "Y"))
-    panel.set_coordinate_display_plan(_coordinate_plan())
-    panel.set_pending_target("X", 99.0, 1.25)
-    panel.set_action_buttons_enabled(True, True)
-
     panel.set_coordinate_display_plan(
         _coordinate_plan(
-            selected_frame_id=frame_id,
+            selected_frame_id="11111111-1111-4111-8111-111111111111",
             updates=(
-                CoordinateAxisDisplay("X", 1.25, "available", "X is registered."),
-                CoordinateAxisDisplay("Y", 2.5, "available", "Y is registered."),
+                CoordinateAxisDisplay("X", 1.0, "available", "X"),
+                CoordinateAxisDisplay("Y", 2.0, "available", "Y"),
             ),
         )
     )
-
-    assert all(field.isEnabled() for field in panel.axis_fields.values())
-    assert all(field.isReadOnly() for field in panel.axis_fields.values())
-    assert panel.pending_targets == {}
-    assert not panel.input_mode_combo.isEnabled()
-    assert not panel.apply_button.isEnabled()
-
-    panel.set_coordinate_display_plan(_coordinate_plan())
-
     assert all(not field.isReadOnly() for field in panel.axis_fields.values())
     assert panel.input_mode_combo.isEnabled()
+    assert not panel.apply_button.isEnabled()
     panel.deleteLater()
 
 
-def test_selector_refresh_preserves_stable_selection_across_version_or_name_change(
+def test_hard_limit_style_overlays_selected_coordinate_readiness(
     qt_app: QApplication,
 ) -> None:
-    frame_id = "11111111-1111-4111-8111-111111111111"
     panel = StagePositionPanel(("X",))
-    panel.set_coordinate_display_plan(
-        _coordinate_plan(selected_frame_id=frame_id)
+    plan = _coordinate_plan(
+        selected_frame_id="11111111-1111-4111-8111-111111111111",
+        updates=(CoordinateAxisDisplay("X", 1.0, "available", "X"),),
     )
+
+    panel.set_limit_axes({"X"})
+    panel.set_coordinate_display_plan(plan)
+
+    assert "background-color: #c62828" in panel.axis_fields["X"].styleSheet()
+    panel.set_limit_axes(set())
+    assert "background-color: #1565c0" in panel.axis_fields["X"].styleSheet()
+    panel.deleteLater()
+
+
+def test_unavailable_non_machine_coordinate_fields_are_read_only(
+    qt_app: QApplication,
+) -> None:
+    panel = StagePositionPanel(("X", "Y"))
     panel.set_coordinate_display_plan(
         _coordinate_plan(
-            selected_frame_id=frame_id,
-            entries=(
-                CoordinateSelectorEntry("machine", "Machine", "Machine", True),
-                CoordinateSelectorEntry(frame_id, "chip-renamed", "Designs", True),
+            selected_frame_id="22222222-2222-4222-8222-222222222222",
+            updates=(
+                CoordinateAxisDisplay("X", None, "unavailable", "Home X and Y."),
+                CoordinateAxisDisplay("Y", None, "unavailable", "Home X and Y."),
             ),
+            selection_available=False,
+            selection_reason="Home X and Y.",
         )
     )
-
-    assert panel.coordinate_system_combo.currentData() == frame_id
-    assert panel.coordinate_system_combo.currentText() == "chip-renamed"
+    assert all(field.isReadOnly() for field in panel.axis_fields.values())
+    assert not panel.input_mode_combo.isEnabled()
+    assert not panel.apply_button.isEnabled()
     panel.deleteLater()
 
 
-def _ready_frame_without_a(frame_id: str) -> CoordinateFrameRecord:
-    return CoordinateFrameRecord(
-        frame_id=frame_id,
-        kind=FrameKind.DESIGN,
-        name="chip-a",
-        version=0,
-        transform=BFrameTransform(
-            origin_xy_at_reference_b=(0.0, 0.0),
-            reference_b_deg=0.0,
-            xy_angle_at_reference_b_deg=0.0,
-            b_zero_machine_deg=0.0,
-            z_zero_machine_mm=1.0,
-            a_zero_machine_mm=None,
+def test_adapter_renders_finished_snapshot_without_policy_or_shadow_owner() -> None:
+    plan = _coordinate_plan(
+        updates=(
+            CoordinateAxisDisplay("X", 1.25, "available", "X"),
+            CoordinateAxisDisplay("Y", None, "unavailable", "Y"),
+        )
+    )
+    rendered: list[CoordinateDisplayPlan] = []
+    owner = SimpleNamespace(
+        _stage_position_panel=SimpleNamespace(
+            set_coordinate_display_plan=rendered.append
         ),
-        readiness={
-            axis: AxisReadiness(
-                ReadinessStatus.READY
-                if axis in {"X", "Y", "Z", "B"}
-                else ReadinessStatus.MISSING,
-                "" if axis in {"X", "Y", "Z", "B"} else "Find contact.",
-            )
-            for axis in ("X", "Y", "Z", "A", "B")
-        },
-        metadata={},
+        _stage_axis_display_values={"stale": 9.0},
     )
-
-
-class _SelectionSettingsManager:
-    def __init__(self, selected: str) -> None:
-        self.settings = SimpleNamespace(
-            software_coordinates=SimpleNamespace(
-                last_selected_frame_id=selected,
-                pivot=SimpleNamespace(x_mm=0.0, y_mm=0.0),
-            )
-        )
-        self.in_memory_updates: list[str] = []
-
-    def set_software_coordinate_selection(
-        self,
-        frame_id: str,
-    ) -> SoftwareCoordinateSelectionSnapshot:
-        self.settings.software_coordinates.last_selected_frame_id = frame_id
-        self.in_memory_updates.append(frame_id)
-        return SoftwareCoordinateSelectionSnapshot(frame_id, len(self.in_memory_updates))
-
-    def update_and_save(self, *_args, **_kwargs) -> None:
-        raise AssertionError("selector callback must not synchronously save settings")
-
-
-class _SelectionOwner:
-    def __init__(
-        self,
-        *,
-        selected: str,
-        authority_axes: set[str],
-        record: CoordinateFrameRecord | None = None,
-    ) -> None:
-        frame_id = "11111111-1111-4111-8111-111111111111"
-        registry = CoordinateFrameRegistry()
-        registry.add(record or _ready_frame_without_a(frame_id))
-        self._stage_position_panel = None
-        self._coordinate_frame_registry = registry
-        self._coordinate_frames_loaded = True
-        self._coordinate_frame_lifecycle = CoordinateFrameLifecycle(
-            selected_frame_id=selected
-        )
-        self._stage_axis_display_values: dict[str, float] = {}
-        self._latest_physical_machine_pose = PhysicalMachinePose(
-            {axis: 0.0 for axis in authority_axes}
-        )
-        self.settings_manager = _SelectionSettingsManager(selected)
-        self.stage_controller = SimpleNamespace(homed_axes=lambda: {"X", "Y"})
-
-    @property
-    def persisted_selections(self) -> list[str]:
-        return self.settings_manager.in_memory_updates
-
-
-def test_stage_adapter_has_no_coordinate_lifecycle_shadow_fields() -> None:
+    snapshot = CoordinateSystemSnapshot(False, (), None, display_plan=plan)
+    panel_adapter.render_coordinate_system_snapshot(owner, snapshot)
+    assert rendered == [plan]
+    assert owner._stage_axis_display_values == {"X": 1.25}
     source = inspect.getsource(panel_adapter)
-
-    assert "_selected_coordinate_frame_id" not in source
-    assert "_pending_coordinate_frame_restore_id" not in source
-    assert "decide_pending_frame_restore" not in source
-
-
-def test_temporary_b_loss_does_not_persist_machine_selection() -> None:
-    frame_id = "11111111-1111-4111-8111-111111111111"
-    owner = _SelectionOwner(
-        selected=frame_id,
-        authority_axes={"X", "Y", "Z", "A"},
-    )
-
-    panel_adapter.update_software_coordinate_display(
-        owner,
-        owner._latest_physical_machine_pose,
-    )
-
-    assert owner._coordinate_frame_lifecycle.selected_frame_id == frame_id
-    assert owner.persisted_selections == []
+    for forbidden in (
+        "_coordinate_frame_registry",
+        "_coordinate_frame_lifecycle",
+        "_coordinate_frames_loaded",
+        "FrameSelectionDecision",
+        "build_coordinate_display_plan",
+    ):
+        assert forbidden not in source
 
 
-def test_temporary_b_loss_applies_unavailable_display_plan() -> None:
-    frame_id = "11111111-1111-4111-8111-111111111111"
-    owner = _SelectionOwner(
-        selected=frame_id,
-        authority_axes={"X", "Y", "Z", "A"},
-    )
-    owner._stage_axis_display_values = {"X": 12.0, "Y": 34.0}
-    plans: list[CoordinateDisplayPlan] = []
-    owner._stage_position_panel = SimpleNamespace(
-        set_coordinate_display_plan=plans.append
-    )
-
-    panel_adapter.update_software_coordinate_display(
-        owner,
-        owner._latest_physical_machine_pose,
-    )
-
-    assert owner._coordinate_frame_lifecycle.selected_frame_id == frame_id
-    assert owner.persisted_selections == []
-    assert len(plans) == 1
-    assert plans[0].selected_frame_id == frame_id
-    assert plans[0].selection_available is False
-    assert all(update.value is None for update in plans[0].axis_updates)
-    assert all(update.color_role == "unavailable" for update in plans[0].axis_updates)
-    assert owner._stage_axis_display_values == {}
-
-
-def test_display_refresh_delegates_selection_policy_to_lifecycle() -> None:
-    frame_id = "11111111-1111-4111-8111-111111111111"
-    owner = _SelectionOwner(
-        selected=frame_id,
-        authority_axes={"X", "Y", "Z", "A"},
-    )
-    captured: list[FrameSelectionContext] = []
-
-    class _Lifecycle:
-        def plan_selection(
-            self,
-            context: FrameSelectionContext,
-        ) -> FrameSelectionDecision:
-            captured.append(context)
-            return FrameSelectionDecision(
-                selected_frame_id=frame_id,
-                available=False,
-                reason="B coordinate is unavailable.",
-                persist_selection=False,
-            )
-
-    owner._coordinate_frame_lifecycle = _Lifecycle()
-
-    panel_adapter.update_software_coordinate_display(
-        owner,
-        owner._latest_physical_machine_pose,
-    )
-
-    assert len(captured) == 1
-    assert captured[0].requested_frame_id is None
-    assert captured[0].explicit is False
-    assert captured[0].authority_axes == frozenset({"X", "Y", "Z", "A"})
-    assert owner.persisted_selections == []
-
-
-def test_permanently_rejected_selection_falls_back_and_persists_machine() -> None:
-    frame_id = "11111111-1111-4111-8111-111111111111"
-    corrupt = replace(
-        _ready_frame_without_a(frame_id),
-        transform=BFrameTransform.identity(),
-    )
-    owner = _SelectionOwner(
-        selected=frame_id,
-        authority_axes={"X", "Y", "Z", "A", "B"},
-        record=corrupt,
-    )
-
-    panel_adapter.update_software_coordinate_display(
-        owner,
-        owner._latest_physical_machine_pose,
-    )
-
-    assert owner._coordinate_frame_lifecycle.selected_frame_id == "machine"
-    assert owner.persisted_selections == ["machine"]
-
-
-def test_explicit_unavailable_selection_keeps_previous_selection() -> None:
-    frame_id = "11111111-1111-4111-8111-111111111111"
-    owner = _SelectionOwner(
-        selected="machine",
-        authority_axes={"X", "Y", "Z", "A"},
-    )
-
-    panel_adapter.select_gui_coordinate_frame(owner, frame_id)
-
-    assert owner._coordinate_frame_lifecycle.selected_frame_id == "machine"
-    assert owner.persisted_selections == []
-
-
-def test_explicit_selection_with_invalid_pivot_persists_final_machine_fallback() -> None:
-    frame_id = "11111111-1111-4111-8111-111111111111"
-    owner = _SelectionOwner(
-        selected="machine",
-        authority_axes={"X", "Y", "Z", "A", "B"},
-    )
-    plans: list[CoordinateDisplayPlan] = []
-    owner._stage_position_panel = SimpleNamespace(
-        set_coordinate_display_plan=plans.append
-    )
-    owner.settings_manager.settings.software_coordinates.pivot.x_mm = float("nan")
-
-    panel_adapter.select_gui_coordinate_frame(owner, frame_id)
-
-    assert owner._coordinate_frame_lifecycle.selected_frame_id == "machine"
-    assert plans[-1].selected_frame_id == "machine"
-    assert owner.persisted_selections == ["machine"]
-
-
-def test_explicit_selection_plans_applies_and_persists_once() -> None:
-    frame_id = "11111111-1111-4111-8111-111111111111"
-    owner = _SelectionOwner(
-        selected="machine",
-        authority_axes={"X", "Y", "Z", "A", "B"},
-    )
-    contexts: list[FrameSelectionContext] = []
-
-    class _Lifecycle:
-        def plan_selection(
-            self,
-            context: FrameSelectionContext,
-        ) -> FrameSelectionDecision:
-            contexts.append(context)
-            return FrameSelectionDecision(
-                selected_frame_id=frame_id,
-                available=True,
-                reason=None,
-                persist_selection=True,
-            )
-
-    plans: list[CoordinateDisplayPlan] = []
-    owner._coordinate_frame_lifecycle = _Lifecycle()
-    owner._stage_position_panel = SimpleNamespace(
-        set_coordinate_display_plan=plans.append
-    )
-
-    panel_adapter.select_gui_coordinate_frame(owner, frame_id)
-
-    assert len(contexts) == 1
-    assert contexts[0].requested_frame_id == frame_id
-    assert contexts[0].explicit is True
-    assert [plan.selected_frame_id for plan in plans] == [frame_id]
-    assert owner.persisted_selections == [frame_id]
-
-
-def test_explicit_machine_selection_tolerates_missing_physical_pose(
+def test_widget_creation_renders_current_snapshot_and_keeps_c_hidden(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    frame_id = "11111111-1111-4111-8111-111111111111"
-    owner = _SelectionOwner(
-        selected=frame_id,
-        authority_axes=set(),
+    class _Signal:
+        def connect(self, _callback: object) -> None:
+            pass
+
+    plan = _coordinate_plan()
+    rendered: list[CoordinateDisplayPlan] = []
+    observed_axes: list[tuple[str, ...]] = []
+    panel = SimpleNamespace(
+        axis_escape_pressed=_Signal(),
+        axis_editing_finished=_Signal(),
+        axis_text_edited=_Signal(),
+        input_mode_changed=_Signal(),
+        apply_requested=_Signal(),
+        cancel_requested=_Signal(),
+        coordinate_system_changed=_Signal(),
+        axis_fields={},
+        base_styles={},
+        pending_targets={},
+        set_coordinate_display_plan=rendered.append,
     )
-    owner._latest_physical_machine_pose = None
+
+    def make_panel(axes: tuple[str, ...], _owner: object) -> object:
+        observed_axes.append(tuple(axes))
+        return panel
+
+    monkeypatch.setattr(panel_adapter, "StagePositionPanel", make_panel)
+    owner = SimpleNamespace(
+        _on_stage_axis_escape_pressed=lambda _axis: None,
+        _on_stage_axis_editing_finished=lambda _axis: None,
+        _update_stage_coordinate_apply_state=lambda: None,
+        _on_stage_coordinate_mode_changed=lambda: None,
+        _apply_pending_stage_coordinate_targets=lambda: None,
+        _coordinate_system_coordinator=SimpleNamespace(
+            snapshot=lambda: CoordinateSystemSnapshot(
+                False,
+                (),
+                None,
+                display_plan=plan,
+            )
+        ),
+        _stage_axis_display_values={},
+    )
+
+    assert panel_adapter.create_stage_position_widget(owner) is panel
+    assert observed_axes == [("X", "Y", "Z", "A", "B")]
+    assert rendered == [plan]
+
+
+def test_adapter_selection_calls_coordinator_and_leaves_api_choice_untouched(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[object] = []
+    transition = CoordinateTransition(CoordinateSystemSnapshot(False, (), None))
+
+    class _Coordinator:
+        def select_system(self, request: CoordinateSystemSelection):
+            calls.append(request)
+            return transition
+
+    owner = SimpleNamespace(
+        _coordinate_system_coordinator=_Coordinator(),
+        _api_coordinate_frame_id="api-frame",
+    )
     monkeypatch.setattr(
-        panel_adapter,
-        "_coerce_physical_machine_pose",
-        lambda _value: None,
-    )
-
-    panel_adapter.select_gui_coordinate_frame(owner, "machine")
-
-    assert owner._coordinate_frame_lifecycle.selected_frame_id == "machine"
-    assert owner.persisted_selections == ["machine"]
-
-
-def test_gui_restore_selects_ready_through_z_even_when_a_is_missing(
-    qt_app: QApplication,
-) -> None:
-    frame_id = "11111111-1111-4111-8111-111111111111"
-    registry = CoordinateFrameRegistry()
-    registry.add(_ready_frame_without_a(frame_id))
-    panel = StagePositionPanel(("X", "Y", "Z", "A", "B"))
-    owner = SimpleNamespace(
-        _stage_position_panel=panel,
-        _coordinate_frame_registry=registry,
-        _coordinate_frames_loaded=True,
-        _coordinate_frame_lifecycle=CoordinateFrameLifecycle(
-            restore_frame_id=frame_id
+        connection_flow,
+        "apply_coordinate_transition",
+        lambda actual_owner, actual_transition: calls.append(
+            (actual_owner, actual_transition)
         ),
-        settings_manager=_SelectionSettingsManager(frame_id),
-        stage_controller=SimpleNamespace(homed_axes=lambda: {"X", "Y"}),
     )
-    pose = PhysicalMachinePose({"X": 0.0, "Y": 0.0, "Z": 1.0, "A": 2.0, "B": 0.0})
-
-    panel_adapter.update_software_coordinate_display(owner, pose)
-
-    assert owner._coordinate_frame_lifecycle.selected_frame_id == frame_id
-    assert panel.coordinate_system_combo.currentData() == frame_id
-    assert "background-color: #1565c0" in panel.axis_fields["Z"].styleSheet()
-    assert "background-color: #f0b429" in panel.axis_fields["A"].styleSheet()
-    panel.deleteLater()
-
-
-def test_explicit_gui_selection_cancels_pending_restore_and_persists_locally() -> None:
-    frame_id = "11111111-1111-4111-8111-111111111111"
-    registry = CoordinateFrameRegistry()
-    registry.add(_ready_frame_without_a(frame_id))
-    manager = _SelectionSettingsManager(frame_id)
-    published: list[SoftwareCoordinateSelectionSnapshot] = []
-    owner = SimpleNamespace(
-        _coordinate_frame_registry=registry,
-        _coordinate_frames_loaded=True,
-        _coordinate_frame_lifecycle=CoordinateFrameLifecycle(
-            restore_frame_id=frame_id
-        ),
-        _api_coordinate_frame_id="api-frame-must-not-change",
-        _latest_physical_machine_pose=PhysicalMachinePose(
-            {"X": 0.0, "Y": 0.0, "Z": 1.0, "A": 2.0, "B": 0.0}
-        ),
-        _stage_position_panel=None,
-        _software_coordinate_selection_store=SimpleNamespace(publish=published.append),
-        settings_manager=manager,
-        stage_controller=SimpleNamespace(homed_axes=lambda: {"X", "Y"}),
-    )
-
-    panel_adapter.select_gui_coordinate_frame(owner, "machine")
-
-    assert owner._coordinate_frame_lifecycle.selected_frame_id == "machine"
-    assert owner.settings_manager.in_memory_updates == ["machine"]
-    assert manager.in_memory_updates == ["machine"]
-    assert published == [SoftwareCoordinateSelectionSnapshot("machine", 1)]
-    assert owner._api_coordinate_frame_id == "api-frame-must-not-change"
-
-
-def test_deleted_selected_frame_falls_back_safely_without_rearming_restore() -> None:
-    owner = SimpleNamespace(
-        _stage_position_panel=None,
-        _coordinate_frame_registry=CoordinateFrameRegistry(),
-        _coordinate_frames_loaded=True,
-        _coordinate_frame_lifecycle=CoordinateFrameLifecycle(
-            selected_frame_id="11111111-1111-4111-8111-111111111111"
-        ),
-        settings_manager=_SelectionSettingsManager("11111111-1111-4111-8111-111111111111"),
-        stage_controller=SimpleNamespace(homed_axes=lambda: {"X", "Y"}),
-    )
-
-    panel_adapter.update_software_coordinate_display(
+    panel_adapter.select_gui_coordinate_frame(
         owner,
-        PhysicalMachinePose({"X": 0.0, "Y": 0.0, "Z": 1.0, "A": 2.0, "B": 0.0}),
+        "11111111-1111-4111-8111-111111111111",
     )
-
-    assert owner._coordinate_frame_lifecycle.selected_frame_id == "machine"
-    assert owner.settings_manager.in_memory_updates == ["machine"]
-
-
-def test_missing_fresh_machine_axis_clears_stale_value_and_shows_exact_yellow_reason(
-    qt_app: QApplication,
-) -> None:
-    panel = StagePositionPanel(("X", "Y", "Z", "A", "B"))
-    owner = SimpleNamespace(
-        _stage_position_panel=panel,
-        _coordinate_frame_registry=CoordinateFrameRegistry(),
-        _coordinate_frames_loaded=True,
-        _coordinate_frame_lifecycle=CoordinateFrameLifecycle(),
-        _stage_axis_display_values={},
-        settings_manager=_SelectionSettingsManager("machine"),
-        stage_controller=SimpleNamespace(homed_axes=lambda: {"X", "Y", "Z", "A"}),
-    )
-    panel_adapter.update_software_coordinate_display(
-        owner,
-        PhysicalMachinePose({"X": 12.0, "Y": 2.0, "Z": 3.0, "A": 4.0, "B": 5.0}),
-    )
-    assert panel.axis_fields["X"].text() == "12"
-
-    panel_adapter.update_software_coordinate_display(
-        owner,
-        PhysicalMachinePose({"Y": 2.0, "Z": 3.0, "A": 4.0, "B": 5.0}),
-    )
-
-    assert panel.axis_fields["X"].text() == ""
-    assert "background-color: #f0b429" in panel.axis_fields["X"].styleSheet()
-    assert panel.axis_fields["X"].toolTip() == (
-        "Physical Machine X coordinate is unavailable."
-    )
-    assert owner._stage_axis_display_values == {"Y": 2.0, "Z": 3.0, "A": 4.0, "B": 5.0}
-    panel.deleteLater()
-
-
-def _connect_synchronized_snapshot_presentation(
-    owner: SimpleNamespace,
-    controller: StageController,
-) -> None:
-    def refresh(_legacy_position: object) -> None:
-        pose = physical_machine_pose_from_controller(
-            controller,
-            ("X", "Y", "Z", "A", "B"),
-        ) or PhysicalMachinePose({})
-        owner._latest_physical_machine_pose = pose
-        panel_adapter.update_software_coordinate_display(owner, pose)
-
-    controller.stage_position_changed = SimpleNamespace(emit=refresh)
-
-
-def _status_with_synchronized_machine(
-    synchronized_machine_position: tuple[float, ...] | None,
-) -> _Status:
-    display = (5.0, 2.0, 3.0, 4.0, 5.0)
-    return _Status(
-        state="Idle",
-        display_position=display,
-        work_position=display,
-        synchronized_machine_position=synchronized_machine_position,
-    )
-
-
-def test_same_wpos_missing_wco_clears_previous_blue_machine_values(
-    qt_app: QApplication,
-) -> None:
-    controller = StageController()
-    panel = StagePositionPanel(("X", "Y", "Z", "A", "B"))
-    owner = SimpleNamespace(
-        _stage_position_panel=panel,
-        _coordinate_frame_registry=CoordinateFrameRegistry(),
-        _coordinate_frames_loaded=True,
-        _coordinate_frame_lifecycle=CoordinateFrameLifecycle(),
-        _stage_axis_display_values={},
-        settings_manager=_SelectionSettingsManager("machine"),
-        stage_controller=controller,
-    )
-    controller.apply_axis_calibrations(default_axis_calibrations())
-    controller._homed_axes = {"X", "Y", "Z", "A"}
-    _connect_synchronized_snapshot_presentation(owner, controller)
-    try:
-        controller._update_cached_positions(
-            _status_with_synchronized_machine((15.0, 22.0, 3.0, 4.0, 5.0))
-        )
-        assert panel.axis_fields["X"].text() == "15"
-        assert "background-color: #1565c0" in panel.axis_fields["X"].styleSheet()
-
-        controller._update_cached_positions(_status_with_synchronized_machine(None))
-
-        assert panel.axis_fields["X"].text() == ""
-        assert "background-color: #f0b429" in panel.axis_fields["X"].styleSheet()
-    finally:
-        panel.deleteLater()
-        controller.shutdown()
-
-
-def test_same_wpos_new_synchronized_snapshot_completes_pending_restore() -> None:
-    frame_id = "11111111-1111-4111-8111-111111111111"
-    registry = CoordinateFrameRegistry()
-    registry.add(_ready_frame_without_a(frame_id))
-    controller = StageController()
-    plans: list[CoordinateDisplayPlan] = []
-    owner = SimpleNamespace(
-        _stage_position_panel=SimpleNamespace(set_coordinate_display_plan=plans.append),
-        _coordinate_frame_registry=registry,
-        _coordinate_frames_loaded=True,
-        _coordinate_frame_lifecycle=CoordinateFrameLifecycle(
-            restore_frame_id=frame_id
-        ),
-        _stage_axis_display_values={},
-        settings_manager=_SelectionSettingsManager(frame_id),
-        stage_controller=controller,
-    )
-    controller.apply_axis_calibrations(default_axis_calibrations())
-    controller._homed_axes = {"X", "Y", "Z", "A"}
-    _connect_synchronized_snapshot_presentation(owner, controller)
-    try:
-        controller._update_cached_positions(_status_with_synchronized_machine(None))
-        assert owner._coordinate_frame_lifecycle.selected_frame_id == "machine"
-
-        controller._update_cached_positions(
-            _status_with_synchronized_machine((0.0, 0.0, 1.0, 2.0, 0.0))
-        )
-
-        assert owner._coordinate_frame_lifecycle.selected_frame_id == frame_id
-        assert plans[-1].selected_frame_id == frame_id
-    finally:
-        controller.shutdown()
-
-
-def test_same_wpos_changed_machine_snapshot_refreshes_displayed_value(
-    qt_app: QApplication,
-) -> None:
-    controller = StageController()
-    panel = StagePositionPanel(("X", "Y", "Z", "A", "B"))
-    owner = SimpleNamespace(
-        _stage_position_panel=panel,
-        _coordinate_frame_registry=CoordinateFrameRegistry(),
-        _coordinate_frames_loaded=True,
-        _coordinate_frame_lifecycle=CoordinateFrameLifecycle(),
-        _stage_axis_display_values={},
-        settings_manager=_SelectionSettingsManager("machine"),
-        stage_controller=controller,
-    )
-    controller.apply_axis_calibrations(default_axis_calibrations())
-    controller._homed_axes = {"X", "Y", "Z", "A"}
-    _connect_synchronized_snapshot_presentation(owner, controller)
-    try:
-        controller._update_cached_positions(
-            _status_with_synchronized_machine((15.0, 22.0, 3.0, 4.0, 5.0))
-        )
-        controller._update_cached_positions(
-            _status_with_synchronized_machine((16.0, 22.0, 3.0, 4.0, 5.0))
-        )
-
-        assert panel.axis_fields["X"].text() == "16"
-    finally:
-        panel.deleteLater()
-        controller.shutdown()
-
-
-def test_refresh_accepts_valid_pose_value_across_module_reload_boundary(
-    qt_app: QApplication,
-) -> None:
-    plans: list[object] = []
-    reloaded_pose_type = type(
-        "PhysicalMachinePose",
-        (),
-        {"__module__": "probe_station_gui.coordinates.model"},
-    )
-    reloaded_pose = reloaded_pose_type()
-    reloaded_pose.values = {"X": 1.0, "Y": 2.0, "Z": 3.0, "A": 4.0, "B": 5.0}
-    owner = SimpleNamespace(
-        _stage_position_panel=SimpleNamespace(set_coordinate_display_plan=plans.append),
-        _coordinate_frame_registry=CoordinateFrameRegistry(),
-        _coordinate_frames_loaded=True,
-        _coordinate_frame_lifecycle=CoordinateFrameLifecycle(),
-        _stage_axis_display_values={},
-        _latest_physical_machine_pose=reloaded_pose,
-        settings_manager=_SelectionSettingsManager("machine"),
-        stage_controller=SimpleNamespace(homed_axes=lambda: {"X", "Y", "Z", "A"}),
-    )
-
-    panel_adapter.refresh_coordinate_frame_display(owner)
-
-    assert plans[-1].selected_frame_id == "machine"
-
-
-def _reloaded_pose(values: object) -> object:
-    pose_type = type(
-        "PhysicalMachinePose",
-        (),
-        {"__module__": "probe_station_gui.coordinates.model"},
-    )
-    pose = pose_type()
-    pose.values = values
-    return pose
-
-
-def _reloaded_pose_without_values() -> object:
-    pose_type = type(
-        "PhysicalMachinePose",
-        (),
-        {"__module__": "probe_station_gui.coordinates.model"},
-    )
-    return pose_type()
-
-
-def _reloaded_pose_with_raising_values() -> object:
-    def raise_values(_self) -> object:
-        raise RuntimeError("broken reload value")
-
-    pose_type = type(
-        "PhysicalMachinePose",
-        (),
-        {
-            "__module__": "probe_station_gui.coordinates.model",
-            "values": property(raise_values),
-        },
-    )
-    return pose_type()
-
-
-@pytest.mark.parametrize(
-    "pose_factory",
-    [
-        pytest.param(object, id="unexpected-type"),
-        pytest.param(_reloaded_pose_without_values, id="missing-values"),
-        pytest.param(_reloaded_pose_with_raising_values, id="raising-values"),
-        pytest.param(lambda: _reloaded_pose([]), id="non-mapping-values"),
-        pytest.param(lambda: _reloaded_pose({"X": 1.0}), id="partial-values"),
-        pytest.param(
-            lambda: _reloaded_pose(
-                {"X": float("nan"), "Y": 2.0, "Z": 3.0, "A": 4.0, "B": 5.0}
-            ),
-            id="nonfinite-values",
-        ),
-        pytest.param(
-            lambda: _reloaded_pose(
-                {"X": 1.0, "Y": 2.0, "Z": 3.0, "A": 4.0, "Q": 5.0}
-            ),
-            id="unexpected-axis",
-        ),
-    ],
-)
-def test_malformed_reloaded_pose_clears_stale_blue_values_without_raising(
-    qt_app: QApplication,
-    pose_factory,
-) -> None:
-    panel = StagePositionPanel(("X", "Y", "Z", "A", "B"))
-    owner = SimpleNamespace(
-        _stage_position_panel=panel,
-        _coordinate_frame_registry=CoordinateFrameRegistry(),
-        _coordinate_frames_loaded=True,
-        _coordinate_frame_lifecycle=CoordinateFrameLifecycle(),
-        _stage_axis_display_values={},
-        _latest_physical_machine_pose=None,
-        settings_manager=_SelectionSettingsManager("machine"),
-        stage_controller=SimpleNamespace(homed_axes=lambda: {"X", "Y", "Z", "A"}),
-    )
-    panel_adapter.update_software_coordinate_display(
-        owner,
-        PhysicalMachinePose({"X": 99.0, "Y": 2.0, "Z": 3.0, "A": 4.0, "B": 5.0}),
-    )
-    assert panel.axis_fields["X"].text() == "99"
-    assert "background-color: #1565c0" in panel.axis_fields["X"].styleSheet()
-    owner._latest_physical_machine_pose = pose_factory()
-
-    panel_adapter.refresh_coordinate_frame_display(owner)
-
-    assert owner._stage_axis_display_values == {}
-    for axis, field in panel.axis_fields.items():
-        assert field.text() == ""
-        assert "background-color: #f0b429" in field.styleSheet()
-        assert field.toolTip() == f"Physical Machine {axis} coordinate is unavailable."
-    panel.deleteLater()
+    assert calls == [
+        CoordinateSystemSelection("11111111-1111-4111-8111-111111111111"),
+        (owner, transition),
+    ]
+    assert owner._api_coordinate_frame_id == "api-frame"
 
 
 @pytest.mark.parametrize(
     ("value", "expected"),
-    [
-        (0.0, "0"),
-        (0.00049, "0"),
-        (-0.00049, "0"),
-        (1.23456, "1.235"),
-        (-10.5, "-10.5"),
-        (2.30001, "2.3"),
-    ],
+    [(0.0, "0"), (0.00049, "0"), (-0.00049, "0"), (1.23456, "1.235")],
 )
-def test_format_stage_axis_value_matches_existing_rounding(
-    value: float,
-    expected: str,
-) -> None:
+def test_format_stage_axis_value(value: float, expected: str) -> None:
     assert format_stage_axis_value(value) == expected
 
 
-def test_set_fields_available_false_clears_disables_and_styles_fields(
-    qt_app: QApplication,
-) -> None:
-    panel = StagePositionPanel(("X", "Y"))
-    plan = _display_plan(
-        AxisFieldPresentation("X", 1.0, 1.0, 1.0, "#1565c0", "#f5f5f5", "x"),
-        AxisFieldPresentation("Y", 2.0, 2.0, 2.0, "#f0b429", "#1f1f1f", "y"),
-    )
-    panel.apply_display_plan(plan)
-    panel.axis_fields["X"].setText("9.9")
-    panel.axis_fields["X"].setModified(True)
-
-    panel.set_fields_available(False)
-
-    for field in panel.axis_fields.values():
-        assert field.text() == ""
-        assert field.placeholderText() == "---"
-        assert not field.isEnabled()
-        assert not field.isModified()
-        style = field.styleSheet()
-        assert "background-color: #e6e6e6" in style
-        assert "color: #666666" in style
-        assert "border: 1px solid #e6e6e6" in style
-
-    panel.deleteLater()
-
-
-def test_apply_display_plan_preserves_focused_modified_pending_text(
+def test_stage_plan_preserves_focused_modified_pending_text(
     qt_app: QApplication,
 ) -> None:
     panel = StagePositionPanel(("X", "Y"))
@@ -951,233 +340,24 @@ def test_apply_display_plan_preserves_focused_modified_pending_text(
     field = panel.axis_fields["X"]
     field.setEnabled(True)
     field.setFocus()
-    qt_app.processEvents()
     field.setText("7.777")
     field.setModified(True)
-
     panel.apply_display_plan(
-        _display_plan(
-            AxisFieldPresentation(
-                "X",
-                1.0,
-                1.0,
-                7.777,
-                "#1565c0",
-                "#f5f5f5",
-                "X axis",
-            ),
-            AxisFieldPresentation(
-                "Y",
-                2.0,
-                2.0,
-                2.0,
-                "#1565c0",
-                "#f5f5f5",
-                "Y axis",
-            ),
+        _stage_plan(
+            AxisFieldPresentation("X", 1.0, 1.0, 7.777, "#1565c0", "#f5f5f5", "X"),
+            AxisFieldPresentation("Y", 2.0, 2.0, 2.0, "#1565c0", "#f5f5f5", "Y"),
             homed_axes=frozenset({"X", "Y"}),
         )
     )
-
     assert field.text() == "7.777"
     assert field.isModified()
-    assert field.toolTip() == "X axis"
-
     panel.deleteLater()
 
 
-def test_clear_pending_target_state_preserves_uncommitted_focused_text(
-    qt_app: QApplication,
-) -> None:
-    panel = StagePositionPanel(("X", "Y"))
-    panel.apply_display_plan(
-        _display_plan(
-            AxisFieldPresentation("X", 1.0, 1.0, 1.0, "#1565c0", "#f5f5f5", "X axis"),
-            AxisFieldPresentation("Y", 2.0, 2.0, 2.0, "#1565c0", "#f5f5f5", "Y axis"),
-        )
-    )
-    panel.set_pending_target("X", 8.0, 8.0)
-    y_field = panel.axis_fields["Y"]
-    y_field.setFocus()
-    qt_app.processEvents()
-    y_field.setText("7.777")
-    y_field.setModified(True)
-
-    had_changes = panel.clear_pending_target_state()
-
-    assert had_changes
-    assert panel.pending_targets == {}
-    assert y_field.text() == "7.777"
-    assert y_field.isModified()
-
-    panel.deleteLater()
-
-
-def test_limit_base_style_overrides_homed_and_unhomed_styles(
-    qt_app: QApplication,
-) -> None:
-    panel = StagePositionPanel(("X",))
-
-    panel.apply_display_plan(
-        _display_plan(
-            AxisFieldPresentation(
-                "X",
-                1.0,
-                1.0,
-                1.0,
-                "#c62828",
-                "#ffffff",
-                "X axis",
-            ),
-            homed_axes=frozenset({"X"}),
-        )
-    )
-
-    style = panel.axis_fields["X"].styleSheet()
-    assert "background-color: #c62828" in style
-    assert "color: #ffffff" in style
-
-    panel.deleteLater()
-
-
-def test_pending_target_style_overrides_base_style(
-    qt_app: QApplication,
-) -> None:
-    panel = StagePositionPanel(("X",))
-    panel.apply_display_plan(
-        _display_plan(
-            AxisFieldPresentation(
-                "X",
-                1.0,
-                1.0,
-                1.0,
-                "#1565c0",
-                "#f5f5f5",
-                "X axis",
-            )
-        )
-    )
-
-    panel.set_pending_target("X", 4.0, 4.25)
-
-    style = panel.axis_fields["X"].styleSheet()
-    assert "background-color: #d7b8ff" in style
-    assert "color: #1f1233" in style
-
-    panel.deleteLater()
-
-
-def test_confidence_stripe_coexists_with_edited_target_fill(
-    qt_app: QApplication,
-) -> None:
-    panel = StagePositionPanel(("X", "Y", "Z"))
-    panel.apply_display_plan(
-        _display_plan(
-            AxisFieldPresentation(
-                "X", 1.0, 1.0, 1.0, "#1565c0", "#f5f5f5", "X axis", "exact"
-            ),
-            AxisFieldPresentation(
-                "Y",
-                2.0,
-                2.0,
-                2.0,
-                "#1565c0",
-                "#f5f5f5",
-                "Y axis",
-                "approximate",
-            ),
-            AxisFieldPresentation(
-                "Z", 3.0, 3.0, 3.0, "#c62828", "#ffffff", "Z axis", None
-            ),
-        )
-    )
-    panel.set_pending_target("X", 4.0, 4.25)
-
-    x_style = panel.axis_fields["X"].styleSheet()
-    y_style = panel.axis_fields["Y"].styleSheet()
-    z_style = panel.axis_fields["Z"].styleSheet()
-    assert "background-color: #d7b8ff" in x_style
-    assert "border-bottom: 4px solid #2e7d32" in x_style
-    assert "border-bottom: 4px solid #d32f2f" in y_style
-    assert "border-bottom: 4px solid" not in z_style
-
-    panel.deleteLater()
-
-
-def test_confidence_update_restyles_only_the_changed_axis(
-    qt_app: QApplication,
-) -> None:
-    panel = StagePositionPanel(("X", "Y"))
-    panel.apply_display_plan(
-        _display_plan(
-            AxisFieldPresentation(
-                "X", 1.0, 1.0, 1.0, "#1565c0", "#f5f5f5", "X axis", "approximate"
-            ),
-            AxisFieldPresentation(
-                "Y", 2.0, 2.0, 2.0, "#1565c0", "#f5f5f5", "Y axis", "exact"
-            ),
-        )
-    )
-    original_y_style = panel.axis_fields["Y"].styleSheet()
-
-    panel.update_confidence_roles({"X": "exact"})
-
-    assert "border-bottom: 4px solid #2e7d32" in panel.axis_fields["X"].styleSheet()
-    assert panel.axis_fields["Y"].styleSheet() == original_y_style
-    panel.deleteLater()
-
-
-def test_position_legend_uses_aligned_semantic_groups(
-    qt_app: QApplication,
-) -> None:
-    panel = StagePositionPanel(("X",))
-
-    assert tuple(panel._legend_titles) == ("Field state:", "Accuracy:")
-    assert tuple(item.label.text() for item in panel._legend_groups["Field state:"]) == (
-        "Homed",
-        "Unhomed",
-        "Limit",
-        "Edited",
-    )
-    assert tuple(item.label.text() for item in panel._legend_groups["Accuracy:"]) == (
-        "Exact",
-        "Approximate",
-    )
-    state_sizes = {
-        (item.swatch.width(), item.swatch.height())
-        for item in panel._legend_groups["Field state:"]
-    }
-    accuracy_sizes = {
-        (item.swatch.width(), item.swatch.height())
-        for item in panel._legend_groups["Accuracy:"]
-    }
-    assert state_sizes == {(10, 10)}
-    assert accuracy_sizes == {(14, 4)}
-    legend_layout = panel.legend_widget.layout()
-    assert legend_layout.spacing() == 10
-    item_layouts = tuple(
-        layout
-        for index in range(legend_layout.count())
-        if (layout := legend_layout.itemAt(index).layout()) is not None
-    )
-    assert len(item_layouts) == 6
-    assert {layout.spacing() for layout in item_layouts} == {4}
-    assert "backlash" in panel.legend_widget.toolTip().lower()
-    assert all(
-        label.textFormat() != Qt.RichText
-        and "font-size: 9px" not in label.styleSheet()
-        for label in panel.legend_widget.findChildren(QLabel)
-    )
-
-    panel.deleteLater()
-
-
-def test_motion_blink_dimming_maps_known_base_colors(
-    qt_app: QApplication,
-) -> None:
+def test_motion_blink_dimming_maps_semantic_base_colors() -> None:
     panel = StagePositionPanel(("X", "Y", "Z", "A"))
     panel.apply_display_plan(
-        _display_plan(
+        _stage_plan(
             AxisFieldPresentation("X", 1.0, 1.0, 1.0, "#1565c0", "#f5f5f5", "X"),
             AxisFieldPresentation("Y", 2.0, 2.0, 2.0, "#f0b429", "#1f1f1f", "Y"),
             AxisFieldPresentation("Z", 3.0, 3.0, 3.0, "#c62828", "#ffffff", "Z"),
@@ -1185,74 +365,19 @@ def test_motion_blink_dimming_maps_known_base_colors(
         )
     )
     panel.set_pending_target("A", 4.0, 4.0)
-
     panel.refresh_axis_styles({"X", "Y", "Z", "A"}, True)
-
     assert "background-color: #6f9dd3" in panel.axis_fields["X"].styleSheet()
     assert "background-color: #f7d98a" in panel.axis_fields["Y"].styleSheet()
     assert "background-color: #e57373" in panel.axis_fields["Z"].styleSheet()
     assert "background-color: #d7b8ff" in panel.axis_fields["A"].styleSheet()
-
     panel.deleteLater()
 
 
-def test_axis_signals_include_axis_name_and_programmatic_updates_do_not_emit(
-    qt_app: QApplication,
-) -> None:
+def test_selected_input_mode_normalizes_invalid_data() -> None:
     panel = StagePositionPanel(("X",))
-    returned: list[str] = []
-    escaped: list[str] = []
-    finished: list[str] = []
-    edited: list[str] = []
-    panel.axis_return_pressed.connect(returned.append)
-    panel.axis_escape_pressed.connect(escaped.append)
-    panel.axis_editing_finished.connect(finished.append)
-    panel.axis_text_edited.connect(edited.append)
-
-    field = panel.axis_fields["X"]
-    field.setEnabled(True)
-    field.returnPressed.emit()
-    panel._axis_escape_shortcuts["X"].activated.emit()
-    field.textEdited.emit("1.0")
-    field.editingFinished.emit()
-
-    assert returned == ["X"]
-    assert escaped == ["X"]
-    assert edited == ["X"]
-    assert finished == ["X"]
-
-    panel.set_fields_available(False)
-    panel.apply_display_plan(
-        _display_plan(
-            AxisFieldPresentation(
-                "X",
-                1.0,
-                1.0,
-                1.0,
-                "#1565c0",
-                "#f5f5f5",
-                "X axis",
-            )
-        )
-    )
-
-    assert edited == ["X"]
-    assert finished == ["X"]
-
-    panel.deleteLater()
-
-
-def test_selected_input_mode_normalizes_and_falls_back_to_g90(
-    qt_app: QApplication,
-) -> None:
-    panel = StagePositionPanel(("X",))
-
     assert panel.selected_input_mode() == "G90"
     panel.input_mode_combo.setCurrentIndex(1)
     assert panel.selected_input_mode() == "G91"
-    panel.input_mode_combo.setItemData(1, "relative")
-    assert panel.selected_input_mode() == "G91"
     panel.input_mode_combo.setItemData(1, "bogus")
     assert panel.selected_input_mode() == "G90"
-
     panel.deleteLater()

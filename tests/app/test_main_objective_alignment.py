@@ -5,6 +5,10 @@ import pytest
 from PySide6.QtWidgets import QDialog, QInputDialog, QMessageBox
 
 from main import Main
+from probe_station_gui.coordinates.coordinator_model import (
+    CoordinateSystemSnapshot,
+    CoordinateTransition,
+)
 from probe_station_gui.design.objective_offsets import ObjectiveOffsetReference
 from probe_station_gui.design.session import AlignmentPreparation
 from probe_station_gui.settings.manager import Settings
@@ -152,6 +156,14 @@ def _window() -> tuple[Main, _Stage, _SettingsManager, list[str]]:
     window._click_calibration_dialog = None
     window._objective_offset_reference = None
     window._design_session = types.SimpleNamespace(document=None)
+    coordinate_snapshot = CoordinateSystemSnapshot(False, (), None)
+    window._coordinate_system_coordinator = types.SimpleNamespace(
+        snapshot=lambda: coordinate_snapshot,
+        observe_authority=lambda _observation: CoordinateTransition(
+            coordinate_snapshot
+        ),
+    )
+    window._reconcile_design_calibration_fingerprints = lambda: False
     window._manual_alignment_pick_slot = None
     window._manual_alignment_capture_context = None
     window._optical_calibration_runtime = types.SimpleNamespace(

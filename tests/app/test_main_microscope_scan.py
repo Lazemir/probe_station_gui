@@ -12,11 +12,6 @@ from probe_station_gui.camera.microscope_scan_runtime_adapters import (
     build_microscope_scan_plan,
 )
 from probe_station_gui.design.model import DesignRegistration
-from probe_station_gui.coordinates.provenance import (
-    RUNTIME_PROVENANCE_REASON,
-    RUNTIME_PROVENANCE_STATUS,
-)
-from probe_station_gui.coordinates.transforms import BFrameTransform
 
 
 class _FakeScanThread:
@@ -43,6 +38,12 @@ def _set_area_scan_launch_sources(window: Main, scale: object) -> None:
     window._active_objective_metadata = lambda: ("X20", 20.0)
     window._active_objective_xy_offset = lambda: (0.0, 0.0)
     window._design_session = types.SimpleNamespace(document=None, registration=None)
+    window._coordinate_system_coordinator = types.SimpleNamespace(
+        current_design_lease=lambda: types.SimpleNamespace(
+            usable=False,
+            document=None,
+        )
+    )
 
 
 def _install_usable_design_frame(
@@ -55,16 +56,14 @@ def _install_usable_design_frame(
         frame_id="design-a",
         frame_version=4,
     )
-    window._snapshot_active_design_frame_usability = lambda: frame_usability
-    window._design_frame_usability_snapshot_is_current = (
-        lambda snapshot: snapshot is frame_usability
-    )
-    window._camera_stage_xy_from_design_usability_snapshot = (
-        lambda snapshot, point, *, require_current: (
+    window._coordinate_system_coordinator = types.SimpleNamespace(
+        current_design_lease=lambda: frame_usability,
+        design_lease_is_current=lambda snapshot: snapshot is frame_usability,
+        project_design_to_camera_stage=lambda snapshot, point: (
             registration.design_to_stage(point)
-            if snapshot is frame_usability and not require_current
+            if snapshot is frame_usability
             else None
-        )
+        ),
     )
 
 
@@ -92,6 +91,12 @@ def test_microscope_scan_missing_design_does_not_read_scale_or_camera() -> None:
     calls: list[str] = []
     window.serial_connection = types.SimpleNamespace(is_open=True)
     window._design_session = types.SimpleNamespace(document=None, registration=None)
+    window._coordinate_system_coordinator = types.SimpleNamespace(
+        current_design_lease=lambda: types.SimpleNamespace(
+            usable=False,
+            rejection_reason="No design registration.",
+        )
+    )
     window._microscope_scan_running = lambda: False
     window._show_status = lambda message, timeout_ms=0: statuses.append(
         (message, timeout_ms)
@@ -106,43 +111,23 @@ def test_microscope_scan_missing_design_does_not_read_scale_or_camera() -> None:
 
 
 def test_design_scan_rejects_verified_missing_reference_draft_before_planning() -> None:
-    design_kind = Main._active_design_frame_provenance_error.__globals__[
-        "design_frame_provenance_error"
-    ].__globals__["FrameKind"].DESIGN
-    record = types.SimpleNamespace(
-        frame_id="design-a",
-        version=4,
-        kind=design_kind,
-        transform=BFrameTransform.identity(),
-        readiness={
-            axis: types.SimpleNamespace(
-                available=False,
-                reason=f"Design {axis} reference is not registered.",
-            )
-            for axis in ("X", "Y", "Z", "A", "B")
-        },
-        metadata={
-            RUNTIME_PROVENANCE_STATUS: "verified",
-            RUNTIME_PROVENANCE_REASON: "",
-        },
-    )
     window = Main.__new__(Main)
     statuses: list[tuple[str, int]] = []
     calls: list[str] = []
     window.serial_connection = types.SimpleNamespace(is_open=True)
-    window._coordinate_frames_loaded = True
-    window._coordinate_frame_authority_blocked_axes = set()
-    window._coordinate_frame_registry = types.SimpleNamespace(
-        get=lambda _frame_id: record
-    )
     window._design_session = types.SimpleNamespace(
-        active_frame_id="design-a",
         document=types.SimpleNamespace(bounds=(0.0, 0.0, 1.0, 1.0)),
         registration=types.SimpleNamespace(
             valid=True,
             matrix=((1.0, 0.0), (0.0, 1.0)),
             offset=(0.0, 0.0),
         ),
+    )
+    window._coordinate_system_coordinator = types.SimpleNamespace(
+        current_design_lease=lambda: types.SimpleNamespace(
+            usable=False,
+            rejection_reason="Design X reference is not registered.",
+        )
     )
     window._microscope_scan_running = lambda: False
     window._show_status = lambda message, timeout_ms=0: statuses.append(

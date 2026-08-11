@@ -5,7 +5,6 @@ from __future__ import annotations
 from copy import deepcopy
 from dataclasses import dataclass
 import math
-from pathlib import Path
 from typing import Callable, Mapping
 
 from probe_station_gui.design import objective_offsets
@@ -19,6 +18,7 @@ from probe_station_gui.design.navigation_adapter import (
     activate_design_frame_for_document,
 )
 from probe_station_gui.design.session import DesignSession
+from probe_station_gui.design.session_state import export_persisted_session_state
 
 from .coordinator_model import (
     CoordinateNotice,
@@ -26,10 +26,12 @@ from .coordinator_model import (
     DesignSessionCheckpoint,
     FrameRecordsPublication,
     LegacyDesignStateRewriteResult,
+    RestoreDesignWorkspaceUiEffect,
     RewriteLegacyDesignStateIntent,
     _RegistrationTransitionParts,
 )
 from .registry import CoordinateFrameRegistry
+from .source_identity import source_identity
 
 
 @dataclass(frozen=True)
@@ -85,6 +87,15 @@ class CoordinateDesignActivation:
             return _RegistrationTransitionParts(
                 proposed_session_state=candidate.snapshot_state()
             )
+        metadata = request.frame_metadata
+        if metadata is None:
+            return self._failure(
+                DesignModelError("Design source metadata is unavailable.")
+            )
+        if not isinstance(metadata, DesignFrameMetadata):
+            return self._failure(
+                TypeError("frame_metadata must be DesignFrameMetadata")
+            )
         proposed_registry = CoordinateFrameRegistry()
         proposed_registry.reset(self._registry.snapshot().records)
         mapper = self._machine_mapper(request)
@@ -101,12 +112,6 @@ class CoordinateDesignActivation:
         if legacy is not None:
             return legacy
         try:
-            metadata = request.frame_metadata
-            if metadata is not None and not isinstance(
-                metadata,
-                DesignFrameMetadata,
-            ):
-                raise TypeError("frame_metadata must be DesignFrameMetadata")
             create_new = request.create_new or self._should_replace_registered(
                 candidate,
                 proposed_registry,
@@ -151,6 +156,10 @@ class CoordinateDesignActivation:
             previous_session=DesignSessionCheckpoint.capture(self._session),
             projection=projection,
             runtime_record=runtime_record,
+            rollback_ui_effects=self._workspace_rollback_effects(
+                request,
+                candidate_state,
+            ),
         )
         self._discard_legacy_migration_unless_current(candidate)
         return _RegistrationTransitionParts(
@@ -254,10 +263,7 @@ class CoordinateDesignActivation:
         lease = self._legacy_migration_lease
         if lease is None:
             return None
-        try:
-            state = self._session.export_persisted_state()
-        except (OSError, TypeError, ValueError):
-            return None
+        state = self._persisted_state(self._session)
         if not isinstance(state, dict):
             return None
         if (
@@ -277,7 +283,7 @@ class CoordinateDesignActivation:
         pivot: tuple[float, float],
         mapper,
     ) -> _RegistrationTransitionParts | None:
-        legacy_state = candidate.export_persisted_state()
+        legacy_state = self._persisted_state(candidate, request.frame_metadata)
         if not (
             candidate.active_frame_id is None
             and isinstance(legacy_state, dict)
@@ -287,7 +293,8 @@ class CoordinateDesignActivation:
             return None
         if physical_b is None or request.machine_snapshot is None:
             candidate.block_legacy_registration_until_b(
-                "Design registration requires a current B position."
+                "Design registration requires a current B position.",
+                persisted_state=legacy_state,
             )
             return _RegistrationTransitionParts(
                 proposed_session_state=candidate.snapshot_state()
@@ -335,7 +342,10 @@ class CoordinateDesignActivation:
             candidate.apply_active_frame_link(runtime_record, projection)
         except (DesignModelError, KeyError, OSError, TypeError, ValueError) as exc:
             return self._failure(exc)
-        replacement_state = candidate.export_persisted_state()
+        replacement_state = self._persisted_state(
+            candidate,
+            request.frame_metadata,
+        )
         if replacement_state is None:
             return self._failure(
                 DesignModelError("Migrated Design state is unavailable.")
@@ -368,6 +378,26 @@ class CoordinateDesignActivation:
                 runtime_record=runtime_record,
                 success_message="",
                 success_code=success_notice_code,
+                rollback_ui_effects=self._workspace_rollback_effects(
+                    request,
+                    candidate.snapshot_state(),
+                ),
+            ),
+        )
+
+    @staticmethod
+    def _workspace_rollback_effects(
+        request: DesignActivationRequest,
+        _applied_state,
+    ) -> tuple[RestoreDesignWorkspaceUiEffect, ...]:
+        previous = request.workspace_before
+        applied = request.workspace_after
+        if previous is None or applied is None:
+            return ()
+        return (
+            RestoreDesignWorkspaceUiEffect(
+                previous=previous,
+                applied=applied,
             ),
         )
 
@@ -377,6 +407,40 @@ class CoordinateDesignActivation:
     ) -> None:
         if not self._legacy_migration_is_current(candidate):
             self._discard_legacy_migration()
+
+    def _persisted_state(
+        self,
+        session: DesignSession,
+        metadata: object | None = None,
+    ) -> dict[str, object] | None:
+        effective_metadata = (
+            metadata if isinstance(metadata, DesignFrameMetadata) else None
+        )
+        if effective_metadata is None and session.active_frame_id is not None:
+            record = self._registry.get(session.active_frame_id)
+            if record is not None:
+                try:
+                    effective_metadata = DesignFrameMetadata.from_mapping(
+                        record.metadata
+                    )
+                except (KeyError, TypeError, ValueError):
+                    effective_metadata = None
+        route = session.route
+        route_path = None if route is None or route.path is None else str(route.path)
+        return export_persisted_session_state(
+            session.snapshot_state(),
+            document_size=(
+                None
+                if effective_metadata is None
+                else effective_metadata.source_size
+            ),
+            document_mtime_ns=(
+                None
+                if effective_metadata is None
+                else effective_metadata.source_mtime_ns
+            ),
+            route_path=route_path,
+        )
 
     def _discard_legacy_migration(self) -> None:
         self._legacy_migration_state = None
@@ -390,7 +454,7 @@ class CoordinateDesignActivation:
         if lease is None or document is None:
             return False
         try:
-            source_path = str(document.path.expanduser().resolve())
+            source_path = source_identity(document.path)
         except OSError:
             return False
         record = self._registry.get(lease.frame_id)
@@ -419,7 +483,7 @@ class CoordinateDesignActivation:
             raise DesignModelError("Migrated Design document is unavailable.")
         return _LegacyMigrationLease(
             session_identity=id(self._session),
-            source_path=str(document.path.expanduser().resolve()),
+            source_path=source_identity(document.path),
             source_load_id=str(document.source_load_id),
             top_cell_name=str(document.top_cell_name),
             visible_layers=tuple(sorted(document.visible_layers)),
@@ -607,7 +671,7 @@ class CoordinateDesignActivation:
         if document is None:
             return ()
         try:
-            source_path = document.path.expanduser().resolve()
+            source_path = source_identity(document.path)
         except OSError:
             return ()
         matches: list[tuple[str, str]] = []
@@ -615,7 +679,7 @@ class CoordinateDesignActivation:
             try:
                 metadata = DesignFrameMetadata.from_mapping(record.metadata)
                 same_design = (
-                    Path(metadata.source_path).expanduser().resolve() == source_path
+                    source_identity(metadata.source_path) == source_path
                     and metadata.top_cell_name == document.top_cell_name
                 )
             except (KeyError, OSError, TypeError, ValueError):

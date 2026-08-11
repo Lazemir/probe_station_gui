@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from dataclasses import replace
 import logging
 
 from PySide6.QtCore import QTimer
@@ -11,8 +12,11 @@ from probe_station_gui.coordinates.coordinator_model import (
     AutofocusResult,
     CaptureMachinePoseIntent,
     CoordinateAdapterCompletion,
+    CoordinateAuthorityObservation,
     CoordinateTransition,
+    CustomSystemsRequest,
     DesignActivationRequest,
+    DesignWorkspaceCheckpoint,
     FinishOperatorAlignmentUiEffect,
     FocusMoveResult,
     LegacyDesignStateRewriteResult,
@@ -20,15 +24,19 @@ from probe_station_gui.coordinates.coordinator_model import (
     MachineProfileObservation,
     MachinePoseCaptureResult,
     MoveToFocusTargetIntent,
+    PersistCoordinateSelectionIntent,
     RunAutofocusIntent,
     SaveCoordinateFramesIntent,
     RestoreOperatorAlignmentUiEffect,
+    RestoreDesignWorkspaceUiEffect,
     RewriteLegacyDesignStateIntent,
 )
+from probe_station_gui.coordinates.model import PhysicalMachinePose
 from probe_station_gui.coordinates.persistence import (
     CoordinateFrameStoreFailure,
 )
 from probe_station_gui.design import navigation_adapter as design_navigation
+from probe_station_gui.design.model import DesignModelError
 from probe_station_gui.stage import move_lifecycle as stage_move_lifecycle
 from probe_station_gui.views import main_window_homing as homing_ui
 from probe_station_gui.views import main_window_stage_position_panel as stage_position_panel
@@ -44,8 +52,7 @@ def apply_coordinate_transition(
 ) -> None:
     """Render one finished domain transition and submit its adapter intents."""
 
-    owner._coordinate_frames_loaded = transition.snapshot.frames_loaded
-    stage_position_panel.refresh_coordinate_frame_display(owner)
+    stage_position_panel.render_coordinate_system_snapshot(owner, transition.snapshot)
     _render_registration_snapshot(owner, transition)
     _render_coordinate_ui_effects(owner, transition)
     if _registration_view_changed(transition):
@@ -56,6 +63,11 @@ def apply_coordinate_transition(
         if callable(refresh_position):
             refresh_position()
     show_status = getattr(owner, "_show_status", None)
+    if not transition.accepted:
+        plan = transition.snapshot.display_plan
+        reason = None if plan is None else plan.selection_reason
+        if reason and callable(show_status):
+            show_status(reason, 5000)
     for notice in transition.notices:
         if notice.message and callable(show_status):
             show_status(notice.message, notice.duration_ms)
@@ -131,6 +143,8 @@ def apply_coordinate_transition(
                         succeeded=True,
                     ),
                 )
+            elif isinstance(intent, PersistCoordinateSelectionIntent):
+                _persist_coordinate_selection(owner, intent.frame_id)
         except Exception as exc:
             logger.exception("Coordinate frame adapter submission failed")
             if isinstance(
@@ -170,9 +184,100 @@ def apply_coordinate_transition(
                     succeeded=False,
                     message=str(exc) or type(exc).__name__,
                 )
+            elif isinstance(intent, PersistCoordinateSelectionIntent):
+                if callable(show_status):
+                    show_status(
+                        "Coordinate selection could not be saved.",
+                        6000,
+                    )
+                continue
             else:
                 continue
             _complete_coordinate_adapter(owner, failure)
+
+
+def _persist_coordinate_selection(owner: object, frame_id: str) -> None:
+    manager = getattr(owner, "settings_manager", None)
+    update = getattr(manager, "set_software_coordinate_selection", None)
+    store = getattr(owner, "_software_coordinate_selection_store", None)
+    publish = getattr(store, "publish", None)
+    snapshot = update(frame_id) if callable(update) else None
+    if snapshot is not None and callable(publish):
+        publish(snapshot)
+
+
+def coordinate_authority_observation(
+    owner: object,
+    physical_pose: PhysicalMachinePose | None = None,
+) -> CoordinateAuthorityObservation:
+    """Capture one immutable controller/settings authority observation."""
+
+    stage = getattr(owner, "stage_controller", None)
+    latest_snapshot = getattr(stage, "latest_motion_coordinate_snapshot", None)
+    if not callable(latest_snapshot):
+        latest_snapshot = getattr(stage, "latest_machine_coordinate_snapshot", None)
+    try:
+        machine_snapshot = latest_snapshot() if callable(latest_snapshot) else None
+    except Exception:
+        machine_snapshot = None
+    pose = physical_pose
+    if not isinstance(pose, PhysicalMachinePose):
+        pose = (
+            machine_snapshot.physical_machine_pose
+            if machine_snapshot is not None
+            else PhysicalMachinePose({})
+        )
+    homed_getter = getattr(stage, "homed_axes", None)
+    try:
+        homed_axes = frozenset(homed_getter()) if callable(homed_getter) else frozenset()
+    except Exception:
+        homed_axes = frozenset()
+    pivot = None
+    pivot_error = None
+    pivot_error_permanent = False
+    geometry_getter = getattr(owner, "_rotation_geometry_snapshot", None)
+    try:
+        if callable(geometry_getter):
+            pivot_value = geometry_getter().pivot_machine_xy
+            pivot = (float(pivot_value[0]), float(pivot_value[1]))
+    except (DesignModelError, IndexError, TypeError, ValueError) as exc:
+        pivot_error = str(exc) or type(exc).__name__
+        pivot_error_permanent = True
+    except Exception as exc:
+        pivot_error = str(exc) or type(exc).__name__
+    objective_getter = getattr(owner, "_active_objective_xy_offset", None)
+    try:
+        objective_value = objective_getter() if callable(objective_getter) else None
+        objective_offset = (
+            (float(objective_value[0]), float(objective_value[1]))
+            if objective_value is not None
+            else (float("nan"), float("nan"))
+        )
+    except Exception:
+        objective_offset = (float("nan"), float("nan"))
+    return CoordinateAuthorityObservation(
+        physical_pose=pose,
+        homed_axes=homed_axes,
+        machine_snapshot=machine_snapshot,
+        pivot_machine_xy=pivot,
+        objective_xy_offset=objective_offset,
+        pivot_error=pivot_error,
+        pivot_error_permanent=pivot_error_permanent,
+    )
+
+
+def observe_coordinate_authority(
+    owner: object,
+    physical_pose: PhysicalMachinePose | None = None,
+) -> CoordinateTransition | None:
+    coordinator = getattr(owner, "_coordinate_system_coordinator", None)
+    if coordinator is None:
+        return None
+    transition = coordinator.observe_authority(
+        coordinate_authority_observation(owner, physical_pose)
+    )
+    apply_coordinate_transition(owner, transition)
+    return transition
 
 
 def _registration_view_changed(transition: CoordinateTransition) -> bool:
@@ -191,7 +296,11 @@ def _render_coordinate_ui_effects(
     owner: object,
     transition: CoordinateTransition,
 ) -> None:
+    workspace_rollbacks: list[RestoreDesignWorkspaceUiEffect] = []
     for effect in transition.ui_effects:
+        if isinstance(effect, RestoreDesignWorkspaceUiEffect):
+            workspace_rollbacks.append(effect)
+            continue
         if isinstance(effect, FinishOperatorAlignmentUiEffect):
             set_snap = getattr(owner, "_set_design_snap_enabled", None)
             if callable(set_snap):
@@ -217,6 +326,178 @@ def _render_coordinate_ui_effects(
         update = getattr(owner, "_update_stage_coordinate_apply_state", None)
         if callable(update):
             update()
+    for effect in reversed(workspace_rollbacks):
+        _restore_design_workspace(owner, effect)
+
+
+def _restore_design_workspace(
+    owner: object,
+    effect: RestoreDesignWorkspaceUiEffect,
+) -> None:
+    session = getattr(owner, "_design_session", None)
+    snapshot_state = getattr(session, "snapshot_state", None)
+    apply_state = getattr(session, "apply_state", None)
+    if not callable(snapshot_state) or not callable(apply_state):
+        return
+    current = capture_design_workspace(owner)
+    applied = effect.applied
+    previous = effect.previous
+    if current.session_state.document is not applied.session_state.document:
+        return
+    if not _workspace_documents_are_compatible(previous, applied):
+        apply_design_workspace_checkpoint(owner, previous)
+        return
+    current_state = current.session_state
+    applied_state = applied.session_state
+    previous_state = previous.session_state
+    if (
+        current_state.targets == applied_state.targets
+        and current_state.selected_target_index
+        == applied_state.selected_target_index
+    ):
+        targets = previous_state.targets
+        selected_target_index = previous_state.selected_target_index
+    else:
+        targets = current_state.targets
+        selected_target_index = current_state.selected_target_index
+    if (
+        current_state.route == applied_state.route
+        and current_state.selected_route_point_index
+        == applied_state.selected_route_point_index
+    ):
+        route = previous_state.route
+        selected_route_point_index = previous_state.selected_route_point_index
+    else:
+        route = current_state.route
+        selected_route_point_index = current_state.selected_route_point_index
+    apply_design_workspace_checkpoint(
+        owner,
+        replace(
+            current,
+            session_state=replace(
+                current_state,
+                document=previous_state.document,
+                targets=targets,
+                selected_target_index=selected_target_index,
+                route=route,
+                selected_route_point_index=selected_route_point_index,
+            ),
+            frame_metadata=_rollback_value(
+                current.frame_metadata,
+                applied.frame_metadata,
+                previous.frame_metadata,
+            ),
+            markup=_rollback_value(
+                current.markup,
+                applied.markup,
+                previous.markup,
+            ),
+            direct_guide_ids=_rollback_value(
+                current.direct_guide_ids,
+                applied.direct_guide_ids,
+                previous.direct_guide_ids,
+            ),
+            pending_visibility=_rollback_value(
+                current.pending_visibility,
+                applied.pending_visibility,
+                previous.pending_visibility,
+            ),
+            last_selected_design_point=_rollback_value(
+                current.last_selected_design_point,
+                applied.last_selected_design_point,
+                previous.last_selected_design_point,
+            ),
+            pending_alignment_preparation=_rollback_value(
+                current.pending_alignment_preparation,
+                applied.pending_alignment_preparation,
+                previous.pending_alignment_preparation,
+            ),
+        ),
+    )
+
+
+def _rollback_value(current: object, applied: object, previous: object):
+    return previous if current == applied else current
+
+
+def _workspace_documents_are_compatible(
+    previous: DesignWorkspaceCheckpoint,
+    applied: DesignWorkspaceCheckpoint,
+) -> bool:
+    previous_document = previous.session_state.document
+    applied_document = applied.session_state.document
+    if previous_document is None or applied_document is None:
+        return previous_document is applied_document
+    return bool(
+        str(previous_document.path) == str(applied_document.path)
+        and previous_document.source_load_id == applied_document.source_load_id
+        and previous_document.top_cell_name == applied_document.top_cell_name
+        and previous_document.rotation_quarter_turns
+        == applied_document.rotation_quarter_turns
+    )
+
+
+def capture_design_workspace(
+    owner: object,
+    *,
+    session_state: object | None = None,
+    frame_metadata: object = _FRAME_METADATA_UNSET,
+    markup: object = _FRAME_METADATA_UNSET,
+    direct_guide_ids: object = _FRAME_METADATA_UNSET,
+    pending_visibility: object = _FRAME_METADATA_UNSET,
+    last_selected_design_point: object = _FRAME_METADATA_UNSET,
+    pending_alignment_preparation: object = _FRAME_METADATA_UNSET,
+) -> DesignWorkspaceCheckpoint:
+    if session_state is None:
+        session_state = owner._design_session.snapshot_state()
+    return DesignWorkspaceCheckpoint(
+        session_state=session_state,
+        frame_metadata=(
+            getattr(owner, "_active_design_frame_metadata", None)
+            if frame_metadata is _FRAME_METADATA_UNSET
+            else frame_metadata
+        ),
+        markup=(
+            getattr(owner, "_design_markup", None)
+            if markup is _FRAME_METADATA_UNSET
+            else markup
+        ),
+        direct_guide_ids=tuple(
+            getattr(owner, "_design_markup_direct_guide_ids", ())
+            if direct_guide_ids is _FRAME_METADATA_UNSET
+            else direct_guide_ids
+        ),
+        pending_visibility=(
+            getattr(owner, "_design_markup_pending_visibility", None)
+            if pending_visibility is _FRAME_METADATA_UNSET
+            else pending_visibility
+        ),
+        last_selected_design_point=(
+            getattr(owner, "_last_selected_design_point", None)
+            if last_selected_design_point is _FRAME_METADATA_UNSET
+            else last_selected_design_point
+        ),
+        pending_alignment_preparation=(
+            getattr(owner, "_pending_alignment_preparation", None)
+            if pending_alignment_preparation is _FRAME_METADATA_UNSET
+            else pending_alignment_preparation
+        ),
+    )
+
+
+def apply_design_workspace_checkpoint(
+    owner: object,
+    checkpoint: DesignWorkspaceCheckpoint,
+) -> None:
+    owner._design_session.apply_state(checkpoint.session_state)
+    owner._active_design_frame_metadata = checkpoint.frame_metadata
+    owner._design_markup = checkpoint.markup
+    owner._design_markup_direct_guide_ids = list(checkpoint.direct_guide_ids)
+    owner._design_markup_pending_visibility = checkpoint.pending_visibility
+    owner._last_selected_design_point = checkpoint.last_selected_design_point
+    owner._pending_alignment_preparation = (
+        checkpoint.pending_alignment_preparation
+    )
 
 
 def _render_registration_snapshot(
@@ -300,14 +581,13 @@ def activate_current_design(
     requested_frame_id: str | None = None,
     create_new: bool = False,
     create_new_if_registered: bool = False,
+    workspace_after: DesignWorkspaceCheckpoint | None = None,
 ) -> CoordinateTransition | None:
     """Capture live adapter observations and submit one Design activation."""
 
-    session = getattr(owner, "_design_session", None)
     coordinator = getattr(owner, "_coordinate_system_coordinator", None)
-    if session is None or coordinator is None:
+    if coordinator is None:
         return None
-    state = session.snapshot_state() if session_state is None else session_state
     try:
         pivot_value = owner._rotation_geometry_snapshot().pivot_machine_xy
         pivot = (float(pivot_value[0]), float(pivot_value[1]))
@@ -329,9 +609,14 @@ def activate_current_design(
         if callable(axes_are_homed) and axes_are_homed({axis})
     )
     latest_snapshot = getattr(stage, "latest_machine_coordinate_snapshot", None)
+    workspace_before = (
+        capture_design_workspace(owner)
+        if workspace_after is not None
+        else None
+    )
     transition = coordinator.activate_design(
         DesignActivationRequest(
-            session_state=state,
+            session_state=session_state,
             frame_metadata=(
                 getattr(owner, "_active_design_frame_metadata", None)
                 if frame_metadata is _FRAME_METADATA_UNSET
@@ -344,14 +629,39 @@ def activate_current_design(
             create_new=create_new,
             create_new_if_registered=create_new_if_registered,
             homed_axes=homed_axes,
+            workspace_before=workspace_before,
+            workspace_after=workspace_after,
         )
     )
+    if transition.accepted and workspace_after is not None:
+        apply_design_workspace_checkpoint(owner, workspace_after)
     apply_coordinate_transition(owner, transition)
     return transition
 
 
 def handle_coordinate_frame_loaded(owner: object, result: object) -> None:
-    was_loaded = bool(getattr(owner, "_coordinate_frames_loaded", False))
+    was_loaded = bool(
+        owner._coordinate_system_coordinator.snapshot().frames_loaded
+    )
+    if not was_loaded:
+        settings = getattr(getattr(owner, "settings_manager", None), "settings", None)
+        software_coordinates = getattr(settings, "software_coordinates", None)
+        if software_coordinates is not None:
+            try:
+                synchronized = (
+                    owner._coordinate_system_coordinator.synchronize_custom_systems(
+                        CustomSystemsRequest(software_coordinates)
+                    )
+                )
+            except (TypeError, ValueError) as exc:
+                show_status = getattr(owner, "_show_status", None)
+                if callable(show_status):
+                    show_status(
+                        f"Custom coordinate settings could not be loaded: {exc}",
+                        6000,
+                    )
+            else:
+                apply_coordinate_transition(owner, synchronized)
     transition = owner._coordinate_system_coordinator.complete(
         CoordinateAdapterCompletion(
             intent_id=int(result.request_id),
@@ -368,9 +678,6 @@ def handle_coordinate_frame_loaded(owner: object, result: object) -> None:
     if diagnostics:
         for diagnostic in diagnostics:
             logger.warning("Design coordinate frame unavailable: %s", diagnostic)
-    materialize_custom = getattr(owner, "_materialize_software_coordinate_frames", None)
-    if callable(materialize_custom):
-        materialize_custom()
     reconcile_calibrations = getattr(
         owner,
         "_reconcile_design_calibration_fingerprints",
@@ -698,7 +1005,9 @@ def controller_state_with_design(owner: object) -> dict[str, object] | None:
     if isinstance(registration.legacy_migration_state, dict):
         state["design_session"] = deepcopy(registration.legacy_migration_state)
         return state
-    design_state = owner._design_session.export_persisted_state()
+    design_state = owner._coordinate_runtime.controller_persistence_state(
+        owner._design_session.snapshot_state()
+    )
     if design_state is not None:
         state["design_session"] = design_state
     return state
@@ -730,7 +1039,7 @@ def maybe_restore_persisted_design(
         return
     owner._pending_persisted_design_state = None
     owner._pending_persisted_design_position = None
-    if owner._design_session.document is not None:
+    if owner._coordinate_system_coordinator.current_design_lease().document is not None:
         return
     decision = design_navigation.prepare_persisted_design_restore(
         design_state,

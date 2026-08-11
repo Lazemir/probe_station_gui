@@ -269,9 +269,13 @@ class _FakeJoystickWindow:
             setattr(self, name, _Signal())
         self.stage_controller = None
         self.serial = None
+        self.relative_motion_projector = None
 
     def set_stage_controller(self, stage_controller: object) -> None:
         self.stage_controller = stage_controller
+
+    def set_relative_motion_projector(self, projector: object) -> None:
+        self.relative_motion_projector = projector
 
     def set_serial(self, serial_connection: object) -> None:
         self.serial = serial_connection
@@ -387,6 +391,7 @@ class _DockOwner:
         "_on_manual_motion_axis",
         "_on_manual_jog_command_changed",
         "_on_manual_jog_stopped",
+        "_project_gui_relative_motion",
         "_on_homing_status_changed",
         "_on_limit_axes_changed",
         "_on_homing_action_started",
@@ -491,6 +496,10 @@ def test_create_main_window_docks_assigns_owner_attrs_and_dock_names(monkeypatch
     assert owner.serial_connection_tabs is None
     assert owner.serial_terminal_panel is None
     assert owner.joystick_panel.stage_controller is owner.stage_controller
+    assert (
+        owner.joystick_panel.relative_motion_projector
+        is owner._project_gui_relative_motion
+    )
     assert owner.resistance_dock.objectName() == "ResistanceDock"
     assert owner.joystick_dock.objectName() == "JoystickDock"
     assert owner.alignment_dock.objectName() == "AlignmentDock"
@@ -525,12 +534,15 @@ def test_needles_zone_change_persists_controller_state(monkeypatch) -> None:
     owner.stage_controller.export_cached_controller_state = lambda: {
         "needles_zone": "lift"
     }
-    owner._design_session = SimpleNamespace(export_persisted_state=lambda: None)
     owner._coordinate_system_coordinator = SimpleNamespace(
         snapshot=lambda: SimpleNamespace(
             registration=SimpleNamespace(legacy_migration_state=None)
-        )
+        ),
     )
+    owner._coordinate_runtime = SimpleNamespace(
+        controller_persistence_state=lambda _workspace_state: None
+    )
+    owner._design_session = SimpleNamespace(snapshot_state=lambda: None)
     owner._controller_state_persistence_suspended = False
     owner.settings_manager.save_controller_state = lambda state: saved.append(state)
 

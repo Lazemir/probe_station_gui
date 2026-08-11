@@ -2,35 +2,21 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-import logging
 from typing import Any, Protocol
 
 from PySide6.QtCore import Qt
 
-from probe_station_gui.coordinates.model import (
-    PhysicalMachinePose,
-    STAGE_AXES,
-    VISIBLE_STAGE_AXES,
+from probe_station_gui.coordinates.coordinator_model import (
+    CoordinateSystemSelection,
+    CoordinateSystemSnapshot,
 )
-from probe_station_gui.coordinates.lifecycle import (
-    CoordinateFrameLifecycle,
-    FrameSelectionContext,
-    FrameSelectionDecision,
-)
-from probe_station_gui.coordinates.presentation import (
-    MACHINE_FRAME_ID,
-    build_coordinate_display_plan,
-)
-from probe_station_gui.coordinates.rotation_geometry import rotation_geometry_snapshot
+from probe_station_gui.coordinates.lifecycle import MACHINE_FRAME_ID
+from probe_station_gui.coordinates.model import VISIBLE_STAGE_AXES
 from probe_station_gui.stage.position_presenter import (
     coordinate_confidence_role,
     stage_position_display_plan,
 )
 from probe_station_gui.views.stage_position_panel import StagePositionPanel
-
-
-logger = logging.getLogger(__name__)
 
 
 class MainWindowStagePositionPanelOwner(Protocol):
@@ -47,7 +33,6 @@ class MainWindowStagePositionPanelOwner(Protocol):
     _stage_motion_axes: set[str]
     _stage_motion_blink_dimmed: bool
     _stage_motion_blink_timer: Any
-    _coordinate_frame_lifecycle: CoordinateFrameLifecycle
     stage_controller: Any
 
     def _on_stage_axis_escape_pressed(self, axis_name: str) -> None: ...
@@ -78,124 +63,19 @@ def create_stage_position_widget(
     owner._stage_axis_fields = panel.axis_fields
     owner._stage_axis_base_styles = panel.base_styles
     owner._pending_stage_axis_targets = panel.pending_targets
-    initialize_gui_coordinate_selection(owner)
+    refresh_coordinate_frame_display(owner)
     return panel
 
 
-def initialize_gui_coordinate_selection(owner: MainWindowStagePositionPanelOwner) -> None:
-    """Start in Machine while retaining an eligible persisted restore candidate."""
-
-    settings = getattr(getattr(owner, "settings_manager", None), "settings", None)
-    software = getattr(settings, "software_coordinates", None)
-    last_selected = str(
-        getattr(software, "last_selected_frame_id", MACHINE_FRAME_ID)
-        or MACHINE_FRAME_ID
-    )
-    owner._coordinate_frame_lifecycle = CoordinateFrameLifecycle(
-        selected_frame_id=MACHINE_FRAME_ID,
-        restore_frame_id=last_selected,
-    )
-
-
-def _persist_gui_coordinate_selection(owner: object, frame_id: str) -> None:
-    manager = getattr(owner, "settings_manager", None)
-    update_in_memory = getattr(manager, "set_software_coordinate_selection", None)
-    store = getattr(owner, "_software_coordinate_selection_store", None)
-    publish = getattr(store, "publish", None)
-    try:
-        snapshot = None
-        if callable(update_in_memory):
-            snapshot = update_in_memory(frame_id)
-        if callable(publish) and snapshot is not None:
-            publish(snapshot)
-    except Exception:
-        logger.exception("Software coordinate selection submission failed")
-        show_status = getattr(owner, "_show_status", None)
-        if callable(show_status):
-            show_status("Coordinate selection could not be saved.", 6000)
-
-
-def _coordinate_pivot(owner: object) -> tuple[float, float]:
-    settings = getattr(getattr(owner, "settings_manager", None), "settings", None)
-    return rotation_geometry_snapshot(settings.software_coordinates).pivot_machine_xy
-
-
-def _coerce_physical_machine_pose(value: object) -> PhysicalMachinePose:
-    if isinstance(value, PhysicalMachinePose):
-        return value
-    try:
-        value_type = type(value)
-        if (
-            value_type.__name__ != "PhysicalMachinePose"
-            or value_type.__module__ != "probe_station_gui.coordinates.model"
-        ):
-            return PhysicalMachinePose({})
-        values = getattr(value, "values")
-        if not isinstance(values, Mapping):
-            return PhysicalMachinePose({})
-        copied_values = dict(values)
-        axes = set(copied_values)
-        if axes not in (set(VISIBLE_STAGE_AXES), set(STAGE_AXES)):
-            return PhysicalMachinePose({})
-        return PhysicalMachinePose.from_mapping(copied_values)
-    except Exception:
-        return PhysicalMachinePose({})
-
-
-def update_software_coordinate_display(
+def render_coordinate_system_snapshot(
     owner: MainWindowStagePositionPanelOwner,
-    physical_pose: PhysicalMachinePose | object,
-    *,
-    requested_frame_id: str | None = None,
-    explicit: bool = False,
-) -> FrameSelectionDecision | None:
-    """Resolve GUI-local selection and apply one pure software-frame plan."""
+    snapshot: CoordinateSystemSnapshot,
+) -> None:
+    """Render a finished coordinator snapshot without re-running policy."""
 
-    physical_pose = _coerce_physical_machine_pose(physical_pose)
-    registry = getattr(owner, "_coordinate_frame_registry", None)
-    frames_loaded = bool(getattr(owner, "_coordinate_frames_loaded", False))
-    if not explicit and (physical_pose is None or registry is None or not frames_loaded):
-        return None
-    snapshot = registry.snapshot() if registry is not None and frames_loaded else None
-    homed_getter = getattr(getattr(owner, "stage_controller", None), "homed_axes", None)
-    homed_axes = homed_getter() if callable(homed_getter) else set()
-    authority_axes = set() if physical_pose is None else set(physical_pose.values)
-
-    requested = requested_frame_id
-    try:
-        pivot = _coordinate_pivot(owner)
-    except (AttributeError, TypeError, ValueError) as exc:
-        requested = MACHINE_FRAME_ID
-        pivot = (float("nan"), float("nan"))
-        show_status = getattr(owner, "_show_status", None)
-        if callable(show_status):
-            show_status(str(exc), 6000)
-    decision = owner._coordinate_frame_lifecycle.plan_selection(
-        FrameSelectionContext(
-            records=() if snapshot is None else snapshot.records,
-            requested_frame_id=requested,
-            explicit=explicit,
-            homed_axes=frozenset(homed_axes),
-            authority_axes=frozenset(authority_axes),
-        )
-    )
-    if explicit and not decision.available:
-        return decision
-    if physical_pose is None or snapshot is None:
-        if decision.persist_selection:
-            _persist_gui_coordinate_selection(owner, decision.selected_frame_id)
-        return decision
-    plan = build_coordinate_display_plan(
-        snapshot,
-        selected_frame_id=decision.selected_frame_id,
-        physical_pose=physical_pose,
-        pivot_machine_xy=pivot,
-        homed_axes=homed_axes,
-        authority_axes=authority_axes,
-        selection_decision=decision,
-    )
-    if decision.persist_selection:
-        _persist_gui_coordinate_selection(owner, plan.selected_frame_id)
+    plan = snapshot.display_plan
+    if plan is None:
+        return
     owner._stage_axis_display_values = {
         update.axis: float(update.value)
         for update in plan.axis_updates
@@ -203,16 +83,16 @@ def update_software_coordinate_display(
     }
     panel = getattr(owner, "_stage_position_panel", None)
     if panel is not None:
+        set_limit_axes = getattr(panel, "set_limit_axes", None)
+        if callable(set_limit_axes):
+            set_limit_axes(owner._stage_limit_axes)
         panel.set_coordinate_display_plan(plan)
-    return decision
 
 
 def refresh_coordinate_frame_display(owner: MainWindowStagePositionPanelOwner) -> None:
-    pose = _coerce_physical_machine_pose(
-        getattr(owner, "_latest_physical_machine_pose", None)
-    )
-    if pose is not None:
-        update_software_coordinate_display(owner, pose)
+    coordinator = getattr(owner, "_coordinate_system_coordinator", None)
+    if coordinator is not None:
+        render_coordinate_system_snapshot(owner, coordinator.snapshot())
 
 
 def select_gui_coordinate_frame(
@@ -221,22 +101,30 @@ def select_gui_coordinate_frame(
 ) -> None:
     """Apply one explicit GUI selection without touching API coordinate state."""
 
-    requested = str(frame_id or MACHINE_FRAME_ID)
-    update_software_coordinate_display(
-        owner,
-        getattr(owner, "_latest_physical_machine_pose", None),
-        requested_frame_id=requested,
-        explicit=True,
+    coordinator = getattr(owner, "_coordinate_system_coordinator", None)
+    if coordinator is None:
+        return
+    transition = coordinator.select_system(
+        CoordinateSystemSelection(str(frame_id or MACHINE_FRAME_ID))
     )
+    from probe_station_gui.views import main_window_connection_flow
+
+    main_window_connection_flow.apply_coordinate_transition(owner, transition)
 
 
 def gui_coordinate_motion_editing_enabled(owner: object) -> bool:
-    """Return whether legacy position-field/Step targets are Machine-valued."""
+    """Return whether the rendered GUI Coordinate System can accept motion."""
 
-    lifecycle = getattr(owner, "_coordinate_frame_lifecycle", None)
-    if lifecycle is None:
+    coordinator = getattr(owner, "_coordinate_system_coordinator", None)
+    if coordinator is None:
         return True
-    return lifecycle.selected_frame_id == MACHINE_FRAME_ID
+    snapshot = coordinator.snapshot()
+    plan = snapshot.display_plan
+    return bool(
+        plan is not None
+        and plan.selection_available
+        and snapshot.motion_lease is not None
+    )
 
 
 def display_axis_value_from_raw(
@@ -434,22 +322,12 @@ def update_stage_position_display(
         )
         owner._stage_axis_display_values[axis_plan.axis] = axis_plan.display_value
     if panel is None:
-        pose = _coerce_physical_machine_pose(
-            getattr(owner, "_latest_physical_machine_pose", None)
-        )
-        if pose is not None:
-            update_software_coordinate_display(owner, pose)
         return
     panel.apply_display_plan(plan)
     if not plan.fields_available:
         panel.set_fields_available(False)
         owner._update_stage_coordinate_apply_state()
         return
-    pose = _coerce_physical_machine_pose(
-        getattr(owner, "_latest_physical_machine_pose", None)
-    )
-    if pose is not None:
-        update_software_coordinate_display(owner, pose)
     owner._update_stage_coordinate_apply_state()
 
 
@@ -471,10 +349,9 @@ __all__ = [
     "raw_axis_value_from_display",
     "refresh_stage_axis_styles",
     "refresh_coordinate_frame_display",
-    "initialize_gui_coordinate_selection",
+    "render_coordinate_system_snapshot",
     "select_gui_coordinate_frame",
     "set_stage_motion_axes",
     "update_coordinate_confidence",
-    "update_software_coordinate_display",
     "update_stage_position_display",
 ]

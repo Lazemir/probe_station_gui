@@ -97,7 +97,10 @@ def _loaded_coordinator(
 ) -> tuple[CoordinateSystemCoordinator, CoordinateFrameRegistry, DesignSession]:
     registry = CoordinateFrameRegistry()
     session = DesignSession(document=document)
-    coordinator = CoordinateSystemCoordinator(registry=registry, session=session)
+    coordinator = CoordinateSystemCoordinator._for_testing(
+        registry=registry,
+        session=session,
+    )
     load = coordinator.start(MachineProfileObservation("profile-a")).intents[0]
     coordinator.complete(
         CoordinateAdapterCompletion(

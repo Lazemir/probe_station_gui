@@ -1,39 +1,31 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from uuid import uuid4
 
 from main import Main
-from probe_station_gui.coordinates import (
-    AxisReadiness,
-    BFrameTransform,
-    CoordinateFrameRecord,
-    CoordinateFrameRegistry,
-    CoordinateSystemCoordinator,
-    FrameKind,
-    PhysicalMachinePose,
-    ReadinessStatus,
+from probe_station_gui.coordinates.coordinator_model import (
+    CoordinateSystemSnapshot,
+    CoordinateTransition,
 )
-from probe_station_gui.design.session import DesignSession
-from probe_station_gui.coordinates.software_frames import materialize_custom_frames
-from probe_station_gui.coordinates.lifecycle import CoordinateFrameLifecycle
-from probe_station_gui.coordinates.persistence import (
-    CoordinateFrameStoreFailure,
-    CoordinateFrameStoreSuccess,
+from probe_station_gui.coordinates.rotation_geometry import (
+    rotation_geometry_snapshot,
 )
 from probe_station_gui.settings.manager import Settings
-from probe_station_gui.settings.software_coordinates import CustomFrameSettings
-from probe_station_gui.views import main_window_stage_position_panel as panel_adapter
 
 
 class _SettingsManager:
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, events: list[object]) -> None:
         self.settings = settings
         self.saved: list[Settings] = []
+        self._events = events
 
     def replace_and_save(self, settings: Settings, **_kwargs: object) -> None:
         self.settings = settings.clone()
         self.saved.append(self.settings)
+        self._events.append("save")
+
+    def objectives_configuration(self):
+        return self.settings.objectives.clone()
 
 
 class _Stage:
@@ -43,177 +35,86 @@ class _Stage:
     def is_busy(self) -> bool:
         return self.busy
 
+    def latest_machine_coordinate_snapshot(self):
+        return None
+
     def homed_axes(self) -> set[str]:
-        return {"X", "Y", "Z", "A", "B"}
+        return {"X", "Y", "Z", "A"}
 
 
-class _PivotSession:
-    def __init__(self, frame_id: str) -> None:
-        self.active_frame_id = frame_id
-        self.prepared: list[tuple[object, float, tuple[float, float]]] = []
-        self.applied: list[tuple[object, object]] = []
+class _Coordinator:
+    def __init__(self, events: list[object]) -> None:
+        self._events = events
+        self.observations: list[object] = []
+        self._snapshot = CoordinateSystemSnapshot(False, (), None)
 
-    def prepare_active_frame_link(
-        self,
-        record: object,
-        *,
-        machine_point_for_navigation: object,
-        machine_b_deg: float,
-        pivot_machine_xy: tuple[float, float],
-    ) -> object:
-        projection = object()
-        self.prepared.append((record, machine_b_deg, pivot_machine_xy))
-        return projection
+    def snapshot(self) -> CoordinateSystemSnapshot:
+        return self._snapshot
 
-    def apply_active_frame_link(self, record: object, projection: object) -> None:
-        self.applied.append((record, projection))
+    def observe_authority(self, observation: object) -> CoordinateTransition:
+        self.observations.append(observation)
+        self._events.append("authority")
+        return CoordinateTransition(self._snapshot)
 
 
 def _owner(*, busy: bool = False) -> SimpleNamespace:
-    settings = Settings()
-    frame_id = str(uuid4())
-    settings.software_coordinates.custom_frames = (
-        settings.software_coordinates.custom_frames
-        + (
-            CustomFrameSettings(
-                frame_id=frame_id,
-                name="fixture",
-                origin_x_mm=10.0,
-                origin_y_mm=0.0,
-                reference_b_deg=0.0,
-                xy_angle_deg=0.0,
-                b_zero_deg=0.0,
-            ),
-        )
-    )
-    design = CoordinateFrameRecord(
-        frame_id=str(uuid4()),
-        kind=FrameKind.DESIGN,
-        name="design",
-        version=3,
-        transform=BFrameTransform(
-            origin_xy_at_reference_b=(8.0, 0.0),
-            reference_b_deg=0.0,
-            xy_angle_at_reference_b_deg=0.0,
-            b_zero_machine_deg=0.0,
-        ),
-        readiness={axis: AxisReadiness(ReadinessStatus.READY) for axis in "XYZAB"},
-        metadata={"registration_marks": ["preserve"]},
-    )
-    registry = CoordinateFrameRegistry()
-    registry.reset(materialize_custom_frames((design,), settings.software_coordinates))
-    manager = _SettingsManager(settings)
+    events: list[object] = []
+    manager = _SettingsManager(Settings(), events)
+    coordinator = _Coordinator(events)
     owner = SimpleNamespace(
         settings_manager=manager,
         stage_controller=_Stage(busy=busy),
-        _coordinate_frame_lifecycle=CoordinateFrameLifecycle(
-            selected_frame_id=frame_id,
-        ),
-        _coordinate_frame_registry=registry,
-        _coordinate_frames_loaded=True,
+        _coordinate_system_coordinator=coordinator,
         _stage_position_panel=None,
-        _latest_physical_machine_pose=PhysicalMachinePose(
-            {"X": 0.0, "Y": 0.0, "Z": 1.0, "A": 2.0, "B": 90.0}
-        ),
+        _stage_axis_display_values={},
         _objective_mutation_busy=lambda: False,
-        _apply_settings=lambda **_kwargs: None,
-        _show_status=lambda *_args: None,
+        _active_objective_xy_offset=lambda: (0.0, 0.0),
+        _apply_settings=lambda **_kwargs: events.append("apply"),
+        _show_status=lambda message, timeout=0: events.append(
+            ("status", str(message), int(timeout))
+        ),
+        _events=events,
+    )
+    owner._rotation_geometry_snapshot = lambda: rotation_geometry_snapshot(
+        manager.settings.software_coordinates
     )
     return owner
 
 
-def test_idle_pivot_edit_reprojects_display_without_replacing_frame_records() -> None:
+def test_idle_pivot_edit_saves_then_refreshes_coordinate_authority() -> None:
     owner = _owner()
-    before_records = owner._coordinate_frame_registry.snapshot()
-    panel_adapter.update_software_coordinate_display(
-        owner,
-        owner._latest_physical_machine_pose,
-    )
-    before_display = dict(owner._stage_axis_display_values)
     updated = owner.settings_manager.settings.clone()
     updated.software_coordinates.pivot.x_mm = 1.0
 
     Main._apply_settings_from_dialog(owner, updated)
 
-    after_records = owner._coordinate_frame_registry.snapshot()
     assert owner.settings_manager.settings.software_coordinates.pivot.x_mm == 1.0
-    assert after_records == before_records
-    assert owner._stage_axis_display_values["X"] != before_display["X"]
-    design = next(record for record in after_records.records if record.kind is FrameKind.DESIGN)
-    assert design.metadata["registration_marks"] == ["preserve"]
-    assert all(state.available for state in design.readiness.values())
+    assert len(owner._coordinate_system_coordinator.observations) == 1
+    assert owner._events == ["save", "apply", "authority"]
 
 
-def test_same_pivot_reapply_is_registry_noop_and_busy_pivot_is_rejected() -> None:
+def test_same_pivot_reapply_does_not_refresh_authority() -> None:
     owner = _owner()
     unchanged = owner.settings_manager.settings.clone()
-    before = owner._coordinate_frame_registry.snapshot()
 
     Main._apply_settings_from_dialog(owner, unchanged)
 
-    assert owner._coordinate_frame_registry.snapshot() == before
-    owner.stage_controller.busy = True
-    changed = owner.settings_manager.settings.clone()
-    changed.software_coordinates.pivot.x_mm = 1.0
-    Main._apply_settings_from_dialog(owner, changed)
-
-    assert owner.settings_manager.settings.software_coordinates.pivot.x_mm == 0.0
-    assert owner._coordinate_frame_registry.snapshot() == before
+    assert owner._events == ["save", "apply"]
+    assert owner._coordinate_system_coordinator.observations == []
 
 
-def test_idle_pivot_change_prepares_then_atomically_relinks_active_design_session() -> None:
-    owner = _owner()
-    design = next(
-        record
-        for record in owner._coordinate_frame_registry.snapshot().records
-        if record.kind is FrameKind.DESIGN
-    )
-    session = _PivotSession(design.frame_id)
-    owner._design_session = session
-    owner._design_navigation_xy_from_physical_machine_xy = lambda point: point
-    owner.stage_controller.latest_machine_coordinate_snapshot = lambda: SimpleNamespace(
-        physical_machine_pose=PhysicalMachinePose({"B": 37.0})
-    )
-    before = owner._coordinate_frame_registry.snapshot()
-    changed = owner.settings_manager.settings.clone()
-    changed.software_coordinates.pivot.x_mm = 4.0
-    changed.software_coordinates.pivot.y_mm = -3.0
-
-    Main._apply_settings_from_dialog(owner, changed)
-
-    assert session.prepared == [(design, 37.0, (4.0, -3.0))]
-    assert len(session.applied) == 1
-    assert session.applied[0][0] is design
-    assert owner._coordinate_frame_registry.snapshot() == before
-
-
-def test_busy_stage_rejects_programmatic_settings_submission_without_side_effects() -> None:
+def test_busy_stage_rejects_programmatic_settings_without_side_effects() -> None:
     owner = _owner(busy=True)
-    before_settings = owner.settings_manager.settings.clone()
-    before_frames = owner._coordinate_frame_registry.snapshot()
-    submitted = before_settings.clone()
+    before = owner.settings_manager.settings.clone()
+    submitted = before.clone()
     submitted.design_last_directory = "C:/programmatic-bypass"
     submitted.software_coordinates.pivot.x_mm = 2.0
 
     Main._apply_settings_from_dialog(owner, submitted)
 
-    assert owner.settings_manager.settings == before_settings
+    assert owner.settings_manager.settings == before
     assert owner.settings_manager.saved == []
-    assert owner._coordinate_frame_registry.snapshot() == before_frames
-
-
-def test_late_coordinate_store_callbacks_do_not_mutate_runtime_registry() -> None:
-    owner = _owner()
-    owner._coordinate_system_coordinator = CoordinateSystemCoordinator(
-        registry=owner._coordinate_frame_registry,
-        session=DesignSession(),
-    )
-    before = owner._coordinate_frame_registry.snapshot()
-
-    Main._on_coordinate_frames_saved(owner, CoordinateFrameStoreSuccess(1, "save"))
-    Main._on_coordinate_frame_store_failed(
-        owner,
-        CoordinateFrameStoreFailure(1, "save", "late failure"),
-    )
-
-    assert owner._coordinate_frame_registry.snapshot() == before
+    assert owner._coordinate_system_coordinator.observations == []
+    assert owner._events == [
+        ("status", "Stage is busy; settings not changed.", 4000)
+    ]

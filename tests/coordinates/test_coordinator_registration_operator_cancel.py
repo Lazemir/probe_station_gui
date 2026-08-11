@@ -10,6 +10,10 @@ from probe_station_gui.coordinates.coordinator_model import (
     FrameRecordsPublication,
     MachinePoseCaptureResult,
     RegistrationCaptureRequest,
+    RegistrationCheckMarkRequest,
+    RegistrationInvalidationRequest,
+    RegistrationSourceMarkRequest,
+    RegistrationSourceMarksRequest,
     RestoreOperatorAlignmentUiEffect,
 )
 from probe_station_gui.design.frame_registration import DesignFrameMetadata
@@ -59,6 +63,38 @@ def _start_second_operator_mark(coordinator) -> object:
     return started.intents[0]
 
 
+def test_coordinator_owns_registration_mark_and_invalidation_mutations(
+    tmp_path,
+) -> None:
+    document = _document(tmp_path)
+    coordinator, _registry, session = _loaded_coordinator(document, _draft(document))
+    session.source_stage_marks = ((3.0, 4.0),)
+
+    selected = coordinator.set_registration_source_mark(
+        RegistrationSourceMarkRequest((10.0, 20.0), slot=0)
+    )
+    replaced = coordinator.replace_registration_source_marks(
+        RegistrationSourceMarksRequest(((1.0, 2.0), (3.0, 4.0)))
+    )
+    checked = coordinator.add_registration_check_mark(
+        RegistrationCheckMarkRequest((5.0, 6.0))
+    )
+    invalidated = coordinator.invalidate_registration(
+        RegistrationInvalidationRequest("B authority changed.")
+    )
+
+    assert selected.snapshot.registration.source_stage_marks == ()
+    assert replaced.snapshot.registration.source_design_marks == (
+        (1.0, 2.0),
+        (3.0, 4.0),
+    )
+    assert checked.snapshot.registration.check_design_marks == ((5.0, 6.0),)
+    assert invalidated.snapshot.registration.registration_valid is False
+    assert invalidated.snapshot.registration.registration_status == (
+        "B authority changed."
+    )
+
+
 def _owner(events: list[object]) -> SimpleNamespace:
     layout = SimpleNamespace(
         set_alignment_capture_points=lambda points: events.append(
@@ -68,7 +104,6 @@ def _owner(events: list[object]) -> SimpleNamespace:
         set_selected_focus_point=lambda _point: None,
     )
     return SimpleNamespace(
-        _coordinate_frames_loaded=True,
         _alignment_design_draft=((0.0, 0.0), (1000.0, 0.0)),
         _alignment_stage_draft=[],
         _alignment_draft_fit_residuals=(1.0, 2.0),
@@ -202,7 +237,7 @@ def test_changed_frame_version_restores_superseded_operator_draft_once(
         machine_b_deg=0.0,
         pivot_machine_xy=(0.0, 0.0),
     )
-    coordinator.publish_frame_records(
+    coordinator._publish_frame_records(
         FrameRecordsPublication.for_committed_record(
             registry.snapshot().records,
             newer,

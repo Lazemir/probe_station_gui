@@ -117,8 +117,95 @@ def restore_session_state(
     session.__dict__ = restored
 
 
+def export_persisted_session_state(
+    state: DesignSessionState,
+    *,
+    document_size: int | None = None,
+    document_mtime_ns: int | None = None,
+    route_path: str | None = None,
+) -> dict[str, object] | None:
+    """Serialize one detached state using only pre-observed file metadata."""
+
+    if not isinstance(state, DesignSessionState):
+        raise TypeError("state must be a DesignSessionState")
+    document = state.document
+    if document is None:
+        return None
+    if (
+        state.active_frame_id is None
+        and state._runtime_blocked_persisted_state is not None
+    ):
+        return deepcopy(state._runtime_blocked_persisted_state)
+    result: dict[str, object] = {
+        "version": 3 if state.active_frame_id is not None else 2,
+        "document_path": str(document.path),
+        "top_cell_name": document.top_cell_name,
+        "rotation_quarter_turns": int(document.rotation_quarter_turns),
+        "visible_layers": [
+            [int(layer), int(datatype)]
+            for layer, datatype in sorted(document.visible_layers)
+        ],
+    }
+    if state.active_frame_id is not None:
+        result["active_frame_id"] = state.active_frame_id
+    else:
+        registration = state.registration
+        result.update(
+            {
+                "source_design_marks": _serialize_points(
+                    state.source_design_marks
+                ),
+                "source_stage_marks": _serialize_points(
+                    state.source_stage_marks
+                ),
+                "check_design_marks": _serialize_points(
+                    state.check_design_marks
+                ),
+                "check_stage_marks": _serialize_points(
+                    state.check_stage_marks
+                ),
+                "registration_valid": bool(
+                    registration is not None and registration.valid
+                ),
+                "registration_status": state.registration_status,
+                "registration_stale_reason": (
+                    registration.stale_reason
+                    if registration is not None
+                    else ""
+                ),
+            }
+        )
+    if document_mtime_ns is not None:
+        result["document_mtime_ns"] = int(document_mtime_ns)
+    if document_size is not None:
+        result["document_size"] = int(document_size)
+    if state.active_frame_id is None and (
+        state._legacy_stage_coordinate_provenance_present
+        or state._legacy_stage_coordinate_provenance is not None
+    ):
+        result["stage_coordinate_provenance"] = deepcopy(
+            state._legacy_stage_coordinate_provenance
+        )
+    if state.route is not None and route_path:
+        result["route"] = {
+            "path": str(route_path),
+            "selected_route_point_index": int(
+                state.selected_route_point_index
+            ),
+        }
+    return result
+
+
 def _copy_points(points: Iterable[Point2D]) -> tuple[Point2D, ...]:
     return tuple((float(point[0]), float(point[1])) for point in points)
 
 
-__all__ = ["DesignSessionState"]
+def _serialize_points(points: Iterable[Point2D]) -> list[list[float]]:
+    return [
+        [float(point[0]), float(point[1])]
+        for point in points
+        if point is not None
+    ]
+
+
+__all__ = ["DesignSessionState", "export_persisted_session_state"]

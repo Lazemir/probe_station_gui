@@ -18,10 +18,7 @@ from PySide6.QtWidgets import (
 )
 
 from probe_station_gui.shared.wheel_guard import GuardedComboBox as QComboBox
-from probe_station_gui.coordinates.presentation import (
-    MACHINE_FRAME_ID,
-    CoordinateDisplayPlan,
-)
+from probe_station_gui.coordinates.presentation import CoordinateDisplayPlan
 from probe_station_gui.stage.api_moves import normalize_api_coordinate_input_mode
 from probe_station_gui.stage.position_presenter import StagePositionDisplayPlan
 
@@ -32,6 +29,8 @@ EDITED_BACKGROUND = "#d7b8ff"
 EDITED_FOREGROUND = "#1f1233"
 EXACT_STRIPE = "#2e7d32"
 APPROXIMATE_STRIPE = "#d32f2f"
+LIMIT_BACKGROUND = "#c62828"
+LIMIT_FOREGROUND = "#ffffff"
 DIMMED_BACKGROUNDS = {
     "#1565c0": "#6f9dd3",
     "#f0b429": "#f7d98a",
@@ -75,7 +74,9 @@ class StagePositionPanel(QWidget):
         self._axis_names = tuple(str(axis).strip().upper() for axis in axis_names)
         self._axis_fields: dict[str, QLineEdit] = {}
         self._axis_base_styles: dict[str, tuple[str, str]] = {}
+        self._coordinate_axis_styles: dict[str, tuple[str, str]] = {}
         self._axis_confidence_roles: dict[str, str] = {}
+        self._limit_axes: set[str] = set()
         self._pending_targets: dict[str, tuple[float, float]] = {}
         self._return_commits: set[str] = set()
         self._axis_escape_shortcuts: dict[str, QShortcut] = {}
@@ -395,7 +396,7 @@ class StagePositionPanel(QWidget):
         """Apply software-frame values without reconstructing position fields."""
 
         self._sync_coordinate_selector(plan)
-        motion_editing_enabled = plan.selected_frame_id == MACHINE_FRAME_ID
+        motion_editing_enabled = bool(plan.selection_available)
         self._coordinate_motion_editing_enabled = motion_editing_enabled
         if not motion_editing_enabled:
             self._pending_targets.clear()
@@ -415,6 +416,12 @@ class StagePositionPanel(QWidget):
                     if available
                     else ("#f0b429", "#1f1f1f")
                 )
+                self._coordinate_axis_styles[axis_plan.axis] = (
+                    background,
+                    foreground,
+                )
+                if axis_plan.axis in self._limit_axes:
+                    background, foreground = LIMIT_BACKGROUND, LIMIT_FOREGROUND
                 self._axis_base_styles[axis_plan.axis] = (background, foreground)
                 self._axis_confidence_roles.pop(axis_plan.axis, None)
                 if not available:
@@ -433,6 +440,31 @@ class StagePositionPanel(QWidget):
                 field.setToolTip(axis_plan.tooltip)
                 field.blockSignals(False)
                 self._apply_axis_style(axis_plan.axis, field)
+
+    def set_limit_axes(self, axes: object) -> None:
+        """Apply hard-limit styling independently of coordinate readiness."""
+
+        if isinstance(axes, str):
+            candidates = (axes,)
+        elif isinstance(axes, (set, frozenset, tuple, list)):
+            candidates = axes
+        else:
+            candidates = ()
+        normalized = {
+            self._normalize_axis(axis)
+            for axis in candidates
+            if self._normalize_axis(axis) in self._axis_fields
+        }
+        if normalized == self._limit_axes:
+            return
+        self._limit_axes = normalized
+        for axis, coordinate_style in self._coordinate_axis_styles.items():
+            self._axis_base_styles[axis] = (
+                (LIMIT_BACKGROUND, LIMIT_FOREGROUND)
+                if axis in normalized
+                else coordinate_style
+            )
+            self._apply_axis_style(axis)
 
     def _sync_coordinate_selector(self, plan: CoordinateDisplayPlan) -> None:
         signature = tuple(

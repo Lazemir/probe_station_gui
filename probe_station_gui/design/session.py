@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from probe_station_gui.coordinates.model import CoordinateFrameRecord
+from probe_station_gui.coordinates.source_identity import source_identity
 from probe_station_gui.coordinates.transforms import rotate_xy
 from probe_station_gui.design.frame_registration import DesignFrameMetadata
 from probe_station_gui.design.model import (
@@ -21,6 +22,7 @@ from probe_station_gui.design.model import (
 )
 from probe_station_gui.design.session_state import (
     DesignSessionState,
+    export_persisted_session_state,
     restore_session_state,
     snapshot_session_state,
 )
@@ -117,78 +119,30 @@ class DesignSession:
     def export_persisted_state(self) -> dict[str, object] | None:
         """Return design state tied to the current controller coordinate session."""
 
-        if self.document is None:
-            return None
-        if (
+        snapshot = self.snapshot_state()
+        if self.document is None or (
             self.active_frame_id is None
             and self._runtime_blocked_persisted_state is not None
         ):
-            return deepcopy(self._runtime_blocked_persisted_state)
-        state: dict[str, object] = {
-            "version": 3 if self.active_frame_id is not None else 2,
-            "document_path": str(self.document.path),
-            "top_cell_name": self.document.top_cell_name,
-            "rotation_quarter_turns": int(self.document.rotation_quarter_turns),
-            "visible_layers": [
-                [int(layer), int(datatype)]
-                for layer, datatype in sorted(self.document.visible_layers)
-            ],
-        }
-        if self.active_frame_id is not None:
-            state["active_frame_id"] = self.active_frame_id
-        else:
-            state.update(
-                {
-                    "source_design_marks": self._serialize_points(
-                        self.source_design_marks_compact()
-                    ),
-                    "source_stage_marks": self._serialize_points(
-                        self.source_stage_marks_compact()
-                    ),
-                    "check_design_marks": self._serialize_points(
-                        self.check_design_marks
-                    ),
-                    "check_stage_marks": self._serialize_points(
-                        self.check_stage_marks
-                    ),
-                    "registration_valid": bool(
-                        self.registration is not None and self.registration.valid
-                    ),
-                    "registration_status": self.registration_status,
-                    "registration_stale_reason": (
-                        self.registration.stale_reason
-                        if self.registration is not None
-                        else ""
-                    ),
-                }
-            )
+            return export_persisted_session_state(snapshot)
+        document_size = None
+        document_mtime_ns = None
         try:
             stat = self.document.path.stat()
         except OSError:
             pass
         else:
-            state["document_mtime_ns"] = int(stat.st_mtime_ns)
-            state["document_size"] = int(stat.st_size)
-        legacy_provenance = getattr(
-            self,
-            "_legacy_stage_coordinate_provenance",
-            None,
-        )
-        if self.active_frame_id is None and (
-            bool(
-                getattr(
-                    self,
-                    "_legacy_stage_coordinate_provenance_present",
-                    False,
-                )
-            )
-            or legacy_provenance is not None
-        ):
-            state["stage_coordinate_provenance"] = deepcopy(legacy_provenance)
+            document_mtime_ns = int(stat.st_mtime_ns)
+            document_size = int(stat.st_size)
         route_state = self._export_persisted_route_state()
-        if route_state is not None:
-            state["route"] = route_state
-        return state
+        return export_persisted_session_state(
+            snapshot,
+            document_size=document_size,
+            document_mtime_ns=document_mtime_ns,
+            route_path=(
+                None if route_state is None else str(route_state["path"])
+            ),
+        )
 
     def restore_persisted_state(
         self,
@@ -419,18 +373,32 @@ class DesignSession:
             and self._runtime_blocked_persisted_state is not None
         )
 
-    def block_legacy_registration_until_b(self, reason: str) -> None:
+    def block_legacy_registration_until_b(
+        self,
+        reason: str,
+        *,
+        persisted_state: dict[str, object] | None = None,
+    ) -> None:
         """Block legacy runtime use without changing its persisted payload."""
 
-        self.block_legacy_registration(reason)
+        self.block_legacy_registration(reason, persisted_state=persisted_state)
 
-    def block_legacy_registration(self, reason: str) -> None:
+    def block_legacy_registration(
+        self,
+        reason: str,
+        *,
+        persisted_state: dict[str, object] | None = None,
+    ) -> None:
         """Block legacy runtime use without changing its persisted payload."""
 
         if self.active_frame_id is not None:
             return
         if self._runtime_blocked_persisted_state is None:
-            persisted = self.export_persisted_state()
+            persisted = (
+                deepcopy(persisted_state)
+                if persisted_state is not None
+                else self.export_persisted_state()
+            )
             if persisted is not None:
                 self._runtime_blocked_persisted_state = deepcopy(persisted)
         self.invalidate_registration(reason)
@@ -466,7 +434,7 @@ class DesignSession:
         metadata = DesignFrameMetadata.from_mapping(frame.metadata)
         if self.document is None:
             raise DesignModelError("Load a design before selecting its coordinate frame.")
-        if Path(metadata.source_path).resolve() != self.document.path.resolve():
+        if source_identity(metadata.source_path) != source_identity(self.document.path):
             raise DesignModelError("Coordinate frame belongs to a different design file.")
         if metadata.top_cell_name != self.document.top_cell_name:
             raise DesignModelError(

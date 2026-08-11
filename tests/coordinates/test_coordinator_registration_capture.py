@@ -49,7 +49,10 @@ def test_cancelled_capture_is_inert_before_snapshot_conversion(
     session = DesignSession(document=document)
     session.active_frame_id = draft.frame_id
     session.source_design_marks = ((0.0, 0.0), (1000.0, 0.0))
-    coordinator = CoordinateSystemCoordinator(registry=registry, session=session)
+    coordinator = CoordinateSystemCoordinator._for_testing(
+        registry=registry,
+        session=session,
+    )
     request_type = getattr(coordinator_model, "RegistrationCaptureRequest")
     intent_type = getattr(coordinator_model, "CaptureMachinePoseIntent")
     result_type = getattr(coordinator_model, "MachinePoseCaptureResult")
@@ -107,7 +110,7 @@ def test_stale_second_capture_restores_exact_pre_batch_baseline_before_conversio
     assert session.source_stage_marks_compact() == [(3.0, 4.0)]
     second = coordinator.capture_registration_mark(request).intents[0]
     bumped = replace(draft, version=draft.version + 1)
-    coordinator.publish_frame_records(
+    coordinator._publish_frame_records(
         FrameRecordsPublication.for_committed_record(
             registry.snapshot().records,
             bumped,
@@ -167,7 +170,7 @@ def test_replacement_capture_restores_superseded_domain_evidence(
     )
     assert session.source_stage_marks_compact() == [(3.0, 4.0)]
     bumped = replace(draft, version=draft.version + 1)
-    coordinator.publish_frame_records(FrameRecordsPublication(records=(bumped,)))
+    coordinator._publish_frame_records(FrameRecordsPublication(records=(bumped,)))
 
     replacement = coordinator.capture_registration_mark(request)
 

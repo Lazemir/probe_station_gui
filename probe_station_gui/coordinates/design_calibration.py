@@ -35,7 +35,18 @@ def reconcile_design_calibrations(
     physical-Machine geometry rather than derived Design registration.
     """
 
-    current = design_calibration_fingerprints(calibrations)
+    return reconcile_design_calibration_fingerprints(
+        records,
+        design_calibration_fingerprints(calibrations),
+    )
+
+
+def reconcile_design_calibration_fingerprints(
+    records: Iterable[CoordinateFrameRecord],
+    current: tuple[tuple[str, str], ...],
+) -> tuple[tuple[CoordinateFrameRecord, ...], bool]:
+    """Prepare stale Design records from an immutable curve identity snapshot."""
+
     reconciled: list[CoordinateFrameRecord] = []
     changed_any = False
     for record in records:
@@ -141,4 +152,8 @@ def _normalized(value: float) -> float:
     return 0.0 if float(value) == 0.0 else float(value)
 
 
-__all__ = ["design_calibration_fingerprints", "reconcile_design_calibrations"]
+__all__ = [
+    "design_calibration_fingerprints",
+    "reconcile_design_calibration_fingerprints",
+    "reconcile_design_calibrations",
+]

@@ -28,13 +28,6 @@ from tests.app.main_coordinate_feedrate_support import (
     request_route_measurement_for_point,
     route_measurement_dialog_module,
 )
-from probe_station_gui.coordinates.provenance import (
-    RUNTIME_PROVENANCE_REASON,
-    RUNTIME_PROVENANCE_STATUS,
-)
-from probe_station_gui.coordinates.transforms import BFrameTransform
-
-
 def _install_usable_design_frame(window: Main) -> object:
     usability = types.SimpleNamespace(
         usable=True,
@@ -46,9 +39,9 @@ def _install_usable_design_frame(window: Main) -> object:
         frame_id="design-a",
         frame_version=4,
     )
-    window._snapshot_active_design_frame_usability = lambda: usability
-    window._design_frame_usability_snapshot_is_current = (
-        lambda snapshot: snapshot is usability
+    window._coordinate_system_coordinator = types.SimpleNamespace(
+        current_design_lease=lambda: usability,
+        design_lease_is_current=lambda snapshot: snapshot is usability,
     )
     window._snapshot_active_route_design_frame = (
         lambda _usability=None: route_frame
@@ -299,7 +292,6 @@ class MainRouteMeasurementSessionTest(unittest.TestCase):
         window._route_measurement_waiting = False
         window._last_route_measurement_result = None
         window._route_measurement_current_point = 12
-        window._coordinate_frames_loaded = True
         window.serial_connection = types.SimpleNamespace(is_open=True)
         window._design_session = types.SimpleNamespace(
             route=types.SimpleNamespace(points=[object()], name="route"),
@@ -323,32 +315,18 @@ class MainRouteMeasurementSessionTest(unittest.TestCase):
         self.assertIn("Invalid session handle", response["message"])
 
     def test_api_route_session_rejects_unverified_design_provenance(self) -> None:
-        design_kind = main_module.design_frame_provenance_error.__globals__[
-            "FrameKind"
-        ].DESIGN
         for status, reason in (
             ("pending", "Design coordinate provenance is being checked."),
             ("blocked", "Design source changed since registration."),
         ):
             with self.subTest(status=status):
                 unsafe_point_calls: list[object] = []
-                record = types.SimpleNamespace(
-                    kind=design_kind,
-                    metadata={
-                        RUNTIME_PROVENANCE_STATUS: status,
-                        RUNTIME_PROVENANCE_REASON: reason,
-                    },
-                )
                 window = Main.__new__(Main)
                 window._api_route_session_thread_preflight = lambda _payload: (
                     None,
                     (0.0, 0.0),
                 )
                 window.serial_connection = types.SimpleNamespace(is_open=True)
-                window._coordinate_frames_loaded = True
-                window._coordinate_frame_registry = types.SimpleNamespace(
-                    get=lambda _frame_id, current=record: current
-                )
                 window._design_session = types.SimpleNamespace(
                     active_frame_id="design-a",
                     route=types.SimpleNamespace(points=[object()], name="route"),
@@ -360,6 +338,16 @@ class MainRouteMeasurementSessionTest(unittest.TestCase):
                         frame_id="design-a",
                         frame_version=4,
                     )
+                )
+                frame_usability = types.SimpleNamespace(
+                    usable=False,
+                    rejection_reason=reason,
+                    frame_id="design-a",
+                    frame_version=4,
+                )
+                window._coordinate_system_coordinator = types.SimpleNamespace(
+                    current_design_lease=lambda current=frame_usability: current,
+                    design_lease_is_current=lambda _snapshot: True,
                 )
 
                 def unsafe_points(route: object) -> list[RouteMeasurementPoint]:
@@ -376,26 +364,6 @@ class MainRouteMeasurementSessionTest(unittest.TestCase):
                 self.assertEqual(unsafe_point_calls, [])
 
     def test_api_route_session_rejects_verified_missing_reference_draft(self) -> None:
-        design_kind = main_module.design_frame_provenance_error.__globals__[
-            "FrameKind"
-        ].DESIGN
-        record = types.SimpleNamespace(
-            frame_id="design-a",
-            version=4,
-            kind=design_kind,
-            transform=BFrameTransform.identity(),
-            readiness={
-                axis: types.SimpleNamespace(
-                    available=False,
-                    reason=f"Design {axis} reference is not registered.",
-                )
-                for axis in ("X", "Y", "Z", "A", "B")
-            },
-            metadata={
-                RUNTIME_PROVENANCE_STATUS: "verified",
-                RUNTIME_PROVENANCE_REASON: "",
-            },
-        )
         unsafe_point_calls: list[object] = []
         window = Main.__new__(Main)
         window._api_route_session_thread_preflight = lambda _payload: (
@@ -403,17 +371,22 @@ class MainRouteMeasurementSessionTest(unittest.TestCase):
             (0.0, 0.0),
         )
         window.serial_connection = types.SimpleNamespace(is_open=True)
-        window._coordinate_frames_loaded = True
-        window._coordinate_frame_authority_blocked_axes = set()
-        window._coordinate_frame_registry = types.SimpleNamespace(
-            get=lambda _frame_id: record
-        )
         window._design_session = types.SimpleNamespace(
             active_frame_id="design-a",
             route=types.SimpleNamespace(points=[object()], name="route"),
             registration=types.SimpleNamespace(valid=True),
         )
         window._route_measurement_current_point = 1
+        frame_usability = types.SimpleNamespace(
+            usable=False,
+            rejection_reason="Design X reference is not registered.",
+            frame_id="design-a",
+            frame_version=4,
+        )
+        window._coordinate_system_coordinator = types.SimpleNamespace(
+            current_design_lease=lambda: frame_usability,
+            design_lease_is_current=lambda _snapshot: True,
+        )
 
         def unsafe_points(route: object) -> list[RouteMeasurementPoint]:
             unsafe_point_calls.append(route)
@@ -1069,7 +1042,6 @@ class MainRouteMeasurementSessionTest(unittest.TestCase):
         lcr = _FakeConnectedLcr()
         window = Main.__new__(Main)
         window._route_measurement_thread = old_thread
-        window._coordinate_frames_loaded = True
         window._route_measurement_runner = old_runner
         window._route_measurement_waiting = True
         window._last_route_measurement_result = None
@@ -1547,7 +1519,6 @@ class MainRouteMeasurementSessionTest(unittest.TestCase):
         camera_calls: list[float] = []
         dialog_calls: list[tuple[str, object]] = []
         window._route_measurement_thread = None
-        window._coordinate_frames_loaded = True
         window.serial_connection = types.SimpleNamespace(is_open=True)
         window._design_session = types.SimpleNamespace(
             route=types.SimpleNamespace(points=[object()], name="route"),

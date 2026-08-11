@@ -11,7 +11,6 @@ from tests.app.main_coordinate_feedrate_support import (
     RouteMeasurementRecord,
     RouteMeasurementRunner,
     RouteMeterConfiguration,
-    StageControllerError,
     main_module,
 )
 
@@ -1325,6 +1324,7 @@ class MainMeterContactActionsTest(unittest.TestCase):
         window._api_ensure_measurement_instrument_connected = lambda: None
         window._api_needle_feedrate = lambda _payload: 7.0
         window._api_timestamp_utc = lambda: "2026-06-26T10:05:00+00:00"
+        window._snapshot_active_route_design_frame = lambda: "frame-snapshot"
         window._telegram_route_actions_markup = lambda: "actions"
         window._send_telegram_alert = (
             lambda key, text, *, attach_photo=False, reply_markup=None: alerts.append(

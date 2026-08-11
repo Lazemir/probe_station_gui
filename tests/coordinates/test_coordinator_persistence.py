@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 from dataclasses import replace
 from pathlib import Path
 import subprocess
@@ -76,7 +77,14 @@ def _coordinator(
 ) -> tuple[CoordinateSystemCoordinator, CoordinateFrameRegistry, DesignSession]:
     registry = CoordinateFrameRegistry()
     session = DesignSession(document=document)
-    return CoordinateSystemCoordinator(registry=registry, session=session), registry, session
+    return (
+        CoordinateSystemCoordinator._for_testing(
+            registry=registry,
+            session=session,
+        ),
+        registry,
+        session,
+    )
 
 
 def _complete_load(
@@ -137,7 +145,7 @@ def test_completion_requires_exact_qt_free_store_result_types(tmp_path: Path) ->
     assert arbitrary_load.snapshot.frames_loaded is False
     _complete_load(coordinator, load, CoordinateFrameDocument(records=(draft,)))
     save = _save_intent(
-        coordinator.publish_frame_records(
+        coordinator._publish_frame_records(
             FrameRecordsPublication(
                 records=(committed,),
                 previous_record=draft,
@@ -203,16 +211,39 @@ def test_coordinator_exposes_only_explicit_coordinate_workflows() -> None:
         "cancel_registration",
         "capture_registration_mark",
         "close_design",
+        "close",
         "complete",
+        "controller_persistence_state",
+        "current_design_lease",
+        "design_lease_is_current",
         "focus_search_lease",
         "observe_focus_context",
+        "observe_authority",
         "offer_focus_candidate",
-        "publish_frame_records",
+        "set_registration_source_mark",
+        "replace_registration_source_marks",
+        "add_registration_check_mark",
+        "clear_registration_source_stage_marks",
+        "apply_registration_alignment",
+        "invalidate_registration",
+        "observe_design_calibrations",
+        "project_design_to_camera_stage",
+        "project_design_to_raw_stage",
+        "project_motion",
+        "project_raw_stage_to_design",
         "reset_focus_reference",
         "snapshot",
         "start",
+        "select_system",
+        "synchronize_custom_systems",
         "use_focus_reference",
     }
+
+
+def test_public_coordinator_constructor_does_not_accept_mutable_policy_owners() -> None:
+    parameters = inspect.signature(CoordinateSystemCoordinator).parameters
+
+    assert set(parameters) == {"restore_frame_id"}
 
 
 def test_only_current_load_completion_can_install_records(tmp_path: Path) -> None:
@@ -290,7 +321,7 @@ def test_publication_preserves_rejected_raw_document_slots(tmp_path: Path) -> No
     _complete_load(coordinator, load, document)
 
     save = _save_intent(
-        coordinator.publish_frame_records(
+        coordinator._publish_frame_records(
             FrameRecordsPublication(records=(renamed,))
         )
     )
@@ -358,7 +389,7 @@ def test_coordinator_publishes_factory_proposal_from_domain_inputs(
     assert isinstance(load, LoadCoordinateFramesIntent)
     _complete_load(coordinator, load, CoordinateFrameDocument(records=(draft,)))
 
-    transition = coordinator.publish_frame_records(
+    transition = coordinator._publish_frame_records(
         FrameRecordsPublication.for_committed_record(
             registry.snapshot().records,
             committed,
@@ -401,7 +432,7 @@ def test_publication_captures_its_adopted_session_for_rollback(
     _complete_load(coordinator, load, CoordinateFrameDocument(records=(draft,)))
 
     save = _save_intent(
-        coordinator.publish_frame_records(
+        coordinator._publish_frame_records(
             FrameRecordsPublication.for_committed_record(
                 registry.snapshot().records,
                 committed,
@@ -439,7 +470,7 @@ def test_same_frame_failure_preserves_newer_targets_route_and_selections(
     session._legacy_stage_coordinate_provenance_present = True
     baseline = DesignSessionCheckpoint.capture(session)
     save = _save_intent(
-        coordinator.publish_frame_records(
+        coordinator._publish_frame_records(
             FrameRecordsPublication(
                 records=(committed,),
                 previous_record=draft,
@@ -519,7 +550,7 @@ def test_old_failure_does_not_overwrite_newer_same_frame_coordinate_edit(
     _complete_load(coordinator, load, CoordinateFrameDocument(records=(draft,)))
     session.apply_active_frame_link(draft, _link(draft).projection)
     save = _save_intent(
-        coordinator.publish_frame_records(
+        coordinator._publish_frame_records(
             FrameRecordsPublication(
                 records=(committed,),
                 previous_record=draft,
@@ -576,7 +607,7 @@ def test_terminal_failure_privately_releases_contact_commit(
     released: list[dict[str, object]] = []
     registry = CoordinateFrameRegistry()
     session = DesignSession(document=design)
-    coordinator = CoordinateSystemCoordinator(
+    coordinator = CoordinateSystemCoordinator._for_testing(
         registry=registry,
         session=session,
         registration_lifecycle=SimpleNamespace(
@@ -587,7 +618,7 @@ def test_terminal_failure_privately_releases_contact_commit(
     assert isinstance(load, LoadCoordinateFramesIntent)
     _complete_load(coordinator, load, CoordinateFrameDocument(records=(draft,)))
     save = _save_intent(
-        coordinator.publish_frame_records(
+        coordinator._publish_frame_records(
             FrameRecordsPublication.for_committed_record(
                 registry.snapshot().records,
                 contacted,
@@ -632,7 +663,7 @@ def test_publication_installs_one_adopted_registry_and_session_before_save(
     _complete_load(coordinator, load, CoordinateFrameDocument(records=(draft,)))
     checkpoint = DesignSessionCheckpoint.capture(session)
 
-    transition = coordinator.publish_frame_records(
+    transition = coordinator._publish_frame_records(
         FrameRecordsPublication(
             records=(committed,),
             previous_record=draft,
@@ -659,7 +690,7 @@ def test_older_save_failure_defers_to_newer_publication(tmp_path: Path) -> None:
     assert isinstance(load, LoadCoordinateFramesIntent)
     _complete_load(coordinator, load, CoordinateFrameDocument(records=(draft,)))
     first = _save_intent(
-        coordinator.publish_frame_records(
+        coordinator._publish_frame_records(
             FrameRecordsPublication(
                 records=(registered,),
                 previous_record=draft,
@@ -671,7 +702,7 @@ def test_older_save_failure_defers_to_newer_publication(tmp_path: Path) -> None:
         )
     )
     second = _save_intent(
-        coordinator.publish_frame_records(
+        coordinator._publish_frame_records(
             FrameRecordsPublication(
                 records=(focused,),
                 previous_record=registered,
@@ -711,7 +742,7 @@ def test_deferred_and_stale_failures_do_not_release_contact_commit(
     renamed = replace(contacted, name="renamed", version=2)
     releases: list[dict[str, object]] = []
     registry = CoordinateFrameRegistry()
-    coordinator = CoordinateSystemCoordinator(
+    coordinator = CoordinateSystemCoordinator._for_testing(
         registry=registry,
         session=DesignSession(document=design),
         registration_lifecycle=SimpleNamespace(
@@ -722,7 +753,7 @@ def test_deferred_and_stale_failures_do_not_release_contact_commit(
     assert isinstance(load, LoadCoordinateFramesIntent)
     _complete_load(coordinator, load, CoordinateFrameDocument(records=(draft,)))
     first = _save_intent(
-        coordinator.publish_frame_records(
+        coordinator._publish_frame_records(
             FrameRecordsPublication.for_committed_record(
                 registry.snapshot().records,
                 contacted,
@@ -731,7 +762,7 @@ def test_deferred_and_stale_failures_do_not_release_contact_commit(
         )
     )
     second = _save_intent(
-        coordinator.publish_frame_records(
+        coordinator._publish_frame_records(
             FrameRecordsPublication.for_committed_record(
                 registry.snapshot().records,
                 renamed,
@@ -777,7 +808,7 @@ def test_terminal_failure_rolls_back_each_frame_and_exact_session_once(
     _complete_load(coordinator, load, CoordinateFrameDocument(records=(a0, b0)))
     baseline = DesignSessionCheckpoint.capture(session)
     first = _save_intent(
-        coordinator.publish_frame_records(
+        coordinator._publish_frame_records(
             FrameRecordsPublication(
                 records=(a1, b0),
                 previous_record=a0,
@@ -787,7 +818,7 @@ def test_terminal_failure_rolls_back_each_frame_and_exact_session_once(
             )
         )
     )
-    coordinator.publish_frame_records(
+    coordinator._publish_frame_records(
         FrameRecordsPublication(
             records=(a2, b0),
             previous_record=a1,
@@ -797,7 +828,7 @@ def test_terminal_failure_rolls_back_each_frame_and_exact_session_once(
         )
     )
     terminal = _save_intent(
-        coordinator.publish_frame_records(
+        coordinator._publish_frame_records(
             FrameRecordsPublication(
                 records=(a2, b1),
                 previous_record=b0,
@@ -840,7 +871,7 @@ def test_bulk_publication_failure_restores_full_previous_record_set(
         CoordinateFrameDocument(records=(original_a, original_b)),
     )
     save = _save_intent(
-        coordinator.publish_frame_records(
+        coordinator._publish_frame_records(
             FrameRecordsPublication(records=(changed_a,))
         )
     )
@@ -866,7 +897,7 @@ def test_newer_success_acknowledges_every_coalesced_publication(tmp_path: Path) 
     assert isinstance(load, LoadCoordinateFramesIntent)
     _complete_load(coordinator, load, CoordinateFrameDocument(records=(draft,)))
     first = _save_intent(
-        coordinator.publish_frame_records(
+        coordinator._publish_frame_records(
             FrameRecordsPublication(
                 records=(registered,),
                 previous_record=draft,
@@ -878,7 +909,7 @@ def test_newer_success_acknowledges_every_coalesced_publication(tmp_path: Path) 
         )
     )
     second = _save_intent(
-        coordinator.publish_frame_records(
+        coordinator._publish_frame_records(
             FrameRecordsPublication(
                 records=(focused,),
                 previous_record=registered,
@@ -910,7 +941,7 @@ def test_coalesced_success_keeps_durable_legacy_completion_tag(tmp_path: Path) -
     load = coordinator.start(MachineProfileObservation("profile")).intents[0]
     assert isinstance(load, LoadCoordinateFramesIntent)
     _complete_load(coordinator, load, CoordinateFrameDocument(records=(draft,)))
-    coordinator.publish_frame_records(
+    coordinator._publish_frame_records(
         FrameRecordsPublication(
             records=(migrated,),
             previous_record=draft,
@@ -921,7 +952,7 @@ def test_coalesced_success_keeps_durable_legacy_completion_tag(tmp_path: Path) -
         )
     )
     latest = _save_intent(
-        coordinator.publish_frame_records(
+        coordinator._publish_frame_records(
             FrameRecordsPublication(
                 records=(focused,),
                 previous_record=migrated,
@@ -953,7 +984,7 @@ def test_only_operator_alignment_failure_requests_snap_restore(tmp_path: Path) -
     assert isinstance(load, LoadCoordinateFramesIntent)
     _complete_load(coordinator, load, CoordinateFrameDocument(records=(draft,)))
     save = _save_intent(
-        coordinator.publish_frame_records(
+        coordinator._publish_frame_records(
             FrameRecordsPublication(
                 records=(committed,),
                 previous_record=draft,
@@ -994,7 +1025,7 @@ def test_repeated_and_late_save_completions_are_inert(tmp_path: Path) -> None:
     assert isinstance(load, LoadCoordinateFramesIntent)
     _complete_load(coordinator, load, CoordinateFrameDocument(records=(draft,)))
     save = _save_intent(
-        coordinator.publish_frame_records(
+        coordinator._publish_frame_records(
             FrameRecordsPublication(
                 records=(committed,),
                 previous_record=draft,

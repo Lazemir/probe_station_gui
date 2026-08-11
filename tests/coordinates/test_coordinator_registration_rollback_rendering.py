@@ -94,7 +94,10 @@ def _loaded_coordinator(
     record = new_design_frame_draft(document, existing_names=())
     registry = CoordinateFrameRegistry()
     session = DesignSession(document=document)
-    coordinator = CoordinateSystemCoordinator(registry=registry, session=session)
+    coordinator = CoordinateSystemCoordinator._for_testing(
+        registry=registry,
+        session=session,
+    )
     load = coordinator.start(MachineProfileObservation("profile-a")).intents[0]
     coordinator.complete(
         CoordinateAdapterCompletion(
@@ -139,15 +142,14 @@ def _capture(
 def _render_non_operator_transition(monkeypatch, transition: object) -> list[str]:
     events: list[str] = []
     owner = SimpleNamespace(
-        _coordinate_frames_loaded=True,
         _refresh_design_panel=lambda: events.append("panel"),
         _refresh_design_position=lambda: events.append("position"),
         _show_status=lambda _message, _duration=0: events.append("status"),
     )
     monkeypatch.setattr(
         connection_flow.stage_position_panel,
-        "refresh_coordinate_frame_display",
-        lambda _owner: events.append("coordinates"),
+        "render_coordinate_system_snapshot",
+        lambda _owner, _snapshot: events.append("coordinates"),
     )
 
     connection_flow.apply_coordinate_transition(owner, transition)
@@ -275,7 +277,6 @@ def test_operator_rollback_renders_an_exact_empty_stage_draft(
         set_selected_focus_point=lambda _point: None,
     )
     owner = SimpleNamespace(
-        _coordinate_frames_loaded=True,
         _alignment_design_draft=((0.0, 0.0), (1000.0, 0.0)),
         _alignment_stage_draft=[(3.0, 4.0)],
         _alignment_draft_fit_residuals=(1.0, 2.0),
@@ -320,7 +321,7 @@ def test_stale_capture_rollback_renders_once_and_replay_is_inert(
     intent = started.intents[0]
     current = registry.get(session.active_frame_id)
     assert current is not None
-    coordinator.publish_frame_records(
+    coordinator._publish_frame_records(
         FrameRecordsPublication.for_committed_record(
             registry.snapshot().records,
             replace(current, version=current.version + 1),

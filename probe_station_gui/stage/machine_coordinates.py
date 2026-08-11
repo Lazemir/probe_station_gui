@@ -38,12 +38,44 @@ class MachineCoordinateSnapshot:
         mapper: StageAxisCalibrationMapper,
         axis_index: Mapping[str, int],
     ) -> "MachineCoordinateSnapshot":
+        return cls._from_status(
+            status,
+            mapper,
+            axis_index,
+            require_idle=True,
+        )
+
+    @classmethod
+    def from_motion_status(
+        cls,
+        status: object | None,
+        mapper: StageAxisCalibrationMapper,
+        axis_index: Mapping[str, int],
+    ) -> "MachineCoordinateSnapshot":
+        """Build a same-generation snapshot usable for live motion projection."""
+
+        return cls._from_status(
+            status,
+            mapper,
+            axis_index,
+            require_idle=False,
+        )
+
+    @classmethod
+    def _from_status(
+        cls,
+        status: object | None,
+        mapper: StageAxisCalibrationMapper,
+        axis_index: Mapping[str, int],
+        *,
+        require_idle: bool,
+    ) -> "MachineCoordinateSnapshot":
         if status is None:
             raise MachineCoordinateSnapshotUnavailable(
                 "A synchronized controller status is unavailable."
             )
         state = str(getattr(status, "state", "")).strip().lower()
-        if state != "idle":
+        if require_idle and state != "idle":
             raise MachineCoordinateSnapshotUnavailable(
                 "Wait for the stage to stop before capturing a reference."
             )
@@ -145,6 +177,38 @@ class MachineCoordinateSnapshot:
         if self.position_reporting_mode != "machine":
             raw_machine -= self.work_offset[index]
         return raw_machine
+
+    def remap(
+        self,
+        mapper: StageAxisCalibrationMapper,
+    ) -> "MachineCoordinateSnapshot":
+        """Reinterpret the same synchronized raw sample with new curves."""
+
+        physical: dict[str, float] = {}
+        try:
+            for raw_axis, index in self.axis_index.items():
+                axis = str(raw_axis).strip().upper()
+                if 0 <= int(index) < len(self.raw_machine_position):
+                    physical[axis] = float(
+                        mapper.controller_to_physical(
+                            axis,
+                            self.raw_machine_position[int(index)],
+                        )
+                    )
+        except (TypeError, ValueError) as exc:
+            raise MachineCoordinateSnapshotUnavailable(
+                "Machine coordinates are outside the universal calibration domain."
+            ) from exc
+        return MachineCoordinateSnapshot(
+            raw_machine_position=self.raw_machine_position,
+            configured_position=self.configured_position,
+            work_offset=self.work_offset,
+            coordinate_system=self.coordinate_system,
+            position_reporting_mode=self.position_reporting_mode,
+            mapper=mapper,
+            axis_index=self.axis_index,
+            physical_machine_pose=PhysicalMachinePose.from_mapping(physical),
+        )
 
     def _axis(self, axis: str) -> tuple[str, int]:
         normalized = str(axis).strip().upper()

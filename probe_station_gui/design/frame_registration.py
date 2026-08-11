@@ -16,6 +16,7 @@ from probe_station_gui.coordinates.model import (
     VISIBLE_STAGE_AXES,
 )
 from probe_station_gui.coordinates.registry import CoordinateFrameRegistry, invalidate_axes
+from probe_station_gui.coordinates.source_identity import source_identity
 from probe_station_gui.coordinates.transforms import BFrameTransform, rotate_xy
 from probe_station_gui.design.model import DesignDocument, Point2D
 from probe_station_gui.design.rigid_registration import fit_rigid_registration
@@ -446,7 +447,7 @@ def design_frame_for_loaded_document(
     stored = DesignFrameMetadata.from_mapping(frame.metadata)
     current = current_metadata or DesignFrameMetadata.from_document(design_document)
     if (
-        Path(stored.source_path).resolve() == Path(current.source_path).resolve()
+        source_identity(stored.source_path) == source_identity(current.source_path)
         and stored.source_size == current.source_size
         and stored.source_mtime_ns == current.source_mtime_ns
         and stored.source_sha256 == current.source_sha256

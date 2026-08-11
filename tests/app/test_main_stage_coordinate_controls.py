@@ -23,19 +23,8 @@ from probe_station_gui.settings.axis_calibration_config import (
     default_axis_calibrations,
 )
 from probe_station_gui.stage.controller import StageController
-from probe_station_gui.coordinates.model import (
-    AxisReadiness,
-    CoordinateFrameRecord,
-    FrameKind,
-    PhysicalMachinePose,
-    ReadinessStatus,
-)
-from probe_station_gui.coordinates.lifecycle import CoordinateFrameLifecycle
-from probe_station_gui.coordinates.registry import CoordinateFrameRegistry
-from probe_station_gui.coordinates.transforms import BFrameTransform
-from probe_station_gui.settings.manager import (
-    Settings,
-    SoftwareCoordinateSelectionSnapshot,
+from probe_station_gui.coordinates.coordinator_model import (
+    CoordinateSystemSnapshot,
 )
 from probe_station_gui.stage.exact_step import ExactStepAccumulator
 from probe_station_gui.views import main_window_homing as homing_ui
@@ -119,150 +108,20 @@ class MainStageCoordinateControlsTest(unittest.TestCase):
         self.assertEqual([event[0] for event in events], ["needles", "coordinates"])
 
     @staticmethod
-    def _software_frame(frame_id: str, *, version: int = 0) -> CoordinateFrameRecord:
-        return CoordinateFrameRecord(
-            frame_id=frame_id,
-            kind=FrameKind.DESIGN,
-            name="chip-a",
-            version=version,
-            transform=BFrameTransform(
-                origin_xy_at_reference_b=(0.0, 0.0),
-                reference_b_deg=0.0,
-                xy_angle_at_reference_b_deg=0.0,
-                b_zero_machine_deg=0.0,
-                z_zero_machine_mm=1.0,
-            ),
-            readiness={
-                axis: AxisReadiness(
-                    ReadinessStatus.READY
-                    if axis in {"X", "Y", "Z", "B"}
-                    else ReadinessStatus.MISSING,
-                    "" if axis in {"X", "Y", "Z", "B"} else "Find contact.",
-                )
-                for axis in ("X", "Y", "Z", "A", "B")
-            },
-            metadata={},
+    def _select_gui_coordinate_system(window: Main, frame_id: str) -> object:
+        motion_lease = types.SimpleNamespace(basis_fingerprint=(frame_id,))
+        snapshot = CoordinateSystemSnapshot(
+            frames_loaded=True,
+            records=(),
+            document=None,
+            selected_frame_id=frame_id,
+            display_plan=types.SimpleNamespace(selection_available=True),
+            motion_lease=motion_lease,
         )
-
-    def test_main_coordinate_selection_seam_cancels_pending_restore(self) -> None:
-        frame_id = "11111111-1111-4111-8111-111111111111"
-        settings = Settings()
-        settings.software_coordinates.last_selected_frame_id = frame_id
-        in_memory: list[str] = []
-        published: list[SoftwareCoordinateSelectionSnapshot] = []
-        window = Main.__new__(Main)
-        window._coordinate_frame_lifecycle = CoordinateFrameLifecycle(
-            restore_frame_id=frame_id
+        window._coordinate_system_coordinator = types.SimpleNamespace(
+            snapshot=lambda: snapshot
         )
-        window._latest_physical_machine_pose = PhysicalMachinePose(
-            {"X": 0.0, "Y": 0.0, "Z": 1.0, "A": 2.0, "B": 0.0}
-        )
-        window._coordinate_frame_registry = CoordinateFrameRegistry()
-        window._coordinate_frames_loaded = True
-        window._stage_position_panel = None
-        window.stage_controller = types.SimpleNamespace(homed_axes=lambda: {"X", "Y"})
-
-        def set_selection(selected: str) -> SoftwareCoordinateSelectionSnapshot:
-            settings.software_coordinates.last_selected_frame_id = selected
-            settings.software_coordinates.selection_generation += 1
-            in_memory.append(selected)
-            return SoftwareCoordinateSelectionSnapshot(
-                selected,
-                settings.software_coordinates.selection_generation,
-            )
-
-        window.settings_manager = types.SimpleNamespace(
-            settings=settings,
-            set_software_coordinate_selection=set_selection,
-            update_and_save=lambda *_args, **_kwargs: self.fail(
-                "selector callback used synchronous settings persistence"
-            ),
-        )
-        window._software_coordinate_selection_store = types.SimpleNamespace(
-            publish=published.append
-        )
-
-        Main._on_software_coordinate_system_changed(window, "machine")
-
-        self.assertEqual(
-            window._coordinate_frame_lifecycle.selected_frame_id,
-            "machine",
-        )
-        self.assertEqual(in_memory, ["machine"])
-        self.assertEqual(
-            published,
-            [SoftwareCoordinateSelectionSnapshot("machine", 1)],
-        )
-
-    def test_selection_persistence_failure_reports_without_reverting_ui(self) -> None:
-        frame_id = "11111111-1111-4111-8111-111111111111"
-        statuses: list[tuple[str, int]] = []
-        window = Main.__new__(Main)
-        window._coordinate_frame_lifecycle = CoordinateFrameLifecycle(
-            selected_frame_id=frame_id
-        )
-        window._show_status = lambda message, timeout: statuses.append(
-            (message, timeout)
-        )
-
-        Main._on_software_coordinate_selection_store_failed(
-            window,
-            types.SimpleNamespace(
-                frame_id=frame_id,
-                message="OSError: disk unavailable",
-            ),
-        )
-
-        self.assertEqual(
-            window._coordinate_frame_lifecycle.selected_frame_id,
-            frame_id,
-        )
-        self.assertEqual(
-            statuses,
-            [("Coordinate selection could not be saved.", 6000)],
-        )
-
-    def test_main_refresh_preserves_frame_id_across_version_then_falls_back_on_delete(self) -> None:
-        frame_id = "11111111-1111-4111-8111-111111111111"
-        registry = CoordinateFrameRegistry()
-        original = registry.add(self._software_frame(frame_id))
-        plans: list[object] = []
-        window = Main.__new__(Main)
-        window._coordinate_frame_lifecycle = CoordinateFrameLifecycle(
-            selected_frame_id=frame_id
-        )
-        window._latest_physical_machine_pose = PhysicalMachinePose(
-            {"X": 0.0, "Y": 0.0, "Z": 1.0, "A": 2.0, "B": 0.0}
-        )
-        window._coordinate_frame_registry = registry
-        window._coordinate_frames_loaded = True
-        window._stage_axis_display_values = {}
-        window._stage_position_panel = types.SimpleNamespace(
-            set_coordinate_display_plan=plans.append
-        )
-        window.stage_controller = types.SimpleNamespace(homed_axes=lambda: {"X", "Y"})
-        window.settings_manager = types.SimpleNamespace(settings=Settings())
-
-        registry.replace(
-            self._software_frame(frame_id, version=original.version),
-            expected_version=original.version,
-        )
-        Main._refresh_software_coordinate_display(window)
-
-        self.assertEqual(
-            window._coordinate_frame_lifecycle.selected_frame_id,
-            frame_id,
-        )
-        self.assertEqual(plans[-1].selected_frame_id, frame_id)
-
-        registry.reset(())
-        Main._refresh_software_coordinate_display(window)
-
-        self.assertEqual(
-            window._coordinate_frame_lifecycle.selected_frame_id,
-            "machine",
-        )
-        self.assertEqual(plans[-1].selected_frame_id, "machine")
+        return motion_lease
 
     def test_stage_position_display_updates_caches_while_panel_applies_ui_state(
         self,
@@ -414,6 +273,58 @@ class MainStageCoordinateControlsTest(unittest.TestCase):
         self.assertEqual(statuses, ["Cleared pending coordinate edits after input mode change.|2000"])
         self.assertEqual(y_field.text(), "7.777")
         self.assertTrue(y_field.isModified())
+
+    def test_mode_change_restores_selected_system_before_relative_step(self) -> None:
+        frame_id = "11111111-1111-4111-8111-111111111111"
+        window, _controller, _joystick, _timer, _statuses = _make_main(120.0)
+        self._prepare_exact_step(window)
+        motion_lease = self._select_gui_coordinate_system(window, frame_id)
+        window._stage_axis_display_values["X"] = 1.0
+        window._pending_stage_axis_targets["X"] = (10.5, 1.5)
+        render_events: list[str] = []
+        projection_calls: list[tuple[tuple[str, float], ...]] = []
+
+        def render_raw(_owner: object, _position: object) -> None:
+            render_events.append("raw")
+            window._stage_axis_display_values["X"] = 10.0
+
+        def render_selected(_owner: object) -> None:
+            render_events.append("selected")
+            window._stage_axis_display_values["X"] = 1.0
+
+        def project(axis_values, *, mode, lease, allow_pose_rebase=False):
+            self.assertEqual(mode, "G90")
+            self.assertIs(lease, motion_lease)
+            self.assertFalse(allow_pose_rebase)
+            projection_calls.append(tuple(axis_values))
+            return types.SimpleNamespace(
+                accepted=True,
+                lease=motion_lease,
+                raw_targets=(("X", 10.001),),
+                raw_distances=(("X", 0.001),),
+                display_targets=(("X", 1.001),),
+                machine_targets=(("X", 10.001),),
+                reason="",
+            )
+
+        window._project_gui_coordinate_motion = project
+        with (
+            mock.patch.object(
+                main_module.stage_position_panel_adapter,
+                "update_stage_position_display",
+                side_effect=render_raw,
+            ),
+            mock.patch.object(
+                main_module.stage_position_panel_adapter,
+                "refresh_coordinate_frame_display",
+                side_effect=render_selected,
+            ),
+        ):
+            Main._on_stage_coordinate_mode_changed(window)
+            Main._on_manual_axis_move_requested(window, "X", 0.001, "G91", 120.0)
+
+        self.assertEqual(render_events, ["raw", "selected"])
+        self.assertEqual(projection_calls, [(('X', 1.001),)])
 
     def test_saving_needle_down_target_does_not_reapply_full_settings(self) -> None:
         window = Main.__new__(Main)
@@ -604,7 +515,7 @@ class MainStageCoordinateControlsTest(unittest.TestCase):
     ) -> None:
         window, stage_controller, _joystick, _timer, _statuses = _make_main(77.0)
         window._coordinate_targets.active_axis = "X"
-        window._resolve_stage_axis_target = (
+        window._resolve_api_stage_axis_target = (
             lambda axis, display_target, input_mode: (
                 display_target,
                 display_target,
@@ -630,7 +541,7 @@ class MainStageCoordinateControlsTest(unittest.TestCase):
 
     def test_api_move_to_coordinates_rejects_stage_busy_before_start(self) -> None:
         window, stage_controller, _joystick, _timer, _statuses = _make_main(77.0)
-        window._resolve_stage_axis_target = (
+        window._resolve_api_stage_axis_target = (
             lambda axis, display_target, input_mode: (
                 display_target,
                 display_target,
@@ -655,7 +566,7 @@ class MainStageCoordinateControlsTest(unittest.TestCase):
 
     def test_api_move_to_coordinates_returns_start_failure_response(self) -> None:
         window, stage_controller, _joystick, _timer, _statuses = _make_main(77.0)
-        window._resolve_stage_axis_target = (
+        window._resolve_api_stage_axis_target = (
             lambda axis, display_target, input_mode: (
                 display_target + 10.0,
                 display_target + 0.25,
@@ -678,12 +589,13 @@ class MainStageCoordinateControlsTest(unittest.TestCase):
             {"X": (11.0, 1.25)},
             feedrate_mm_min=77.0,
             source_label="API",
+            limit_targets={"X": 1.25},
         )
 
     def test_api_move_to_coordinates_starts_with_raw_and_display_targets(self) -> None:
         window, stage_controller, _joystick, _timer, _statuses = _make_main(77.0)
 
-        def resolve_axis_target(
+        def resolve_api_axis_target(
             _axis: str,
             display_target: float,
             input_mode: str,
@@ -691,7 +603,7 @@ class MainStageCoordinateControlsTest(unittest.TestCase):
             raw_offset = 100.0 if input_mode == "G91" else 0.0
             return display_target + raw_offset, display_target + 0.5
 
-        window._resolve_stage_axis_target = resolve_axis_target
+        window._resolve_api_stage_axis_target = resolve_api_axis_target
         stage_controller.is_busy = mock.Mock(return_value=False)
         stage_controller.coordinate_display_name = mock.Mock(return_value="Work")
         window._start_coordinate_targets_move = mock.Mock(return_value=True)
@@ -706,6 +618,7 @@ class MainStageCoordinateControlsTest(unittest.TestCase):
             {"X": (101.0, 1.5), "Y": (102.0, 2.5)},
             feedrate_mm_min=77.0,
             source_label="API",
+            limit_targets={"X": 1.5, "Y": 2.5},
         )
         self.assertEqual(
             response,
@@ -716,7 +629,7 @@ class MainStageCoordinateControlsTest(unittest.TestCase):
                 "queued_axes": [],
                 "mode": "G91",
                 "current_feedrate_mm_min": 77.0,
-                "coordinate_display": "Work",
+                "coordinate_display": "Machine",
                 "targets": {"X": 1.5, "Y": 2.5},
             },
         )
@@ -763,99 +676,374 @@ class MainStageCoordinateControlsTest(unittest.TestCase):
         self.assertEqual(joystick.coordinate_modes, ["jog"])
         self.assertEqual(stage_controller.requests, [({"X": 5.0}, 99.0)])
 
-    def test_non_machine_offset_and_rotated_frames_cannot_emit_legacy_apply_targets(
+    def test_non_machine_apply_projects_compensated_axes_with_display_lease(
         self,
     ) -> None:
-        cases = (
-            BFrameTransform(
-                origin_xy_at_reference_b=(10.0, -3.0),
-                reference_b_deg=0.0,
-                xy_angle_at_reference_b_deg=0.0,
-                b_zero_machine_deg=0.0,
-            ),
-            BFrameTransform(
-                origin_xy_at_reference_b=(0.0, 0.0),
-                reference_b_deg=0.0,
-                xy_angle_at_reference_b_deg=90.0,
-                b_zero_machine_deg=0.0,
-            ),
+        frame_id = "11111111-1111-4111-8111-111111111111"
+        window, stage_controller, _joystick, _timer, _statuses = _make_main(99.0)
+        motion_lease = self._select_gui_coordinate_system(window, frame_id)
+        projection_calls: list[tuple[tuple[tuple[str, float], ...], str, object]] = []
+        limit_calls: list[tuple[str, float]] = []
+        window._machine_axis_target_limit_error = lambda axis, target: (
+            limit_calls.append((axis, target)) or None
         )
-        for index, transform in enumerate(cases, start=1):
-            with self.subTest(transform=transform):
-                frame_id = f"11111111-1111-4111-8111-{index:012d}"
-                window, stage_controller, _joystick, _timer, _statuses = _make_main(99.0)
-                registry = CoordinateFrameRegistry()
-                registry.add(
-                    CoordinateFrameRecord(
-                        frame_id=frame_id,
-                        kind=FrameKind.DESIGN,
-                        name=f"chip-{index}",
-                        version=0,
-                        transform=transform,
-                        readiness={
-                            axis: AxisReadiness(ReadinessStatus.READY)
-                            for axis in ("X", "Y", "Z", "A", "B")
-                        },
-                        metadata={},
-                    )
-                )
-                window._coordinate_frame_registry = registry
-                window._coordinate_frame_lifecycle = CoordinateFrameLifecycle(
-                    selected_frame_id=frame_id
-                )
-                window._pending_stage_axis_targets = {"X": (99.0, 1.0)}
 
-                Main._apply_pending_stage_coordinate_targets(window)
+        def project(axis_values, *, mode, lease, allow_pose_rebase=False):
+            projection_calls.append((tuple(axis_values), mode, lease))
+            return types.SimpleNamespace(
+                accepted=True,
+                lease=motion_lease,
+                raw_targets=(("X", 10.0), ("Y", 20.0)),
+                raw_distances=(("X", 9.0), ("Y", 18.0)),
+                display_targets=(("X", 1.0), ("Y", 2.0)),
+                machine_targets=(("X", 101.0), ("Y", 102.0)),
+                reason="",
+            )
 
-                self.assertEqual(stage_controller.requests, [])
+        window._project_gui_coordinate_motion = project
+        window._pending_stage_axis_targets = {"X": (99.0, 1.0)}
 
-    def test_non_machine_offset_and_rotated_frames_cannot_emit_legacy_step_targets(
+        with mock.patch.object(
+            main_module.stage_position_update,
+            "publish_stage_position_estimate",
+        ):
+            Main._apply_pending_stage_coordinate_targets(window)
+
+        self.assertEqual(
+            projection_calls,
+            [((("X", 1.0),), "G90", motion_lease)],
+        )
+        self.assertIs(projection_calls[0][2], motion_lease)
+        self.assertEqual(
+            stage_controller.requests,
+            [({"X": 10.0, "Y": 20.0}, 99.0)],
+        )
+        self.assertEqual(
+            limit_calls,
+            [
+                ("X", 101.0),
+                ("Y", 102.0),
+                ("X", 101.0),
+                ("Y", 102.0),
+            ],
+        )
+
+    def test_machine_apply_uses_rendered_physical_snapshot_lease(self) -> None:
+        window, stage_controller, _joystick, _timer, _statuses = _make_main(99.0)
+        motion_lease = self._select_gui_coordinate_system(window, "machine")
+        projection_calls: list[tuple[tuple[tuple[str, float], ...], object]] = []
+
+        def project(axis_values, *, mode, lease, allow_pose_rebase=False):
+            self.assertEqual(mode, "G90")
+            self.assertFalse(allow_pose_rebase)
+            projection_calls.append((tuple(axis_values), lease))
+            return types.SimpleNamespace(
+                accepted=True,
+                lease=motion_lease,
+                raw_targets=(("X", 5.5),),
+                raw_distances=(("X", 0.5),),
+                display_targets=(("X", 21.0),),
+                machine_targets=(("X", 21.0),),
+                reason="",
+            )
+
+        window._project_gui_coordinate_motion = project
+        window._pending_stage_axis_targets = {"X": (999.0, 21.0)}
+
+        with mock.patch.object(
+            main_module.stage_position_update,
+            "publish_stage_position_estimate",
+        ):
+            Main._apply_pending_stage_coordinate_targets(window)
+
+        self.assertEqual(projection_calls, [((("X", 21.0),), motion_lease)])
+        self.assertEqual(stage_controller.requests, [({"X": 5.5}, 99.0)])
+
+    def test_non_machine_step_reuses_lease_and_projects_compensated_axes(
         self,
     ) -> None:
-        transforms = (
-            BFrameTransform(
-                origin_xy_at_reference_b=(10.0, -3.0),
-                reference_b_deg=0.0,
-                xy_angle_at_reference_b_deg=0.0,
-                b_zero_machine_deg=0.0,
-            ),
-            BFrameTransform(
-                origin_xy_at_reference_b=(0.0, 0.0),
-                reference_b_deg=0.0,
-                xy_angle_at_reference_b_deg=90.0,
-                b_zero_machine_deg=0.0,
-            ),
+        frame_id = "22222222-2222-4222-8222-222222222222"
+        window, stage_controller, _joystick, _timer, _statuses = _make_main(120.0)
+        exact_timer = self._prepare_exact_step(window)
+        motion_lease = self._select_gui_coordinate_system(window, frame_id)
+        projection_calls: list[tuple[tuple[tuple[str, float], ...], str, object]] = []
+
+        def project(axis_values, *, mode, lease, allow_pose_rebase=False):
+            projection_calls.append((tuple(axis_values), mode, lease))
+            return types.SimpleNamespace(
+                accepted=True,
+                lease=motion_lease,
+                raw_targets=(("X", 10.001), ("Y", 20.0)),
+                raw_distances=(("X", 0.001), ("Y", 0.0)),
+                display_targets=(("X", 1.001), ("Y", 2.0)),
+                machine_targets=(("X", 1.001), ("Y", 2.0)),
+                reason="",
+            )
+
+        window._project_gui_coordinate_motion = project
+        window._stage_axis_display_values["X"] = 1.0
+
+        Main._on_manual_axis_move_requested(window, "X", 0.001, "G91", 120.0)
+        with mock.patch.object(
+            main_module.stage_position_update,
+            "publish_stage_position_estimate",
+        ):
+            exact_timer.fire()
+
+        self.assertEqual(len(projection_calls), 2)
+        self.assertEqual(
+            [call[:2] for call in projection_calls],
+            [
+                ((("X", 1.001),), "G90"),
+                ((("X", 1.001),), "G90"),
+            ],
         )
-        for index, transform in enumerate(transforms, start=1):
-            with self.subTest(transform=transform):
-                frame_id = f"22222222-2222-4222-8222-{index:012d}"
-                window, stage_controller, _joystick, _timer, _statuses = _make_main(120.0)
-                exact_timer = self._prepare_exact_step(window)
-                registry = CoordinateFrameRegistry()
-                registry.add(
-                    CoordinateFrameRecord(
-                        frame_id=frame_id,
-                        kind=FrameKind.DESIGN,
-                        name=f"chip-{index}",
-                        version=0,
-                        transform=transform,
-                        readiness={
-                            axis: AxisReadiness(ReadinessStatus.READY)
-                            for axis in ("X", "Y", "Z", "A", "B")
-                        },
-                        metadata={},
-                    )
-                )
-                window._coordinate_frame_registry = registry
-                window._coordinate_frame_lifecycle = CoordinateFrameLifecycle(
-                    selected_frame_id=frame_id
-                )
-                window._stage_axis_display_values["X"] = 1.0
+        self.assertTrue(all(call[2] is motion_lease for call in projection_calls))
+        self.assertEqual(
+            stage_controller.requests,
+            [({"X": 10.001, "Y": 20.0}, 120.0)],
+        )
 
-                Main._on_manual_axis_move_requested(window, "X", 0.001, "G91", 120.0)
-                exact_timer.fire()
+    def test_api_machine_target_is_not_reused_as_selected_design_step_baseline(
+        self,
+    ) -> None:
+        frame_id = "33333333-3333-4333-8333-333333333333"
+        window, _stage_controller, _joystick, _timer, _statuses = _make_main(120.0)
+        self._prepare_exact_step(window)
+        self.assertTrue(
+            Main._start_coordinate_targets_move(
+                window,
+                {"X": (50.0, 50.0)},
+                feedrate_mm_min=120.0,
+                source_label="API",
+                limit_targets={"X": 50.0},
+            )
+        )
+        motion_lease = self._select_gui_coordinate_system(window, frame_id)
+        window._stage_axis_display_values["X"] = 1.0
+        self.assertIsNone(window._coordinate_targets.display_basis)
+        projection_calls: list[tuple[tuple[str, float], ...]] = []
 
-                self.assertEqual(stage_controller.requests, [])
+        def project(axis_values, *, mode, lease, allow_pose_rebase=False):
+            self.assertEqual(mode, "G90")
+            self.assertIs(lease, motion_lease)
+            self.assertTrue(allow_pose_rebase)
+            projection_calls.append(tuple(axis_values))
+            return types.SimpleNamespace(
+                accepted=True,
+                lease=motion_lease,
+                raw_targets=(("X", 10.001),),
+                raw_distances=(("X", 0.001),),
+                display_targets=(("X", 1.001),),
+                machine_targets=(("X", 1.001),),
+                reason="",
+            )
+
+        window._project_gui_coordinate_motion = project
+
+        Main._on_manual_axis_move_requested(window, "X", 0.001, "G91", 120.0)
+
+        self.assertEqual(projection_calls, [(("X", 1.001),)])
+
+    def test_api_machine_completion_does_not_consume_equal_design_step_target(
+        self,
+    ) -> None:
+        frame_id = "33333333-3333-4333-8333-333333333333"
+        window, stage_controller, _joystick, _timer, _statuses = _make_main(120.0)
+        exact_timer = self._prepare_exact_step(window)
+        self.assertTrue(
+            Main._start_coordinate_targets_move(
+                window,
+                {"X": (50.0, 50.0)},
+                feedrate_mm_min=120.0,
+                source_label="API",
+                limit_targets={"X": 50.0},
+            )
+        )
+        motion_lease = self._select_gui_coordinate_system(window, frame_id)
+        window._stage_axis_display_values["X"] = 49.999
+        projection_calls: list[tuple[tuple[str, float], ...]] = []
+
+        def project(axis_values, *, mode, lease, allow_pose_rebase=False):
+            self.assertEqual(mode, "G90")
+            self.assertIs(lease, motion_lease)
+            self.assertTrue(allow_pose_rebase)
+            projection_calls.append(tuple(axis_values))
+            return types.SimpleNamespace(
+                accepted=True,
+                lease=motion_lease,
+                raw_targets=(("X", 10.0),),
+                raw_distances=(("X", 0.001),),
+                display_targets=(("X", 50.0),),
+                machine_targets=(("X", 10.0),),
+                reason="",
+            )
+
+        window._project_gui_coordinate_motion = project
+        Main._on_manual_axis_move_requested(window, "X", 0.001, "G91", 120.0)
+        exact_timer.fire()
+
+        self.assertEqual(window._exact_step_accumulator.targets, {"X": 50.0})
+        self.assertEqual(len(stage_controller.requests), 1)
+
+        stage_controller.busy = False
+        stage_controller.latest_state = "Idle"
+        window._coordinate_targets.started_at = None
+        window._coordinate_targets.seen_active_state = True
+        with mock.patch.object(
+            main_module.stage_position_update,
+            "publish_stage_position_estimate",
+        ):
+            stage_move_lifecycle.finish_coordinate_move_if_idle(
+                window,
+                (50.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+                monotonic_s=time.monotonic(),
+                schedule_single_shot=lambda _delay, callback: callback(),
+            )
+
+        self.assertEqual(projection_calls, [(("X", 50.0),), (("X", 50.0),)])
+        self.assertEqual(
+            stage_controller.requests,
+            [({"X": 50.0}, 120.0), ({"X": 10.0}, 120.0)],
+        )
+
+    def test_api_limit_failure_clears_design_step_before_stale_basis_dispatch(
+        self,
+    ) -> None:
+        frame_id = "33333333-3333-4333-8333-333333333333"
+        window, stage_controller, _joystick, _timer, _statuses = _make_main(120.0)
+        exact_timer = self._prepare_exact_step(window)
+        self.assertTrue(
+            Main._start_coordinate_targets_move(
+                window,
+                {"X": (50.0, 50.0)},
+                feedrate_mm_min=120.0,
+                source_label="API",
+                limit_targets={"X": 50.0},
+            )
+        )
+        motion_lease = self._select_gui_coordinate_system(window, frame_id)
+        window._stage_axis_display_values["X"] = 49.999
+        projection_calls: list[object] = []
+
+        def project(axis_values, *, mode, lease, allow_pose_rebase=False):
+            projection_calls.append(lease)
+            return types.SimpleNamespace(
+                accepted=True,
+                lease=motion_lease,
+                raw_targets=(("X", 10.0),),
+                raw_distances=(("X", 0.001),),
+                display_targets=(("X", 50.0),),
+                machine_targets=(("X", 10.0),),
+                reason="",
+            )
+
+        window._project_gui_coordinate_motion = project
+        Main._on_manual_axis_move_requested(window, "X", 0.001, "G91", 120.0)
+        exact_timer.fire()
+        changed_pivot_lease = types.SimpleNamespace(
+            basis_fingerprint=(frame_id, "changed-pivot")
+        )
+        window._coordinate_system_coordinator.snapshot = lambda: types.SimpleNamespace(
+            selected_frame_id=frame_id,
+            display_plan=types.SimpleNamespace(selection_available=True),
+            motion_lease=changed_pivot_lease,
+        )
+        stage_controller.busy = False
+
+        with mock.patch.object(
+            main_module.stage_position_update,
+            "publish_stage_position_estimate",
+        ):
+            stage_move_lifecycle.on_move_finished(window, False, "Limit reached.")
+
+        self.assertEqual(projection_calls, [motion_lease])
+        self.assertEqual(stage_controller.requests, [({"X": 50.0}, 120.0)])
+        self.assertEqual(window._exact_step_accumulator.targets, {})
+        self.assertEqual(window._pending_stage_axis_targets, {})
+        self.assertFalse(exact_timer.isActive())
+
+    def test_non_machine_step_followup_rebases_pose_on_same_coordinate_basis(
+        self,
+    ) -> None:
+        frame_id = "33333333-3333-4333-8333-333333333333"
+        window, stage_controller, _joystick, _timer, _statuses = _make_main(120.0)
+        exact_timer = self._prepare_exact_step(window)
+        start_lease = self._select_gui_coordinate_system(window, frame_id)
+        current_lease = {"value": start_lease}
+        window._coordinate_system_coordinator.snapshot = lambda: types.SimpleNamespace(
+            selected_frame_id=frame_id,
+            display_plan=types.SimpleNamespace(selection_available=True),
+            motion_lease=current_lease["value"],
+        )
+        calls: list[tuple[object, bool, tuple[tuple[str, float], ...]]] = []
+
+        def project(
+            axis_values,
+            *,
+            mode,
+            lease,
+            allow_pose_rebase=False,
+        ):
+            values = tuple(axis_values)
+            calls.append((lease, bool(allow_pose_rebase), values))
+            if lease is not current_lease["value"] and not allow_pose_rebase:
+                return types.SimpleNamespace(
+                    accepted=False,
+                    lease=current_lease["value"],
+                    raw_targets=(),
+                    raw_distances=(),
+                    display_targets=(),
+                    machine_targets=(),
+                    reason="Coordinate System authority changed before movement.",
+                )
+            display_x = dict(values)["X"]
+            return types.SimpleNamespace(
+                accepted=True,
+                lease=current_lease["value"],
+                raw_targets=(("X", display_x + 9.0), ("Y", 20.0)),
+                raw_distances=(("X", 0.001),),
+                display_targets=(("X", display_x), ("Y", 2.0)),
+                machine_targets=(("X", display_x), ("Y", 2.0)),
+                reason="",
+            )
+
+        window._project_gui_coordinate_motion = project
+        window._stage_axis_display_values.update({"X": 1.0, "Y": 2.0})
+        Main._on_manual_axis_move_requested(window, "X", 0.001, "G91", 120.0)
+        with mock.patch.object(
+            main_module.stage_position_update,
+            "publish_stage_position_estimate",
+        ):
+            exact_timer.fire()
+        next_lease = types.SimpleNamespace(basis_fingerprint=(frame_id,))
+        current_lease["value"] = next_lease
+        stage_controller.busy = True
+        stage_controller.latest_state = "Jog"
+
+        Main._on_manual_axis_move_requested(window, "X", 0.001, "G91", 120.0)
+        exact_timer.fire()
+
+        self.assertEqual(len(stage_controller.requests), 1)
+        stage_controller.busy = False
+        stage_controller.latest_state = "Idle"
+        window._coordinate_targets.started_at = None
+        window._coordinate_targets.seen_active_state = True
+        with mock.patch.object(
+            main_module.stage_position_update,
+            "publish_stage_position_estimate",
+        ):
+            stage_move_lifecycle.finish_coordinate_move_if_idle(
+                window,
+                (10.001, 20.0, 0.0, 0.0, 0.0, 0.0),
+                monotonic_s=time.monotonic(),
+                schedule_single_shot=lambda _delay, callback: callback(),
+            )
+
+        self.assertEqual(len(stage_controller.requests), 2)
+        self.assertEqual([call[1] for call in calls], [False, False, True, True])
+        self.assertIs(calls[2][0], start_lease)
+        self.assertIs(calls[3][0], next_lease)
 
     def test_step_presses_accumulate_during_one_fixed_window(self) -> None:
         window, stage_controller, _joystick, _timer, _statuses = _make_main(120.0)

@@ -64,6 +64,170 @@ def test_design_activation_adopts_candidate_state_without_replacing_session(
     assert isinstance(activated.intents[0], SaveCoordinateFramesIntent)
 
 
+def test_design_activation_uses_owned_session_when_adapter_omits_state(
+    tmp_path: Path,
+) -> None:
+    document = _document(tmp_path)
+    coordinator, registry, session = _loaded_coordinator(document, None)
+
+    activated = coordinator.activate_design(
+        coordinator_model.DesignActivationRequest(
+            session_state=None,
+            frame_metadata=DesignFrameMetadata.from_document(document),
+            machine_snapshot=_machine_snapshot(1.0, 2.0, 0.0),
+            pivot_machine_xy=(0.0, 0.0),
+            objective_xy_offset=(0.0, 0.0),
+        )
+    )
+
+    assert activated.accepted
+    assert session.active_frame_id is not None
+    assert registry.get(session.active_frame_id) is not None
+
+
+def test_normal_activation_uses_preobserved_source_identity_without_resolve(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    document = _document(tmp_path)
+    coordinator, _registry, session = _loaded_coordinator(document, None)
+    metadata = DesignFrameMetadata.from_document(document)
+
+    with monkeypatch.context() as filesystem:
+        filesystem.setattr(
+            Path,
+            "resolve",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("coordinator activation resolved a source path")
+            ),
+        )
+        activated = coordinator.activate_design(
+            coordinator_model.DesignActivationRequest(
+                session_state=session.snapshot_state(),
+                frame_metadata=metadata,
+                machine_snapshot=_machine_snapshot(1.0, 2.0, 0.0),
+                pivot_machine_xy=(0.0, 0.0),
+                objective_xy_offset=(0.0, 0.0),
+            )
+        )
+
+    assert activated.accepted
+
+
+def test_normal_activation_without_preobserved_metadata_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    document = _document(tmp_path)
+    coordinator, _registry, session = _loaded_coordinator(document, None)
+
+    with monkeypatch.context() as filesystem:
+        filesystem.setattr(
+            Path,
+            "stat",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("coordinator activation inspected a source file")
+            ),
+        )
+        filesystem.setattr(
+            Path,
+            "resolve",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("coordinator activation resolved a source path")
+            ),
+        )
+        activated = coordinator.activate_design(
+            coordinator_model.DesignActivationRequest(
+                session_state=session.snapshot_state(),
+                frame_metadata=None,
+                machine_snapshot=_machine_snapshot(1.0, 2.0, 0.0),
+                pivot_machine_xy=(0.0, 0.0),
+                objective_xy_offset=(0.0, 0.0),
+            )
+        )
+
+    assert not activated.accepted
+    assert activated.notices
+    assert "metadata" in activated.notices[0].message.lower()
+
+
+def test_legacy_missing_b_block_uses_preobserved_state_without_serializing(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    document = _document(tmp_path)
+    coordinator, _registry, session = _loaded_coordinator(document, None)
+    session.source_design_marks = ((0.0, 0.0), (1000.0, 0.0))
+    session.source_stage_marks = ((3.0, 4.0), (4.0, 4.0))
+    metadata = DesignFrameMetadata.from_document(document)
+    monkeypatch.setattr(
+        DesignSession,
+        "export_persisted_state",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("legacy block serialized on the coordinator thread")
+        ),
+    )
+
+    activated = coordinator.activate_design(
+        coordinator_model.DesignActivationRequest(
+            session_state=session.snapshot_state(),
+            frame_metadata=metadata,
+            machine_snapshot=None,
+            pivot_machine_xy=(0.0, 0.0),
+            objective_xy_offset=(0.0, 0.0),
+        )
+    )
+
+    assert activated.accepted
+    assert activated.intents == ()
+    assert session.legacy_registration_waiting_for_b
+
+
+def test_legacy_with_b_without_preobserved_metadata_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    document = _document(tmp_path)
+    coordinator, _registry, session = _loaded_coordinator(document, None)
+    session.source_design_marks = ((0.0, 0.0), (1000.0, 0.0))
+    session.source_stage_marks = ((3.0, 4.0), (4.0, 4.0))
+    session._legacy_stage_coordinate_provenance = {
+        "position_reporting_mode": "machine",
+        "coordinate_system": None,
+        "work_offset": [0.0] * 6,
+    }
+    session._legacy_stage_coordinate_provenance_present = True
+
+    with monkeypatch.context() as filesystem:
+        filesystem.setattr(
+            Path,
+            "stat",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("legacy activation inspected a source file")
+            ),
+        )
+        filesystem.setattr(
+            Path,
+            "resolve",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("legacy activation resolved a source path")
+            ),
+        )
+        activated = coordinator.activate_design(
+            coordinator_model.DesignActivationRequest(
+                session_state=session.snapshot_state(),
+                frame_metadata=None,
+                machine_snapshot=_machine_snapshot(1.0, 2.0, 0.0),
+                pivot_machine_xy=(0.0, 0.0),
+                objective_xy_offset=(0.0, 0.0),
+            )
+        )
+
+    assert not activated.accepted
+    assert activated.notices
+    assert "metadata" in activated.notices[0].message.lower()
+
+
 def test_missing_active_frame_is_not_exposed_and_reconciles_to_existing_sibling(
     tmp_path: Path,
 ) -> None:
@@ -414,7 +578,7 @@ def test_legacy_rewrite_rebases_on_route_saved_before_frame_ack(
         machine_b_deg=0.0,
         pivot_machine_xy=(0.0, 0.0),
     )
-    newer_save = coordinator.publish_frame_records(
+    newer_save = coordinator._publish_frame_records(
         FrameRecordsPublication.for_committed_record(
             registry.snapshot().records,
             newer,
@@ -484,7 +648,11 @@ def test_unavailable_current_legacy_rewrite_state_fails_closed(
         )
     )
     save = activated.intents[0]
-    monkeypatch.setattr(session, "export_persisted_state", lambda: current_state)
+    monkeypatch.setattr(
+        coordinator._registration._activation,
+        "_persisted_state",
+        lambda *_args, **_kwargs: current_state,
+    )
 
     frame_saved = coordinator.complete(
         CoordinateAdapterCompletion(
@@ -569,7 +737,7 @@ def test_old_save_failure_cannot_restore_session_over_newer_activation(
     frame_b = _draft(document)
     assert frame_a.frame_id != frame_b.frame_id
     coordinator, registry, session = _loaded_coordinator(document, frame_a)
-    add_sibling = coordinator.publish_frame_records(
+    add_sibling = coordinator._publish_frame_records(
         FrameRecordsPublication(records=(frame_a, frame_b))
     ).intents[0]
     coordinator.complete(
@@ -588,7 +756,7 @@ def test_old_save_failure_cannot_restore_session_over_newer_activation(
         machine_b_deg=0.0,
         pivot_machine_xy=(0.0, 0.0),
     )
-    pending = coordinator.publish_frame_records(
+    pending = coordinator._publish_frame_records(
         FrameRecordsPublication.for_committed_record(
             registry.snapshot().records,
             changed_a,

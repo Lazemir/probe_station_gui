@@ -4,9 +4,17 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
+import math
 from typing import TYPE_CHECKING, TypeAlias
 
-from .model import CoordinateFrameRecord
+from .model import (
+    STAGE_AXES,
+    AxisReadiness,
+    CoordinateFrameRecord,
+    PhysicalMachinePose,
+)
+from .presentation import CoordinateDisplayPlan
+from .transforms import BFrameTransform
 
 if TYPE_CHECKING:
     from probe_station_gui.design.session import (
@@ -14,8 +22,14 @@ if TYPE_CHECKING:
         DesignSession,
         DesignSessionState,
     )
+    from probe_station_gui.design.frame_registration import DesignFrameMetadata
+    from probe_station_gui.design.model import DesignDocument
+    from probe_station_gui.stage.machine_coordinates import MachineCoordinateSnapshot
 
     from .persistence import CoordinateFrameDocument
+    from probe_station_gui.settings.software_coordinates import (
+        SoftwareCoordinateSettings,
+    )
 
 
 @dataclass(frozen=True)
@@ -70,6 +84,11 @@ class ReadPhysicalAIntent:
 
 
 @dataclass(frozen=True)
+class PersistCoordinateSelectionIntent:
+    frame_id: str
+
+
+@dataclass(frozen=True)
 class RewriteLegacyDesignStateIntent:
     """Replace controller-owned legacy Design state after frame durability."""
 
@@ -81,11 +100,148 @@ CoordinateAdapterIntent: TypeAlias = (
     CaptureMachinePoseIntent
     | LoadCoordinateFramesIntent
     | MoveToFocusTargetIntent
+    | PersistCoordinateSelectionIntent
     | ReadPhysicalAIntent
     | RewriteLegacyDesignStateIntent
     | RunAutofocusIntent
     | SaveCoordinateFramesIntent
 )
+
+
+@dataclass(frozen=True)
+class CoordinateSystemSelection:
+    frame_id: str
+
+    def __post_init__(self) -> None:
+        frame_id = str(self.frame_id).strip()
+        if not frame_id:
+            raise ValueError("Coordinate System ID must not be empty.")
+        object.__setattr__(self, "frame_id", frame_id)
+
+
+@dataclass(frozen=True)
+class CoordinateAuthorityObservation:
+    physical_pose: PhysicalMachinePose
+    homed_axes: frozenset[str]
+    machine_snapshot: MachineCoordinateSnapshot | None
+    pivot_machine_xy: tuple[float, float] | None
+    objective_xy_offset: tuple[float, float] = (0.0, 0.0)
+    pivot_error: str | None = None
+    pivot_error_permanent: bool = False
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.physical_pose, PhysicalMachinePose):
+            raise TypeError("physical_pose must be a PhysicalMachinePose")
+        object.__setattr__(
+            self,
+            "homed_axes",
+            frozenset(str(axis).strip().upper() for axis in self.homed_axes),
+        )
+        if self.pivot_error_permanent and not str(self.pivot_error or "").strip():
+            raise ValueError("A permanent pivot error requires a reason.")
+
+
+@dataclass(frozen=True)
+class CoordinateMotionLease:
+    """Immutable selected-system basis shared by display and one GUI move."""
+
+    selected_frame_id: str
+    available: bool
+    reason: str | None
+    record: CoordinateFrameRecord | None
+    authority: CoordinateAuthorityObservation
+    display_values: tuple[tuple[str, float], ...]
+    basis_fingerprint: tuple[object, ...]
+    fingerprint: tuple[object, ...]
+
+
+@dataclass(frozen=True)
+class CoordinateMotionRequest:
+    """Absolute or relative GUI-axis values tied to one displayed snapshot."""
+
+    lease: CoordinateMotionLease
+    mode: str
+    axis_values: tuple[tuple[str, float], ...]
+    allow_pose_rebase: bool = False
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.lease, CoordinateMotionLease):
+            raise TypeError("lease must be a CoordinateMotionLease")
+        mode = str(self.mode).strip().upper()
+        if mode not in {"G90", "G91"}:
+            raise ValueError("Coordinate motion mode must be G90 or G91.")
+        normalized: list[tuple[str, float]] = []
+        seen: set[str] = set()
+        for raw_axis, raw_value in self.axis_values:
+            axis = str(raw_axis).strip().upper()
+            if axis not in STAGE_AXES:
+                raise ValueError(f"Unsupported stage axis {raw_axis!r}.")
+            if axis in seen:
+                raise ValueError(f"Coordinate motion axis {axis} appears more than once.")
+            value = float(raw_value)
+            if not math.isfinite(value):
+                raise ValueError(f"{axis} coordinate must be finite.")
+            seen.add(axis)
+            normalized.append((axis, value))
+        if not normalized:
+            raise ValueError("Coordinate motion requires at least one axis value.")
+        object.__setattr__(self, "mode", mode)
+        object.__setattr__(self, "axis_values", tuple(normalized))
+        object.__setattr__(self, "allow_pose_rebase", bool(self.allow_pose_rebase))
+
+
+@dataclass(frozen=True)
+class CoordinateMotionProjection:
+    """Configured Machine targets/vector derived from one GUI motion lease."""
+
+    lease: CoordinateMotionLease
+    accepted: bool
+    raw_targets: tuple[tuple[str, float], ...] = ()
+    raw_distances: tuple[tuple[str, float], ...] = ()
+    display_targets: tuple[tuple[str, float], ...] = ()
+    machine_targets: tuple[tuple[str, float], ...] = ()
+    reason: str = ""
+
+
+@dataclass(frozen=True)
+class CustomSystemsRequest:
+    settings: SoftwareCoordinateSettings
+
+
+@dataclass(frozen=True)
+class DesignCalibrationObservation:
+    fingerprints: tuple[tuple[str, str], ...]
+
+
+@dataclass(frozen=True)
+class DesignCoordinateLease:
+    """One immutable, current-or-stale capability for Design projection."""
+
+    load_complete: bool
+    frame_id: str | None
+    frame_version: int | None
+    transform: BFrameTransform | None
+    readiness: tuple[tuple[str, AxisReadiness], ...]
+    provenance_error: str | None
+    authority_blocked_axes: frozenset[str]
+    rejection_reason: str | None
+    document: DesignDocument | None
+    metadata: DesignFrameMetadata | None
+    machine_coordinate_snapshot: MachineCoordinateSnapshot | None
+    pivot_machine_xy: tuple[float, float] | None
+    objective_xy_offset: tuple[float, float]
+    fingerprint: tuple[object, ...]
+
+    @property
+    def usable(self) -> bool:
+        return self.rejection_reason is None
+
+    @property
+    def reason(self) -> str | None:
+        return self.rejection_reason
+
+    def readiness_for(self, axis: str) -> AxisReadiness | None:
+        return dict(self.readiness).get(str(axis).strip().upper())
 
 
 @dataclass(frozen=True)
@@ -107,8 +263,34 @@ class RegistrationCaptureRequest:
 
 
 @dataclass(frozen=True)
+class RegistrationSourceMarkRequest:
+    point: tuple[float, float]
+    slot: int | None = None
+
+
+@dataclass(frozen=True)
+class RegistrationSourceMarksRequest:
+    points: tuple[tuple[float, float], ...]
+
+
+@dataclass(frozen=True)
+class RegistrationCheckMarkRequest:
+    point: tuple[float, float]
+
+
+@dataclass(frozen=True)
+class RegistrationInvalidationRequest:
+    reason: str
+
+
+@dataclass(frozen=True)
+class RegistrationAlignmentRequest:
+    preparation: object
+
+
+@dataclass(frozen=True)
 class DesignActivationRequest:
-    session_state: DesignSessionState
+    session_state: DesignSessionState | None
     frame_metadata: object | None
     machine_snapshot: object | None
     pivot_machine_xy: tuple[float, float] | None
@@ -117,6 +299,8 @@ class DesignActivationRequest:
     create_new: bool = False
     create_new_if_registered: bool = False
     homed_axes: frozenset[str] = frozenset({"X", "Y"})
+    workspace_before: DesignWorkspaceCheckpoint | None = None
+    workspace_after: DesignWorkspaceCheckpoint | None = None
 
 
 @dataclass(frozen=True)
@@ -210,6 +394,15 @@ class OperatorPickRelease:
 
 
 @dataclass(frozen=True)
+class RegistrationProjection:
+    valid: bool
+    status: str
+    source_stage_marks: tuple[tuple[float, float], ...]
+    matrix: tuple[tuple[float, float], tuple[float, float]]
+    design_unit_mm: float
+
+
+@dataclass(frozen=True)
 class FinishOperatorAlignmentUiEffect:
     """Finish the exact operator-alignment draft just published."""
 
@@ -222,8 +415,31 @@ class RestoreOperatorAlignmentUiEffect:
     stage_marks: tuple[tuple[float, float] | None, ...]
 
 
+@dataclass(frozen=True)
+class DesignWorkspaceCheckpoint:
+    """Detached adapter-owned Design presentation and navigation state."""
+
+    session_state: DesignSessionState
+    frame_metadata: object | None = None
+    markup: object | None = None
+    direct_guide_ids: tuple[str, ...] = ()
+    pending_visibility: object | None = None
+    last_selected_design_point: tuple[float, float] | None = None
+    pending_alignment_preparation: object | None = None
+
+
+@dataclass(frozen=True)
+class RestoreDesignWorkspaceUiEffect:
+    """Three-way rollback one optimistic adapter workspace checkpoint."""
+
+    previous: DesignWorkspaceCheckpoint
+    applied: DesignWorkspaceCheckpoint
+
+
 CoordinateUiEffect: TypeAlias = (
-    FinishOperatorAlignmentUiEffect | RestoreOperatorAlignmentUiEffect
+    FinishOperatorAlignmentUiEffect
+    | RestoreOperatorAlignmentUiEffect
+    | RestoreDesignWorkspaceUiEffect
 )
 
 
@@ -231,8 +447,13 @@ CoordinateUiEffect: TypeAlias = (
 class RegistrationWorkflowSnapshot:
     active_frame_id: str | None = None
     active_frame_version: int | None = None
+    source_design_marks: tuple[tuple[float, float], ...] = ()
     source_stage_marks: tuple[tuple[float, float], ...] = ()
+    check_design_marks: tuple[tuple[float, float], ...] = ()
     check_stage_marks: tuple[tuple[float, float], ...] = ()
+    registration_valid: bool = False
+    registration_status: str = "No design registration."
+    registration_projection: RegistrationProjection | None = None
     operator_stage_marks: tuple[tuple[float, float] | None, ...] = ()
     alignment_fit_residuals: tuple[float, float] | None = None
     focus_candidate: object | None = None
@@ -430,6 +651,9 @@ class CoordinateSystemSnapshot:
     records: tuple[CoordinateFrameRecord, ...]
     document: CoordinateFrameDocument | None
     selected_frame_id: str = "machine"
+    display_plan: CoordinateDisplayPlan | None = None
+    design_lease: DesignCoordinateLease | None = None
+    motion_lease: CoordinateMotionLease | None = None
     registration: RegistrationWorkflowSnapshot = field(
         default_factory=RegistrationWorkflowSnapshot
     )
@@ -462,10 +686,19 @@ __all__ = [
     "CoordinateAdapterIntent",
     "CaptureMachinePoseIntent",
     "CoordinateNotice",
+    "CoordinateAuthorityObservation",
+    "CoordinateMotionLease",
+    "CoordinateMotionProjection",
+    "CoordinateMotionRequest",
+    "CoordinateSystemSelection",
+    "CustomSystemsRequest",
+    "DesignCalibrationObservation",
+    "DesignCoordinateLease",
     "CoordinateSystemSnapshot",
     "CoordinateTransition",
     "FinishOperatorAlignmentUiEffect",
     "DesignSessionCheckpoint",
+    "DesignWorkspaceCheckpoint",
     "DesignActivationRequest",
     "DesignSessionFrameLink",
     "FrameRecordsPublication",
@@ -481,10 +714,18 @@ __all__ = [
     "MachineProfileObservation",
     "OperatorPickRelease",
     "RegistrationCaptureRequest",
+    "RegistrationAlignmentRequest",
+    "RegistrationCheckMarkRequest",
+    "RegistrationInvalidationRequest",
+    "RegistrationSourceMarkRequest",
+    "RegistrationSourceMarksRequest",
     "RegistrationOpticalObservation",
+    "RegistrationProjection",
     "RegistrationWorkflowSnapshot",
     "RestoreOperatorAlignmentUiEffect",
+    "RestoreDesignWorkspaceUiEffect",
     "PhysicalAReadResult",
+    "PersistCoordinateSelectionIntent",
     "ReadPhysicalAIntent",
     "RewriteLegacyDesignStateIntent",
     "MoveToFocusTargetIntent",

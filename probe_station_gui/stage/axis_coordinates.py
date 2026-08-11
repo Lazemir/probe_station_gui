@@ -16,6 +16,9 @@ from probe_station_gui.stage.axis_mapping import (
     curve_from_settings,
 )
 from probe_station_gui.stage.errors import StageControllerError
+from probe_station_gui.stage.machine_coordinates import (
+    MachineCoordinateSnapshotUnavailable,
+)
 from probe_station_gui.stage.needle_targets import normalise_needle_lowering_target
 from probe_station_gui.stage.types import _Status
 
@@ -38,6 +41,22 @@ class StageControllerAxisCoordinatesMixin:
             if curve is not None:
                 curves[axis] = curve
         self._axis_calibrations = curves
+        cached = self._last_machine_coordinate_snapshot
+        if cached is not None:
+            try:
+                self._last_machine_coordinate_snapshot = cached.remap(
+                    self._axis_calibration_mapper()
+                )
+            except MachineCoordinateSnapshotUnavailable:
+                self._last_machine_coordinate_snapshot = None
+        live_cached = self._last_motion_coordinate_snapshot
+        if live_cached is not None:
+            try:
+                self._last_motion_coordinate_snapshot = live_cached.remap(
+                    self._axis_calibration_mapper()
+                )
+            except MachineCoordinateSnapshotUnavailable:
+                self._last_motion_coordinate_snapshot = None
 
     def axis_a_gcode_coordinate_for_lowering(self, lowering_mm: float) -> float:
         """Map physical A lowering to a raw machine A coordinate."""
@@ -173,6 +192,35 @@ class StageControllerAxisCoordinatesMixin:
             )
         except (CalibrationOutOfDomain, CalibrationCoordinateUnavailable):
             return None
+
+    def axis_machine_display_limits(
+        self,
+        axis: str,
+    ) -> tuple[float, float] | None:
+        """Return software/calibration limits in physical Machine coordinates."""
+
+        normalized = str(axis).strip().upper()
+        mapper = self._axis_calibration_mapper()
+        software_limits = self._axis_limits.get(normalized)
+        calibration_limits = mapper.controller_domain(normalized)
+        if software_limits is None:
+            raw_limits = calibration_limits
+        elif calibration_limits is None:
+            raw_limits = software_limits
+        else:
+            lower = max(float(software_limits[0]), float(calibration_limits[0]))
+            upper = min(float(software_limits[1]), float(calibration_limits[1]))
+            raw_limits = None if lower > upper else (lower, upper)
+        if raw_limits is None:
+            return None
+        try:
+            physical = (
+                mapper.controller_to_physical(normalized, float(raw_limits[0])),
+                mapper.controller_to_physical(normalized, float(raw_limits[1])),
+            )
+        except CalibrationOutOfDomain:
+            return None
+        return min(physical), max(physical)
 
     def _axis_calibration_mapper(self) -> StageAxisCalibrationMapper:
         return StageAxisCalibrationMapper(

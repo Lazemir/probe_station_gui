@@ -1,9 +1,15 @@
 from __future__ import annotations
 
+import inspect
 import types
 
 import pytest
 
+from probe_station_gui.coordinates.coordinator_model import (
+    CoordinateSystemSnapshot,
+    CoordinateTransition,
+    RegistrationWorkflowSnapshot,
+)
 from probe_station_gui.settings.axis_calibration_config import (
     AxisCalibrationSettings,
     default_axis_calibrations,
@@ -121,6 +127,18 @@ class _Owner:
             document=object(),
             registration=types.SimpleNamespace(valid=True),
         )
+        coordinate_snapshot = CoordinateSystemSnapshot(
+            frames_loaded=True,
+            records=(),
+            document=None,
+            registration=RegistrationWorkflowSnapshot(registration_valid=True),
+        )
+        self._coordinate_system_coordinator = types.SimpleNamespace(
+            snapshot=lambda: coordinate_snapshot,
+            observe_authority=lambda _observation: CoordinateTransition(
+                coordinate_snapshot
+            ),
+        )
         self._current_design_stage_xy = (9.0, 9.0)
         self.contact_calibration_window = None
         self.calls: list[tuple[str, object]] = []
@@ -168,12 +186,6 @@ class _Owner:
     def _invalidate_design_registration(self, message: str) -> None:
         self.calls.append(("invalidate", message))
 
-    def _apply_coordinate_frame_authority_blocks(
-        self,
-        position: tuple[float, ...] | None = None,
-    ) -> None:
-        self.calls.append(("frame_authority", position))
-
     def _log_design_position_reconcile(
         self,
         predicted_stage_xy: tuple[float, float],
@@ -207,6 +219,13 @@ def test_invalid_stage_position_uses_display_only_owner_seam(monkeypatch) -> Non
     assert owner.calls == [("display", ["bad"])]
 
 
+def test_position_update_reads_registration_projection_only_from_coordinator() -> None:
+    source = inspect.getsource(position_update.on_stage_position_changed)
+
+    assert "_design_session" not in source
+    assert "_coordinate_system_coordinator.snapshot()" in source
+
+
 def test_unhomed_fallback_clears_prediction_and_keeps_idle_finish_order(
     monkeypatch,
 ) -> None:
@@ -230,6 +249,11 @@ def test_unhomed_fallback_clears_prediction_and_keeps_idle_finish_order(
         "finish_coordinate_move_if_idle",
         lambda _owner, position, **_kwargs: owner.calls.append(("finish", position)),
     )
+    monkeypatch.setattr(
+        position_update.connection_flow,
+        "observe_coordinate_authority",
+        lambda _owner, pose: owner.calls.append(("authority", pose)),
+    )
 
     position_update.on_stage_position_changed(owner, (1.0, 2.0, 3.0))
 
@@ -238,8 +262,8 @@ def test_unhomed_fallback_clears_prediction_and_keeps_idle_finish_order(
     assert owner._planned_move_stage_xy is None
     assert owner.calls == [
         ("restore", (1.0, 2.0, 3.0)),
-        ("frame_authority", (1.0, 2.0, 3.0)),
         ("display", (1.0, 2.0, 3.0)),
+        ("authority", owner._latest_physical_machine_pose),
         ("coordinate", None),
         ("design", (1.0, 2.0)),
         ("finish", (1.0, 2.0, 3.0)),
@@ -262,19 +286,25 @@ def test_preferred_design_stage_xy_clears_completed_planned_wait_state() -> None
     assert owner._planned_move_stop_status_timestamp is None
 
 
-def test_fresh_status_without_b_temporarily_refreshes_frame_authority() -> None:
+def test_position_publication_observes_authority_without_main_policy_helper(
+    monkeypatch,
+) -> None:
     owner = _Owner()
-    signal_plan = types.SimpleNamespace(
-        b_axis=types.SimpleNamespace(current_b=None),
+    observations: list[object] = []
+    monkeypatch.setattr(
+        position_update.stage_position_panel,
+        "update_stage_position_display",
+        lambda _owner, _position: None,
+    )
+    monkeypatch.setattr(
+        position_update.connection_flow,
+        "observe_coordinate_authority",
+        lambda _owner, pose: observations.append(pose),
     )
 
-    position_update._apply_b_axis_registration(
-        owner,
-        signal_plan,
-        (1.0, 2.0, 3.0),
-    )
+    position_update.publish_stage_position_estimate(owner, (1.0, 2.0, 3.0))
 
-    assert ("frame_authority", (1.0, 2.0, 3.0)) in owner.calls
+    assert observations == [None]
 
 
 def test_actual_position_update_maps_cached_machine_mpos_once_not_work_or_wco(

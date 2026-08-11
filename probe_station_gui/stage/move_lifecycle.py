@@ -5,6 +5,9 @@ from __future__ import annotations
 import logging
 from typing import Any, Callable, Protocol
 
+from probe_station_gui.coordinates.coordinator_model import (
+    RegistrationAlignmentRequest,
+)
 from probe_station_gui.views import main_window_homing as homing_ui
 from probe_station_gui.views import main_window_stage_position_panel as stage_position_panel
 
@@ -42,7 +45,7 @@ class StageMoveLifecycleOwner(Protocol):
     _planned_move_ends_at: float | None
     _planned_move_stop_status_timestamp: float | None
     _pending_stage_axis_targets: dict[str, tuple[float, float]]
-    _design_session: Any
+    _coordinate_system_coordinator: Any
     design_navigator_panel: Any
     microscope_scan_dialog: Any
     surface_map_window: Any
@@ -71,6 +74,7 @@ class StageMoveLifecycleOwner(Protocol):
         self,
         success: bool,
         finished_display_targets: dict[str, float],
+        finished_display_basis: object | None,
     ) -> None: ...
 
 
@@ -187,10 +191,11 @@ def finish_coordinate_move_if_idle(
     if decision.stage_position is not None:
         owner._coordinate_targets.stage_position = decision.stage_position
     finished_display_targets = dict(owner._coordinate_targets.display_targets)
+    finished_display_basis = owner._coordinate_targets.display_basis
     clear_coordinate_move_tracking(owner, clear_pending=False, reset_override=True)
     callback = getattr(owner, "_on_coordinate_move_finished", None)
     if callable(callback):
-        callback(True, finished_display_targets)
+        callback(True, finished_display_targets, finished_display_basis)
     if owner._pending_homing_axes:
         schedule_single_shot(
             0,
@@ -216,6 +221,7 @@ def on_move_finished(
     _finish_target_cross(owner, success)
     if _coordinate_tracking_should_clear(success, message_lower):
         finished_display_targets = dict(owner._coordinate_targets.display_targets)
+        finished_display_basis = owner._coordinate_targets.display_basis
         clear_coordinate_move_tracking(
             owner,
             clear_pending=not success,
@@ -224,7 +230,7 @@ def on_move_finished(
         stage_position_panel.clear_stage_motion_axes(owner)
         callback = getattr(owner, "_on_coordinate_move_finished", None)
         if callable(callback):
-            callback(success, finished_display_targets)
+            callback(success, finished_display_targets, finished_display_basis)
     if message:
         owner._show_status(message, 5000)
     owner._schedule_cancel_state_refresh()
@@ -380,7 +386,12 @@ def _finish_pending_alignment_preparation(
     preparation = owner._pending_alignment_preparation
     owner._pending_alignment_preparation = None
     if success:
-        owner._design_session.apply_prepared_alignment(preparation)
+        transition = owner._coordinate_system_coordinator.apply_registration_alignment(
+            RegistrationAlignmentRequest(preparation)
+        )
+        from probe_station_gui.views import main_window_connection_flow
+
+        main_window_connection_flow.apply_coordinate_transition(owner, transition)
         owner._finish_alignment_draft()
         owner._set_design_snap_enabled(False)
         owner._refresh_design_panel()

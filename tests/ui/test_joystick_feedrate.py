@@ -4,6 +4,7 @@ import sys
 import textwrap
 import types
 import unittest
+from typing import NamedTuple
 
 _PYSIDE6_MODULES = ("PySide6", "PySide6.QtCore", "PySide6.QtGui", "PySide6.QtWidgets")
 _ORIGINAL_PYSIDE6 = {name: sys.modules.get(name) for name in _PYSIDE6_MODULES}
@@ -171,6 +172,13 @@ class _ArgsSignalRecorder:
 
     def emit(self, *values) -> None:
         self.values.append(tuple(values))
+
+
+class _ProjectionResult(NamedTuple):
+    accepted: bool
+    raw_distances: tuple[tuple[str, float], ...]
+    lease: object | None
+    reason: str
 
 
 class _FakeSpin:
@@ -342,6 +350,30 @@ def _button_constructor_labels(*attribute_names: str) -> dict[str, str]:
 
 
 class JoystickFeedrateTest(unittest.TestCase):
+    @staticmethod
+    def _jog_widget() -> tuple[JoystickWindow, list[object], list[str]]:
+        widget = JoystickWindow.__new__(JoystickWindow)
+        sent: list[object] = []
+        warnings: list[str] = []
+        widget._active_axes = None
+        widget._active_jog_projection_lease = None
+        widget._pending_jog_axes = None
+        widget._key_stack = []
+        widget.serial_connection = types.SimpleNamespace(is_open=True)
+        widget.stage_controller = None
+        widget._linear_jog_distance_mm = 25.0
+        widget._rotary_jog_distance_deg = 5.0
+        widget._manual_axis_distance_mm = 1.0
+        widget._move_safety_check = lambda: True
+        widget._feedrate_for_axes = lambda _axes: 20.0
+        widget._clear_pending_key_activations = lambda: None
+        widget._schedule_jog_stop_resend = lambda: None
+        widget.send_command = lambda command: sent.append(command) or True
+        widget._show_warning = lambda message: warnings.append(str(message))
+        widget.jog_command_changed = _ArgsSignalRecorder()
+        widget.jog_stopped = _ArgsSignalRecorder()
+        return widget, sent, warnings
+
     def test_motion_button_labels_use_unicode_symbols(self) -> None:
         labels = _button_constructor_labels(
             "up_button",
@@ -667,6 +699,160 @@ class JoystickFeedrateTest(unittest.TestCase):
 
         self.assertEqual(sent, [])
         self.assertEqual(widget.jog_stopped.values, [])
+
+    def test_coordinate_system_change_cancels_jog_and_held_key_state(self) -> None:
+        widget, sent, _warnings = self._jog_widget()
+        widget._key_stack = [("key", "W")]
+        widget._key_press_times = {("key", "W"): 1.0}
+        cleared: list[object] = []
+        widget._clear_pending_key_activations = lambda: cleared.append("pending")
+        widget._sync_physical_key_watchdog = lambda: cleared.append("watchdog")
+        JoystickWindow._apply_axes(widget, (("X", 1),))
+
+        JoystickWindow.cancel_jog_input(widget)
+
+        self.assertEqual(sent, ["$J=G91 G21 X25.000 F20.0\n", b"\x85"])
+        self.assertEqual(widget._key_stack, [])
+        self.assertEqual(widget._key_press_times, {})
+        self.assertEqual(cleared, ["pending", "watchdog"])
+        self.assertIsNone(widget._active_jog_projection_lease)
+
+    def test_initial_jog_projects_distances_and_stores_returned_lease(self) -> None:
+        widget, sent, _warnings = self._jog_widget()
+        lease = object()
+        calls: list[tuple[tuple[tuple[str, float], ...], object | None]] = []
+
+        def project(requested_distances, active_lease):
+            calls.append((requested_distances, active_lease))
+            return _ProjectionResult(True, (("Y", 2.5),), lease, "")
+
+        JoystickWindow.set_relative_motion_projector(widget, project)
+
+        JoystickWindow._apply_axes(widget, (("X", 1),))
+
+        self.assertEqual(calls, [((("X", 25.0),), None)])
+        self.assertEqual(sent, ["$J=G91 G21 Y2.500 F20.0\n"])
+        self.assertIs(widget._active_jog_projection_lease, lease)
+        self.assertEqual(widget._active_axes, (("X", 1),))
+        self.assertEqual(
+            widget.jog_command_changed.values,
+            [((("Y", 2.5),), 20.0)],
+        )
+
+    def test_feedrate_restart_reuses_active_projection_lease(self) -> None:
+        widget, _sent, _warnings = self._jog_widget()
+        lease = object()
+        observed_leases: list[object | None] = []
+
+        def project(requested_distances, active_lease):
+            observed_leases.append(active_lease)
+            return _ProjectionResult(True, requested_distances, lease, "")
+
+        JoystickWindow.set_relative_motion_projector(widget, project)
+        JoystickWindow._apply_axes(widget, (("X", 1),))
+
+        JoystickWindow._restart_active_jog_with_current_feedrate(widget)
+
+        self.assertEqual(observed_leases, [None, lease])
+        self.assertIs(widget._active_jog_projection_lease, lease)
+
+    def test_new_jog_after_stop_starts_without_previous_projection_lease(self) -> None:
+        widget, _sent, _warnings = self._jog_widget()
+        lease = object()
+        observed_leases: list[object | None] = []
+
+        def project(requested_distances, active_lease):
+            observed_leases.append(active_lease)
+            return _ProjectionResult(True, requested_distances, lease, "")
+
+        JoystickWindow.set_relative_motion_projector(widget, project)
+        JoystickWindow._apply_axes(widget, (("X", 1),))
+        JoystickWindow.stop_jog(widget)
+
+        JoystickWindow._apply_axes(widget, (("X", 1),))
+
+        self.assertEqual(observed_leases, [None, None])
+
+    def test_held_key_axis_chord_restart_reuses_active_projection_lease(self) -> None:
+        widget, _sent, _warnings = self._jog_widget()
+        lease = object()
+        calls: list[tuple[tuple[tuple[str, float], ...], object | None]] = []
+
+        def project(requested_distances, active_lease):
+            calls.append((requested_distances, active_lease))
+            return _ProjectionResult(True, requested_distances, lease, "")
+
+        JoystickWindow.set_relative_motion_projector(widget, project)
+        JoystickWindow._apply_axes(widget, (("X", 1),))
+
+        JoystickWindow._apply_axes(widget, (("X", 1), ("Y", 1)))
+
+        self.assertEqual(
+            calls,
+            [
+                ((("X", 25.0),), None),
+                ((("X", 25.0), ("Y", 25.0)), lease),
+            ],
+        )
+        self.assertIs(widget._active_jog_projection_lease, lease)
+
+    def test_projection_rejection_does_not_send_jog_and_surfaces_reason(self) -> None:
+        widget, sent, warnings = self._jog_widget()
+
+        def reject(_requested_distances, active_lease):
+            self.assertIsNone(active_lease)
+            return _ProjectionResult(
+                False,
+                (),
+                object(),
+                "Coordinate system changed.",
+            )
+
+        JoystickWindow.set_relative_motion_projector(widget, reject)
+
+        JoystickWindow._apply_axes(widget, (("X", 1),))
+
+        self.assertEqual(sent, [])
+        self.assertEqual(warnings, ["Coordinate system changed."])
+        self.assertEqual(widget.jog_command_changed.values, [((), 20.0)])
+        self.assertIsNone(widget._active_jog_projection_lease)
+        self.assertIsNone(widget._active_axes)
+
+    def test_projection_rejection_during_restart_clears_active_lease(self) -> None:
+        widget, sent, warnings = self._jog_widget()
+        lease = object()
+
+        def accept(requested_distances, _active_lease):
+            return _ProjectionResult(True, requested_distances, lease, "")
+
+        JoystickWindow.set_relative_motion_projector(widget, accept)
+        JoystickWindow._apply_axes(widget, (("X", 1),))
+
+        def reject(_requested_distances, active_lease):
+            self.assertIs(active_lease, lease)
+            return _ProjectionResult(False, (), lease, "Coordinate system changed.")
+
+        widget._relative_motion_projector = reject
+        JoystickWindow._restart_active_jog_with_current_feedrate(widget)
+
+        self.assertEqual(
+            [command for command in sent if isinstance(command, str)],
+            ["$J=G91 G21 X25.000 F20.0\n"],
+        )
+        self.assertEqual(warnings, ["Coordinate system changed."])
+        self.assertEqual(widget.jog_command_changed.values[-1], ((), 20.0))
+        self.assertIsNone(widget._active_jog_projection_lease)
+        self.assertIsNone(widget._active_axes)
+
+    def test_jog_without_projector_preserves_standalone_distances(self) -> None:
+        widget, sent, _warnings = self._jog_widget()
+
+        JoystickWindow.set_relative_motion_projector(widget, None)
+
+        JoystickWindow._apply_axes(widget, (("X", -1),))
+
+        self.assertEqual(sent, ["$J=G91 G21 X-25.000 F20.0\n"])
+        self.assertEqual(widget._active_axes, (("X", -1),))
 
     def test_known_down_state_marks_lower_button_blue(self) -> None:
         widget = JoystickWindow.__new__(JoystickWindow)

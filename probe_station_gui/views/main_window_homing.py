@@ -29,19 +29,18 @@ class MainWindowHomingOwner(Protocol):
 
     def _controller_latest_state_blocks_motion(self) -> bool: ...
     def _update_stage_coordinate_apply_state(self) -> None: ...
-    def _apply_coordinate_frame_authority_blocks(self) -> None: ...
 
 
 def on_limit_axes_changed(owner: MainWindowHomingOwner, axes: object) -> None:
     owner._stage_limit_axes = _normalized_limit_axes(owner, axes)
     predicted_position = _manual_jog_predicted_position(owner)
-    if predicted_position is not None:
-        stage_position_panel.update_stage_position_display(owner, predicted_position)
-        return
-    stage_position_panel.update_stage_position_display(
-        owner,
-        owner.stage_controller.latest_stage_position(),
+    display_position = (
+        predicted_position
+        if predicted_position is not None
+        else owner.stage_controller.latest_stage_position()
     )
+    stage_position_panel.update_stage_position_display(owner, display_position)
+    stage_position_panel.refresh_coordinate_frame_display(owner)
 
 
 def on_homing_status_changed(
@@ -50,9 +49,8 @@ def on_homing_status_changed(
 ) -> None:
     predicted_position = _manual_jog_predicted_position(owner)
     if predicted_position is not None:
-        stage_position_panel.update_stage_position_display(owner, predicted_position)
-        return
-    if (
+        display_position = predicted_position
+    elif (
         owner._planned_move_stage_xy is not None
         and (
             owner._planned_move_started_at is not None
@@ -61,18 +59,16 @@ def on_homing_status_changed(
     ):
         from probe_station_gui.stage.position_update import position_with_stage_xy
 
-        stage_position_panel.update_stage_position_display(
+        display_position = position_with_stage_xy(
             owner,
-            position_with_stage_xy(
-                owner,
-                owner._planned_move_stage_xy,
-            ),
+            owner._planned_move_stage_xy,
         )
-        return
-    stage_position_panel.update_stage_position_display(
-        owner,
-        owner.stage_controller.latest_stage_position(),
-    )
+    else:
+        display_position = owner.stage_controller.latest_stage_position()
+    stage_position_panel.update_stage_position_display(owner, display_position)
+    from probe_station_gui.views import main_window_connection_flow
+
+    main_window_connection_flow.observe_coordinate_authority(owner)
 
 
 def request_home_axis_from_ui(owner: MainWindowHomingOwner, axis: str) -> None:
@@ -176,7 +172,9 @@ def on_homing_action_finished(
         stage_position_panel.clear_stage_motion_axes(owner)
         owner._update_stage_coordinate_apply_state()
         return
-    owner._apply_coordinate_frame_authority_blocks()
+    from probe_station_gui.views import main_window_connection_flow
+
+    main_window_connection_flow.observe_coordinate_authority(owner)
     stage_position_panel.clear_stage_motion_axes(owner)
     refresh_pending_homing_ui(owner)
     owner._update_stage_coordinate_apply_state()

@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-from dataclasses import replace
-
 import pytest
 
 from probe_station_gui.coordinates import presentation as presentation_module
+from probe_station_gui.coordinates.lifecycle import MACHINE_FRAME_ID
 from probe_station_gui.coordinates.model import (
     AxisReadiness,
     CoordinateFrameRecord,
@@ -12,12 +11,8 @@ from probe_station_gui.coordinates.model import (
     PhysicalMachinePose,
     ReadinessStatus,
 )
-from probe_station_gui.coordinates.lifecycle import (
-    FrameSelectionContext,
-    FrameSelectionDecision,
-)
 from probe_station_gui.coordinates.presentation import (
-    MACHINE_FRAME_ID,
+    CoordinateSelectorEntry,
     build_coordinate_display_plan,
 )
 from probe_station_gui.coordinates.registry import RegistrySnapshot, invalidate_axes
@@ -25,390 +20,160 @@ from probe_station_gui.coordinates.transforms import BFrameTransform
 
 
 DESIGN_ID = "11111111-1111-4111-8111-111111111111"
-CUSTOM_ID = "22222222-2222-4222-8222-222222222222"
-DRAFT_ID = "33333333-3333-4333-8333-333333333333"
-
-
-def _readiness(*ready_axes: str) -> dict[str, AxisReadiness]:
-    ready = set(ready_axes)
-    return {
-        axis: AxisReadiness(
-            ReadinessStatus.READY if axis in ready else ReadinessStatus.MISSING,
-            "" if axis in ready else f"Register {axis}.",
-        )
-        for axis in ("X", "Y", "Z", "A", "B")
-    }
 
 
 def _record(
-    frame_id: str,
-    kind: FrameKind,
-    name: str,
     *,
     ready_axes: tuple[str, ...] = ("X", "Y", "Z", "A", "B"),
     transform: BFrameTransform | None = None,
 ) -> CoordinateFrameRecord:
-    if transform is None:
-        transform = BFrameTransform(
+    ready = set(ready_axes)
+    return CoordinateFrameRecord(
+        frame_id=DESIGN_ID,
+        kind=FrameKind.DESIGN,
+        name="chip",
+        version=0,
+        transform=transform
+        or BFrameTransform(
             origin_xy_at_reference_b=(0.0, 0.0),
             reference_b_deg=0.0,
             xy_angle_at_reference_b_deg=0.0,
             b_zero_machine_deg=0.0,
-            z_zero_machine_mm=0.0 if "Z" in ready_axes else None,
-            a_zero_machine_mm=0.0 if "A" in ready_axes else None,
-        )
-    return CoordinateFrameRecord(
-        frame_id=frame_id,
-        kind=kind,
-        name=name,
-        version=0,
-        transform=transform,
-        readiness=_readiness(*ready_axes),
+            z_zero_machine_mm=0.0 if "Z" in ready else None,
+            a_zero_machine_mm=0.0 if "A" in ready else None,
+        ),
+        readiness={
+            axis: AxisReadiness(
+                ReadinessStatus.READY if axis in ready else ReadinessStatus.MISSING,
+                "" if axis in ready else f"Register {axis}.",
+            )
+            for axis in ("X", "Y", "Z", "A", "B")
+        },
         metadata={},
     )
 
 
-def _snapshot(*records: CoordinateFrameRecord, generation: int = 1) -> RegistrySnapshot:
-    return RegistrySnapshot(generation=generation, records=tuple(records))
-
-
-def _pose(**overrides: float) -> PhysicalMachinePose:
-    values = {"X": 10.0, "Y": 0.0, "Z": 5.0, "A": 9.0, "B": 0.0}
-    values.update(overrides)
-    return PhysicalMachinePose(values)
-
-
 def _plan(
-    snapshot: RegistrySnapshot,
+    record: CoordinateFrameRecord,
     *,
-    selected_frame_id: str = MACHINE_FRAME_ID,
     pose: PhysicalMachinePose | None = None,
     homed_axes: set[str] | None = None,
     authority_axes: set[str] | None = None,
-    preview: bool = False,
+    selection_available: bool = True,
+    selection_reason: str | None = None,
 ):
+    snapshot = RegistrySnapshot(1, (record,))
+    entries = (
+        CoordinateSelectorEntry(MACHINE_FRAME_ID, "Machine", "Machine", True),
+        CoordinateSelectorEntry(
+            record.frame_id,
+            record.name,
+            "Designs",
+            selection_available,
+            selection_reason or "",
+        ),
+    )
     return build_coordinate_display_plan(
         snapshot,
-        selected_frame_id=selected_frame_id,
-        physical_pose=pose or _pose(),
+        selected_frame_id=record.frame_id,
+        physical_pose=pose
+        or PhysicalMachinePose({"X": 10.0, "Y": 0.0, "Z": 5.0, "A": 9.0, "B": 0.0}),
         pivot_machine_xy=(0.0, 0.0),
-        homed_axes={"X", "Y", "Z", "A"} if homed_axes is None else homed_axes,
+        homed_axes=(
+            {"X", "Y", "Z", "A"}
+            if homed_axes is None
+            else homed_axes
+        ),
         authority_axes={"X", "Y", "Z", "A", "B"}
         if authority_axes is None
         else authority_axes,
-        allow_unavailable_selection_for_preview=preview,
+        selector_entries=entries,
+        selection_available=selection_available,
+        selection_reason=selection_reason,
     )
 
 
-def test_selector_groups_machine_designs_and_customs_with_stable_ids() -> None:
-    snapshot = _snapshot(
-        _record(DESIGN_ID, FrameKind.DESIGN, "chip-a"),
-        _record(CUSTOM_ID, FrameKind.CUSTOM, "fixture"),
-    )
-
-    plan = _plan(snapshot)
-
-    assert [(entry.group, entry.name) for entry in plan.selector_entries] == [
-        ("Machine", "Machine"),
-        ("Designs", "chip-a"),
-        ("Custom", "fixture"),
-    ]
-    assert [entry.frame_id for entry in plan.selector_entries] == [
-        MACHINE_FRAME_ID,
-        DESIGN_ID,
-        CUSTOM_ID,
-    ]
-    assert all(entry.name != "Chip" for entry in plan.selector_entries)
-
-
-def test_design_draft_starts_all_visible_axes_yellow_with_exact_reasons() -> None:
-    draft = _record(
-        DRAFT_ID,
-        FrameKind.DESIGN,
-        "chip-draft",
-        ready_axes=(),
-    )
-
+def test_presentation_consumes_finished_selection_without_lifecycle_policy() -> None:
+    assert "CoordinateFrameLifecycle" not in vars(presentation_module)
+    assert "FrameSelectionContext" not in vars(presentation_module)
     plan = _plan(
-        _snapshot(draft),
-        selected_frame_id=DRAFT_ID,
-        preview=True,
+        _record(),
+        selection_available=False,
+        selection_reason="B coordinate is unavailable.",
     )
-
-    assert plan.selected_frame_id == DRAFT_ID
-    assert [update.axis for update in plan.axis_updates] == ["X", "Y", "Z", "A", "B"]
-    assert all(update.color_role == "unavailable" for update in plan.axis_updates)
-    assert {update.axis: update.tooltip for update in plan.axis_updates} == {
-        axis: f"Register {axis}." for axis in ("X", "Y", "Z", "A", "B")
-    }
-
-
-def test_b_attached_frame_recomputes_xy_about_global_pivot() -> None:
-    transform = BFrameTransform(
-        origin_xy_at_reference_b=(10.0, 0.0),
-        reference_b_deg=0.0,
-        xy_angle_at_reference_b_deg=0.0,
-        b_zero_machine_deg=5.0,
-        z_zero_machine_mm=3.0,
-        a_zero_machine_mm=7.0,
-    )
-    frame = _record(DESIGN_ID, FrameKind.DESIGN, "chip-a", transform=transform)
-    snapshot = _snapshot(frame)
-
-    at_reference = _plan(snapshot, selected_frame_id=DESIGN_ID, pose=_pose(X=10.0, Y=0.0, B=0.0))
-    after_rotation = _plan(snapshot, selected_frame_id=DESIGN_ID, pose=_pose(X=0.0, Y=10.0, B=90.0))
-
-    reference_values = {item.axis: item.value for item in at_reference.axis_updates}
-    rotated_values = {item.axis: item.value for item in after_rotation.axis_updates}
-    assert reference_values["X"] == pytest.approx(0.0)
-    assert reference_values["Y"] == pytest.approx(0.0)
-    assert reference_values["B"] == pytest.approx(-5.0)
-    assert reference_values["Z"] == pytest.approx(2.0)
-    assert reference_values["A"] == pytest.approx(2.0)
-    assert rotated_values["X"] == pytest.approx(0.0)
-    assert rotated_values["Y"] == pytest.approx(0.0)
-    assert rotated_values["B"] == pytest.approx(85.0)
-    assert all(item.color_role == "available" for item in after_rotation.axis_updates)
-
-
-def test_missing_z_always_makes_dependent_a_unavailable() -> None:
-    frame = _record(DESIGN_ID, FrameKind.DESIGN, "chip-a")
-    invalidated = invalidate_axes(frame, {"Z"}, "Focus reference changed.")
-
-    plan = _plan(_snapshot(invalidated), selected_frame_id=DESIGN_ID, preview=True)
-
-    axes = {item.axis: item for item in plan.axis_updates}
-    assert axes["Z"].color_role == "unavailable"
-    assert axes["Z"].tooltip == "Focus reference changed."
-    assert axes["A"].color_role == "unavailable"
-    assert axes["A"].tooltip == "Focus reference changed."
-
-
-def test_existing_selection_is_unavailable_until_xy_homing_and_b_authority() -> None:
-    frame = _record(DESIGN_ID, FrameKind.DESIGN, "chip-a")
-    snapshot = _snapshot(frame)
-
-    unhomed = _plan(snapshot, selected_frame_id=DESIGN_ID, homed_axes=set())
-    missing_b = _plan(
-        snapshot,
-        selected_frame_id=DESIGN_ID,
-        homed_axes={"X", "Y"},
-        authority_axes={"X", "Y", "Z", "A"},
-    )
-
-    assert unhomed.selected_frame_id == DESIGN_ID
-    assert unhomed.selection_available is False
-    assert not next(item for item in unhomed.selector_entries if item.frame_id == DESIGN_ID).enabled
-    assert "Home X and Y" in next(
-        item for item in unhomed.selector_entries if item.frame_id == DESIGN_ID
-    ).reason
-    assert missing_b.selected_frame_id == DESIGN_ID
-    assert missing_b.selection_available is False
-    assert "B coordinate is unavailable" in next(
-        item for item in missing_b.selector_entries if item.frame_id == DESIGN_ID
-    ).reason
-
-
-def test_missing_selected_frame_falls_back_to_machine() -> None:
-    plan = _plan(_snapshot(), selected_frame_id=DESIGN_ID)
-
-    assert plan.selected_frame_id == MACHINE_FRAME_ID
-
-
-def test_existing_selection_survives_temporary_b_authority_loss() -> None:
-    plan = _plan(
-        _snapshot(_record(DESIGN_ID, FrameKind.DESIGN, "chip-a")),
-        selected_frame_id=DESIGN_ID,
-        authority_axes={"X", "Y", "Z", "A"},
-    )
-
-    assert plan.selected_frame_id == DESIGN_ID
-    assert plan.selection_available is False
-    assert plan.selection_reason
-    assert all(update.value is None for update in plan.axis_updates)
-    assert all(update.color_role == "unavailable" for update in plan.axis_updates)
-
-
-def test_display_plan_consumes_one_precomputed_selection_decision() -> None:
-    snapshot = _snapshot(_record(DESIGN_ID, FrameKind.DESIGN, "chip-a"))
-    decision = FrameSelectionDecision(
-        selected_frame_id=DESIGN_ID,
-        available=False,
-        reason="B coordinate is unavailable.",
-        persist_selection=False,
-    )
-
-    plan = build_coordinate_display_plan(
-        snapshot,
-        selected_frame_id=MACHINE_FRAME_ID,
-        physical_pose=_pose(),
-        pivot_machine_xy=(0.0, 0.0),
-        homed_axes={"X", "Y", "Z", "A"},
-        authority_axes={"X", "Y", "Z", "A"},
-        selection_decision=decision,
-    )
-
     assert plan.selected_frame_id == DESIGN_ID
     assert plan.selection_available is False
     assert plan.selection_reason == "B coordinate is unavailable."
     assert all(update.value is None for update in plan.axis_updates)
 
 
-def test_missing_selected_record_is_permanent_machine_fallback() -> None:
-    plan = _plan(_snapshot(), selected_frame_id=DESIGN_ID)
-
-    assert plan.selected_frame_id == MACHINE_FRAME_ID
-    assert plan.selection_available is True
-
-
-def test_semantically_invalid_ready_origins_fall_back_to_machine() -> None:
-    corrupt = _record(
-        DESIGN_ID,
-        FrameKind.DESIGN,
-        "corrupt",
-        transform=BFrameTransform.identity(),
-    )
-    snapshot = _snapshot(corrupt)
-
-    plan = _plan(snapshot, selected_frame_id=DESIGN_ID)
-
-    entry = next(item for item in plan.selector_entries if item.frame_id == DESIGN_ID)
-    assert entry.enabled is False
-    assert "READY Z requires" in entry.reason
-    assert plan.selected_frame_id == MACHINE_FRAME_ID
-    assert plan.selection_available is True
-    assert plan.selection_reason is None
-
-
-def test_selector_entries_apply_lifecycle_decisions_without_rechecking_policy(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    corrupt = _record(
-        DESIGN_ID,
-        FrameKind.DESIGN,
-        "corrupt",
-        transform=BFrameTransform.identity(),
-    )
-
-    class _AcceptingLifecycle:
-        def __init__(self, *, selected_frame_id: str = MACHINE_FRAME_ID) -> None:
-            self.selected_frame_id = selected_frame_id
-
-        def plan_selection(
-            self,
-            context: FrameSelectionContext,
-        ) -> FrameSelectionDecision:
-            return FrameSelectionDecision(
-                selected_frame_id=str(context.requested_frame_id),
-                available=True,
-                reason=None,
-                persist_selection=False,
-            )
-
-    monkeypatch.setattr(
-        presentation_module,
-        "CoordinateFrameLifecycle",
-        _AcceptingLifecycle,
-    )
-
-    plan = build_coordinate_display_plan(
-        _snapshot(corrupt),
-        selected_frame_id=MACHINE_FRAME_ID,
-        physical_pose=_pose(),
-        pivot_machine_xy=(0.0, 0.0),
-        homed_axes={"X", "Y", "Z", "A"},
-        authority_axes={"X", "Y", "Z", "A", "B"},
-        selection_decision=FrameSelectionDecision(
-            selected_frame_id=MACHINE_FRAME_ID,
-            available=True,
-            reason=None,
-            persist_selection=False,
-        ),
-    )
-
-    entry = next(item for item in plan.selector_entries if item.frame_id == DESIGN_ID)
-    assert entry.enabled is True
-    assert entry.reason == ""
-
-
-def test_missing_transform_is_a_permanent_machine_fallback() -> None:
-    rejected = replace(
-        _record(DESIGN_ID, FrameKind.DESIGN, "rejected"),
-        transform=None,
-    )
-
-    plan = _plan(_snapshot(rejected), selected_frame_id=DESIGN_ID)
-
-    assert plan.selected_frame_id == MACHINE_FRAME_ID
-    assert plan.selection_available is True
-    assert plan.selection_reason is None
-    entry = next(item for item in plan.selector_entries if item.frame_id == DESIGN_ID)
-    assert entry.enabled is False
-    assert entry.reason == "Coordinate transform is unavailable."
-
-
-@pytest.mark.parametrize("status", ["pending", "blocked"])
-def test_unverified_design_provenance_cannot_select_or_restore(status: str) -> None:
-    record = _record(DESIGN_ID, FrameKind.DESIGN, "chip-a")
-    record = replace(
-        record,
-        metadata={
-            "_runtime_provenance_status": status,
-            "_runtime_provenance_reason": "Design source changed.",
-        },
-    )
-    snapshot = _snapshot(record)
-
-    plan = _plan(snapshot, selected_frame_id=DESIGN_ID)
-
-    entry = next(item for item in plan.selector_entries if item.frame_id == DESIGN_ID)
-    assert entry.enabled is False
-    assert entry.reason == "Design source changed."
-    assert plan.selected_frame_id == DESIGN_ID
-    assert plan.selection_available is False
-    assert plan.selection_reason == "Design source changed."
-
-
-def test_record_version_change_preserves_selection_by_frame_id() -> None:
-    original = _record(DESIGN_ID, FrameKind.DESIGN, "chip-a")
-    updated = replace(original, version=7, name="chip-renamed")
-
-    plan = _plan(
-        _snapshot(updated, generation=9),
-        selected_frame_id=DESIGN_ID,
-    )
-
-    assert plan.selected_frame_id == DESIGN_ID
-    assert next(item for item in plan.selector_entries if item.frame_id == DESIGN_ID).name == "chip-renamed"
-
-
-def test_missing_physical_axis_yellows_only_dependent_values_without_stale_value() -> None:
+def test_b_attached_frame_recomputes_xy_about_global_pivot() -> None:
     frame = _record(
-        DESIGN_ID,
-        FrameKind.DESIGN,
-        "chip-a",
         transform=BFrameTransform(
-            origin_xy_at_reference_b=(0.0, 0.0),
+            origin_xy_at_reference_b=(10.0, 0.0),
             reference_b_deg=0.0,
             xy_angle_at_reference_b_deg=0.0,
-            b_zero_machine_deg=0.0,
-            z_zero_machine_mm=0.0,
-            a_zero_machine_mm=0.0,
+            b_zero_machine_deg=5.0,
+            z_zero_machine_mm=3.0,
+            a_zero_machine_mm=7.0,
+        )
+    )
+    reference = _plan(frame)
+    rotated = _plan(
+        frame,
+        pose=PhysicalMachinePose(
+            {"X": 0.0, "Y": 10.0, "Z": 5.0, "A": 9.0, "B": 90.0}
         ),
     )
+    reference_values = {item.axis: item.value for item in reference.axis_updates}
+    rotated_values = {item.axis: item.value for item in rotated.axis_updates}
+    assert reference_values == pytest.approx(
+        {"X": 0.0, "Y": 0.0, "Z": 2.0, "A": 2.0, "B": -5.0}
+    )
+    assert rotated_values["X"] == pytest.approx(0.0)
+    assert rotated_values["Y"] == pytest.approx(0.0)
+    assert rotated_values["B"] == pytest.approx(85.0)
 
+
+def test_missing_z_always_makes_dependent_a_unavailable() -> None:
+    invalidated = invalidate_axes(_record(), {"Z"}, "Focus reference changed.")
+    axes = {item.axis: item for item in _plan(invalidated).axis_updates}
+    assert axes["Z"].color_role == "unavailable"
+    assert axes["Z"].tooltip == "Focus reference changed."
+    assert axes["A"].color_role == "unavailable"
+    assert axes["A"].tooltip == "Focus reference changed."
+
+
+def test_lost_physical_z_authority_yellows_z_and_dependent_a() -> None:
+    axes = {
+        item.axis: item
+        for item in _plan(
+            _record(),
+            homed_axes={"X", "Y", "A"},
+        ).axis_updates
+    }
+
+    assert axes["Z"].color_role == "unavailable"
+    assert axes["A"].color_role == "unavailable"
+    assert axes["A"].tooltip == (
+        "Physical Machine Z coordinate authority is unavailable."
+    )
+
+
+def test_missing_physical_axis_yellows_only_dependent_values() -> None:
     plan = _plan(
-        _snapshot(frame),
-        selected_frame_id=DESIGN_ID,
+        _record(),
         pose=PhysicalMachinePose({"Y": 0.0, "Z": 5.0, "A": 9.0, "B": 0.0}),
         authority_axes={"Y", "Z", "A", "B"},
     )
-
     axes = {item.axis: item for item in plan.axis_updates}
     assert axes["X"].value is None
     assert axes["Y"].value is None
-    assert axes["X"].color_role == "unavailable"
-    assert axes["Y"].color_role == "unavailable"
     assert axes["X"].tooltip == "Physical Machine X coordinate authority is unavailable."
     assert axes["Y"].tooltip == "Physical Machine X coordinate authority is unavailable."
     assert all(axes[axis].color_role == "available" for axis in ("Z", "A", "B"))
+
+
+def test_c_axis_never_appears_in_coordinate_display_plan() -> None:
+    plan = _plan(_record())
+    assert [update.axis for update in plan.axis_updates] == ["X", "Y", "Z", "A", "B"]
