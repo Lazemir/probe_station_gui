@@ -1161,3 +1161,79 @@ git diff --check 8fc83259e07f48bf0f222e80bb3e1d6c3241fd0e..HEAD
   normal and reverse collection-order gates at `64 passed` each, and confirmed
   the frozen hashes before the exact commit
   `test: split optical calibration coverage`.
+
+#### Task 7a: Separate probe station client domains
+
+**Files:**
+- Create: `probe_station_client/camera.py`
+- Create: `probe_station_client/meter.py`
+- Create: `probe_station_client/route.py`
+- Modify: `probe_station_client/client.py`
+- Modify: `probe_station_client/__init__.py`
+- Create: `tests/api/test_client_domain_ownership.py`
+- Modify: `docs/superpowers/plans/2026-08-10-coordinate-system-coordinator.md`
+
+- [x] Capture the clean `95734dd` baseline before editing. The client had
+  `1238 LOC / 1074 SLOC / 655 LLOC`, aggregate Radon CC `265` over `115`
+  blocks, maximum CC `32`, and MI `0.00`. Its `34` direct tests passed; the
+  client plus API-server baseline passed `68` tests plus `2` subtests. The
+  all-tracked MI-0 count was `19`, while active GUI/test scope was `17`.
+- [x] Observe strict collection RED independently for each new owner before its
+  production extraction: `camera`, then `meter`, then `route` each failed with
+  its exact absent-module `ModuleNotFoundError`. Each preceding domain was made
+  GREEN before introducing the next interface.
+- [x] Make `camera.py` the canonical owner of `CameraFrame` and camera settings,
+  frame/header, exposure-policy, and one-shot exposure behavior. Make
+  `meter.py` the canonical meter namespace while leaving `visa.py` as the
+  unchanged owner of concrete remote VISA adapters. Make `route.py` the
+  canonical owner of API route control, route sessions, ready contacts,
+  polling/deduplication, result submission, and artifact bytes.
+- [x] Keep `ProbeStationClient` in `client.py` as transport/auth/core
+  stage/contact owner and composition root. It imports the three domains only
+  through underscored module names; moved types have no definitions, aliases,
+  forwarding facades, or wrappers in the old module. Route stopped/failed
+  polling receives the exact `ProbeStationClientError` type from the core
+  without a runtime reverse import.
+- [x] Preserve the exact `22`-name package `__all__` and direct canonical root
+  identities. `ProbeStationApiRouteControlClient` remains intentionally absent
+  from the root surface. Fresh forward/reverse import gates preserve
+  `ProbeStationClient` identity across QCoDeS and the package root, and prove
+  domain modules do not retain a runtime `ProbeStationClient` reference.
+- [x] Preserve request methods, paths, ordered query/payload construction,
+  bearer headers, timeout overrides, status-to-error mapping, concrete VISA
+  types, session/client identity, binary artifacts, ready-contact request-ID
+  deduplication, and stop/timeout behavior. `pause`, `pause_ack`, and
+  `interrupt` remain three distinct API route-control actions; no route name,
+  payload schema, direct contact recipe, or server implementation changed.
+- [x] Verification is fresh and no-hardware: client/ownership tests pass `41`;
+  client/public-import/exposure tests pass `49`; client plus API-server
+  contracts pass `75` plus `2` subtests; the complete offscreen,
+  process-local-`QLocale.c()` suite passes `3023` plus `14` subtests with only
+  the inherited `BuiltinImporter.module_repr()` warning. An earlier harness
+  attempt used a nonexistent Public-user basetemp and produced setup-only
+  errors; the corrected unique system-temp run above is the acceptance gate.
+- [x] Affected Ruff, whole-tree client compileall, `git diff --check`, exact
+  class-definition/deletion, one-way import, public-identity, protected-diff,
+  and prospective tracked-file gates pass. `credentials.py`, `visa.py`,
+  `qcodes_driver.py`, `tests/api/test_client.py`, `README.md`, `main.py`, the
+  complete GUI/measure packages, and scripts remain byte-identical to the
+  baseline.
+- [x] Metrics: `client.py` decreases to
+  `795 LOC / 715 SLOC / 421 LLOC / MI 1.81 / CC 148`; the new owners are
+  camera `100 LOC / MI 52.36 / CC 17`, meter
+  `79 LOC / MI 52.17 / CC 19`, and route
+  `304 LOC / MI 24.42 / CC 81`. Aggregate CC remains exactly `265` over the
+  same `115` blocks. No warning was added: the inherited `prepare_contact`
+  CC-32 and `iter_ready` CC-16 warnings remain. All new/touched Python files
+  have positive MI; prospective all-tracked MI-0 decreases `19 -> 18`, while
+  active GUI/test MI-0 remains `17`.
+- [x] Freeze the complete unstaged/untracked implementation snapshot. A first
+  fresh independent read-only review returned `READY` with
+  `0 Critical / 0 Important / 1 Minor`. A strict source-contract RED then
+  reproduced its sole finding: the inherited local 2-tuple annotation did not
+  describe the actual 3-tuple `iter_ready` deduplication key. The annotation-only
+  GREEN preserves runtime behavior and passes the updated focused, API, static,
+  metric, and complete-suite gates above. A final independent read-only review
+  of the corrected evidence-bearing snapshot returned `READY` with
+  `0 Critical / 0 Important / 0 Minor` before staging and the exact commit
+  `refactor: separate probe station client domains`.
