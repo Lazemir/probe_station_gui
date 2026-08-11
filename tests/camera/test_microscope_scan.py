@@ -7,11 +7,11 @@ import pytest
 from PySide6.QtGui import QImage
 
 from probe_station_gui.camera.imaging import (
-    MicroscopeCaptureResult,
     MicroscopeScaleCalibration,
     MicroscopeScanPlan,
     MicroscopeScanTile,
 )
+from probe_station_gui.camera.microscope_artifacts import MicroscopeCaptureResult
 from probe_station_gui.camera import microscope_scan
 
 

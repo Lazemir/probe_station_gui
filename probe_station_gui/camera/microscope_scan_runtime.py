@@ -8,11 +8,11 @@ from pathlib import Path
 from typing import Callable, Mapping, Protocol, Sequence
 
 from probe_station_gui.camera.imaging import (
-    MicroscopeCaptureResult,
     MicroscopeScanPlan,
     MicroscopeScanTile,
     utc_timestamp,
 )
+from probe_station_gui.camera.microscope_artifacts import MicroscopeCaptureResult
 from probe_station_gui.camera.microscope_scan import (
     CameraLockSettings,
     FlatFieldScanOptions,

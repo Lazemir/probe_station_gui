@@ -13,7 +13,7 @@ from pathlib import Path
 
 from PySide6.QtGui import QImage
 
-from probe_station_gui.camera.imaging import (
+from probe_station_gui.camera.flat_field_processing import (
     FlatFieldProfile,
     build_flat_field_profile,
     median_flat_field_reference,

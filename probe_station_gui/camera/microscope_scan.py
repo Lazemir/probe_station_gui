@@ -9,15 +9,17 @@ from pathlib import Path
 from typing import Callable, Mapping, Sequence
 
 from probe_station_gui.camera.imaging import (
-    MicroscopeCaptureResult,
-    MicroscopeImageMetadata,
     MicroscopeScanPlan,
     MicroscopeScanTile,
     build_design_scan_plan,
-    safe_filename_component,
-    scan_tile_filename,
     stage_bounds_from_design_bounds,
     utc_timestamp,
+)
+from probe_station_gui.camera.microscope_artifacts import (
+    MicroscopeCaptureResult,
+    MicroscopeImageMetadata,
+    safe_filename_component,
+    scan_tile_filename,
 )
 from probe_station_gui.design.model import DesignModelError
 

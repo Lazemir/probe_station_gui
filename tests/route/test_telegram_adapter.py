@@ -9,7 +9,7 @@ from types import SimpleNamespace
 from PySide6.QtGui import QImage
 
 from main import Main
-from probe_station_gui.camera.imaging import MicroscopeCaptureResult
+from probe_station_gui.camera.microscope_artifacts import MicroscopeCaptureResult
 from probe_station_gui.route.finish_flow import RouteFinishTelegramPlan
 from probe_station_gui.route.measurement import (
     RouteContactQuality,

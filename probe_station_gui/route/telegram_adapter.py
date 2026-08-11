@@ -11,7 +11,7 @@ from typing import Callable
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QImage, QPainter
 
-from probe_station_gui.camera.imaging import (
+from probe_station_gui.camera.microscope_artifacts import (
     MicroscopeImageMetadata,
     route_photo_filename,
     save_microscope_image,

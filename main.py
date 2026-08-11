@@ -397,12 +397,14 @@ from probe_station_gui.route.artifact_rows import (
     route_contact_height_map_path,
     route_contact_height_map_row,
 )
-from probe_station_gui.camera.imaging import (
+from probe_station_gui.camera.flat_field_processing import (
     apply_flat_field_correction,  # noqa: F401 - retained test/patch seam
+)
+from probe_station_gui.camera.imaging import (
     objective_scale_calibration,
-    save_microscope_image,
     utc_timestamp,
 )
+from probe_station_gui.camera.microscope_artifacts import save_microscope_image
 from probe_station_gui.camera.distortion import (
     DistortionCorrection,
     apply_distortion_correction,

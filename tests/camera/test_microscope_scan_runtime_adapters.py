@@ -13,10 +13,10 @@ from probe_station_gui.camera import (
     microscope_scan_runtime_adapters as adapters,
 )
 from probe_station_gui.camera.imaging import (
-    MicroscopeCaptureResult,
     MicroscopeScanPlan,
     MicroscopeScanTile,
 )
+from probe_station_gui.camera.microscope_artifacts import MicroscopeCaptureResult
 
 
 def _tile() -> MicroscopeScanTile:

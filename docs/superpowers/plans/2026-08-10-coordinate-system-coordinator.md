@@ -1416,3 +1416,112 @@ git diff --check 8fc83259e07f48bf0f222e80bb3e1d6c3241fd0e..HEAD
   direct DAG, identities, AST migration, Radon/Lizard metrics, and protected
   scope before staging and the exact commit
   `refactor: separate optical exposure sessions`.
+
+#### Task 10a: Separate camera imaging domains
+
+**Files:**
+- Create: `probe_station_gui/camera/flat_field_processing.py`
+- Create: `probe_station_gui/camera/microscope_artifacts.py`
+- Create: `probe_station_gui/camera/scan_scale_refinement.py`
+- Create: `probe_station_gui/camera/scan_stitching.py`
+- Modify: `probe_station_gui/camera/imaging.py`
+- Modify: `main.py` (direct owner imports only)
+- Modify: camera scan, runtime, flat-field, live-correction, and Telegram callers
+  (direct owner imports only)
+- Split: `tests/camera/test_imaging.py` into direct domain characterization files
+- Modify: direct consumer tests for canonical owner imports
+- Modify: `docs/superpowers/plans/2026-08-10-coordinate-system-coordinator.md`
+
+- [x] Capture the clean `e75fdb1` baseline before editing. `imaging.py` had
+  SHA-256 `e3d4c7f4...17a34e0`, Git blob `592e4132...5dca18`, and
+  `1803 LOC / 1140 LLOC / 1567 SLOC / CC 280 / 77 blocks / MI 0.00`.
+  Its monolithic test had `1086 LOC / MI 25.07`; the focused camera imaging,
+  scan, runtime, optical, Main, and Telegram baseline passed `181` tests.
+- [x] Observe strict absent-module RED before production for each new owner:
+  direct collection failed with exact `ModuleNotFoundError` for
+  `flat_field_processing`, then `microscope_artifacts`, then
+  `scan_scale_refinement`, and finally `scan_stitching`. Each owner was made
+  GREEN before the old definition was deleted.
+- [x] Make `flat_field_processing.py` the canonical owner of profile building,
+  median references, compiled gain caches, profile/self application, and the
+  stride-aware detached QImage/RGB conversions. Padded RGB888 rows, detached
+  array and QImage ownership, RGB32 correction output, odd blur-radius
+  normalization, exact profile-versus-compiled pixels, and median truncation
+  are characterized directly. Live correction preserves raw -> flat -> lens
+  order and the compiled cache without acquisition restart.
+- [x] Keep immutable scale, tile, and plan identities plus scan plan/bounds and
+  shared stage-coordinate placement primitives canonical in `imaging.py`.
+  Fallback conversion remains `(+dx, -dy)`, full 2x2 inversion and singular
+  rejection are direct tests, overlap remains clamped to `[0, 0.95]`, and
+  serpentine rows retain their original top-to-bottom and odd-row order.
+- [x] Make `scan_scale_refinement.py` own overlap registration and robust scale
+  fitting, including the deliberately dormant integer refinement helpers.
+  Axis-neighbor filtering, `0.01` response, `96 px` shift, `12 px` similarity
+  inliers, 50% consensus, full affine least-squares inversion, subpixel phase
+  translation, implausible-shift rejection, and original-object fallback are
+  preserved by direct characterization.
+- [x] Make `scan_stitching.py` own photometry and blending while keeping
+  `stitch_scan_tiles` strictly stage-coordinate-only: it never imports or calls
+  the refinement owner or placement/phase registration. Signed placement,
+  input-order sequential photometry, overlap masks and planes, float32 clipping,
+  subpixel `INTER_LINEAR` warp, ceil extents, feature-preserving hard selection,
+  and the `0.05` feather ramp retain their original implementation. The
+  stage-only bright-column regression remains exactly `[6]`.
+- [x] Make `microscope_artifacts.py` own capture records, overlay rendering,
+  filenames, PNG/raw persistence, embedded metadata, and UTF-8 JSON sidecars.
+  Direct tests preserve the exact top-level payload order
+  `FileName / MicroscopeImage / Microscopy`, OME-style pixel fields, raw
+  RGB888 copies, overlay separation, non-ASCII encoding, path deduplication,
+  and route/scan filename numbering. Exact definition AST parity preserves the
+  original annotated/raw/sidecar partial-failure order.
+- [x] Use a direct acyclic owner graph: artifact/refinement/stitching depend on
+  canonical scan identities in `imaging`, `imaging` and stitching consume the
+  canonical flat-field image conversion owner, and no child owner is reverse
+  imported. `imaging.py` contains no compatibility wrappers, aliases, or old
+  moved interfaces; `camera/__init__.py` remains byte-identical with its exact
+  seven canonical exports. Production consumers import moved identities from
+  their canonical owners.
+- [x] Preserve every original production definition. After normalizing only
+  the two intentionally public QImage helper names and their added docstrings
+  plus module-qualified calls to the canonical flat-field owner, all `70`
+  original top-level class/function ASTs occur exactly once across the five
+  owners; aggregate Radon complexity remains exactly `CC 280 / 77 blocks`.
+  All `11` migrated caller modules, including `main.py`, have exact non-import
+  AST parity with the baseline.
+- [x] Split all `22` original imaging characterization tests by owner
+  (`2` artifact, `5` refinement, `1` planning, `10` stitching, `4` flat-field).
+  Their function ASTs are exact after normalizing only canonical import sources.
+  New direct regressions cover QImage stride/copy/format, cache equivalence,
+  artifact schemas/filenames, full-matrix scale conversion, diagonal-neighbor
+  exclusion, and stage-only stitching. The six owner/integration files pass
+  `33` tests and every split/new test file has positive MI (minimum `35.07`).
+- [x] Verification is fresh, no-hardware, offscreen, process-local
+  `QLocale.c()`, and uses unique temporary basetemps. The final focused owner
+  and runtime-consumer gate passes `192`; broad camera/App/UI passes `1174`
+  plus `5` subtests; the final complete suite passes `3038` plus `14` subtests
+  with only the inherited `BuiltinImporter.module_repr()` warning. No timing
+  threshold, hardware/session/cancellation/safe-Z behavior, acquisition stop,
+  serial access, network access, or GUI entry point changed.
+- [x] Affected Ruff and format checks, Main with inherited E402 ignored,
+  whole-tree compileall, `git diff --check`, forward/reverse import order,
+  deletion/direct-definition/DAG gates, and protected-byte checks pass. The
+  original single Lizard warning is retained at its moved
+  `refine_scan_scale_from_tile_overlaps` owner (`CCN 17`) with no new warning.
+  `camera/__init__.py`, `seam_radial_fit.py`, and
+  `optical_calibration_runtime.py` retain baseline blobs
+  `dfec7a4...3375 / c3c8e30...a35f / f11e745...108`.
+- [x] Metrics: the residual composition owner is
+  `346 LOC / 213 LLOC / CC 53 / MI 24.10`; flat field is
+  `297 / 159 / 40 / 30.70`; artifacts `387 / 253 / 63 / 18.36`; refinement
+  `387 / 237 / 68 / 21.49`; stitching `487 / 314 / 56 / 14.23`. Every new or
+  touched Python file has positive MI except the pre-existing import-only
+  `main.py`. All-tracked MI-zero decreases exactly `15 -> 14` and active
+  GUI/test MI-zero decreases `14 -> 13`, with no new MI-zero file.
+- [x] Freeze the complete unstaged/untracked evidence-bearing source snapshot.
+  A fresh fork-none independent read-only review returned `READY` with
+  `0 Critical / 0 Important / 0 Minor`, independently repeated the exact
+  focused selection at `192 passed`, and confirmed the `70` definition and
+  `11` caller AST gates, all `22` migrated characterization tests, direct DAG,
+  stage-only stitching, exact MI/CC/block counts, protected blobs, and unchanged
+  production/test hashes before staging and the exact commit
+  `refactor: separate camera imaging domains`.

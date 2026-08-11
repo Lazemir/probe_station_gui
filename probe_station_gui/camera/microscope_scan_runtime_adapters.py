@@ -15,18 +15,24 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QImage
 
 from probe_station_gui.camera import microscope_scan
-from probe_station_gui.camera.imaging import (
-    MicroscopeCaptureResult,
-    MicroscopeScanPlan,
-    MicroscopeScanTile,
+from probe_station_gui.camera.flat_field_processing import (
     apply_flat_field_correction,
     apply_self_flat_field_correction,
     build_median_flat_field_profile,
-    refine_scan_scale_from_tile_overlaps,
-    save_microscope_image,
-    stitch_scan_tiles,
+)
+from probe_station_gui.camera.imaging import (
+    MicroscopeScanPlan,
+    MicroscopeScanTile,
     utc_timestamp,
 )
+from probe_station_gui.camera.microscope_artifacts import (
+    MicroscopeCaptureResult,
+    save_microscope_image,
+)
+from probe_station_gui.camera.scan_scale_refinement import (
+    refine_scan_scale_from_tile_overlaps,
+)
+from probe_station_gui.camera.scan_stitching import stitch_scan_tiles
 from probe_station_gui.camera.microscope_scan import (
     CameraLockSettings,
     FlatFieldScanOptions,

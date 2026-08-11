@@ -18,7 +18,7 @@ from probe_station_gui.camera.distortion import (
     correction_from_payload,
 )
 from probe_station_gui.camera.flat_field_calibration import FlatFieldCalibrationStore
-from probe_station_gui.camera.imaging import (
+from probe_station_gui.camera.flat_field_processing import (
     CompiledFlatFieldCorrection,
     apply_compiled_flat_field_correction,
     compile_flat_field_correction,

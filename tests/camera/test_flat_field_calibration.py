@@ -11,7 +11,7 @@ from probe_station_gui.camera.flat_field_calibration import (
     FlatFieldCalibrationStore,
     median_flat_field_reference,
 )
-from probe_station_gui.camera.imaging import apply_flat_field_correction
+from probe_station_gui.camera.flat_field_processing import apply_flat_field_correction
 
 
 @pytest.fixture
