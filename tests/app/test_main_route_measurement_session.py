@@ -88,7 +88,7 @@ class MainRouteMeasurementSessionTest(unittest.TestCase):
 
         with (
             mock.patch.object(
-                main_module.design_navigation,
+                main_module.route_editing,
                 "load_measurement_route",
                 side_effect=load_route,
             ),

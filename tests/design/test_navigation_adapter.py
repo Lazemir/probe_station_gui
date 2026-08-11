@@ -27,16 +27,20 @@ from probe_station_gui.design.model import (
 from probe_station_gui.design.navigation_adapter import (
     activate_design_frame_for_document,
     apply_loaded_design_document,
-    add_route_array_points,
-    design_panel_presentation,
-    design_position_presentation,
     document_with_persisted_design_view,
     parse_persisted_visible_layers,
-    plan_design_coordinate_move,
-    plan_design_target_move,
     prepare_design_frame_activation,
     prepare_design_frame_publication,
     prepare_persisted_design_restore,
+)
+from probe_station_gui.design.navigation_targeting import (
+    design_panel_presentation,
+    design_position_presentation,
+    plan_design_coordinate_move,
+    plan_design_target_move,
+)
+from probe_station_gui.design.route_editing import (
+    add_route_array_points,
     select_route_point,
 )
 from probe_station_gui.design.session import DesignSession

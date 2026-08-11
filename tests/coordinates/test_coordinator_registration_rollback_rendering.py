@@ -29,7 +29,7 @@ from probe_station_gui.settings.axis_calibration_config import (
 from probe_station_gui.stage.axis_calibration import StageAxisCalibrationMapper
 from probe_station_gui.stage.machine_coordinates import MachineCoordinateSnapshot
 from probe_station_gui.stage.types import _Status
-from probe_station_gui.views import main_window_connection_flow as connection_flow
+from probe_station_gui.views import main_window_coordinate_flow as coordinate_flow
 
 
 class _MissingAxisPose:
@@ -147,12 +147,12 @@ def _render_non_operator_transition(monkeypatch, transition: object) -> list[str
         _show_status=lambda _message, _duration=0: events.append("status"),
     )
     monkeypatch.setattr(
-        connection_flow.stage_position_panel,
+        coordinate_flow.stage_position_panel,
         "render_coordinate_system_snapshot",
         lambda _owner, _snapshot: events.append("coordinates"),
     )
 
-    connection_flow.apply_coordinate_transition(owner, transition)
+    coordinate_flow.apply_coordinate_transition(owner, transition)
 
     return events
 
@@ -291,12 +291,12 @@ def test_operator_rollback_renders_an_exact_empty_stage_draft(
         design_layout_window=layout,
     )
     monkeypatch.setattr(
-        connection_flow.stage_position_panel,
+        coordinate_flow.stage_position_panel,
         "refresh_coordinate_frame_display",
         lambda _owner: events.append("coordinates"),
     )
 
-    connection_flow.apply_coordinate_transition(owner, failed)
+    coordinate_flow.apply_coordinate_transition(owner, failed)
 
     assert owner._alignment_stage_draft == []
     assert events.count(("layout", expected.design_marks)) == 1

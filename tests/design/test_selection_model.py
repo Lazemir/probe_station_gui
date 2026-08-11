@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from probe_station_gui.design.markup import MarkupDocument
-from probe_station_gui.design.navigation_adapter import apply_route_entity_changes
+from probe_station_gui.design.route_editing import apply_route_entity_changes
 from probe_station_gui.design.selection_geometry import SelectionRect
 from probe_station_gui.design.selection_model import (
     EntityOwner,

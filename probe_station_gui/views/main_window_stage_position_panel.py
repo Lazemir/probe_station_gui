@@ -107,9 +107,9 @@ def select_gui_coordinate_frame(
     transition = coordinator.select_system(
         CoordinateSystemSelection(str(frame_id or MACHINE_FRAME_ID))
     )
-    from probe_station_gui.views import main_window_connection_flow
+    from probe_station_gui.views import main_window_coordinate_flow
 
-    main_window_connection_flow.apply_coordinate_transition(owner, transition)
+    main_window_coordinate_flow.apply_coordinate_transition(owner, transition)
 
 
 def gui_coordinate_motion_editing_enabled(owner: object) -> bool:

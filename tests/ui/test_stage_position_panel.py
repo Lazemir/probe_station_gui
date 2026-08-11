@@ -28,7 +28,7 @@ from probe_station_gui.stage.position_presenter import (
     AxisFieldPresentation,
     StagePositionDisplayPlan,
 )
-from probe_station_gui.views import main_window_connection_flow as connection_flow
+from probe_station_gui.views import main_window_coordinate_flow as coordinate_flow
 from probe_station_gui.views import main_window_stage_position_panel as panel_adapter
 from probe_station_gui.views.stage_position_panel import (
     StagePositionPanel,
@@ -305,7 +305,7 @@ def test_adapter_selection_calls_coordinator_and_leaves_api_choice_untouched(
         _api_coordinate_frame_id="api-frame",
     )
     monkeypatch.setattr(
-        connection_flow,
+        coordinate_flow,
         "apply_coordinate_transition",
         lambda actual_owner, actual_transition: calls.append(
             (actual_owner, actual_transition)

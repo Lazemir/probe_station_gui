@@ -518,7 +518,85 @@ git commit -m "refactor: centralize coordinate system presentation"
 
 ---
 
-### Task 4: Enforce the selected-cluster MI gate and run acceptance
+### Task 4: Split residual coordinate adapter responsibilities
+
+**Files:**
+- Modify: `probe_station_gui/design/navigation_adapter.py`
+- Create: `probe_station_gui/design/route_editing.py`
+- Create: `probe_station_gui/design/navigation_targeting.py`
+- Modify: `probe_station_gui/views/main_window_connection_flow.py`
+- Create: `probe_station_gui/views/main_window_coordinate_flow.py`
+- Create: `probe_station_gui/views/main_window_design_workspace.py`
+- Modify: `main.py`
+- Modify: `probe_station_gui/stage/move_lifecycle.py`
+- Modify: `probe_station_gui/stage/position_update.py`
+- Modify: `probe_station_gui/views/main_window_homing.py`
+- Modify: `probe_station_gui/views/main_window_stage_position_panel.py`
+- Create: `tests/design/test_navigation_responsibility_modules.py`
+- Create: `tests/ui/test_main_window_flow_responsibilities.py`
+- Modify: navigation, coordinator, Main adapter, position-update, homing, and
+  stage-position tests that imported or patched the previous owners.
+
+**Owned after this task:** `navigation_adapter.py` owns only Design activation,
+load, and persisted restore. `route_editing.py` owns route CRUD, arrays, mixed
+edits, and route-point selection. `navigation_targeting.py` owns target
+selection, movement plans, and widget-agnostic presentation. The connection
+flow owns only serial/controller connection, reboot, feedrate, persistence, and
+LCR orchestration; coordinate transition execution and Design workspace
+checkpoint/restore live in separate view adapters. No compatibility re-export
+facade remains.
+
+- [x] Add strict RED architecture tests proving each extracted interface is
+  implemented by its owning module and absent from the previous module.
+- [x] Run the RED gate and confirm collection fails because the new modules do
+  not exist.
+- [x] Extract the Qt-free navigation responsibilities and migrate all callers
+  and monkeypatch seams directly to the new owners.
+- [x] Extract coordinate transition execution and Design workspace
+  checkpoint/restore from the serial connection flow; migrate Main, homing,
+  position-update, motion-lifecycle, and tests directly.
+- [x] Preserve route-control and hardware behavior: no Pause/Resume/Interrupt,
+  route runner, serial command, feedrate, or LCR implementation was changed.
+- [x] Run final metrics, full process-local `QLocale.c()` no-hardware tests,
+  Ruff, compileall, diff/ownership/import-order gates, and a fresh read-only
+  review with no Critical/Important finding.
+
+Final Task 4 evidence:
+
+- strict RED: the two architecture test modules failed collection on the
+  absent navigation and coordinate-flow modules;
+- focused navigation GREEN: `34 passed`;
+- focused connection-flow GREEN: `26 passed`;
+- architecture GREEN: `4 passed`;
+- process-local `QLocale.c()` broad gate across Design, coordinates, relevant
+  Main/UI/stage adapters, and all route tests: `1056 passed`, `5 subtests passed`;
+- full process-local `QLocale.c()` no-hardware suite: `2925 passed`,
+  `14 subtests passed`; an earlier run exposed one unchanged camera-monitor
+  scheduling race, while its isolated file and the fresh full rerun both passed;
+- MI: `navigation_adapter.py` `14.67`, `route_editing.py` `25.77`,
+  `navigation_targeting.py` `33.40`, `main_window_connection_flow.py` `27.66`,
+  `main_window_coordinate_flow.py` `8.67`, and
+  `main_window_design_workspace.py` `29.90`;
+- scoped MI-0 count fell from `28` to `26`; neither original owner nor any new
+  Python module is MI 0;
+- `main.py`: LOC `10933`, LLOC `5949`, SLOC `10313`, aggregate CC `1904`,
+  average CC `3.565543`; LOC/CC do not regress from Task 3 and LLOC decreases
+  by one;
+- Ruff on every changed Python file (with inherited startup/test `E402`
+  ignored), whole-tree compileall, diff-check, import-order/public-API,
+  direct-ownership, no-filesystem authority-path, Qt-free domain, and
+  no-eager-re-export gates passed;
+- a fresh independent frozen-diff review found no Critical, Important, or Minor
+  findings and returned **READY**.
+
+```powershell
+git add docs/superpowers/plans/2026-08-10-coordinate-system-coordinator.md main.py probe_station_gui/design/navigation_adapter.py probe_station_gui/design/navigation_targeting.py probe_station_gui/design/route_editing.py probe_station_gui/stage/move_lifecycle.py probe_station_gui/stage/position_update.py probe_station_gui/views/main_window_connection_flow.py probe_station_gui/views/main_window_coordinate_flow.py probe_station_gui/views/main_window_design_workspace.py probe_station_gui/views/main_window_homing.py probe_station_gui/views/main_window_stage_position_panel.py tests/app/test_main_coordinate_system_adapter.py tests/app/test_main_design_markup_navigation.py tests/app/test_main_design_navigation.py tests/app/test_main_design_registration_adapters.py tests/app/test_main_planned_move_prediction.py tests/app/test_main_route_measurement_session.py tests/coordinates/test_coordinator_registration_operator_cancel.py tests/coordinates/test_coordinator_registration_rollback_rendering.py tests/design/test_navigation_adapter.py tests/design/test_navigation_responsibility_modules.py tests/design/test_selection_model.py tests/stage/test_position_update.py tests/ui/test_main_window_connection_flow.py tests/ui/test_main_window_flow_responsibilities.py tests/ui/test_main_window_homing.py tests/ui/test_stage_position_panel.py
+git commit -m "refactor: split coordinate adapter responsibilities"
+```
+
+---
+
+### Task 5: Enforce the selected-cluster MI gate and run acceptance
 
 **Files:**
 - Modify only residual Design/coordinate adapter or test files identified by

@@ -197,7 +197,7 @@ def _activate_candidate_success(
 ) -> CoordinateTransition:
     assert session_state is not None
     if workspace_after is not None:
-        main_module.connection_flow.apply_design_workspace_checkpoint(
+        main_module.design_workspace.apply_design_workspace_checkpoint(
             owner,
             workspace_after,
         )
@@ -209,7 +209,7 @@ def test_maybe_restore_persisted_design_clears_design_and_unhomes_xy_when_xy_cha
 ) -> None:
     window, stage_controller, statuses = _make_window()
     monkeypatch.setattr(
-        main_module.connection_flow,
+        main_module.design_workspace,
         "save_controller_state_without_design",
         lambda _owner: statuses.append("saved_without_design"),
     )
@@ -218,7 +218,7 @@ def test_maybe_restore_persisted_design_clears_design_and_unhomes_xy_when_xy_cha
     }
     window._pending_persisted_design_position = (1.0, 2.0, 3.0)
 
-    main_module.connection_flow.maybe_restore_persisted_design(
+    main_module.design_workspace.maybe_restore_persisted_design(
         window,
         (1.25, 2.5, 3.0),
     )
@@ -234,7 +234,7 @@ def test_on_design_document_loaded_error_saves_controller_state_without_design_w
 ) -> None:
     window, _stage_controller, statuses = _make_window()
     monkeypatch.setattr(
-        main_module.connection_flow,
+        main_module.design_workspace,
         "save_controller_state_without_design",
         lambda _owner: statuses.append("saved_without_design"),
     )
@@ -257,7 +257,7 @@ def test_on_design_document_loaded_success_refreshes_persists_and_restores_route
         lambda _owner: statuses.append("persisted"),
     )
     monkeypatch.setattr(
-        main_module.connection_flow,
+        main_module.coordinate_flow,
         "activate_current_design",
         _activate_candidate_success,
     )
@@ -349,7 +349,7 @@ def test_design_load_worker_carries_precomputed_frame_metadata(
         )
     )
     monkeypatch.setattr(
-        main_module.connection_flow,
+        main_module.coordinate_flow,
         "apply_coordinate_transition",
         lambda *_args: None,
     )

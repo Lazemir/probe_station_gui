@@ -22,11 +22,12 @@ from probe_station_gui.settings.manager import Settings, SettingsManager
 from probe_station_gui.stage import position_update as stage_position_update
 from probe_station_gui.stage.controller import StageController
 from probe_station_gui.stage.types import _Status
-from probe_station_gui.views import main_window_connection_flow as connection_flow
+from probe_station_gui.views import main_window_coordinate_flow as coordinate_flow
+from probe_station_gui.views import main_window_design_workspace as design_workspace
 from probe_station_gui.views import (
     main_window_stage_position_panel as stage_position_panel_adapter,
 )
-from probe_station_gui.design import navigation_adapter as design_navigation
+from probe_station_gui.design import navigation_targeting
 
 
 def test_main_has_no_coordinate_policy_owner_or_compatibility_helpers() -> None:
@@ -45,18 +46,18 @@ def test_main_has_no_coordinate_policy_owner_or_compatibility_helpers() -> None:
         assert forbidden not in source
 
     assert "_design_session" not in inspect.getsource(
-        connection_flow.maybe_restore_persisted_design
+        design_workspace.maybe_restore_persisted_design
     )
     assert "_adopt_session" not in inspect.getsource(Main.__init__)
     assert "_controller_persistence_design_state" not in inspect.getsource(
-        connection_flow.controller_state_with_design
+        design_workspace.controller_state_with_design
     )
     assert "_design_session" not in inspect.getsource(Main._api_microscope_area_scan)
     assert "session.registration" not in inspect.getsource(
-        design_navigation.design_panel_presentation
+        navigation_targeting.design_panel_presentation
     )
     assert "session.source_design_marks" not in inspect.getsource(
-        design_navigation.design_position_presentation
+        navigation_targeting.design_position_presentation
     )
 
 
@@ -175,7 +176,7 @@ def test_selection_persistence_intent_is_fire_and_forget() -> None:
         intents=(PersistCoordinateSelectionIntent("machine"),),
     )
 
-    connection_flow.apply_coordinate_transition(owner, transition)
+    coordinate_flow.apply_coordinate_transition(owner, transition)
 
     assert updates == ["machine"]
     assert published == [persisted]
@@ -322,7 +323,7 @@ def test_objective_persistence_immediately_refreshes_coordinate_authority(
         _show_plan_status=lambda _plan: events.append(("status",)),
     )
     monkeypatch.setattr(
-        connection_flow,
+        coordinate_flow,
         "observe_coordinate_authority",
         lambda actual_owner: events.append(("authority", actual_owner)),
     )
@@ -336,7 +337,7 @@ def test_settings_dialog_refreshes_authority_after_runtime_objective_apply() -> 
 
     assert "objective_authority_changed" in source
     assert source.index("self._apply_settings()") < source.index(
-        "connection_flow.observe_coordinate_authority(self)"
+        "coordinate_flow.observe_coordinate_authority(self)"
     )
     assert "pivot_changed" in source
 
@@ -416,7 +417,7 @@ def test_curve_apply_keeps_estimated_position_authority_on_remapped_snapshot(
             lambda _owner, _position: None,
         )
         monkeypatch.setattr(
-            stage_position_update.connection_flow,
+            stage_position_update.coordinate_flow,
             "observe_coordinate_authority",
             lambda _owner, physical_pose: observed_poses.append(physical_pose),
         )

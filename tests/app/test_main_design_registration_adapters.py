@@ -41,7 +41,7 @@ def test_machine_capture_signal_is_only_translated_to_typed_completion(
         complete=lambda completion: completions.append(completion) or transition
     )
     monkeypatch.setattr(
-        main_module.connection_flow,
+        main_module.coordinate_flow,
         "apply_coordinate_transition",
         lambda owner, value: rendered.append(value),
     )
@@ -105,12 +105,12 @@ def test_design_unload_closes_coordinate_owner_before_workspace_adoption(
         return plan
 
     monkeypatch.setattr(
-        main_module.design_navigation,
+        main_module.route_editing,
         "unload_design_document",
         unload_candidate,
     )
     monkeypatch.setattr(
-        main_module.connection_flow,
+        main_module.coordinate_flow,
         "apply_coordinate_transition",
         lambda _owner, _transition: None,
     )
@@ -147,7 +147,7 @@ def test_resolved_image_alignment_capture_submits_typed_request(monkeypatch) -> 
     window._update_stage_coordinate_apply_state = lambda: None
     window._show_status = lambda *_args: None
     monkeypatch.setattr(
-        main_module.connection_flow,
+        main_module.coordinate_flow,
         "apply_coordinate_transition",
         lambda _owner, value: rendered.append(value),
     )
@@ -195,7 +195,7 @@ def test_armed_crosshair_capture_submits_no_b_motion(monkeypatch) -> None:
     )
     window._show_status = lambda *_args: None
     monkeypatch.setattr(
-        main_module.connection_flow,
+        main_module.coordinate_flow,
         "apply_coordinate_transition",
         lambda *_args: None,
     )
@@ -240,7 +240,7 @@ def test_rejected_fresh_frame_keeps_source_mark_and_ui_state(
     window._set_alignment_panel_expanded = lambda: calls.append("alignment")
     window._show_status = lambda *args: calls.append(("status", args))
     monkeypatch.setattr(
-        main_module.connection_flow,
+        main_module.coordinate_flow,
         "activate_current_design",
         lambda *_args, **_kwargs: types.SimpleNamespace(
             accepted=False,
@@ -269,7 +269,7 @@ def test_rejected_clear_registration_keeps_current_ui_state(monkeypatch) -> None
     window._refresh_design_position = lambda: calls.append("position")
     window._show_status = lambda *args: calls.append(("status", args))
     monkeypatch.setattr(
-        main_module.connection_flow,
+        main_module.coordinate_flow,
         "activate_current_design",
         lambda *_args, **_kwargs: types.SimpleNamespace(
             accepted=False,
@@ -294,7 +294,7 @@ def test_accepted_clear_registration_restarts_ui(monkeypatch) -> None:
     window._refresh_design_position = lambda: calls.append("position")
     window._show_status = lambda *args: calls.append(("status", args))
     monkeypatch.setattr(
-        main_module.connection_flow,
+        main_module.coordinate_flow,
         "activate_current_design",
         lambda *_args, **_kwargs: types.SimpleNamespace(
             accepted=True,
@@ -323,7 +323,7 @@ def test_focus_callbacks_translate_only_typed_results(monkeypatch) -> None:
         complete=lambda completion: completions.append(completion) or transition
     )
     monkeypatch.setattr(
-        main_module.connection_flow,
+        main_module.coordinate_flow,
         "apply_coordinate_transition",
         lambda _owner, value: rendered.append(value),
     )
@@ -368,7 +368,7 @@ def test_main_observes_focus_context_without_owning_lease_policy(
         observe_focus_context=lambda value: observations.append(value) or transition
     )
     monkeypatch.setattr(
-        main_module.connection_flow,
+        main_module.coordinate_flow,
         "apply_coordinate_transition",
         lambda _owner, value: rendered.append(value),
     )
@@ -420,7 +420,7 @@ def test_contact_worker_queues_typed_result_before_gui_completion(monkeypatch) -
         ),
     )
     monkeypatch.setattr(
-        main_module.connection_flow,
+        main_module.coordinate_flow,
         "apply_coordinate_transition",
         lambda _owner, value: rendered.append(value),
     )
@@ -484,7 +484,7 @@ def test_contact_worker_read_failure_is_queued_without_touching_coordinator(
         ),
     )
     monkeypatch.setattr(
-        main_module.connection_flow,
+        main_module.coordinate_flow,
         "apply_coordinate_transition",
         lambda *_args: None,
     )
@@ -556,7 +556,7 @@ def test_api_contact_callback_arms_and_completes_only_on_creator_thread(
         Qt.ConnectionType.QueuedConnection,
     )
     monkeypatch.setattr(
-        main_module.connection_flow,
+        main_module.coordinate_flow,
         "apply_coordinate_transition",
         lambda _owner, _transition: render_threads.append(threading.get_ident()),
     )

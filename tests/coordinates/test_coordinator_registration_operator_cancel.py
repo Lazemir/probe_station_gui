@@ -18,7 +18,7 @@ from probe_station_gui.coordinates.coordinator_model import (
 )
 from probe_station_gui.design.frame_registration import DesignFrameMetadata
 from probe_station_gui.design.registration_lifecycle import RegistrationCancellation
-from probe_station_gui.views import main_window_connection_flow as connection_flow
+from probe_station_gui.views import main_window_coordinate_flow as coordinate_flow
 from tests.coordinates.coordinator_registration_support import (
     _document,
     _draft,
@@ -133,11 +133,11 @@ def test_explicit_cancel_restores_empty_operator_baseline_once_and_stale_is_iner
     events: list[object] = []
     owner = _owner(events)
     monkeypatch.setattr(
-        connection_flow.stage_position_panel,
+        coordinate_flow.stage_position_panel,
         "refresh_coordinate_frame_display",
         lambda _owner: None,
     )
-    connection_flow.apply_coordinate_transition(owner, captured)
+    coordinate_flow.apply_coordinate_transition(owner, captured)
     assert owner._alignment_stage_draft == [(3.0, 4.0)]
     events.clear()
 
@@ -153,7 +153,7 @@ def test_explicit_cancel_restores_empty_operator_baseline_once_and_stale_is_iner
     assert cancelled.ui_effects == (expected,)
     assert cancelled.snapshot.registration.operator_stage_marks == ()
     assert session.source_stage_marks == ()
-    connection_flow.apply_coordinate_transition(owner, cancelled)
+    coordinate_flow.apply_coordinate_transition(owner, cancelled)
     assert owner._alignment_stage_draft == []
     assert events.count(("layout", expected.design_marks)) == 1
     assert events.count("manual") == 1
@@ -169,8 +169,8 @@ def test_explicit_cancel_restores_empty_operator_baseline_once_and_stale_is_iner
             ),
         )
     )
-    connection_flow.apply_coordinate_transition(owner, replay)
-    connection_flow.apply_coordinate_transition(owner, stale)
+    coordinate_flow.apply_coordinate_transition(owner, replay)
+    coordinate_flow.apply_coordinate_transition(owner, stale)
 
     assert not replay.view_changed
     assert replay.ui_effects == ()
@@ -249,11 +249,11 @@ def test_changed_frame_version_restores_superseded_operator_draft_once(
     events: list[object] = []
     owner = _owner(events)
     monkeypatch.setattr(
-        connection_flow.stage_position_panel,
+        coordinate_flow.stage_position_panel,
         "refresh_coordinate_frame_display",
         lambda _owner: None,
     )
-    connection_flow.apply_coordinate_transition(owner, captured)
+    coordinate_flow.apply_coordinate_transition(owner, captured)
     assert owner._alignment_stage_draft == [(3.0, 4.0)]
     events.clear()
 
@@ -273,7 +273,7 @@ def test_changed_frame_version_restores_superseded_operator_draft_once(
     )
     assert replacement.view_changed
     assert replacement.ui_effects == (expected,)
-    connection_flow.apply_coordinate_transition(owner, replacement)
+    coordinate_flow.apply_coordinate_transition(owner, replacement)
     assert owner._alignment_stage_draft == []
     assert events.count(("layout", expected.design_marks)) == 1
 

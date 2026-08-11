@@ -49,6 +49,8 @@ from probe_station_gui.settings.software_coordinates import (
     SoftwareCoordinateSettings,
 )
 from probe_station_gui.views import main_window_connection_flow as connection_flow
+from probe_station_gui.views import main_window_coordinate_flow as coordinate_flow
+from probe_station_gui.views import main_window_design_workspace as design_workspace
 from tests.coordinates.coordinator_registration_support import (
     _loaded_coordinator,
     _machine_snapshot,
@@ -90,12 +92,12 @@ def test_coordinate_transition_submits_load_intent_to_store(monkeypatch) -> None
         ),
     )
     monkeypatch.setattr(
-        connection_flow.stage_position_panel,
+        coordinate_flow.stage_position_panel,
         "render_coordinate_system_snapshot",
         lambda _owner, rendered: events.append(("render", rendered)),
     )
 
-    connection_flow.apply_coordinate_transition(
+    coordinate_flow.apply_coordinate_transition(
         owner,
         CoordinateTransition(
             snapshot,
@@ -127,12 +129,12 @@ def test_selection_persistence_submission_failure_is_reported_without_revert(
         ),
     )
     monkeypatch.setattr(
-        connection_flow.stage_position_panel,
+        coordinate_flow.stage_position_panel,
         "render_coordinate_system_snapshot",
         lambda _owner, _snapshot: None,
     )
 
-    connection_flow.apply_coordinate_transition(
+    coordinate_flow.apply_coordinate_transition(
         owner,
         CoordinateTransition(
             CoordinateSystemSnapshot(False, (), None),
@@ -158,12 +160,12 @@ def test_coordinate_transition_submits_typed_machine_capture_intent(
         ),
     )
     monkeypatch.setattr(
-        connection_flow.stage_position_panel,
+        coordinate_flow.stage_position_panel,
         "render_coordinate_system_snapshot",
         lambda _owner, rendered: events.append(("render", rendered)),
     )
 
-    connection_flow.apply_coordinate_transition(
+    coordinate_flow.apply_coordinate_transition(
         owner,
         CoordinateTransition(
             CoordinateSystemSnapshot(True, (), None),
@@ -197,8 +199,8 @@ def test_unexpected_pivot_read_failure_is_transient_but_validation_is_permanent(
         _active_objective_xy_offset=lambda: (0.0, 0.0),
     )
 
-    transient = connection_flow.coordinate_authority_observation(transient_owner)
-    permanent = connection_flow.coordinate_authority_observation(permanent_owner)
+    transient = coordinate_flow.coordinate_authority_observation(transient_owner)
+    permanent = coordinate_flow.coordinate_authority_observation(permanent_owner)
 
     assert transient.pivot_error == "temporarily busy"
     assert transient.pivot_error_permanent is False
@@ -220,7 +222,7 @@ def test_authority_observation_prefers_live_motion_snapshot() -> None:
         _active_objective_xy_offset=lambda: (0.0, 0.0),
     )
 
-    observation = connection_flow.coordinate_authority_observation(owner)
+    observation = coordinate_flow.coordinate_authority_observation(owner)
 
     assert observation.machine_snapshot is live
     assert observation.physical_pose is live.physical_machine_pose
@@ -274,14 +276,14 @@ def test_coordinate_load_request_and_completion_delegate_to_coordinator(
         ),
     )
     monkeypatch.setattr(
-        connection_flow,
+        coordinate_flow,
         "activate_current_design",
         lambda _owner: calls.append(("activate",)),
     )
     result = CoordinateFrameLoadResult(8, CoordinateFrameDocument())
 
-    request_id = connection_flow.request_coordinate_frame_load(owner)
-    connection_flow.handle_coordinate_frame_loaded(owner, result)
+    request_id = coordinate_flow.request_coordinate_frame_load(owner)
+    coordinate_flow.handle_coordinate_frame_loaded(owner, result)
 
     assert request_id == 8
     assert calls == [
@@ -329,13 +331,13 @@ def test_startup_custom_restore_is_materialized_before_selection_reconcile(
         _reconcile_design_calibration_fingerprints=lambda: None,
     )
     monkeypatch.setattr(
-        connection_flow.stage_position_panel,
+        coordinate_flow.stage_position_panel,
         "render_coordinate_system_snapshot",
         lambda _owner, _snapshot: None,
     )
-    monkeypatch.setattr(connection_flow, "activate_current_design", lambda _owner: None)
+    monkeypatch.setattr(coordinate_flow, "activate_current_design", lambda _owner: None)
 
-    connection_flow.handle_coordinate_frame_loaded(
+    coordinate_flow.handle_coordinate_frame_loaded(
         owner,
         CoordinateFrameLoadResult(
             load_intent.intent_id,
@@ -365,12 +367,12 @@ def test_coordinate_transition_submits_save_and_presents_notices(monkeypatch) ->
         _refresh_design_position=lambda: events.append(("design_position",)),
     )
     monkeypatch.setattr(
-        connection_flow.stage_position_panel,
+        coordinate_flow.stage_position_panel,
         "render_coordinate_system_snapshot",
         lambda _owner, rendered: events.append(("render", rendered)),
     )
 
-    connection_flow.apply_coordinate_transition(
+    coordinate_flow.apply_coordinate_transition(
         owner,
         CoordinateTransition(
             CoordinateSystemSnapshot(True, (), document),
@@ -401,12 +403,12 @@ def test_capture_notice_refreshes_design_views_but_stale_transition_does_not(
         ),
     )
     monkeypatch.setattr(
-        connection_flow.stage_position_panel,
+        coordinate_flow.stage_position_panel,
         "render_coordinate_system_snapshot",
         lambda _owner, rendered: events.append(("coordinate_display", rendered)),
     )
 
-    connection_flow.apply_coordinate_transition(
+    coordinate_flow.apply_coordinate_transition(
         owner,
         CoordinateTransition(
             snapshot,
@@ -419,7 +421,7 @@ def test_capture_notice_refreshes_design_views_but_stale_transition_does_not(
             ),
         ),
     )
-    connection_flow.apply_coordinate_transition(owner, CoordinateTransition(snapshot))
+    coordinate_flow.apply_coordinate_transition(owner, CoordinateTransition(snapshot))
 
     assert events == [
         ("coordinate_display", snapshot),
@@ -439,17 +441,17 @@ def test_activation_view_changes_refresh_on_authority_block_and_recovery(
         _refresh_design_position=lambda: events.append("position"),
     )
     monkeypatch.setattr(
-        connection_flow.stage_position_panel,
+        coordinate_flow.stage_position_panel,
         "render_coordinate_system_snapshot",
         lambda _owner, _snapshot: events.append("coordinates"),
     )
     snapshot = CoordinateSystemSnapshot(True, (), None)
 
-    connection_flow.apply_coordinate_transition(
+    coordinate_flow.apply_coordinate_transition(
         owner,
         CoordinateTransition(snapshot, view_changed=True),
     )
-    connection_flow.apply_coordinate_transition(
+    coordinate_flow.apply_coordinate_transition(
         owner,
         CoordinateTransition(snapshot, view_changed=True),
     )
@@ -479,26 +481,26 @@ def test_operator_alignment_effects_finish_and_restore_exact_ui_draft(
         _update_stage_coordinate_apply_state=lambda: events.append("apply-state"),
     )
     monkeypatch.setattr(
-        connection_flow.stage_position_panel,
+        coordinate_flow.stage_position_panel,
         "render_coordinate_system_snapshot",
         lambda _owner, _snapshot: None,
     )
 
-    connection_flow.apply_coordinate_transition(
+    coordinate_flow.apply_coordinate_transition(
         owner,
         CoordinateTransition(
             snapshot,
             ui_effects=(FinishOperatorAlignmentUiEffect(),),
         ),
     )
-    connection_flow.apply_coordinate_transition(
+    coordinate_flow.apply_coordinate_transition(
         owner,
         CoordinateTransition(snapshot),
     )
 
     assert events == [("snap", False), "finish"]
 
-    connection_flow.apply_coordinate_transition(
+    coordinate_flow.apply_coordinate_transition(
         owner,
         CoordinateTransition(
             snapshot,
@@ -580,7 +582,7 @@ def test_failed_design_frame_save_restores_complete_cross_document_workspace(
         _show_status=lambda message, *_args: statuses.append(message),
     )
     monkeypatch.setattr(
-        connection_flow.stage_position_panel,
+        coordinate_flow.stage_position_panel,
         "render_coordinate_system_snapshot",
         lambda _owner, _snapshot: None,
     )
@@ -588,7 +590,7 @@ def test_failed_design_frame_save_restores_complete_cross_document_workspace(
         baseline_metadata,
         top_cell_name="OTHER",
     )
-    workspace_after = connection_flow.capture_design_workspace(
+    workspace_after = design_workspace.capture_design_workspace(
         owner,
         session_state=candidate.snapshot_state(),
         frame_metadata=candidate_metadata,
@@ -599,7 +601,7 @@ def test_failed_design_frame_save_restores_complete_cross_document_workspace(
         pending_alignment_preparation=None,
     )
 
-    transition = connection_flow.activate_current_design(
+    transition = coordinate_flow.activate_current_design(
         owner,
         session_state=candidate.snapshot_state(),
         frame_metadata=candidate_metadata,
@@ -612,7 +614,7 @@ def test_failed_design_frame_save_restores_complete_cross_document_workspace(
     assert len(saved) == 1
 
     request_id, _document = saved[0]
-    connection_flow.handle_coordinate_frame_failed(
+    coordinate_flow.handle_coordinate_frame_failed(
         owner,
         CoordinateFrameStoreFailure(
             request_id,
@@ -920,15 +922,15 @@ def test_on_serial_disconnected_preserves_detach_cleanup_order(monkeypatch) -> N
     owner = _owner(events)
     owner.serial_connection = _Serial(events, port="COM9")
     original_clear = connection_flow.stage_move_lifecycle.clear_coordinate_move_tracking
-    original_display = connection_flow.stage_position_panel.update_stage_position_display
+    original_display = coordinate_flow.stage_position_panel.update_stage_position_display
     connection_flow.stage_move_lifecycle.clear_coordinate_move_tracking = (
         lambda _owner, **kwargs: events.append(("clear_coordinate_tracking", kwargs))
     )
-    connection_flow.stage_position_panel.update_stage_position_display = (
+    coordinate_flow.stage_position_panel.update_stage_position_display = (
         lambda _owner, value: events.append(("stage_display", value))
     )
     monkeypatch.setattr(
-        connection_flow,
+        coordinate_flow,
         "activate_current_design",
         lambda _owner: events.append(("activate_design",)),
     )
@@ -939,7 +941,7 @@ def test_on_serial_disconnected_preserves_detach_cleanup_order(monkeypatch) -> N
         connection_flow.stage_move_lifecycle.clear_coordinate_move_tracking = (
             original_clear
         )
-        connection_flow.stage_position_panel.update_stage_position_display = (
+        coordinate_flow.stage_position_panel.update_stage_position_display = (
             original_display
         )
 
@@ -1081,7 +1083,7 @@ def test_restore_persisted_controller_state_clears_stale_cache() -> None:
 def test_restore_persisted_controller_state_imports_current_cache(monkeypatch) -> None:
     events: list[object] = []
     monkeypatch.setattr(
-        connection_flow,
+        design_workspace,
         "prepare_persisted_design_restore",
         lambda _owner, state: events.append(("prepare_design_restore", state)),
     )
@@ -1131,17 +1133,17 @@ def test_legacy_controller_state_rewrite_reports_typed_success(
         _coordinate_system_coordinator=_Coordinator(),
     )
     monkeypatch.setattr(
-        connection_flow.stage_position_panel,
+        coordinate_flow.stage_position_panel,
         "render_coordinate_system_snapshot",
         lambda _owner, _snapshot: None,
     )
     monkeypatch.setattr(
-        connection_flow,
+        coordinate_flow,
         "complete_legacy_design_migration",
         lambda _owner, state: events.append(("rewrite", state)),
     )
 
-    connection_flow.apply_coordinate_transition(
+    coordinate_flow.apply_coordinate_transition(
         owner,
         CoordinateTransition(
             snapshot,
@@ -1182,17 +1184,17 @@ def test_legacy_controller_state_rewrite_reports_typed_failure(
         _show_status=lambda message, _timeout: statuses.append(message),
     )
     monkeypatch.setattr(
-        connection_flow.stage_position_panel,
+        coordinate_flow.stage_position_panel,
         "render_coordinate_system_snapshot",
         lambda _owner, _snapshot: None,
     )
     monkeypatch.setattr(
-        connection_flow,
+        coordinate_flow,
         "complete_legacy_design_migration",
         lambda _owner, _state: (_ for _ in ()).throw(OSError("disk full")),
     )
 
-    connection_flow.apply_coordinate_transition(
+    coordinate_flow.apply_coordinate_transition(
         owner,
         CoordinateTransition(
             snapshot,
@@ -1235,7 +1237,7 @@ def test_controller_state_persistence_preserves_legacy_registration_until_frame_
         ),
     )
 
-    state = connection_flow.controller_state_with_design(owner)
+    state = design_workspace.controller_state_with_design(owner)
 
     assert state == {
         "last_stage_position": [1.0, 2.0],
@@ -1271,7 +1273,7 @@ def test_controller_state_persistence_reads_detached_application_projection() ->
         ),
     )
 
-    state = connection_flow.controller_state_with_design(owner)
+    state = design_workspace.controller_state_with_design(owner)
 
     assert state == {
         "last_stage_position": [1.0, 2.0],
@@ -1301,12 +1303,12 @@ def test_activate_current_design_does_not_read_session_owner(monkeypatch) -> Non
         ),
     )
     monkeypatch.setattr(
-        connection_flow.stage_position_panel,
+        coordinate_flow.stage_position_panel,
         "render_coordinate_system_snapshot",
         lambda _owner, _snapshot: None,
     )
 
-    transition = connection_flow.activate_current_design(owner)
+    transition = coordinate_flow.activate_current_design(owner)
 
     assert transition == CoordinateTransition(snapshot)
     assert len(calls) == 1

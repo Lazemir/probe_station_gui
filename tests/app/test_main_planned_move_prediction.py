@@ -564,11 +564,11 @@ class MainPersistedDesignRestoreTest(unittest.TestCase):
         )
 
         with mock.patch.object(
-            main_module.connection_flow.design_navigation,
+            main_module.design_workspace.design_navigation,
             "persisted_design_file_is_current",
             return_value=True,
         ):
-            main_module.connection_flow.maybe_restore_persisted_design(
+            main_module.design_workspace.maybe_restore_persisted_design(
                 window,
                 (1.0, 2.0, 9.0, 0.0, 8.0),
             )
@@ -598,11 +598,11 @@ class MainPersistedDesignRestoreTest(unittest.TestCase):
         stage_controller.homed_axes.remove("Z")
 
         with mock.patch.object(
-            main_module.connection_flow.design_navigation,
+            main_module.design_workspace.design_navigation,
             "persisted_design_file_is_current",
             return_value=True,
         ):
-            main_module.connection_flow.maybe_restore_persisted_design(
+            main_module.design_workspace.maybe_restore_persisted_design(
                 window,
                 (1.0, 2.0, 9.0, 4.0, 5.0),
             )
@@ -628,7 +628,7 @@ class MainPersistedDesignRestoreTest(unittest.TestCase):
             _make_design_restore_main((1.0, 2.0, 3.0, 4.0, 5.0))
         )
 
-        main_module.connection_flow.maybe_restore_persisted_design(
+        main_module.design_workspace.maybe_restore_persisted_design(
             window,
             (1.5, 2.5, 3.0, 4.0, 5.0),
         )

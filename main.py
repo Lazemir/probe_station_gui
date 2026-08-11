@@ -167,7 +167,7 @@ from probe_station_gui.design.contact_navigation import (
     api_route_adjusted_stage_xy,
     api_route_point_payload,
 )
-from probe_station_gui.design import navigation_adapter as design_navigation
+from probe_station_gui.design import navigation_adapter as design_navigation, navigation_targeting, route_editing
 from probe_station_gui.design.markup import (
     MarkupDocument,
     MarkupLoadChoice,
@@ -493,8 +493,8 @@ from probe_station_gui.views.main_window_docks import create_main_window_docks
 from probe_station_gui.views.main_window_menus import setup_main_window_menus
 from probe_station_gui.views import (
     main_window_connection_flow as connection_flow,
-)
-from probe_station_gui.views import (
+    main_window_coordinate_flow as coordinate_flow,
+    main_window_design_workspace as design_workspace,
     main_window_needle_calibration as needle_calibration_ui,
 )
 from probe_station_gui.views import main_window_shutdown as shutdown_ui
@@ -1072,7 +1072,7 @@ class Main(QMainWindow):
         self._coordinate_frame_store.failed.connect(
             self._on_coordinate_frame_store_failed
         )
-        connection_flow.request_coordinate_frame_load(self)
+        coordinate_flow.request_coordinate_frame_load(self)
         self.statusBar()
         self._objective_widget = self._create_objective_widget()
         self.statusBar().addPermanentWidget(self._objective_widget, 0)
@@ -4619,7 +4619,7 @@ class Main(QMainWindow):
         transition = self._coordinate_system_coordinator.set_registration_source_mark(
             RegistrationSourceMarkRequest(snapped_point, slot=slot)
         )
-        connection_flow.apply_coordinate_transition(self, transition)
+        coordinate_flow.apply_coordinate_transition(self, transition)
         self._last_selected_design_point = snapped_point
         self._set_design_snap_enabled(True)
         self._refresh_design_panel()
@@ -4631,7 +4631,7 @@ class Main(QMainWindow):
         )
 
     def _start_fresh_design_frame_for_source_replacement(self) -> bool:
-        transition = connection_flow.activate_current_design(
+        transition = coordinate_flow.activate_current_design(
             self,
             create_new_if_registered=True,
         )
@@ -4681,7 +4681,7 @@ class Main(QMainWindow):
         transition = self._coordinate_system_coordinator.replace_registration_source_marks(
             RegistrationSourceMarksRequest(normalized)
         )
-        connection_flow.apply_coordinate_transition(self, transition)
+        coordinate_flow.apply_coordinate_transition(self, transition)
         self._alignment_design_draft = normalized
         self._alignment_stage_draft = [None] * len(normalized)
         self._alignment_draft_fit_residuals = None
@@ -4905,7 +4905,7 @@ class Main(QMainWindow):
             preserve_exposure_policy=True,
         )
         if custom_transition is not None:
-            connection_flow.apply_coordinate_transition(self, custom_transition)
+            coordinate_flow.apply_coordinate_transition(self, custom_transition)
         reconcile_calibrations = getattr(
             self,
             "_reconcile_design_calibration_fingerprints",
@@ -4925,7 +4925,7 @@ class Main(QMainWindow):
             or objective_authority_changed
             or axis_calibrations_changed
         ):
-            connection_flow.observe_coordinate_authority(self)
+            coordinate_flow.observe_coordinate_authority(self)
         if active_objective_update_rejected:
             self._show_status(
                 "Stage is busy; active objective settings not changed.",
@@ -4946,7 +4946,7 @@ class Main(QMainWindow):
                 )
             )
         )
-        connection_flow.apply_coordinate_transition(self, transition)
+        coordinate_flow.apply_coordinate_transition(self, transition)
         return transition.view_changed
 
     def _design_metadata_with_calibration_fingerprints(
@@ -5199,7 +5199,7 @@ class Main(QMainWindow):
             self._refresh_design_position()
         if getattr(plan, "refresh_calibration_ui", False):
             self._refresh_objective_calibration_ui()
-        connection_flow.observe_coordinate_authority(self)
+        coordinate_flow.observe_coordinate_authority(self)
         if show_status:
             self._show_plan_status(plan)
         return True
@@ -6068,7 +6068,7 @@ class Main(QMainWindow):
             transition = (
                 self._coordinate_system_coordinator.clear_registration_source_stage_marks()
             )
-            connection_flow.apply_coordinate_transition(self, transition)
+            coordinate_flow.apply_coordinate_transition(self, transition)
             self._pending_alignment_preparation = None
             self._pending_quick_alignment_rotation = False
             self._alignment_stage_draft = [None] * len(
@@ -6297,7 +6297,7 @@ class Main(QMainWindow):
                 ),
             )
         )
-        connection_flow.apply_coordinate_transition(self, transition)
+        coordinate_flow.apply_coordinate_transition(self, transition)
 
     def _apply_alignment_capture_plan(self, plan) -> None:
         if plan.points is not None:
@@ -6306,7 +6306,7 @@ class Main(QMainWindow):
             transition = self._coordinate_system_coordinator.apply_registration_alignment(
                 RegistrationAlignmentRequest(plan.preparation)
             )
-            connection_flow.apply_coordinate_transition(self, transition)
+            coordinate_flow.apply_coordinate_transition(self, transition)
             self._finish_alignment_draft()
         if plan.pending_preparation is not None:
             self._pending_alignment_preparation = plan.pending_preparation
@@ -6338,7 +6338,7 @@ class Main(QMainWindow):
                 "Design registration stale after B-axis rotation started."
             )
         )
-        connection_flow.apply_coordinate_transition(self, transition)
+        coordinate_flow.apply_coordinate_transition(self, transition)
 
     def _finish_alignment_draft(self) -> None:
         self._alignment_design_draft = ()
@@ -7072,7 +7072,7 @@ class Main(QMainWindow):
         transition = self._coordinate_system_coordinator.cancel_registration(
             RegistrationCancellation.DESIGN_CHANGED
         )
-        connection_flow.apply_coordinate_transition(self, transition)
+        coordinate_flow.apply_coordinate_transition(self, transition)
         self._invalidate_pending_design_markup_load()
         self._design_load_generation += 1
         generation = self._design_load_generation
@@ -7126,7 +7126,7 @@ class Main(QMainWindow):
             self._set_design_load_pending_ui(False)
             self._show_status(str(exc), 6000)
             if restore_state is not None:
-                connection_flow.save_controller_state_without_design(self)
+                design_workspace.save_controller_state_without_design(self)
             return
         if not plan.accepted:
             self._set_design_load_pending_ui(False)
@@ -7183,7 +7183,7 @@ class Main(QMainWindow):
         elif self.design_navigator_panel:
             self.design_navigator_panel.set_status_message(message)
         if plan.clear_cached_design:
-            connection_flow.save_controller_state_without_design(self)
+            design_workspace.save_controller_state_without_design(self)
 
     def _ensure_design_markup_store(self) -> MarkupStoreWorker:
         store = getattr(self, "_design_markup_store", None)
@@ -7243,7 +7243,7 @@ class Main(QMainWindow):
         frame_metadata = self._design_metadata_with_calibration_fingerprints(
             context.frame_metadata
         )
-        workspace_after = connection_flow.capture_design_workspace(
+        workspace_after = design_workspace.capture_design_workspace(
             self,
             session_state=context.session.snapshot_state(),
             frame_metadata=frame_metadata,
@@ -7253,7 +7253,7 @@ class Main(QMainWindow):
             last_selected_design_point=context.plan.last_selected_design_point,
             pending_alignment_preparation=None,
         )
-        transition = connection_flow.activate_current_design(
+        transition = coordinate_flow.activate_current_design(
             self,
             session_state=context.session.snapshot_state(),
             frame_metadata=frame_metadata,
@@ -7507,23 +7507,23 @@ class Main(QMainWindow):
         self._show_status("Coordinate selection could not be saved.", 6000)
 
     def _on_coordinate_frame_document_loaded(self, result: object) -> None:
-        connection_flow.handle_coordinate_frame_loaded(self, result)
+        coordinate_flow.handle_coordinate_frame_loaded(self, result)
 
     def _on_coordinate_frame_document_saved(self, result: object) -> None:
-        connection_flow.handle_coordinate_frame_saved(self, result)
+        coordinate_flow.handle_coordinate_frame_saved(self, result)
 
     def _on_coordinate_frame_store_failed(self, failure: object) -> None:
         operation = str(getattr(failure, "operation", "operation"))
         message = str(getattr(failure, "message", "Unknown persistence error."))
         logger.warning("Coordinate frame %s failed: %s", operation, message)
-        connection_flow.handle_coordinate_frame_failed(self, failure)
+        coordinate_flow.handle_coordinate_frame_failed(self, failure)
 
     def _show_navigation_status(self, plan: object) -> None:
         message = getattr(plan, "status_message", None)
         if message is not None:
             self._show_status(message, getattr(plan, "status_timeout_ms", 5000))
 
-    def _apply_route_edit_plan(self, plan: design_navigation.RouteEditPlan, *, empty_selection: bool = False, update_selection: bool = True) -> bool:
+    def _apply_route_edit_plan(self, plan: route_editing.RouteEditPlan, *, empty_selection: bool = False, update_selection: bool = True) -> bool:
         if not plan.accepted:
             self._show_navigation_status(plan)
             return False
@@ -7541,10 +7541,10 @@ class Main(QMainWindow):
         self._design_load_generation += 1
         loaded_document = self._design_session.document
         candidate_session = self._snapshot_design_session()
-        plan = design_navigation.unload_design_document(candidate_session)
+        plan = route_editing.unload_design_document(candidate_session)
         if not plan.accepted:
             return
-        connection_flow.apply_coordinate_transition(
+        coordinate_flow.apply_coordinate_transition(
             self,
             self._coordinate_system_coordinator.close_design(),
         )
@@ -7568,7 +7568,7 @@ class Main(QMainWindow):
             return
         candidate_session = self._snapshot_design_session()
         try:
-            plan = design_navigation.set_design_top_cell(candidate_session, top_cell_name)
+            plan = route_editing.set_design_top_cell(candidate_session, top_cell_name)
         except DesignModelError as exc:
             self._show_status(str(exc), 6000)
             return
@@ -7580,14 +7580,14 @@ class Main(QMainWindow):
                 top_cell_name=document.top_cell_name,
                 design_unit_mm=float(document.dbu) * 1e3,
             )
-        workspace_after = connection_flow.capture_design_workspace(
+        workspace_after = design_workspace.capture_design_workspace(
             self,
             session_state=candidate_session.snapshot_state(),
             frame_metadata=metadata,
             last_selected_design_point=None,
             pending_alignment_preparation=None,
         )
-        transition = connection_flow.activate_current_design(
+        transition = coordinate_flow.activate_current_design(
             self,
             session_state=candidate_session.snapshot_state(),
             frame_metadata=metadata,
@@ -7604,7 +7604,7 @@ class Main(QMainWindow):
             return
         candidate_session = self._snapshot_design_session()
         try:
-            plan = design_navigation.set_design_layer_visibility(
+            plan = route_editing.set_design_layer_visibility(
                 candidate_session, layer, datatype, visible
             )
         except DesignModelError as exc:
@@ -7612,11 +7612,11 @@ class Main(QMainWindow):
             return
         if not plan.accepted:
             return
-        workspace_after = connection_flow.capture_design_workspace(
+        workspace_after = design_workspace.capture_design_workspace(
             self,
             session_state=candidate_session.snapshot_state(),
         )
-        transition = connection_flow.activate_current_design(
+        transition = coordinate_flow.activate_current_design(
             self,
             session_state=candidate_session.snapshot_state(),
             workspace_after=workspace_after,
@@ -7664,7 +7664,7 @@ class Main(QMainWindow):
         )
         candidate_session = self._snapshot_design_session()
         try:
-            plan = design_navigation.rotate_design_document(
+            plan = route_editing.rotate_design_document(
                 candidate_session,
                 delta,
                 self._last_selected_design_point,
@@ -7673,14 +7673,14 @@ class Main(QMainWindow):
         except DesignModelError as exc:
             self._show_status(str(exc), 5000)
             return
-        workspace_after = connection_flow.capture_design_workspace(
+        workspace_after = design_workspace.capture_design_workspace(
             self,
             session_state=candidate_session.snapshot_state(),
             markup=rotated_markup,
             last_selected_design_point=plan.last_selected_design_point,
             pending_alignment_preparation=None,
         )
-        transition = connection_flow.activate_current_design(
+        transition = coordinate_flow.activate_current_design(
             self,
             session_state=candidate_session.snapshot_state(),
             workspace_after=workspace_after,
@@ -7697,7 +7697,7 @@ class Main(QMainWindow):
         if not self._design_mutation_ready():
             return
         try:
-            plan = design_navigation.create_measurement_route(self._design_session)
+            plan = route_editing.create_measurement_route(self._design_session)
         except DesignModelError as exc:
             self._show_status(str(exc), 5000)
             return
@@ -7709,7 +7709,7 @@ class Main(QMainWindow):
         if not self._design_mutation_ready():
             return
         try:
-            plan = design_navigation.load_measurement_route(self._design_session, route_path)
+            plan = route_editing.load_measurement_route(self._design_session, route_path)
         except DesignModelError as exc:
             self._show_status(str(exc), 7000)
             return
@@ -7721,7 +7721,7 @@ class Main(QMainWindow):
         if not self._design_mutation_ready():
             return
         try:
-            plan = design_navigation.save_measurement_route(self._design_session)
+            plan = route_editing.save_measurement_route(self._design_session)
         except DesignModelError as exc:
             self._show_status(str(exc), 5000)
             return
@@ -7731,7 +7731,7 @@ class Main(QMainWindow):
         if not self._design_mutation_ready():
             return
         try:
-            plan = design_navigation.save_measurement_route(self._design_session, route_path)
+            plan = route_editing.save_measurement_route(self._design_session, route_path)
         except DesignModelError as exc:
             self._show_status(str(exc), 5000)
             return
@@ -7742,7 +7742,7 @@ class Main(QMainWindow):
             self._show_status("Design editing is locked.", 4000)
             return
         try:
-            plan = design_navigation.add_design_route_point(self._design_session, x_value, y_value)
+            plan = route_editing.add_design_route_point(self._design_session, x_value, y_value)
         except DesignModelError as exc:
             self._show_status(str(exc), 5000)
             return
@@ -7899,7 +7899,7 @@ class Main(QMainWindow):
         except ValueError as exc:
             self._show_status(str(exc), 4000)
             return
-        route_plan = design_navigation.apply_route_entity_changes(
+        route_plan = route_editing.apply_route_entity_changes(
             self._design_session,
             plan,
         )
@@ -7938,7 +7938,7 @@ class Main(QMainWindow):
             self._show_status("Design editing is locked.", 4000)
             return
         try:
-            plan = design_navigation.add_route_array_points(
+            plan = route_editing.add_route_array_points(
                 self._design_session, origin_x, origin_y, step_x_dx, step_x_dy,
                 count_x, step_y_dx, step_y_dy, count_y, serpentine, replace_existing,
                 selected_indices,
@@ -7951,13 +7951,13 @@ class Main(QMainWindow):
     def _remove_selected_route_point(self) -> None:
         if not self._design_mutation_ready():
             return
-        plan = design_navigation.remove_selected_route_point(self._design_session)
+        plan = route_editing.remove_selected_route_point(self._design_session)
         self._apply_route_edit_plan(plan)
 
     def _clear_measurement_route_points(self) -> None:
         if not self._design_mutation_ready():
             return
-        plan = design_navigation.clear_measurement_route_points(self._design_session)
+        plan = route_editing.clear_measurement_route_points(self._design_session)
         self._apply_route_edit_plan(plan, empty_selection=True)
 
     def _open_route_measurement_dialog(self, *, start_context: bool = True) -> None:
@@ -7997,7 +7997,7 @@ class Main(QMainWindow):
             route_path = str(state.get("session_route_path") or "").strip()
             if RouteMeasurementSettingsStore.session_active(state) and route_path:
                 try:
-                    route_plan = design_navigation.load_measurement_route(
+                    route_plan = route_editing.load_measurement_route(
                         self._design_session,
                         route_path,
                     )
@@ -8400,7 +8400,7 @@ class Main(QMainWindow):
         request: FirstContactRequest,
     ) -> ReadPhysicalAIntent | None:
         transition = self._coordinate_system_coordinator.arm_first_contact(request)
-        connection_flow.apply_coordinate_transition(self, transition)
+        coordinate_flow.apply_coordinate_transition(self, transition)
         return next(
             (
                 intent
@@ -8416,7 +8416,7 @@ class Main(QMainWindow):
         completed = self._coordinate_system_coordinator.complete(
             CoordinateAdapterCompletion(result.intent_id, result)
         )
-        connection_flow.apply_coordinate_transition(self, completed)
+        coordinate_flow.apply_coordinate_transition(self, completed)
 
     def _route_measurement_points(
         self,
@@ -9373,7 +9373,7 @@ class Main(QMainWindow):
             self._save_route_measurement_current_point(value)
 
     def _select_route_point_for_measurement(self, point_number: int) -> None:
-        plan = design_navigation.select_route_point_for_measurement(
+        plan = route_editing.select_route_point_for_measurement(
             self._design_session,
             point_number,
         )
@@ -9419,7 +9419,7 @@ class Main(QMainWindow):
     def _select_route_point(self, index: int) -> None:
         if not self._design_mutation_ready():
             return
-        plan = design_navigation.select_route_point(self._design_session, index)
+        plan = route_editing.select_route_point(self._design_session, index)
         self._last_selected_design_point = plan.last_selected_design_point
         self._refresh_design_panel()
 
@@ -9453,7 +9453,7 @@ class Main(QMainWindow):
         transition = self._coordinate_system_coordinator.set_registration_source_mark(
             RegistrationSourceMarkRequest((x_value, y_value))
         )
-        connection_flow.apply_coordinate_transition(self, transition)
+        coordinate_flow.apply_coordinate_transition(self, transition)
         self._refresh_design_panel()
         self._show_status(
             f"Design source mark captured at X={x_value:.3f}, Y={y_value:.3f}.",
@@ -9466,7 +9466,7 @@ class Main(QMainWindow):
         transition = self._coordinate_system_coordinator.add_registration_check_mark(
             RegistrationCheckMarkRequest((x_value, y_value))
         )
-        connection_flow.apply_coordinate_transition(self, transition)
+        coordinate_flow.apply_coordinate_transition(self, transition)
         self._refresh_design_panel()
         self._show_status(
             f"Design check mark captured at X={x_value:.3f}, Y={y_value:.3f}.",
@@ -9498,7 +9498,7 @@ class Main(QMainWindow):
                 check_mark=check_mark,
             )
         )
-        connection_flow.apply_coordinate_transition(self, transition)
+        coordinate_flow.apply_coordinate_transition(self, transition)
 
     def _on_registration_machine_coordinate_snapshot_finished(
         self,
@@ -9530,14 +9530,14 @@ class Main(QMainWindow):
                 ),
             )
         )
-        connection_flow.apply_coordinate_transition(self, transition)
+        coordinate_flow.apply_coordinate_transition(self, transition)
 
 
     def _design_spacing_ratio_is_reasonable(self, ratio: float) -> bool:
         return abs(float(ratio) - 1.0) <= self.DESIGN_SPACING_RATIO_TOLERANCE
 
     def _clear_design_registration(self) -> None:
-        transition = connection_flow.activate_current_design(self, create_new=True)
+        transition = coordinate_flow.activate_current_design(self, create_new=True)
         if transition is None or not transition.accepted:
             return
         self._pending_alignment_preparation = None
@@ -9557,7 +9557,7 @@ class Main(QMainWindow):
             == self._coordinate_system_coordinator.current_design_lease().frame_id
         ):
             return
-        connection_flow.activate_current_design(self)
+        coordinate_flow.activate_current_design(self)
 
     def _select_design_registration_instance(self, frame_id: str) -> None:
         if not self._design_edit_safe():
@@ -9570,7 +9570,7 @@ class Main(QMainWindow):
             .registration.active_frame_id
         ):
             return
-        transition = connection_flow.activate_current_design(
+        transition = coordinate_flow.activate_current_design(
             self,
             requested_frame_id=selected_id,
         )
@@ -9594,22 +9594,22 @@ class Main(QMainWindow):
         transition = self._coordinate_system_coordinator.invalidate_registration(
             RegistrationInvalidationRequest(reason)
         )
-        connection_flow.apply_coordinate_transition(self, transition)
+        coordinate_flow.apply_coordinate_transition(self, transition)
         if self._design_session.document is not None:
             self._set_design_snap_enabled(True)
 
     def _on_design_target_selected(self, target_id: str) -> None:
-        design_navigation.select_design_target(self._design_session, target_id)
+        navigation_targeting.select_design_target(self._design_session, target_id)
         self._refresh_design_panel()
 
     def _select_next_design_target(self) -> None:
-        plan = design_navigation.select_next_design_target(self._design_session)
+        plan = navigation_targeting.select_next_design_target(self._design_session)
         self._refresh_design_panel()
         if plan.status_message is not None:
             self._show_status(plan.status_message, plan.status_timeout_ms)
 
     def _select_previous_design_target(self) -> None:
-        plan = design_navigation.select_previous_design_target(self._design_session)
+        plan = navigation_targeting.select_previous_design_target(self._design_session)
         self._refresh_design_panel()
         if plan.status_message is not None:
             self._show_status(plan.status_message, plan.status_timeout_ms)
@@ -9621,7 +9621,7 @@ class Main(QMainWindow):
             if target is not None
             else None
         )
-        plan = design_navigation.plan_design_target_move(
+        plan = navigation_targeting.plan_design_target_move(
             self._design_session,
             target_id,
             stage_xy,
@@ -9664,7 +9664,7 @@ class Main(QMainWindow):
             if document is not None
             else None
         )
-        plan = design_navigation.plan_design_coordinate_move(
+        plan = navigation_targeting.plan_design_coordinate_move(
             document is not None,
             self.stage_controller.is_busy() if document is not None else False,
             design_xy,
@@ -9795,7 +9795,7 @@ class Main(QMainWindow):
                 lease=pending_context,
             )
         )
-        connection_flow.apply_coordinate_transition(self, transition)
+        coordinate_flow.apply_coordinate_transition(self, transition)
         self._show_status("Focus reference found. Review and use the selected point.", 5000)
 
     def _on_focus_structure_bounds_failed(
@@ -9861,13 +9861,13 @@ class Main(QMainWindow):
                 ),
             )
         )
-        connection_flow.apply_coordinate_transition(self, transition)
+        coordinate_flow.apply_coordinate_transition(self, transition)
 
     def _observe_design_focus_context(self) -> None:
         transition = self._coordinate_system_coordinator.observe_focus_context(
             self._registration_optical_observation()
         )
-        connection_flow.apply_coordinate_transition(self, transition)
+        coordinate_flow.apply_coordinate_transition(self, transition)
 
     def _on_registration_focus_move_finished(
         self,
@@ -9896,7 +9896,7 @@ class Main(QMainWindow):
                 ),
             )
         )
-        connection_flow.apply_coordinate_transition(self, transition)
+        coordinate_flow.apply_coordinate_transition(self, transition)
 
     def _on_registration_focus_move_signal(
         self,
@@ -9937,7 +9937,7 @@ class Main(QMainWindow):
                 ),
             ),
         )
-        connection_flow.apply_coordinate_transition(self, transition)
+        coordinate_flow.apply_coordinate_transition(self, transition)
 
     def _registration_optical_observation(self) -> RegistrationOpticalObservation:
         fov_size = self._resolve_design_fov_size() or (0.0, 0.0)
@@ -9969,7 +9969,7 @@ class Main(QMainWindow):
                 ),
             )
         )
-        connection_flow.apply_coordinate_transition(self, transition)
+        coordinate_flow.apply_coordinate_transition(self, transition)
 
     def _connect_design_focus_signals(self) -> None:
         window = getattr(self, "design_layout_window", None)
@@ -10001,7 +10001,7 @@ class Main(QMainWindow):
         self._connect_design_focus_signals()
         route_measurement_thread = getattr(self, "_route_measurement_thread", None)
         coordinate_snapshot = self._coordinate_system_coordinator.snapshot()
-        p = design_navigation.design_panel_presentation(
+        p = navigation_targeting.design_panel_presentation(
             self._design_session,
             coordinate_snapshot.registration,
             route_running=route_measurement_thread is not None and route_measurement_thread.is_alive(),
@@ -10386,7 +10386,7 @@ class Main(QMainWindow):
             design_xy = self._design_xy_from_raw_stage_xy(stage_xy)
             fov_design_size = self._resolve_design_fov_size()
         coordinate_snapshot = self._coordinate_system_coordinator.snapshot()
-        p = design_navigation.design_position_presentation(
+        p = navigation_targeting.design_position_presentation(
             self._design_session,
             coordinate_snapshot.registration,
             stage_xy=stage_xy,

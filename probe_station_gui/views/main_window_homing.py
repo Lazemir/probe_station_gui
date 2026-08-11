@@ -66,9 +66,9 @@ def on_homing_status_changed(
     else:
         display_position = owner.stage_controller.latest_stage_position()
     stage_position_panel.update_stage_position_display(owner, display_position)
-    from probe_station_gui.views import main_window_connection_flow
+    from probe_station_gui.views import main_window_coordinate_flow
 
-    main_window_connection_flow.observe_coordinate_authority(owner)
+    main_window_coordinate_flow.observe_coordinate_authority(owner)
 
 
 def request_home_axis_from_ui(owner: MainWindowHomingOwner, axis: str) -> None:
@@ -172,9 +172,9 @@ def on_homing_action_finished(
         stage_position_panel.clear_stage_motion_axes(owner)
         owner._update_stage_coordinate_apply_state()
         return
-    from probe_station_gui.views import main_window_connection_flow
+    from probe_station_gui.views import main_window_coordinate_flow
 
-    main_window_connection_flow.observe_coordinate_authority(owner)
+    main_window_coordinate_flow.observe_coordinate_authority(owner)
     stage_position_panel.clear_stage_motion_axes(owner)
     refresh_pending_homing_ui(owner)
     owner._update_stage_coordinate_apply_state()

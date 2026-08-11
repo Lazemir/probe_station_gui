@@ -389,9 +389,9 @@ def _finish_pending_alignment_preparation(
         transition = owner._coordinate_system_coordinator.apply_registration_alignment(
             RegistrationAlignmentRequest(preparation)
         )
-        from probe_station_gui.views import main_window_connection_flow
+        from probe_station_gui.views import main_window_coordinate_flow
 
-        main_window_connection_flow.apply_coordinate_transition(owner, transition)
+        main_window_coordinate_flow.apply_coordinate_transition(owner, transition)
         owner._finish_alignment_draft()
         owner._set_design_snap_enabled(False)
         owner._refresh_design_panel()

@@ -235,7 +235,7 @@ def test_unhomed_fallback_clears_prediction_and_keeps_idle_finish_order(
     owner._manual_jog_prediction.stage_xy = (9.0, 9.0)
     owner._planned_move_stage_xy = (8.0, 8.0)
     monkeypatch.setattr(
-        position_update.connection_flow,
+        position_update.design_workspace,
         "maybe_restore_persisted_design",
         lambda _owner, position: owner.calls.append(("restore", position)),
     )
@@ -250,7 +250,7 @@ def test_unhomed_fallback_clears_prediction_and_keeps_idle_finish_order(
         lambda _owner, position, **_kwargs: owner.calls.append(("finish", position)),
     )
     monkeypatch.setattr(
-        position_update.connection_flow,
+        position_update.coordinate_flow,
         "observe_coordinate_authority",
         lambda _owner, pose: owner.calls.append(("authority", pose)),
     )
@@ -297,7 +297,7 @@ def test_position_publication_observes_authority_without_main_policy_helper(
         lambda _owner, _position: None,
     )
     monkeypatch.setattr(
-        position_update.connection_flow,
+        position_update.coordinate_flow,
         "observe_coordinate_authority",
         lambda _owner, pose: observations.append(pose),
     )
@@ -328,7 +328,7 @@ def test_actual_position_update_maps_cached_machine_mpos_once_not_work_or_wco(
     owner.stage_controller.machine_position = (15.0, 22.0, 3.0, 4.0, 5.0)
     captured: list[tuple[object, object]] = []
     monkeypatch.setattr(
-        position_update.connection_flow,
+        position_update.design_workspace,
         "maybe_restore_persisted_design",
         lambda _owner, _position: None,
     )
@@ -389,7 +389,7 @@ def test_status_without_synchronized_machine_snapshot_publishes_empty_physical_p
     owner.stage_controller.latest_synchronized_machine_position = lambda: None
     captured: list[object] = []
     monkeypatch.setattr(
-        position_update.connection_flow,
+        position_update.design_workspace,
         "maybe_restore_persisted_design",
         lambda _owner, _position: None,
     )

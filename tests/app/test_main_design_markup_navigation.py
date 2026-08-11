@@ -140,7 +140,7 @@ def test_rejected_design_activation_keeps_previous_session_markup_and_registry(
     success_plans: list[object] = []
     window._apply_design_load_success_plan = lambda *args: success_plans.append(args)
     monkeypatch.setattr(
-        main_module.connection_flow.stage_position_panel,
+        main_module.coordinate_flow.stage_position_panel,
         "refresh_coordinate_frame_display",
         lambda _owner: None,
     )
@@ -249,12 +249,12 @@ def test_rotate_design_transforms_and_persists_route_and_markup_together(
         ),
     )
     monkeypatch.setattr(
-        main_module.connection_flow,
+        main_module.coordinate_flow,
         "apply_coordinate_transition",
         lambda *_args: None,
     )
     monkeypatch.setattr(
-        main_module.connection_flow,
+        main_module.coordinate_flow,
         "activate_current_design",
         _activate_candidate_success,
     )
@@ -309,7 +309,7 @@ def test_changed_markup_choice_rebinds_or_discards_saved_guides(
         lambda _owner: statuses.append("persisted"),
     )
     monkeypatch.setattr(
-        main_module.connection_flow,
+        main_module.coordinate_flow,
         "activate_current_design",
         _activate_candidate_success,
     )
@@ -492,12 +492,12 @@ def test_newer_design_load_invalidates_older_markup_response(
         )
     )
     monkeypatch.setattr(
-        main_module.connection_flow,
+        main_module.coordinate_flow,
         "apply_coordinate_transition",
         lambda *_args: None,
     )
     monkeypatch.setattr(
-        main_module.connection_flow,
+        main_module.coordinate_flow,
         "activate_current_design",
         _activate_candidate_success,
     )
@@ -570,7 +570,7 @@ def test_markup_read_failure_commits_the_already_visible_design(
         lambda _owner: None,
     )
     monkeypatch.setattr(
-        main_module.connection_flow,
+        main_module.coordinate_flow,
         "activate_current_design",
         _activate_candidate_success,
     )
@@ -627,7 +627,7 @@ def test_start_empty_deletes_sidecar_even_with_pending_visibility(
         lambda _owner: None,
     )
     monkeypatch.setattr(
-        main_module.connection_flow,
+        main_module.coordinate_flow,
         "activate_current_design",
         _activate_candidate_success,
     )

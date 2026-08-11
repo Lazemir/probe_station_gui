@@ -3,7 +3,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from probe_station_gui.views import main_window_homing as homing_ui
-from probe_station_gui.views import main_window_connection_flow as connection_flow
+from probe_station_gui.views import main_window_coordinate_flow as coordinate_flow
 
 
 class _StageController:
@@ -183,7 +183,7 @@ def test_successful_homing_finish_refreshes_authority_without_staling_registrati
         ),
     )
     monkeypatch.setattr(
-        connection_flow,
+        coordinate_flow,
         "observe_coordinate_authority",
         lambda _owner: events.append(("authority",)),
     )
@@ -214,7 +214,7 @@ def test_homing_status_loss_immediately_refreshes_coordinate_authority(
         lambda _owner, position: events.append(("display", position)),
     )
     monkeypatch.setattr(
-        connection_flow,
+        coordinate_flow,
         "observe_coordinate_authority",
         lambda _owner: events.append(("authority",)),
     )

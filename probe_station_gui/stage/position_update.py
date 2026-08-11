@@ -13,7 +13,8 @@ from probe_station_gui.coordinates.model import PhysicalMachinePose
 from probe_station_gui.design import navigation_adapter as design_navigation
 from probe_station_gui.stage import move_lifecycle as stage_move_lifecycle
 from probe_station_gui.stage.position_presenter import stage_position_signal_plan
-from probe_station_gui.views import main_window_connection_flow as connection_flow
+from probe_station_gui.views import main_window_coordinate_flow as coordinate_flow
+from probe_station_gui.views import main_window_design_workspace as design_workspace
 from probe_station_gui.views import main_window_stage_position_panel as stage_position_panel
 
 
@@ -142,7 +143,7 @@ def publish_stage_position_estimate(
         else None
     )
     stage_position_panel.update_stage_position_display(owner, position)
-    connection_flow.observe_coordinate_authority(
+    coordinate_flow.observe_coordinate_authority(
         owner,
         getattr(owner, "_latest_physical_machine_pose", None),
     )
@@ -226,7 +227,7 @@ def on_stage_position_changed(
     if not isinstance(position, tuple) or len(position) < 2:
         owner._latest_physical_machine_pose = PhysicalMachinePose({})
         stage_position_panel.update_stage_position_display(owner, position)
-        connection_flow.observe_coordinate_authority(
+        coordinate_flow.observe_coordinate_authority(
             owner,
             owner._latest_physical_machine_pose,
         )
@@ -241,7 +242,7 @@ def on_stage_position_changed(
     logger.debug("TIMING stage_position_changed position=%s", position)
     current_position = design_navigation.coerce_position_tuple(position)
     if current_position is not None:
-        connection_flow.maybe_restore_persisted_design(owner, current_position)
+        design_workspace.maybe_restore_persisted_design(owner, current_position)
     now = time.monotonic()
     latest_state = (owner.stage_controller.latest_stage_state() or "").lower()
     xy_homed = owner.stage_controller.axes_are_homed({"X", "Y"})
@@ -276,13 +277,13 @@ def on_stage_position_changed(
             owner._format_optional_point(center_xy),
             latest_state,
         )
-        connection_flow.observe_coordinate_authority(
+        coordinate_flow.observe_coordinate_authority(
             owner,
             owner._latest_physical_machine_pose,
         )
         return
     if _ignore_manual_idle_sample(owner, center_xy, now, latest_state):
-        connection_flow.observe_coordinate_authority(
+        coordinate_flow.observe_coordinate_authority(
             owner,
             owner._latest_physical_machine_pose,
         )
@@ -373,7 +374,7 @@ def _apply_unhomed_fallback(
 ) -> None:
     _ = center_xy
     stage_position_panel.update_stage_position_display(owner, position)
-    connection_flow.observe_coordinate_authority(
+    coordinate_flow.observe_coordinate_authority(
         owner,
         owner._latest_physical_machine_pose,
     )
