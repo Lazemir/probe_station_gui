@@ -17,9 +17,25 @@ def test_plot_pipeline_modules_exist_at_owned_seams() -> None:
         ROOT / "probe_station_gui" / "views" / "design_plot_viewport.py",
         ROOT / "probe_station_gui" / "views" / "design_plot_route_rendering.py",
         ROOT / "probe_station_gui" / "views" / "design_plot_rendering.py",
+        ROOT / "probe_station_gui" / "design" / "klayout_render_worker.py",
+        ROOT / "probe_station_gui" / "design" / "klayout_snap_worker.py",
+        ROOT
+        / "probe_station_gui"
+        / "design"
+        / "klayout_structure_bounds_worker.py",
+        ROOT / "probe_station_gui" / "design" / "klayout_worker_runtime.py",
+    )
+    replaced_worker_owner = (
+        ROOT / "probe_station_gui" / "design" / ("klayout_" + "workers.py")
     )
 
     assert all(path.is_file() for path in expected)
+    assert not replaced_worker_owner.exists()
+    assert all(
+        "probe_station_gui.design." + "klayout_" + "workers"
+        not in path.read_text(encoding="utf-8")
+        for path in expected
+    )
 
 
 def test_plot_pane_has_no_legacy_snap_queue_or_worker_ownership() -> None:

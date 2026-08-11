@@ -21,11 +21,9 @@ from probe_station_gui.design.klayout_types import (
     SnapResponse,
     forward_rotate_point,
 )
-from probe_station_gui.design.klayout_workers import (
-    KLayoutRenderWorker,
-    KLayoutSnapWorker,
-    _shape_contours,
-)
+from probe_station_gui.design.klayout_render_worker import KLayoutRenderWorker
+from probe_station_gui.design.klayout_snap_worker import KLayoutSnapWorker
+from probe_station_gui.design.klayout_worker_runtime import shape_contours
 
 
 @pytest.fixture(scope="module")
@@ -416,7 +414,7 @@ def test_shape_contours_handles_real_klayout_edge() -> None:
         db.Edge(1_000, 2_000, 4_000, 6_000)
     )
 
-    contours = list(_shape_contours(shape, db.DTrans(), db))
+    contours = list(shape_contours(shape, db.DTrans(), db))
 
     assert len(contours) == 1
     points, closed = contours[0]

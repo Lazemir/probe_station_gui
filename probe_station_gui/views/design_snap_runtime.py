@@ -9,7 +9,7 @@ import weakref
 
 from PySide6.QtCore import QObject, Signal
 
-from probe_station_gui.design.klayout_workers import KLayoutSnapWorker
+from probe_station_gui.design.klayout_snap_worker import KLayoutSnapWorker
 from probe_station_gui.design.snap_coordinator import (
     AttachWorker,
     CancelHover,

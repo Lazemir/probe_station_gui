@@ -14,7 +14,7 @@ from probe_station_gui.design.klayout_types import (
     SnapRequest,
     SnapWorkBudget,
 )
-from probe_station_gui.design.klayout_workers import (
+from probe_station_gui.design.klayout_snap_worker import (
     _KLayoutSnapBackend,
     _collect_snap_geometry,
 )

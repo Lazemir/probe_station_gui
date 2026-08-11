@@ -25,7 +25,7 @@ from probe_station_gui.design.klayout_types import (
     RenderFrame,
     RenderRequest,
 )
-from probe_station_gui.design.klayout_workers import KLayoutRenderWorker
+from probe_station_gui.design.klayout_render_worker import KLayoutRenderWorker
 from probe_station_gui.design.model import DesignDocument
 from probe_station_gui.views.design_klayout_raster import (
     ACTIVE_SCHEDULE_MS,

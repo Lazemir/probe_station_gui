@@ -19,10 +19,8 @@ from probe_station_gui.design.klayout_types import (
     SnapResponse,
     SnapFailure,
 )
-from probe_station_gui.design.klayout_workers import (
-    KLayoutRenderWorker,
-    KLayoutSnapWorker,
-)
+from probe_station_gui.design.klayout_render_worker import KLayoutRenderWorker
+from probe_station_gui.design.klayout_snap_worker import KLayoutSnapWorker
 from probe_station_gui.design.model import SnapResult
 
 

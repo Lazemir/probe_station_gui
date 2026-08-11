@@ -15,7 +15,7 @@ from probe_station_gui.design.klayout_types import (
     StructureBoundsRequest,
     StructureBoundsResult,
 )
-from probe_station_gui.design.klayout_workers import (
+from probe_station_gui.design.klayout_structure_bounds_worker import (
     KLayoutStructureBoundsWorker,
     _KLayoutStructureBoundsBackend,
 )

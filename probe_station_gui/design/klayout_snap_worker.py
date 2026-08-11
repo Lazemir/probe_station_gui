@@ -1,0 +1,604 @@
+"""Priority KLayout snap worker and bounded local-geometry backend."""
+
+from __future__ import annotations
+
+from collections import deque
+from collections.abc import Callable, Iterable, Sequence
+from dataclasses import dataclass
+from pathlib import Path
+import threading
+import time
+from typing import Any, Protocol
+
+from PySide6.QtCore import QObject, Qt, Signal, Slot
+
+from .klayout_geometry import Segment2D, plan_snap_search, select_snap
+from .klayout_types import (
+    Box2D,
+    KLayoutConfig,
+    Point2D,
+    SnapFailure,
+    SnapRequest,
+    SnapResponse,
+    SnapWorkBudget,
+    SNAP_UNAVAILABLE_CANCELLED,
+    SNAP_UNAVAILABLE_CANDIDATE_BUDGET,
+    SNAP_UNAVAILABLE_SHAPE_BUDGET,
+    SNAP_UNAVAILABLE_TIME_BUDGET,
+    forward_rotate_point,
+    inverse_rotate_box,
+    inverse_rotate_point,
+)
+from .klayout_worker_runtime import (
+    CREATOR_THREAD_ERROR,
+    STOP_WORKER,
+    ShapeContours,
+    WorkerPublication,
+    shape_contours,
+)
+from .model import SnapResult
+
+
+class _SnapBackend(Protocol):
+    def ensure_config(self, config: KLayoutConfig) -> None: ...
+
+    def snap(
+        self,
+        request: SnapRequest,
+        *,
+        is_cancelled: Callable[[], bool],
+    ) -> SnapResponse: ...
+
+    def close(self) -> None: ...
+
+
+SnapBackendFactory = Callable[[], _SnapBackend]
+
+
+@dataclass(frozen=True)
+class _SnapWork:
+    request: SnapRequest
+    cancellation_generation: int
+    hover_cancellation_generation: int
+
+
+class KLayoutSnapWorker(QObject):
+    """Snap on one daemon thread; lifecycle calls belong to the creator thread."""
+
+    loaded = Signal(object)
+    snap_ready = Signal(object)
+    failed = Signal(object)
+    lifecycle_failed = Signal(str)
+    finished = Signal()
+    _publication_posted = Signal(object)
+    _finished_posted = Signal()
+
+    def __init__(
+        self,
+        parent: QObject | None = None,
+        *,
+        backend_factory: SnapBackendFactory | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._creator_thread_id = threading.get_ident()
+        self._backend_factory = backend_factory or _KLayoutSnapBackend
+        self._condition = threading.Condition(threading.Lock())
+        self._stop_requested = threading.Event()
+        self._hover: SnapRequest | None = None
+        self._clicks: deque[SnapRequest] = deque()
+        self._cancellation_generation = 0
+        self._hover_cancellation_generation = 0
+        self._latest_config: KLayoutConfig | None = None
+        self._stopping = False
+        self._thread: threading.Thread | None = None
+        self._finished_publication_posted = False
+        self._thread_finished_event = threading.Event()
+        self._publication_posted.connect(
+            self._deliver_publication,
+            Qt.ConnectionType.QueuedConnection,
+        )
+        self._finished_posted.connect(
+            self._deliver_finished,
+            Qt.ConnectionType.QueuedConnection,
+        )
+
+    def submit_hover(self, request: SnapRequest) -> None:
+        """Queue the newest hover request from the worker's creator thread."""
+        self._require_creator_thread()
+        self._submit(request, click=False)
+
+    def submit_click(self, request: SnapRequest) -> None:
+        """Queue a FIFO-priority click request from the worker's creator thread."""
+        self._require_creator_thread()
+        self._submit(request, click=True)
+
+    def cancel_hover(self) -> None:
+        self._require_creator_thread()
+        with self._condition:
+            self._hover_cancellation_generation += 1
+            self._hover = None
+            self._condition.notify_all()
+
+    def cancel_pending(self) -> None:
+        self._require_creator_thread()
+        with self._condition:
+            self._cancellation_generation += 1
+            self._hover_cancellation_generation += 1
+            self._hover = None
+            self._clicks.clear()
+            self._condition.notify_all()
+
+    def stop(self, timeout_s: float = 1.0) -> None:
+        """Stop accepting work from the creator thread and join up to the deadline."""
+        self._require_creator_thread()
+        deadline = time.monotonic() + max(0.0, float(timeout_s))
+        with self._condition:
+            self._stop_requested.set()
+            self._stopping = True
+            self._hover = None
+            self._clicks.clear()
+            thread = self._thread
+            self._condition.notify_all()
+            post_finished = thread is None
+        if post_finished:
+            self._post_finished()
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=max(0.0, deadline - time.monotonic()))
+
+    def _submit(self, request: SnapRequest, *, click: bool) -> None:
+        with self._condition:
+            if self._stopping or self._stop_requested.is_set():
+                return
+            self._latest_config = request.config
+            if click:
+                self._clicks.append(request)
+            else:
+                self._hover = request
+            if self._thread is None:
+                self._thread = threading.Thread(
+                    target=self._run,
+                    name="klayout-snap",
+                    daemon=True,
+                )
+                self._thread.start()
+            self._condition.notify()
+
+    def _run(self) -> None:
+        backend: _SnapBackend | None = None
+        try:
+            backend = self._backend_factory()
+            active_config: KLayoutConfig | None = None
+            while True:
+                work = self._take_next()
+                if work is STOP_WORKER:
+                    return
+                request = work.request
+                try:
+                    config_changed = active_config != request.config
+                    if config_changed:
+                        backend.ensure_config(request.config)
+                        active_config = request.config
+                    if self._work_is_obsolete(work):
+                        continue
+                    if config_changed:
+                        self._post_publication(
+                            "loaded",
+                            request.config,
+                            request.config,
+                        )
+                    response = backend.snap(
+                        request,
+                        is_cancelled=lambda work=work: self._work_is_obsolete(work),
+                    )
+                    if self._work_is_obsolete(work):
+                        continue
+                except Exception as exc:
+                    if self._work_is_obsolete(work):
+                        continue
+                    self._post_publication(
+                        "failed",
+                        SnapFailure(
+                            request_id=request.request_id,
+                            config_generation=request.config.generation,
+                            purpose=request.purpose,
+                            message=f"{type(exc).__name__}: {exc}",
+                        ),
+                        request.config,
+                    )
+                    continue
+                self._post_publication(
+                    "snap_ready",
+                    response,
+                    request.config,
+                )
+        except Exception as exc:
+            self._post_publication(
+                "lifecycle_failed",
+                f"{type(exc).__name__}: {exc}",
+            )
+        finally:
+            if backend is not None:
+                try:
+                    backend.close()
+                except Exception as exc:
+                    self._post_publication(
+                        "lifecycle_failed",
+                        f"{type(exc).__name__}: {exc}",
+                    )
+            self._post_finished()
+
+    def _snap_work(self, request: SnapRequest) -> _SnapWork:
+        # Called only while self._condition is held by _take_next().
+        return _SnapWork(
+            request=request,
+            cancellation_generation=self._cancellation_generation,
+            hover_cancellation_generation=self._hover_cancellation_generation,
+        )
+
+    def _work_is_obsolete(self, work: _SnapWork) -> bool:
+        with self._condition:
+            if self._stopping or self._stop_requested.is_set():
+                return True
+            if self._cancellation_generation != work.cancellation_generation:
+                return True
+            if (
+                work.request.purpose == "hover"
+                and self._hover_cancellation_generation
+                != work.hover_cancellation_generation
+            ):
+                return True
+            if work.request.config != self._latest_config:
+                return True
+            if work.request.purpose != "hover":
+                return False
+            if self._clicks:
+                return True
+            return (
+                self._hover is not None
+                and self._hover.request_id != work.request.request_id
+            )
+
+    def _take_next(self) -> _SnapWork | object:
+        with self._condition:
+            while True:
+                while (
+                    not self._clicks
+                    and self._hover is None
+                    and not self._stopping
+                    and not self._stop_requested.is_set()
+                ):
+                    self._condition.wait()
+                if self._stopping or self._stop_requested.is_set():
+                    return STOP_WORKER
+                while self._clicks:
+                    request = self._clicks.popleft()
+                    if request.config == self._latest_config:
+                        return self._snap_work(request)
+                request = self._hover
+                self._hover = None
+                if request is not None and request.config == self._latest_config:
+                    return self._snap_work(request)
+
+    def _require_creator_thread(self) -> None:
+        if threading.get_ident() != self._creator_thread_id:
+            raise RuntimeError(CREATOR_THREAD_ERROR)
+
+    def _post_publication(
+        self,
+        kind: str,
+        value: object,
+        config: KLayoutConfig | None = None,
+    ) -> None:
+        self._publication_posted.emit(
+            WorkerPublication(
+                kind=kind,
+                value=value,
+                config_generation=None if config is None else config.generation,
+            )
+        )
+
+    def _post_finished(self) -> None:
+        with self._condition:
+            if self._finished_publication_posted:
+                return
+            self._finished_publication_posted = True
+            self._thread_finished_event.set()
+        self._finished_posted.emit()
+
+    @property
+    def is_finished(self) -> bool:
+        return self._thread_finished_event.is_set()
+
+    @Slot(object)
+    def _deliver_publication(self, publication: WorkerPublication) -> None:
+        with self._condition:
+            if self._stopping or self._stop_requested.is_set():
+                return
+            if publication.config_generation is not None and (
+                self._latest_config is None
+                or publication.config_generation != self._latest_config.generation
+            ):
+                return
+        getattr(self, publication.kind).emit(publication.value)
+
+    @Slot()
+    def _deliver_finished(self) -> None:
+        self.finished.emit()
+
+
+class _KLayoutSnapBackend:
+    """Own the independent KLayout database used by one snap worker thread."""
+
+    def __init__(self, *, clock: Callable[[], float] = time.perf_counter) -> None:
+        self._clock = clock
+        self._db: Any = None
+        self._layout: Any = None
+        self._top_cell: Any = None
+        self._layer_indexes: dict[tuple[int, int], int] = {}
+        self._path: Path | None = None
+        self._source_load_id: str | None = None
+
+    def ensure_config(self, config: KLayoutConfig) -> None:
+        if self._path != config.path or self._source_load_id != config.source_load_id:
+            self.close()
+            import klayout.db as db
+
+            layout = db.Layout()
+            layout.read(str(config.path))
+            self._db = db
+            self._layout = layout
+            self._layer_indexes = {
+                (int(info.layer), int(info.datatype)): layout.layer(info)
+                for info in layout.layer_infos()
+            }
+            self._path = config.path
+            self._source_load_id = config.source_load_id
+
+        top_cell = self._layout.cell(config.top_cell_name)
+        if top_cell is None:
+            raise RuntimeError(f"Top cell '{config.top_cell_name}' does not exist")
+        self._top_cell = top_cell
+
+    def snap(
+        self,
+        request: SnapRequest,
+        *,
+        is_cancelled: Callable[[], bool],
+    ) -> SnapResponse:
+        started = self._clock()
+        if is_cancelled():
+            return self._unavailable_response(
+                request,
+                started,
+                0,
+                0,
+                SNAP_UNAVAILABLE_CANCELLED,
+            )
+        plan = plan_snap_search(
+            request.point,
+            request.radius,
+            request.config.display_bounds,
+        )
+        if not plan.accepted:
+            return self._unavailable_response(
+                request,
+                started,
+                0,
+                0,
+                plan.skip_reason or SNAP_UNAVAILABLE_CANCELLED,
+            )
+        source_point = inverse_rotate_point(request.point, request.config)
+        source_search_box = inverse_rotate_box(plan.search_box, request.config)
+        shape_stream = self._iter_shape_contours(request.config, source_search_box)
+        try:
+            collected = _collect_snap_geometry(
+                shape_stream,
+                request.budget,
+                clock=self._clock,
+                is_cancelled=is_cancelled,
+            )
+        finally:
+            close = getattr(shape_stream, "close", None)
+            if close is not None:
+                close()
+        if collected.unavailable_reason is not None:
+            return self._unavailable_response(
+                request,
+                started,
+                collected.shapes_inspected,
+                collected.candidates_generated,
+                collected.unavailable_reason,
+            )
+        source_result = select_snap(
+            source_point,
+            collected.vertices,
+            collected.segments,
+            request.radius,
+        )
+        result = _rotate_snap_result(source_result, request)
+        return SnapResponse(
+            request_id=request.request_id,
+            config_generation=request.config.generation,
+            raw_point=request.point,
+            result=result,
+            elapsed_ms=(self._clock() - started) * 1000.0,
+            shapes_inspected=collected.shapes_inspected,
+            purpose=request.purpose,
+            candidates_generated=collected.candidates_generated,
+        )
+
+    def _unavailable_response(
+        self,
+        request: SnapRequest,
+        started: float,
+        shapes: int,
+        candidates: int,
+        reason: str,
+    ) -> SnapResponse:
+        return SnapResponse(
+            request_id=request.request_id,
+            config_generation=request.config.generation,
+            raw_point=request.point,
+            result=SnapResult(point=request.point, mode="free", distance=0.0),
+            elapsed_ms=(self._clock() - started) * 1000.0,
+            shapes_inspected=shapes,
+            purpose=request.purpose,
+            candidates_generated=candidates,
+            unavailable_reason=reason,
+        )
+
+    def _iter_shape_contours(
+        self,
+        config: KLayoutConfig,
+        source_search_box: Box2D,
+    ) -> Iterable[ShapeContours]:
+        search_box = self._db.DBox(*source_search_box)
+        for layer_key in sorted(config.visible_layers):
+            layer_index = self._layer_indexes.get(layer_key)
+            if layer_index is None:
+                continue
+            iterator = self._top_cell.begin_shapes_rec_touching(
+                layer_index,
+                search_box,
+            )
+            try:
+                while not iterator.at_end():
+                    yield shape_contours(
+                        iterator.shape(),
+                        iterator.dtrans(),
+                        self._db,
+                    )
+                    iterator.next()
+            finally:
+                del iterator
+
+    def close(self) -> None:
+        top_cell = self._top_cell
+        layout = self._layout
+        self._top_cell = None
+        self._layout = None
+        self._layer_indexes = {}
+        self._path = None
+        self._source_load_id = None
+        self._db = None
+        del top_cell
+        del layout
+
+
+def _rotate_snap_result(result: SnapResult, request: SnapRequest) -> SnapResult:
+    if result.mode == "free":
+        return SnapResult(point=request.point, mode="free", distance=0.0)
+    segment_start = (
+        forward_rotate_point(result.segment_start, request.config)
+        if result.segment_start is not None
+        else None
+    )
+    segment_end = (
+        forward_rotate_point(result.segment_end, request.config)
+        if result.segment_end is not None
+        else None
+    )
+    return SnapResult(
+        point=forward_rotate_point(result.point, request.config),
+        mode=result.mode,
+        distance=result.distance,
+        segment_start=segment_start,
+        segment_end=segment_end,
+    )
+
+
+@dataclass(frozen=True)
+class _CollectedSnapGeometry:
+    vertices: Sequence[Point2D]
+    segments: Sequence[Segment2D]
+    shapes_inspected: int
+    candidates_generated: int
+    unavailable_reason: str | None = None
+
+
+def _collect_snap_geometry(
+    shapes: Iterable[ShapeContours],
+    budget: SnapWorkBudget,
+    *,
+    clock: Callable[[], float],
+    is_cancelled: Callable[[], bool],
+) -> _CollectedSnapGeometry:
+    started = clock()
+    vertices: list[Point2D] = []
+    segments: list[Segment2D] = []
+    shapes_inspected = 0
+    candidates_generated = 0
+
+    def abort(reason: str) -> _CollectedSnapGeometry:
+        return _CollectedSnapGeometry(
+            (),
+            (),
+            shapes_inspected,
+            candidates_generated,
+            reason,
+        )
+
+    def checkpoint() -> str | None:
+        if is_cancelled():
+            return SNAP_UNAVAILABLE_CANCELLED
+        if (clock() - started) * 1_000.0 > budget.max_elapsed_ms:
+            return SNAP_UNAVAILABLE_TIME_BUDGET
+        return None
+
+    shape_iterator = iter(shapes)
+    while True:
+        reason = checkpoint()
+        if reason is not None:
+            return abort(reason)
+        if shapes_inspected >= budget.max_shapes:
+            return abort(SNAP_UNAVAILABLE_SHAPE_BUDGET)
+        try:
+            shape_contours = next(shape_iterator)
+        except StopIteration:
+            break
+        shapes_inspected += 1
+        contour_iterator = iter(shape_contours)
+        while True:
+            reason = checkpoint()
+            if reason is not None:
+                return abort(reason)
+            try:
+                contour, closed = next(contour_iterator)
+            except StopIteration:
+                break
+            contour_points: list[Point2D] = []
+            point_iterator = iter(contour)
+            while True:
+                reason = checkpoint()
+                if reason is not None:
+                    return abort(reason)
+                try:
+                    point = next(point_iterator)
+                except StopIteration:
+                    break
+                added_candidates = 1 + int(bool(contour_points))
+                if candidates_generated + added_candidates > budget.max_candidates:
+                    return abort(SNAP_UNAVAILABLE_CANDIDATE_BUDGET)
+                vertices.append(point)
+                candidates_generated += 1
+                if contour_points:
+                    segments.append((contour_points[-1], point))
+                    candidates_generated += 1
+                contour_points.append(point)
+            if closed and len(contour_points) > 1:
+                reason = checkpoint()
+                if reason is not None:
+                    return abort(reason)
+                if candidates_generated + 1 > budget.max_candidates:
+                    return abort(SNAP_UNAVAILABLE_CANDIDATE_BUDGET)
+                segments.append((contour_points[-1], contour_points[0]))
+                candidates_generated += 1
+    return _CollectedSnapGeometry(
+        tuple(vertices),
+        tuple(segments),
+        shapes_inspected,
+        candidates_generated,
+    )
+
+
+__all__ = ["KLayoutSnapWorker"]

@@ -148,7 +148,9 @@ from probe_station_gui.design.klayout_types import (
     StructureBoundsRequest,
     StructureBoundsResult,
 )
-from probe_station_gui.design.klayout_workers import KLayoutStructureBoundsWorker
+from probe_station_gui.design.klayout_structure_bounds_worker import (
+    KLayoutStructureBoundsWorker,
+)
 from probe_station_gui.design.frame_registration import (
     DesignFrameMetadata,
 )

@@ -17,7 +17,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import QApplication, QWidget
 
-from probe_station_gui.design.klayout_workers import KLayoutRenderWorker
+from probe_station_gui.design.klayout_render_worker import KLayoutRenderWorker
 from probe_station_gui.design.model import DesignDocument, MeasurementTarget
 from probe_station_gui.route.model import MeasurementRoute
 from probe_station_gui.views.microscope_interaction import (

@@ -1525,3 +1525,74 @@ git diff --check 8fc83259e07f48bf0f222e80bb3e1d6c3241fd0e..HEAD
   stage-only stitching, exact MI/CC/block counts, protected blobs, and unchanged
   production/test hashes before staging and the exact commit
   `refactor: separate camera imaging domains`.
+
+#### Task 11a: Separate KLayout worker families
+
+**Files:**
+- Create: `probe_station_gui/design/klayout_render_worker.py`
+- Create: `probe_station_gui/design/klayout_snap_worker.py`
+- Create: `probe_station_gui/design/klayout_structure_bounds_worker.py`
+- Create: `probe_station_gui/design/klayout_worker_runtime.py`
+- Delete: `probe_station_gui/design/klayout_workers.py`
+- Modify: direct production and test import owners only
+- Modify: `tests/ui/test_design_plot_pipeline_ownership.py`
+- Modify: `docs/superpowers/plans/2026-08-10-coordinate-system-coordinator.md`
+
+- [x] Observe strict absent-module RED before each canonical owner. Direct
+  collection failed independently with the exact `ModuleNotFoundError` for
+  `klayout_render_worker`, `klayout_snap_worker`, the neutral shared
+  `klayout_worker_runtime`, and `klayout_structure_bounds_worker`. A separate
+  architecture RED then failed only because the replaced monolith still
+  existed; after direct caller migration the old file and all old imports were
+  deleted without a compatibility facade, alias, package export, or re-export.
+- [x] Make the render family own newest-only submit coalescing, creator-thread
+  lifecycle, queued unlocked publication, stale-generation suppression, and
+  the thread-owned KLayout `LayoutView` cache, visible-layer configuration,
+  inverse viewport rotation, detached image rotation, and dimension checks.
+  Make the snap family own newest-only hover, FIFO-priority clicks, cooperative
+  cancellation generations, stale-config suppression, the independent KLayout
+  database cache, bounded contour/candidate/time collection, and rotated snap
+  results. Make the structure-bounds family own newest-only requests, fixture
+  bounds, visible recursive shape bounds, bounded nonblocking stop, parent
+  detachment, strong retirement, creator-thread `finished`, and `deleteLater`.
+- [x] Keep only genuine shared runtime knowledge in
+  `klayout_worker_runtime.py`: one immutable render/snap publication record,
+  the worker stop/thread contract, and the two-consumer KLayout box/polygon/
+  path/edge contour adapter. The direct acyclic graph is render -> runtime +
+  types, snap -> runtime + geometry + types + model, and structure -> runtime +
+  types. KLayout itself remains function-locally imported only when a backend
+  loads a file; fresh forward/reverse imports and worker construction leave
+  `klayout`, `klayout.db`, and `klayout.lay` absent from `sys.modules`.
+- [x] Preserve all worker and caller characterization. The core render/snap/
+  structure/backend/real-KLayout selection passes `46` tests; the focused
+  worker/raster/runtime/plot selection passes `111`; the architecture-adjacent
+  Design/KLayout/minimap/shutdown selection passes `163`. Five fresh-process
+  lifecycle stress runs pass `52` tests each. The broad Design/UI/App gate
+  passes `1222` plus `5` subtests, and the complete offscreen process-local
+  `QLocale.c()` no-hardware suite passes `3038` plus `14` subtests with only the
+  inherited `BuiltinImporter.module_repr()` deprecation warning.
+- [x] Affected and configured whole-tree Ruff, whole-tree compileall,
+  `git diff --check`, direct-definition/deletion searches, forward/reverse lazy
+  imports, and normalized non-import AST parity for `main.py` plus all six
+  production callers pass. `klayout_types.py`, `klayout_geometry.py`,
+  `model.py`, the snap coordinator, plot pane/render/presentation modules, and
+  the complete route and stage production trees remain byte-identical to the
+  baseline; protected view callers change only their canonical import source.
+- [x] Metrics: the deleted owner was
+  `1261 LOC / 826 LLOC / 1121 SLOC / CC 278 / 81 blocks / MI 0.00`.
+  The render, snap, structure, and shared-runtime owners are respectively
+  `330 / 220 / 288 / MI 20.11`, `604 / 373 / 544 / MI 9.44`,
+  `330 / 223 / 287 / MI 19.19`, and `73 / 43 / 54 / MI 49.92` for
+  LOC/LLOC/SLOC/MI. Aggregate production complexity remains exactly
+  `CC 278 / 81 blocks`, with maximum CC `17`. Every new owner and every touched
+  Python file has positive MI except the pre-existing import-only `main.py`;
+  the lowest positive value remains `test_klayout_workers.py 0.37`.
+  Prospective all-tracked MI-zero decreases exactly `14 -> 13`, and active
+  GUI/client/test MI-zero decreases `13 -> 12`, with no new MI-zero file.
+- [x] Freeze the complete unstaged/untracked evidence-bearing snapshot. A fresh
+  fork-none independent read-only review compared all four owners with the full
+  deleted monolith, independently repeated the `46` core and `7` ownership
+  tests plus Ruff, diff, import, AST, Radon, and MI-zero gates, and returned
+  `READY` with `0 Critical / 0 Important / 0 Minor`. No file was staged or
+  committed before that verdict; the exact commit remains
+  `refactor: separate klayout worker families`.
