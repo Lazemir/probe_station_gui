@@ -1103,3 +1103,61 @@ git diff --check 8fc83259e07f48bf0f222e80bb3e1d6c3241fd0e..HEAD
 - [x] Freeze the complete unstaged/untracked diff and require a fresh independent
   read-only review with no Critical or Important finding before staging or the
   exact commit `refactor: separate optical distortion fitting`.
+
+#### Task 6c: Split optical calibration test monoliths
+
+**Files:**
+- Delete: `tests/app/test_main_lens_distortion.py`
+- Create: `tests/app/lens_distortion_test_support.py`
+- Create: `tests/app/test_main_lens_distortion_delivery.py`
+- Create: `tests/app/test_main_lens_distortion_objective_updates.py`
+- Create: `tests/app/test_main_lens_distortion_start_reset.py`
+- Delete: `tests/camera/test_optical_calibration_runtime.py`
+- Create: `tests/camera/optical_calibration_runtime_test_support.py`
+- Create: `tests/camera/test_optical_calibration_runtime_capture.py`
+- Create: `tests/camera/test_optical_calibration_runtime_lifecycle.py`
+- Create: `tests/camera/test_optical_calibration_runtime_adapters.py`
+- Modify: `docs/superpowers/plans/2026-08-10-coordinate-system-coordinator.md`
+
+- [x] Capture the clean `134650e` baseline before editing: the app/runtime
+  monoliths collected `26 / 38` items and passed independently, their SHA-256
+  values were `F3BBD437...CE1DD / 361A2638...84571`, and Radon reported
+  `1215 LOC / 777 LLOC / CC 194 / MI 0.00` and
+  `1372 LOC / 767 LLOC / CC 280 / MI 0.00` respectively.
+- [x] Split the app tests into delivery/persistence, click-calibration objective
+  ownership, and start/reset/error/cache seams. Split the runtime tests into
+  capture/cleanup/return-to-start, lifecycle/concurrency/cancellation, and
+  production-adapter/persistence seams. Keep only two small non-test support
+  modules, preserve the runtime error-surfacing fixture locally in each runtime
+  owner, and delete seven unused app fakes instead of introducing a facade.
+- [x] Prove mechanical parity against the original HEAD sources: all `21 / 32`
+  top-level test-definition ASTs, every retained helper AST, and all three
+  fixture ASTs compare exactly. Normalized collection suffix hashes remain
+  app `8b9e707d...09561`, runtime `f62783c3...267de1`, and combined
+  `d740e384...04170`; normal and reverse orders both pass all `64` items.
+- [x] Delete both original monoliths without a compatibility package facade,
+  cross-test import, import-time purge, loader/sys.path workaround, production
+  private alias, or filename-only architecture test. Direct deletion/import and
+  single-definition gates pass, and all runtime tests share one canonical
+  support `_InlineThread` identity.
+- [x] Verification is fresh, offscreen, process-local `QLocale.c()`, and
+  no-hardware: focused optical/camera/Main/UI `246 passed`; the timing and
+  process-global monkeypatch selection passed `9` items three consecutive
+  times; broad camera/App/UI `1143 passed` plus `5` subtests; full suite
+  `3016 passed` plus `14` subtests with only the inherited
+  `BuiltinImporter.module_repr()` deprecation warning. Affected and configured
+  whole-tree Ruff, whole-tree compileall, `git diff --check`, Lizard warnings,
+  AST/deletion/import gates, and exact production-byte/tree gates pass.
+- [x] Metrics: the two old files totalled
+  `2587 LOC / 1544 LLOC / CC 474`, while the eight direct owners/support files
+  total `2585 LOC / 1507 LLOC / CC 437`; maximum CC stays `13`. Individual MI
+  values are app `48.05 / 28.15 / 22.30 / 21.82` and runtime
+  `27.90 / 21.55 / 12.72 / 32.53`. All-tracked MI-0 decreases `21 -> 19` and
+  active GUI/test MI-0 decreases `19 -> 17`, with no new MI-0 file. Production
+  remains byte-identical: `main.py` blob `6785640e...5853`,
+  `probe_station_gui` tree `0bb6fb63...b05`, and scoped status/diff are empty.
+- [x] Freeze the complete unstaged/untracked diff. A fresh independent read-only
+  review returned `READY` with `0 Critical / 0 Important / 0 Minor`, repeated
+  normal and reverse collection-order gates at `64 passed` each, and confirmed
+  the frozen hashes before the exact commit
+  `test: split optical calibration coverage`.
