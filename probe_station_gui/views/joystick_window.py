@@ -1399,8 +1399,6 @@ class JoystickWindow(JoystickFeedrateMixin, QWidget):
             return None
         raw_a_position = self.stage_controller.latest_a_position()
         if raw_a_position is None:
-            raw_a_position = self.stage_controller.current_a_position()
-        if raw_a_position is None:
             reason = self.stage_controller.last_a_position_read_failure()
             if reason:
                 logger.warning("Unable to open contact coordinate editor: %s", reason)

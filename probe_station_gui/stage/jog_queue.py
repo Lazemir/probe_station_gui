@@ -266,7 +266,6 @@ class StageControllerJogQueueMixin:
         if not normalized or self._motion_safety_disabled:
             return tuple(normalized)
 
-        self._refresh_cached_jog_status_if_missing()
         move = self._move_vector_from_axis_distances(normalized)
         clipped = self._clip_relative_move_to_software_limits(move, emit_status=True)
         clipped_values = {axis: value for axis, value in clipped.items()}
@@ -377,22 +376,6 @@ class StageControllerJogQueueMixin:
             b=values["B"],
             c=values["C"],
         )
-
-    def _refresh_cached_jog_status_if_missing(self) -> None:
-        if self._last_stage_position is not None:
-            return
-        serial_connection = self._serial
-        if serial_connection is None or not serial_connection.is_open:
-            return
-        if not self._serial_session_lock.acquire(blocking=False):
-            return
-        try:
-            with self._serial_session(serial_connection):
-                self._query_status(serial_connection, timeout=0.5)
-        except StageControllerError:
-            return
-        finally:
-            self._serial_session_lock.release()
 
     def _cached_jog_axis_skip_reason(
         self,

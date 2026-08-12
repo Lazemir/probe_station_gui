@@ -10,9 +10,6 @@ try:
         StageController,
         StageControllerError,
         _FakeSerial,
-        _LineFakeSerial,
-        _RejectingSerial,
-        _SwapOnFirstAcquireLock,
         _WritableFakeSerial,
     )
 except ImportError:
@@ -22,37 +19,52 @@ except ImportError:
         StageController,
         StageControllerError,
         _FakeSerial,
-        _LineFakeSerial,
-        _RejectingSerial,
-        _SwapOnFirstAcquireLock,
         _WritableFakeSerial,
     )
 
 class StageControllerJogQueueTest(unittest.TestCase):
-    def test_cached_jog_status_uses_captured_serial_for_status_mask(self) -> None:
+    def test_jog_constraints_with_missing_cache_do_not_query_serial(self) -> None:
         controller = StageController()
-        original = _LineFakeSerial(
-            [
-                b"ok\n",
-                b"<Idle|WPos:0.000,0.000,3.840,2.967,0.000|Bf:15,127|FS:0,0>\n",
-            ]
-        )
-        replacement = _RejectingSerial()
-        positions = []
+
+        class _ExplodingSerial:
+            is_open = True
+
+            def __init__(self) -> None:
+                self.writes: list[bytes] = []
+                self.flush_count = 0
+                self.read_count = 0
+
+            def write(self, payload: bytes) -> None:
+                self.writes.append(bytes(payload))
+                raise AssertionError("unexpected GUI-thread serial write")
+
+            def flush(self) -> None:
+                self.flush_count += 1
+                raise AssertionError("unexpected GUI-thread serial flush")
+
+            def readline(self) -> bytes:
+                self.read_count += 1
+                raise AssertionError("unexpected GUI-thread serial read")
+
+            def __getattr__(self, name: str) -> object:
+                raise AssertionError(f"unexpected GUI-thread serial access: {name}")
+
+        serial_connection = _ExplodingSerial()
         try:
-            controller._serial = original
-            controller._serial_session_lock = _SwapOnFirstAcquireLock(
-                lambda: setattr(controller, "_serial", replacement)
-            )
-            controller.stage_position_changed = types.SimpleNamespace(
-                emit=lambda position: positions.append(position)
+            controller._serial = serial_connection
+            controller._last_stage_position = None
+            controller._axis_limits = {"X": (0.0, 10.0)}
+            controller._homed_axes = {"X"}
+            controller._query_status = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("status query reached from jog constraints")
             )
 
-            controller._refresh_cached_jog_status_if_missing()
+            constrained = controller.constrain_jog_distances((("X", 2.5),))
 
-            self.assertEqual(replacement.writes, [])
-            self.assertEqual(original.writes, [b"$10=2\n", b"?\n"])
-            self.assertEqual(positions[-1], (0.0, 0.0, 3.84, 2.967, 0.0))
+            self.assertEqual(constrained, (("X", 2.5),))
+            self.assertEqual(serial_connection.writes, [])
+            self.assertEqual(serial_connection.flush_count, 0)
+            self.assertEqual(serial_connection.read_count, 0)
         finally:
             controller.shutdown()
 
