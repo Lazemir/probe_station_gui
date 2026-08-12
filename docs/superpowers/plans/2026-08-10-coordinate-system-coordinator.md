@@ -2707,3 +2707,49 @@ git diff --check 8fc83259e07f48bf0f222e80bb3e1d6c3241fd0e..HEAD
   proportional/public-setter slice `24/24`, Ruff, format, diff, compile, AST,
   imports/identity, Radon, Lizard, MI, and final hashes, then returned corrected
   `READY` with `0 Critical / 0 Important / 0 Minor`.
+
+#### Stage architecture: Deepen controller coordinate/status/cache owners
+
+- [x] Pin clean C3 commit dd4a297 and add one replacement ownership test
+  before production movement. Three independent REDs proved that coordinate
+  policy, live status/session policy, and cached observation policy were still
+  defined directly on StageController. Move exactly 6 methods to the existing
+  axis-coordinate owner, 14 methods to the existing status-I/O owner, and 12
+  methods to the existing connection/cache owner. Add no base, wrapper, alias,
+  re-export, dynamic forwarding, worker, signal, or public interface.
+- [x] Preserve the exact direct-base order, root StageController identity, Qt
+  signal declarations, and public signatures. Decorator-aware AST comparison
+  against dd4a297 proves all 32 moved methods exact and absent from the residual
+  class; all 39 retained controller methods remain exact. Forward owner imports
+  stay Qt/controller-free, reverse imports resolve each method to the canonical
+  owner, and the package export remains the canonical class.
+- [x] Hardware-free behavior gates pass ownership/axis/C3 96/96,
+  status/session/machine/jog/click/autofocus 97/97, cache/needle/snapshot 95/95,
+  and the complete stage suite 490 + 4 subtests. App coordinate coverage passes
+  72 with the inherited native-crash node deselected plus that exact node 1/1;
+  the focused UI slice passes 54/54. Deterministic directory partitions cover
+  the exact collected union 3267/3267 + 16 subtests: App 365+1+5, UI 568,
+  Stage 490+4, API 132+2, camera 331, coordinates 201, design 381, instruments
+  149+5, notifications 24, packaging 3, route 420, scripts 31, settings 167,
+  and shared 4.
+- [x] Affected/configured whole Ruff, new-test format, compileall, diff-check,
+  import-order/root-identity, AST/deletion, and exact scope gates pass. Lizard
+  aggregate retains one inherited CCN17 method, now owned by cache state, with
+  0.00% duplication. Baseline metrics were controller
+  1468/922/1277 CC241/79 max17 MI0.00, status I/O
+  330/145/300 CC68/18 max10 MI23.44, connection
+  341/201/296 CC62/17 max13 MI22.49, and axis
+  384/202/329 CC63/28 max8 MI23.80. Final metrics are controller
+  923/610/810 CC114/47 max9 MI5.45, status I/O
+  578/287/521 CC123/32 max10 MI7.52, connection
+  508/296/428 CC107/29 max17 MI17.91, and axis
+  523/283/450 CC89/34 max11 MI15.00. Cluster Radon changes only by class
+  accounting, CC434/142 -> CC433/142. Active/all-tracked MI-zero decreases
+  exactly 3 -> 2: only Main and joystick remain.
+- [x] Freeze the exact six-path evidence snapshot and obtain fresh independent
+  READY 0/0/0 before commit refactor: separate stage controller domains.
+  Reviewer independently confirmed moved AST 6+14+12, retained 39/39, all
+  public signatures, bases, signals/constants, root identity, ownership,
+  lock/session/status-mask/cache/G10 boundaries, and no facade/duplicate/reverse
+  import. Fresh proportional 47, Ruff, format, compile, diff, Radon, MI,
+  Lizard, hashes, index, and temp gates passed with C/I/M 0/0/0.

@@ -9,12 +9,18 @@ from typing import Optional
 
 import serial
 
+from probe_station_gui.stage.axis_mapping import CalibrationOutOfDomain
 from probe_station_gui.stage.errors import StageControllerError
 from probe_station_gui.stage.fluidnc_session import (
     FluidNCSession,
     FluidNCSessionCallbacks,
 )
 from probe_station_gui.stage.fluidnc_protocol import line_indicates_controller_reboot
+from probe_station_gui.stage.machine_coordinates import (
+    MachineCoordinateSnapshot,
+    MachineCoordinateSnapshotUnavailable,
+)
+from probe_station_gui.stage.types import _Status
 
 
 logger = logging.getLogger(__name__)
@@ -339,3 +345,164 @@ class StageControllerConnectionMixin:
             if line_indicates_controller_reboot(line):
                 self._handle_controller_reboot_detected(line, source)
                 return
+
+    def latest_stage_position(self) -> tuple[float, ...] | None:
+        """Return the most recently observed GUI position, if any."""
+
+        if self._last_stage_position is None:
+            return None
+        return tuple(self._last_stage_position)
+
+    def latest_machine_position(self) -> tuple[float, ...] | None:
+        """Return the latest cached raw machine coordinates without controller I/O."""
+
+        if self._position_reporting_mode == "work":
+            work_position = self._last_stage_position
+            coordinate_system = self._active_work_coordinate_system
+            if work_position is None or coordinate_system is None:
+                return None
+            work_offset = self._controller_coordinate_offsets.get(coordinate_system)
+            if (
+                work_offset is None
+                or len(work_position) < 3
+                or len(work_offset) < len(work_position)
+            ):
+                return None
+            # TODO(coordinate-system-rework): publish one canonical machine-coordinate snapshot instead of reconstructing MPos from WPos/WCO.
+            return tuple(
+                float(position + offset)
+                for position, offset in zip(work_position, work_offset)
+            )
+        if self._last_machine_position is None:
+            return None
+        return tuple(self._last_machine_position)
+
+    def latest_synchronized_machine_position(self) -> tuple[float, ...] | None:
+        """Return Machine coordinates produced by one controller status frame."""
+
+        if self._last_synchronized_machine_position is None:
+            return None
+        return tuple(self._last_synchronized_machine_position)
+
+    def latest_machine_coordinate_snapshot(
+        self,
+    ) -> MachineCoordinateSnapshot | None:
+        """Return the latest immutable same-generation coordinate snapshot."""
+
+        return self._last_machine_coordinate_snapshot
+
+    def latest_motion_coordinate_snapshot(
+        self,
+    ) -> MachineCoordinateSnapshot | None:
+        """Return a synchronized snapshot for display and live motion projection."""
+
+        return self._last_motion_coordinate_snapshot
+
+    def axis_calibration_preview_position(
+        self,
+        axis: str,
+    ) -> tuple[float, float] | None:
+        """Return cached raw and mapped machine coordinates for a preview marker."""
+
+        normalized = str(axis).strip().upper()
+        index = self.AXIS_INDEX.get(normalized)
+        machine_position = self.latest_machine_position()
+        if index is None or machine_position is None or index >= len(machine_position):
+            return None
+        controller_value = float(machine_position[index])
+        try:
+            physical_value = self._axis_calibration_mapper().machine_controller_to_physical(
+                normalized,
+                controller_value,
+            )
+        except CalibrationOutOfDomain:
+            return None
+        return controller_value, physical_value
+
+    def latest_a_position(self) -> float | None:
+        """Return the latest cached A position, if known."""
+
+        latest = self.latest_stage_position()
+        if latest is None or len(latest) <= 3:
+            return None
+        return float(latest[3])
+
+    def latest_axis_a_lowering(self) -> float | None:
+        """Return the latest cached physical A-axis lowering, if known."""
+
+        a_position = self.latest_a_position()
+        if a_position is None:
+            return None
+        return self._axis_a_lowering_for_configured_coordinate(a_position)
+
+    def latest_stage_state(self) -> str | None:
+        """Return the most recently observed controller motion state."""
+
+        return self._last_stage_state
+
+    def last_status_timestamp(self) -> float | None:
+        """Return monotonic time of the most recent parsed status frame."""
+
+        return self._last_status_timestamp
+
+    def last_jog_write_timestamp(self) -> float | None:
+        """Return monotonic time when the last jog command was flushed."""
+
+        return self._last_jog_write_timestamp
+
+    def _update_cached_positions(self, status: _Status) -> None:
+        previous_state = self._last_stage_state
+        previous_synchronized_machine = self._last_synchronized_machine_position
+        self._last_stage_state = status.state
+        if status.coordinate_system:
+            self._active_work_coordinate_system = status.coordinate_system
+        if status.position is not None:
+            self._last_machine_position = tuple(float(v) for v in status.position)
+        synchronized_machine = getattr(status, "synchronized_machine_position", None)
+        self._last_synchronized_machine_position = (
+            tuple(float(value) for value in synchronized_machine)
+            if synchronized_machine is not None
+            else None
+        )
+        try:
+            self._last_motion_coordinate_snapshot = (
+                MachineCoordinateSnapshot.from_motion_status(
+                    status,
+                    self._axis_calibration_mapper(),
+                    self.AXIS_INDEX,
+                )
+            )
+        except MachineCoordinateSnapshotUnavailable:
+            self._last_motion_coordinate_snapshot = None
+        try:
+            self._last_machine_coordinate_snapshot = (
+                MachineCoordinateSnapshot.from_status(
+                    status,
+                    self._axis_calibration_mapper(),
+                    self.AXIS_INDEX,
+                )
+            )
+        except MachineCoordinateSnapshotUnavailable:
+            self._last_machine_coordinate_snapshot = None
+        synchronized_machine_changed = (
+            previous_synchronized_machine != self._last_synchronized_machine_position
+        )
+        if status.display_position is not None:
+            previous_position = self._last_stage_position
+            coords = tuple(float(v) for v in status.display_position)
+            self._last_stage_position = coords
+            if (
+                previous_position != coords
+                or previous_state != status.state
+                or synchronized_machine_changed
+            ):
+                self.stage_position_changed.emit(coords)
+        if (
+            status.coordinate_system
+            and status.work_offset is not None
+            and status.coordinate_system in self.WORK_COORDINATE_SYSTEMS
+        ):
+            self._controller_coordinate_offsets[status.coordinate_system] = tuple(
+                float(v) for v in status.work_offset
+            )
+        self._update_coordinate_confidence_from_status(status)

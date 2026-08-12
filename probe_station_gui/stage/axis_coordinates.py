@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+import math
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Optional
@@ -25,6 +27,9 @@ from probe_station_gui.stage.needle_targets import normalise_needle_lowering_tar
 from probe_station_gui.stage.types import _Status
 
 
+logger = logging.getLogger(__name__)
+
+
 @dataclass(frozen=True)
 class NeedleHeightSaveResult:
     success: bool
@@ -34,6 +39,140 @@ class NeedleHeightSaveResult:
 
 class StageControllerAxisCoordinatesMixin:
     """Controller-facing operations built on the pure six-axis mapper."""
+
+    def apply_coordinate_system_configuration(
+        self,
+        *,
+        position_mode: str,
+        startup_mode: str,
+        preferred_system: str,
+    ) -> None:
+        """Apply coordinate-system preferences loaded from persistent settings."""
+
+        reporting_mode = position_mode.strip().lower()
+        if reporting_mode not in {"work", "machine"}:
+            reporting_mode = "work"
+        mode = startup_mode.strip().lower()
+        if mode not in {"controller", "fixed"}:
+            mode = "controller"
+        system = preferred_system.strip().upper()
+        if system not in self.WORK_COORDINATE_SYSTEMS:
+            system = self.DEFAULT_WORK_COORDINATE_SYSTEM
+        reporting_mode_changed = reporting_mode != self._position_reporting_mode
+        self._position_reporting_mode = reporting_mode
+        self._coordinate_startup_mode = mode
+        self._preferred_work_coordinate_system = system
+        if reporting_mode_changed:
+            self._last_machine_coordinate_snapshot = None
+            self._last_motion_coordinate_snapshot = None
+
+    def active_coordinate_system(self) -> str | None:
+        """Return the currently active work coordinate system, if known."""
+
+        return self._active_work_coordinate_system
+
+    def coordinate_display_name(self) -> str:
+        """Return the label that matches the coordinates exposed to the GUI."""
+
+        if self._position_reporting_mode == "machine":
+            return "Machine"
+        active = self._active_work_coordinate_system
+        if active:
+            return active
+        return "Work"
+
+    def axis_display_limits(self, axis: str) -> tuple[float, float] | None:
+        """Return software limits in the same coordinate basis as the GUI."""
+
+        return self.calibrated_axis_display_limits(axis.upper().strip(), None)
+
+    def set_current_axis_work_coordinate(
+        self,
+        axis: str,
+        value: float = 0.0,
+    ) -> None:
+        """Shift the active work offset so the current axis position reads value."""
+
+        axis_key = axis.upper().strip()
+        if axis_key not in self.AXIS_INDEX:
+            raise StageControllerError(f"Unsupported axis: {axis}")
+        try:
+            target_value = float(value)
+        except (TypeError, ValueError) as exc:
+            raise StageControllerError(f"Unsupported {axis_key} coordinate: {value}") from exc
+        if not math.isfinite(target_value):
+            raise StageControllerError(f"Unsupported {axis_key} coordinate: {value}")
+        lease = self._operation_lifecycle.try_reserve_idle(
+            f"set {axis_key} work coordinate"
+        )
+        if lease is None:
+            raise StageControllerError(
+                "Stage is busy. Wait for the current operation to finish."
+            )
+        with lease:
+            with self._state_lock:
+                with self._serial_session():
+                    self._set_current_axis_work_coordinate_locked(
+                        axis_key,
+                        target_value,
+                    )
+
+    def _set_current_axis_work_coordinate_locked(
+        self,
+        axis: str,
+        value: float,
+    ) -> None:
+        serial_connection = self._current_serial()
+        status = self._query_status_with_required_coordinates(
+            serial_connection,
+            axes=(axis,),
+        )
+        if status is None:
+            raise StageControllerError("Unable to read controller status.")
+        if status.state.lower() in {"jog", "run"}:
+            raise StageControllerError(
+                "Wait for the stage to stop before setting a work coordinate."
+            )
+        coordinate_system = (
+            status.coordinate_system
+            or self._active_work_coordinate_system
+            or self._preferred_work_coordinate_system
+        )
+        coordinate_system = coordinate_system.strip().upper()
+        p_value = self.WORK_COORDINATE_SYSTEM_P_VALUES.get(coordinate_system)
+        if p_value is None:
+            raise StageControllerError(
+                f"Unsupported work coordinate system: {coordinate_system}."
+            )
+        self._require_homed_axes(status, {axis})
+        command = (
+            f"G10 L20 P{p_value} {axis}"
+            f"{self._format_gcode_value(value, decimals=6)}"
+        )
+        self._write_current_command_and_wait(command)
+        self._active_work_coordinate_system = coordinate_system
+        if self._position_reporting_mode != "machine":
+            try:
+                self._controller_coordinate_offsets = self._query_work_coordinate_offsets()
+            except Exception as exc:
+                logger.warning("Unable to refresh work coordinate offsets: %s", exc)
+        try:
+            refreshed = self._query_status_with_required_coordinates(
+                serial_connection,
+                axes=(axis,),
+            )
+            if axis == "A" and refreshed is not None:
+                self._update_needles_from_status(refreshed)
+        except Exception as exc:
+            logger.warning(
+                "Unable to refresh stage status after setting %s work coordinate: %s",
+                axis,
+                exc,
+            )
+        self.status_message.emit(
+            f"{axis} work coordinate set to {self._format_gcode_value(value)} "
+            f"in {coordinate_system}."
+        )
 
     def request_needle_height_save(self, request_id: object) -> bool:
         with self._shutdown_gate:

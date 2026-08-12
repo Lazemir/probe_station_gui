@@ -3,15 +3,18 @@
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from collections.abc import Iterable
 from typing import Optional
 
 from probe_station_gui.stage.errors import StageControllerError
+from probe_station_gui.stage.axis_mapping import CalibrationOutOfDomain
 from probe_station_gui.stage.fluidnc_protocol import (
     parse_float_tuple,
     parse_fluidnc_status_line,
 )
+from probe_station_gui.stage.machine_coordinates import MachineCoordinateSnapshot
 from probe_station_gui.stage.types import _Status
 
 
@@ -328,3 +331,248 @@ class StageControllerStatusIOMixin:
     @staticmethod
     def _parse_float_tuple(raw: str) -> tuple[float, ...] | None:
         return parse_float_tuple(raw)
+
+    def _poll_status_once(self) -> None:
+        serial_connection = self._serial
+        if serial_connection is None or not serial_connection.is_open:
+            return
+        try:
+            if not self._serial_session_lock.acquire(blocking=False):
+                return
+            try:
+                with self._serial_session(serial_connection):
+                    self._query_status(serial_connection, check_cancelled=False)
+            finally:
+                self._serial_session_lock.release()
+        except StageControllerError:
+            return
+
+    def _run_status_refresh(self) -> None:
+        lease = self._operation_lifecycle.try_reserve_idle("status refresh")
+        try:
+            if lease is not None:
+                with lease:
+                    self._poll_status_once()
+        finally:
+            with self._state_lock:
+                self._status_refresh_thread = None
+
+    def current_stage_position(self) -> tuple[float, ...]:
+        """Return the latest controller position in the active GUI coordinate space."""
+
+        lease = self._operation_lifecycle.try_reserve_idle("stage position query")
+        if lease is None:
+            raise StageControllerError("Stage is busy. Wait for the current operation to finish.")
+        with lease:
+            status = self._query_current_stage_position_status()
+            return self._stage_position_from_status(status)
+
+    def run_external_current_stage_position(self) -> tuple[float, ...]:
+        """Read stage position from the worker that owns an external reservation."""
+
+        operation = self._operation_lifecycle.snapshot()
+        if not operation.owned_by(threading.current_thread()):
+            raise StageControllerError(
+                "Current thread does not own an external stage task."
+            )
+        status = self._query_current_stage_position_status()
+        return self._stage_position_from_status(status)
+
+    def run_external_current_physical_machine_coordinates(
+        self,
+        axes: Iterable[str],
+    ) -> dict[str, float]:
+        """Read synchronized physical Machine coordinates inside an external task."""
+
+        operation = self._operation_lifecycle.snapshot()
+        if not operation.owned_by(threading.current_thread()):
+            raise StageControllerError(
+                "Current thread does not own an external stage task."
+            )
+        with self._serial_session():
+            return self._current_physical_machine_coordinates_locked(axes)
+
+    def request_machine_coordinate_snapshot(
+        self,
+        request_id: object,
+        *,
+        axes: Iterable[str],
+    ) -> bool:
+        """Capture one calibrated, provenance-checked status off the GUI thread."""
+
+        normalized_axes = tuple(str(axis).strip().upper() for axis in axes)
+        return self._start_background_task(
+            target=self._run_machine_coordinate_snapshot_request,
+            args=(request_id, normalized_axes),
+            busy_message="Stage is busy. Wait before capturing a reference.",
+        )
+
+    def _run_machine_coordinate_snapshot_request(
+        self,
+        request_id: object,
+        axes: tuple[str, ...],
+    ) -> None:
+        try:
+            status = self._query_current_stage_position_status()
+            snapshot = MachineCoordinateSnapshot.from_status(
+                status,
+                self._axis_calibration_mapper(),
+                self.AXIS_INDEX,
+            )
+            for axis in axes:
+                snapshot.physical_machine_pose.require(axis)
+        except Exception as exc:
+            self.machine_coordinate_snapshot_finished.emit(
+                request_id,
+                False,
+                None,
+                str(exc),
+            )
+            return
+        self.machine_coordinate_snapshot_finished.emit(
+            request_id,
+            True,
+            snapshot,
+            "",
+        )
+
+    def _current_physical_machine_coordinates_locked(
+        self,
+        axes: Iterable[str],
+    ) -> dict[str, float]:
+        normalized_axes = tuple(str(axis).strip().upper() for axis in axes)
+        serial_connection = self._current_serial()
+        restore_mask = self._desired_status_report_mask_for_mode(
+            self._position_reporting_mode
+        )
+        machine_mask = self._desired_status_report_mask_for_mode("machine")
+        try:
+            self._ensure_status_report_mask(machine_mask)
+            required_count = self._required_coordinate_axis_count(normalized_axes)
+            status = None
+            for attempt in range(max(1, int(self.COORDINATE_STATUS_READ_ATTEMPTS))):
+                status = self._read_status_frame(
+                    serial_connection,
+                    timeout=1.5,
+                    parse_status_line=self._parse_raw_machine_status_line,
+                )
+                if status is not None and status.position is not None and len(status.position) >= required_count:
+                    break
+                if attempt + 1 < int(self.COORDINATE_STATUS_READ_ATTEMPTS):
+                    time.sleep(self.COORDINATE_STATUS_RETRY_DELAY_S)
+            return self._physical_machine_coordinates_from_status(
+                status,
+                axes=normalized_axes,
+            )
+        finally:
+            self._ensure_status_report_mask(restore_mask, check_cancelled=False)
+
+    def _parse_raw_machine_status_line(self, line: str) -> _Status | None:
+        return parse_fluidnc_status_line(
+            line,
+            position_reporting_mode="machine",
+            active_work_coordinate_system=self._active_work_coordinate_system,
+            controller_coordinate_offsets=self._controller_coordinate_offsets,
+            axis_index=self.AXIS_INDEX,
+        )
+
+    def _physical_machine_coordinates_from_status(
+        self,
+        status: _Status | None,
+        *,
+        axes: Iterable[str],
+    ) -> dict[str, float]:
+        normalized_axes = tuple(str(axis).strip().upper() for axis in axes)
+        if status is None or status.position is None:
+            raise StageControllerError("Unable to read physical Machine coordinates.")
+        if status.state.lower() in {"jog", "run"}:
+            raise StageControllerError(
+                "Wait for the stage to stop before capturing a reference."
+            )
+        mapper = self._axis_calibration_mapper()
+        result: dict[str, float] = {}
+        for axis in normalized_axes:
+            index = self.AXIS_INDEX.get(axis)
+            if index is None:
+                raise StageControllerError(f"Unsupported axis: {axis}")
+            if index >= len(status.position):
+                raise StageControllerError(
+                    f"Controller did not report complete Machine coordinates for {axis}."
+                )
+            raw_value = float(status.position[index])
+            try:
+                result[axis] = float(mapper.controller_to_physical(axis, raw_value))
+            except CalibrationOutOfDomain as exc:
+                raise StageControllerError(
+                    f"Machine {axis}={raw_value:.6f} is outside the axis calibration domain."
+                ) from exc
+        return result
+
+    def _query_current_stage_position_status(self) -> _Status | None:
+        with self._serial_session():
+            return self._query_synced_status_for_absolute_motion(min_axes=3)
+
+    def _stage_position_from_status(
+        self,
+        status: _Status | None,
+    ) -> tuple[float, ...]:
+        if status is None or status.display_position is None:
+            raise StageControllerError("Unable to read stage position.")
+        if len(status.display_position) < 3:
+            raise StageControllerError("Controller did not report complete X/Y/Z coordinates.")
+        if status.state.lower() in {"jog", "run"}:
+            raise StageControllerError("Wait for the stage to stop before capturing a marker.")
+        self._ensure_b_axis_zero_reference(status)
+        return tuple(float(value) for value in status.display_position)
+
+    def request_status_refresh(self) -> None:
+        """Poll controller position in a background thread when idle."""
+
+        with self._state_lock:
+            if not self._async_write_queue.empty():
+                return
+            if self._jog_motion_active:
+                return
+            serial_connection = self._serial
+            if serial_connection is None or not serial_connection.is_open:
+                return
+            if (
+                self._status_refresh_thread is not None
+                and self._status_refresh_thread.is_alive()
+            ):
+                return
+            thread = threading.Thread(target=self._run_status_refresh, daemon=True)
+            self._status_refresh_thread = thread
+            thread.start()
+
+    def _query_synced_status_for_absolute_motion(
+        self,
+        *,
+        refresh_coordinate_state: bool = True,
+        axes: Iterable[str] | None = None,
+        min_axes: int | None = None,
+    ) -> Optional[_Status]:
+        """Refresh coordinate-system state before absolute position reads and moves."""
+
+        serial_connection = self._current_serial()
+        with self._serial_session(serial_connection):
+            if not refresh_coordinate_state:
+                state_was_stale = self._controller_state_stale
+                status = self._query_status_with_required_coordinates(
+                    serial_connection,
+                    axes=axes,
+                    min_axes=min_axes,
+                )
+                if (
+                    status is not None
+                    and not state_was_stale
+                ):
+                    return status
+
+            if self._position_reporting_mode != "machine" or self._controller_state_stale:
+                self._refresh_coordinate_system_state(apply_preference=True)
+            return self._query_status_with_required_coordinates(
+                serial_connection,
+                axes=axes,
+                min_axes=min_axes,
+            )
