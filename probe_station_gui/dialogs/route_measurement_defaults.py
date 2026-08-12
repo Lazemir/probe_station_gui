@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from probe_station_gui.route.measurement import RouteContactQualityLimits
+from probe_station_gui.route.contact_quality import RouteContactQualityLimits
 
 
 ROUTE_MEASUREMENT_PROFILE_VERSION = 7

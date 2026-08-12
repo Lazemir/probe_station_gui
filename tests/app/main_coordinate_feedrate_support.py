@@ -1,3 +1,5 @@
+# ruff: noqa: E402
+
 import struct
 import threading
 import time
@@ -11,13 +13,12 @@ restore_real_imports_for_main()
 import main as main_module
 from main import Main
 from probe_station_gui.design.contact_navigation import api_route_adjusted_stage_xy
-from probe_station_gui.dialogs import (
-    route_measurement_dialog as route_measurement_dialog_module,
-)
 from probe_station_gui.dialogs.route_measurement_dialog import (
     RouteMeasurementDialog,
-    RouteMeasurementRunConfiguration,
 )
+from probe_station_gui.route.measurement_config import RouteMeasurementRunConfiguration
+from probe_station_gui.route.meter_config import RouteMeterConfiguration
+from probe_station_gui.route.operation_modes import ROUTE_OPERATION_MEASURE
 from probe_station_gui.route.measurement import (
     RouteContactPlacementResult,
     RouteContactHeightRecord,
@@ -36,7 +37,7 @@ from probe_station_gui.route.dialog_adapter import (
     RouteMeasurementPointRequestCallbacks,
     request_route_measurement_for_point,
 )
-from probe_station_gui.instruments.meters.lcr import LCRMeterError, RouteMeterConfiguration
+from probe_station_gui.instruments.meters.lcr import LCRMeterError
 from probe_station_gui.settings.manager import ObjectiveCalibrationSettings, Settings
 from probe_station_gui.stage.api_moves import api_move_feedrate
 from probe_station_gui.stage.controller import StageControllerError
@@ -88,7 +89,6 @@ class _FakeView:
 
     def setFocus(self, *_args, **_kwargs) -> None:  # noqa: N802 - Qt naming
         self.focus_count += 1
-
 
 
 class _FakeMicroscopeInteraction:
@@ -379,7 +379,9 @@ class _FakeStagePositionPanel:
     def set_fields_available(self, available: bool) -> None:
         self.available_calls.append(bool(available))
 
-    def refresh_axis_styles(self, motion_axes: object, motion_blink_dimmed: bool) -> None:
+    def refresh_axis_styles(
+        self, motion_axes: object, motion_blink_dimmed: bool
+    ) -> None:
         normalized_motion_axes = {
             str(axis).strip().upper() for axis in motion_axes if str(axis).strip()
         }
@@ -391,7 +393,10 @@ class _FakeStagePositionPanel:
                 field.styles.append(("#d7b8ff", "#1f1233"))
             elif axis_name in normalized_motion_axes and motion_blink_dimmed:
                 field.styles.append(
-                    (main_module.Main.STAGE_AXIS_DIMMED_BACKGROUNDS[background], foreground)
+                    (
+                        main_module.Main.STAGE_AXIS_DIMMED_BACKGROUNDS[background],
+                        foreground,
+                    )
                 )
             else:
                 field.styles.append((background, foreground))
@@ -623,7 +628,9 @@ def _coordinate_target_state() -> CoordinateTargetMoveState:
     )
 
 
-def _make_main(current_feedrate: float = 120.0) -> tuple[
+def _make_main(
+    current_feedrate: float = 120.0,
+) -> tuple[
     Main,
     _FakeStageController,
     _FakeJoystick,
@@ -699,8 +706,8 @@ def _make_main(current_feedrate: float = 120.0) -> tuple[
     window._clear_planned_move_prediction = lambda *, clear_wait_state: None
     window._schedule_status_refreshes = lambda _delays: None
     window._schedule_cancel_state_refresh = lambda: None
-    window._show_status = (
-        lambda message, _timeout_ms=None: statuses.append(str(message))
+    window._show_status = lambda message, _timeout_ms=None: statuses.append(
+        str(message)
     )
     window._can_display_design_position = lambda: False
     window._update_coordinate_display = lambda **_kwargs: None
@@ -763,7 +770,7 @@ def _route_start_point() -> RouteMeasurementPoint:
 
 def _route_start_configuration(
     *,
-    operation_mode: str = route_measurement_dialog_module.ROUTE_OPERATION_MEASURE,
+    operation_mode: str = ROUTE_OPERATION_MEASURE,
     photo_autofocus_enabled: bool = False,
 ) -> RouteMeasurementRunConfiguration:
     return RouteMeasurementRunConfiguration(
@@ -838,9 +845,9 @@ def _make_route_start_main(
         )
     )
     window._design_contact_success_callback = lambda _frame: None
-    window._route_measurement_points = (
-        lambda _route, *, frame_usability_snapshot=None: [point]
-    )
+    window._route_measurement_points = lambda _route, *, frame_usability_snapshot=None: [
+        point
+    ]
     window._set_route_measurement_resume_point = lambda _point: None
     window._route_measurement_session_active = False
     window._set_route_measurement_pending = lambda _pending: None
@@ -863,11 +870,11 @@ def _make_route_start_main(
     window.route_measurement_waiting_changed = _RouteStartEmit()
     window.design_navigator_panel = None
     window._route_measurement_dialog = dialog
-    window._show_status = (
-        lambda message, timeout_ms=None: statuses.append((str(message), timeout_ms))
+    window._show_status = lambda message, timeout_ms=None: statuses.append(
+        (str(message), timeout_ms)
     )
-    window._send_telegram_alert = (
-        lambda key, *args, **kwargs: telegrams.append((str(key), args, dict(kwargs)))
+    window._send_telegram_alert = lambda key, *args, **kwargs: telegrams.append(
+        (str(key), args, dict(kwargs))
     )
     window._telegram_photo_lock = threading.Lock()
     window._update_stage_coordinate_apply_state = lambda: None
@@ -911,8 +918,8 @@ def _make_cancel_main() -> tuple[Main, _FakeStageController, _FakeButton, list[s
     window._stage_motion_axes = set()
     window._stage_motion_blink_dimmed = False
     window._stage_motion_blink_timer = _FakeTimer()
-    window._show_status = (
-        lambda message, _timeout_ms=None: statuses.append(str(message))
+    window._show_status = lambda message, _timeout_ms=None: statuses.append(
+        str(message)
     )
     window._clear_planned_move_prediction = lambda *, clear_wait_state: None
     window._schedule_status_refreshes = lambda _delays: None
@@ -946,13 +953,11 @@ def _make_stage_position_display_main() -> tuple[Main, _FakeStageController]:
     window._stage_axis_base_styles = panel.base_styles
     window._stage_axis_return_commits = panel.return_commits
     window._update_stage_coordinate_apply_state = lambda: None
-    window._set_stage_position_fields_available = (
-        lambda available: setattr(window, "_fields_available", bool(available))
+    window._set_stage_position_fields_available = lambda available: setattr(
+        window, "_fields_available", bool(available)
     )
-    window._style_stage_axis_field = (
-        lambda field, background, foreground: field.styles.append(
-            (str(background), str(foreground))
-        )
+    window._style_stage_axis_field = lambda field, background, foreground: (
+        field.styles.append((str(background), str(foreground)))
     )
     window._current_linear_feedrate = lambda: 123.0
     stage_controller.homed_axes = lambda: {"X", "Y"}

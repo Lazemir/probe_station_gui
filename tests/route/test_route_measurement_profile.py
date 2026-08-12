@@ -16,7 +16,10 @@ from probe_station_gui.dialogs.route_measurement_defaults import (
     DEFAULT_ROUTE_INITIAL_MEASUREMENT_COUNT,
 )
 from probe_station_gui.dialogs.route_measurement_dialog import RouteMeasurementDialog
-from probe_station_gui.instruments.meters.lcr import ROUTE_METER_KEITHLEY
+from probe_station_gui.dialogs.route_measurement_profile import (
+    RouteMeasurementProfileController,
+)
+from probe_station_gui.route.meter_config import ROUTE_METER_KEITHLEY
 from probe_station_gui.route.measurement import ROUTE_OPERATION_PHOTO_THEN_MEASURE
 
 
@@ -35,6 +38,12 @@ def _dialog(tmp_path: Path) -> RouteMeasurementDialog:
         default_csv_path=str(tmp_path / "default.csv"),
         settings_path=tmp_path / "route-measurement-settings.json",
     )
+
+
+def _profile_controller(
+    dialog: RouteMeasurementDialog,
+) -> RouteMeasurementProfileController:
+    return dialog._profile_controller
 
 
 def test_route_measurement_profile_round_trips_dialog_state(
@@ -84,9 +93,10 @@ def test_route_measurement_profile_round_trips_dialog_state(
         },
     }
 
-    assert dialog._apply_profile_data(profile) is False
+    controller = _profile_controller(dialog)
+    assert controller.apply_data(profile) is False
 
-    saved = dialog._profile_data()
+    saved = controller.data()
     assert saved["csv_path"] == str(tmp_path / "measure.csv")
     assert saved["previous_csv_path"] == str(tmp_path / "previous.csv")
     assert saved["operation_mode"] == ROUTE_OPERATION_PHOTO_THEN_MEASURE
@@ -139,11 +149,14 @@ def test_legacy_keithley_profile_migrates_route_defaults(
         },
     }
 
-    assert dialog._apply_profile_data(legacy_profile) is True
+    controller = _profile_controller(dialog)
+    assert controller.apply_data(legacy_profile) is True
 
-    saved = dialog._profile_data()
+    saved = controller.data()
     assert saved["initial_measurement_count"] == DEFAULT_ROUTE_INITIAL_MEASUREMENT_COUNT
-    assert saved["followup_measurement_count"] == DEFAULT_ROUTE_FOLLOWUP_MEASUREMENT_COUNT
+    assert (
+        saved["followup_measurement_count"] == DEFAULT_ROUTE_FOLLOWUP_MEASUREMENT_COUNT
+    )
     assert saved["meter"]["keithley"]["measurement_voltage_v"] == pytest.approx(
         DEFAULT_KEITHLEY_MEASUREMENT_VOLTAGE_V
     )
@@ -159,8 +172,9 @@ def test_profile_uses_csv_path_as_previous_csv_fallback(
     dialog = _dialog(tmp_path)
     csv_path = str(tmp_path / "measure.csv")
 
-    assert dialog._apply_profile_data({"csv_path": csv_path}) is False
+    controller = _profile_controller(dialog)
+    assert controller.apply_data({"csv_path": csv_path}) is False
 
-    saved = dialog._profile_data()
+    saved = controller.data()
     assert saved["csv_path"] == csv_path
     assert saved["previous_csv_path"] == csv_path

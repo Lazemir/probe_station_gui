@@ -16,22 +16,21 @@ from tests.app.main_coordinate_feedrate_support import (
     RouteContactHeightRecord,
     RouteContactQuality,
     RouteContactSeekResult,
-    RouteMeasurementDialog,
     RouteMeasurementPoint,
     RouteMeasurementRecord,
     RoutePhotoRecord,
     Settings,
     _FakeAliveThread,
-    _FakeButton,
     _FakeFrame,
     _FakeRouteMeasurementRunner,
     _FakeThread,
     _telegram_test_photo_bytes,
     main_module,
     request_route_measurement_for_point,
-    route_measurement_dialog_module,
 )
-from probe_station_gui.views import main_window_needle_calibration as needle_calibration_ui
+from probe_station_gui.views import (
+    main_window_needle_calibration as needle_calibration_ui,
+)
 from probe_station_gui.views import main_window_shutdown as shutdown_ui
 
 
@@ -135,13 +134,11 @@ assert image.height() == 4
 
         window._route_measurement_dialog = None
         window._take_pending_telegram_contact_photos = lambda: (before, after)
-        window._telegram_contact_photo_payload = (
-            lambda _before, _after: (
-                (b"combined", "route-contact-comparison.jpg"),
-                "Route contact check:\n"
-                "Left: before needle press. Right: contact attempt.\n"
-                "Point 1/2, structure 3, P003, status=bad_contact.",
-            )
+        window._telegram_contact_photo_payload = lambda _before, _after: (
+            (b"combined", "route-contact-comparison.jpg"),
+            "Route contact check:\n"
+            "Left: before needle press. Right: contact attempt.\n"
+            "Point 1/2, structure 3, P003, status=bad_contact.",
         )
         window._send_telegram_bot_message = (
             lambda message, *, photo=None, reply_markup=None: sent.append(
@@ -210,16 +207,14 @@ assert image.height() == 4
         window._route_measurement_waiting = False
         window._pending_route_measure_point = None
         window._latest_route_contact_failure_telegram_photos = lambda: (before, after)
-        window._telegram_contact_photo_payload = (
-            lambda _before, _after: (
-                (b"combined", "route-contact-comparison.jpg"),
-                "Route contact check:\n"
-                "Left: before needle press. Right: contact attempt.\n"
-                "Point 1/2, structure 3, P003, status=bad_contact.",
-            )
+        window._telegram_contact_photo_payload = lambda _before, _after: (
+            (b"combined", "route-contact-comparison.jpg"),
+            "Route contact check:\n"
+            "Left: before needle press. Right: contact attempt.\n"
+            "Point 1/2, structure 3, P003, status=bad_contact.",
         )
-        window._send_telegram_alert = (
-            lambda key, text, **kwargs: alerts.append((key, text, kwargs))
+        window._send_telegram_alert = lambda key, text, **kwargs: alerts.append(
+            (key, text, kwargs)
         )
         window._telegram_route_actions_markup = lambda: "actions"
         window.design_navigator_panel = None
@@ -255,10 +250,9 @@ assert image.height() == 4
             emit=lambda message: emitted.append(str(message))
         )
         window.stage_controller = types.SimpleNamespace(
-            run_external_local_autofocus=lambda *, range_mm, parent_token: requests.append(
-                (float(range_mm), str(parent_token))
+            run_external_local_autofocus=lambda *, range_mm, parent_token: (
+                requests.append((float(range_mm), str(parent_token))) or "focus-result"
             )
-            or "focus-result"
         )
         settings = PointPhotoSettings(autofocus_range_mm=0.03)
 
@@ -323,8 +317,7 @@ assert image.height() == 4
             _needles_zone="raise",
             reserve_external_task=lambda label: _stage_lease(label),
             run_external_local_autofocus=lambda *, range_mm, step_mm=None: (
-                calls.append((float(range_mm), step_mm))
-                or _FocusResult()
+                calls.append((float(range_mm), step_mm)) or _FocusResult()
             ),
         )
 
@@ -446,7 +439,9 @@ assert image.height() == 4
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["route_name"], "")
 
-    def test_route_points_keep_contact_xy_separate_from_photo_objective_xy(self) -> None:
+    def test_route_points_keep_contact_xy_separate_from_photo_objective_xy(
+        self,
+    ) -> None:
         window = Main.__new__(Main)
         settings = Settings()
         settings.objectives.active_name = "X50"
@@ -599,9 +594,9 @@ assert image.height() == 4
         window._current_needle_feedrate = lambda: 7.0
         window._run_sample_unload = lambda *_args: None
         window.stage_controller = types.SimpleNamespace(
-            max_feedrate_for_axes=lambda axes: 900.0
-            if tuple(axes) == ("X", "Y")
-            else 1.0
+            max_feedrate_for_axes=lambda axes: (
+                900.0 if tuple(axes) == ("X", "Y") else 1.0
+            )
         )
 
         original_box = main_module.QMessageBox
@@ -713,20 +708,6 @@ assert image.height() == 4
         self.assertEqual(resumed, [12])
         self.assertEqual(progress, [(3, 7, 12)])
 
-    def test_route_progress_eta_uses_current_run_baseline(self) -> None:
-        dialog = RouteMeasurementDialog.__new__(RouteMeasurementDialog)
-        dialog._progress_started_at = 100.0
-        dialog._progress_baseline_completed = 187
-        original_monotonic = route_measurement_dialog_module.time.monotonic
-        route_measurement_dialog_module.time.monotonic = lambda: 160.0
-        try:
-            text = RouteMeasurementDialog._progress_eta_text(dialog, 188, 292)
-        finally:
-            route_measurement_dialog_module.time.monotonic = original_monotonic
-
-        self.assertIn("Remaining: 1:44:00 | Finish:", text)
-        self.assertNotIn("Remaining: 00:33", text)
-
     def test_route_contact_move_raises_needles_and_moves_only(self) -> None:
         window = Main.__new__(Main)
         calls: list[object] = []
@@ -796,7 +777,9 @@ assert image.height() == 4
                 ("move", x_mm, y_mm)
             ),
         )
-        window.route_measurement_status = types.SimpleNamespace(emit=lambda _message: None)
+        window.route_measurement_status = types.SimpleNamespace(
+            emit=lambda _message: None
+        )
         window.route_contact_move_finished = types.SimpleNamespace(
             emit=lambda _success, _message: None
         )
@@ -822,8 +805,8 @@ assert image.height() == 4
         )
         window._clear_stage_motion_axes = lambda: None
         window._schedule_status_refreshes = lambda _delays: None
-        window._show_status = (
-            lambda message, _timeout_ms=None: statuses.append(str(message))
+        window._show_status = lambda message, _timeout_ms=None: statuses.append(
+            str(message)
         )
 
         request_route_measurement_for_point(
@@ -852,9 +835,7 @@ assert image.height() == 4
         self.assertEqual(window._pending_route_measure_point, 91)
         self.assertEqual(
             statuses,
-            [
-                "Stopping contact measurement, then measuring point 91."
-            ],
+            ["Stopping contact measurement, then measuring point 91."],
         )
         self.assertEqual(runner.confirmations, [])
 
@@ -871,8 +852,8 @@ assert image.height() == 4
         window.stage_controller = types.SimpleNamespace(
             cancel_active_motion=lambda reason: cancelled_motions.append(str(reason))
         )
-        window._show_status = (
-            lambda message, _timeout_ms=None: statuses.append(str(message))
+        window._show_status = lambda message, _timeout_ms=None: statuses.append(
+            str(message)
         )
 
         Main._cancel_contact_seek(window)
@@ -881,116 +862,6 @@ assert image.height() == 4
         self.assertEqual(aborts, [])
         self.assertEqual(cancelled_motions, ["Contact seek cancel requested."])
         self.assertEqual(statuses, ["Contact seek cancel requested."])
-
-    def test_waiting_dialog_measure_confirms_current_contact(self) -> None:
-        dialog = RouteMeasurementDialog.__new__(RouteMeasurementDialog)
-        confirmed: list[bool] = []
-        remeasured: list[bool] = []
-        measured: list[bool] = []
-
-        dialog._running = True
-        dialog._waiting = True
-        dialog.measure_current_requested = types.SimpleNamespace(
-            emit=lambda: confirmed.append(True)
-        )
-        dialog.remeasure_requested = types.SimpleNamespace(
-            emit=lambda: remeasured.append(True)
-        )
-        dialog._emit_measure_requested = lambda: measured.append(True)
-
-        RouteMeasurementDialog._emit_next_or_measure_requested(dialog)
-
-        self.assertEqual(confirmed, [True])
-        self.assertEqual(remeasured, [])
-        self.assertEqual(measured, [])
-
-    def test_waiting_dialog_enables_runtime_output_and_meter_fields(self) -> None:
-        class _FakeEnabledWidget:
-            def __init__(self, *, checked: bool = False) -> None:
-                self.enabled = False
-                self._checked = bool(checked)
-
-            def setEnabled(self, enabled: bool) -> None:  # noqa: N802
-                self.enabled = bool(enabled)
-
-            def isChecked(self) -> bool:  # noqa: N802
-                return self._checked
-
-        dialog = RouteMeasurementDialog.__new__(RouteMeasurementDialog)
-        dialog._running = True
-        dialog._waiting = False
-        dialog._operation_combo = _FakeEnabledWidget()
-        dialog._operation_combo.currentData = lambda: (
-            route_measurement_dialog_module.ROUTE_OPERATION_PHOTO_THEN_MEASURE
-        )
-        dialog._photo_dir_edit = _FakeEnabledWidget()
-        dialog._photo_browse_button = _FakeEnabledWidget()
-        dialog._photo_settle_spin = _FakeEnabledWidget()
-        dialog._photo_autofocus_checkbox = _FakeEnabledWidget(checked=True)
-        dialog._photo_autofocus_range_spin = _FakeEnabledWidget()
-        dialog._csv_path_edit = _FakeEnabledWidget()
-        dialog._csv_browse_button = _FakeEnabledWidget()
-        dialog._previous_ok_only_checkbox = _FakeEnabledWidget(checked=True)
-        dialog._previous_csv_path_edit = _FakeEnabledWidget()
-        dialog._previous_csv_browse_button = _FakeEnabledWidget()
-        dialog._meter_combo = _FakeEnabledWidget()
-        dialog._gwinstek_page = _FakeEnabledWidget()
-        dialog._keithley_page = _FakeEnabledWidget()
-        dialog._initial_measurement_count_spin = _FakeEnabledWidget()
-        dialog._followup_measurement_count_spin = _FakeEnabledWidget()
-        dialog._max_relative_rms_spin = _FakeEnabledWidget()
-        dialog._contact_settle_spin = _FakeEnabledWidget()
-        dialog._contact_seek_range_spin = _FakeEnabledWidget()
-        dialog._contact_seek_step_spin = _FakeEnabledWidget()
-        dialog._contact_max_mad_sigma_spin = _FakeEnabledWidget()
-        dialog._contact_max_p95_step_spin = _FakeEnabledWidget()
-        dialog._contact_max_relative_mad_spin = _FakeEnabledWidget()
-        dialog._contact_max_relative_p95_step_spin = _FakeEnabledWidget()
-        dialog._pause_button = _FakeButton()
-        dialog._interrupt_button = _FakeButton()
-        dialog._stop_button = _FakeButton()
-        dialog._save_shift_button = _FakeButton()
-        dialog._remeasure_button = _FakeButton()
-        dialog._skip_button = _FakeButton()
-        dialog._next_button = _FakeButton()
-        dialog._jump_point_spin = _FakeEnabledWidget()
-        dialog._move_button = _FakeButton()
-        dialog._jump_button = _FakeButton()
-        dialog._set_runtime_settings_enabled = lambda _enabled: None
-        dialog._update_session_buttons = lambda: None
-
-        RouteMeasurementDialog.set_waiting(dialog, True)
-
-        self.assertTrue(dialog._csv_path_edit.enabled)
-        self.assertTrue(dialog._operation_combo.enabled)
-        self.assertTrue(dialog._photo_dir_edit.enabled)
-        self.assertTrue(dialog._photo_autofocus_checkbox.enabled)
-        self.assertTrue(dialog._photo_autofocus_range_spin.enabled)
-        self.assertTrue(dialog._previous_ok_only_checkbox.enabled)
-        self.assertTrue(dialog._previous_csv_path_edit.enabled)
-        self.assertTrue(dialog._meter_combo.enabled)
-        self.assertTrue(dialog._gwinstek_page.enabled)
-        self.assertTrue(dialog._keithley_page.enabled)
-
-    def test_running_dialog_close_is_ignored(self) -> None:
-        dialog = RouteMeasurementDialog.__new__(RouteMeasurementDialog)
-        statuses: list[str] = []
-
-        class _CloseEvent:
-            def __init__(self) -> None:
-                self.ignored = False
-
-            def ignore(self) -> None:
-                self.ignored = True
-
-        event = _CloseEvent()
-        dialog._running = True
-        dialog.set_status = lambda message: statuses.append(str(message))
-
-        RouteMeasurementDialog.closeEvent(dialog, event)
-
-        self.assertTrue(event.ignored)
-        self.assertEqual(statuses, ["Stop route measurement before closing."])
 
     def test_main_shutdown_forces_route_dialog_close(self) -> None:
         window = Main.__new__(Main)
@@ -1074,6 +945,7 @@ assert image.height() == 4
         self.assertEqual(rows[0]["contact_axis_a_lowering_mm"], "1.002")
         self.assertEqual(rows[0]["contact_seek_status"], "found")
         self.assertEqual(rows[0]["contact_seek_attempts"], "3")
+
 
 if __name__ == "__main__":
     unittest.main()

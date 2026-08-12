@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Mapping
 
-from probe_station_gui.route.measurement import RouteContactQualityLimits
+from probe_station_gui.route.contact_quality import RouteContactQualityLimits
 from probe_station_gui.route.meter_config import RouteMeterConfiguration
 
 

@@ -7,6 +7,11 @@ from pathlib import Path
 from unittest import mock
 
 from probe_station_gui.design.session import DesignSession
+from probe_station_gui.route.operation_modes import (
+    ROUTE_OPERATION_MEASURE,
+    ROUTE_OPERATION_PHOTO,
+    ROUTE_OPERATION_PHOTO_THEN_MEASURE,
+)
 from tests.app.main_coordinate_feedrate_support import (
     Main,
     RouteMeasurementPointRequestCallbacks,
@@ -27,7 +32,6 @@ from tests.app.main_coordinate_feedrate_support import (
     _telegram_test_photo_bytes,
     main_module,
     request_route_measurement_for_point,
-    route_measurement_dialog_module,
 )
 
 
@@ -1375,7 +1379,7 @@ class MainRouteMeasurementSessionTest(unittest.TestCase):
             _make_route_start_main(objective_scale=None)
         )
         configuration = _route_start_configuration(
-            operation_mode=route_measurement_dialog_module.ROUTE_OPERATION_PHOTO_THEN_MEASURE,
+            operation_mode=ROUTE_OPERATION_PHOTO_THEN_MEASURE,
         )
 
         Main._start_route_measurement(window, configuration)
@@ -1397,7 +1401,7 @@ class MainRouteMeasurementSessionTest(unittest.TestCase):
             camera_frame=None
         )
         configuration = _route_start_configuration(
-            operation_mode=route_measurement_dialog_module.ROUTE_OPERATION_PHOTO,
+            operation_mode=ROUTE_OPERATION_PHOTO,
         )
 
         Main._start_route_measurement(window, configuration)
@@ -1451,7 +1455,7 @@ class MainRouteMeasurementSessionTest(unittest.TestCase):
             _make_route_start_main()
         )
         configuration = _route_start_configuration(
-            operation_mode=route_measurement_dialog_module.ROUTE_OPERATION_PHOTO,
+            operation_mode=ROUTE_OPERATION_PHOTO,
         )
         original_thread = main_module.threading.Thread
         _FakeThread.instances = []
@@ -1587,7 +1591,7 @@ class MainRouteMeasurementSessionTest(unittest.TestCase):
         configuration = RouteMeasurementRunConfiguration(
             csv_path="route.csv",
             previous_csv_path="route.csv",
-            operation_mode=route_measurement_dialog_module.ROUTE_OPERATION_MEASURE,
+            operation_mode=ROUTE_OPERATION_MEASURE,
             photo_output_dir="photos",
             photo_settle_s=0.0,
             photo_autofocus_enabled=True,
@@ -1681,7 +1685,7 @@ class MainRouteMeasurementSessionTest(unittest.TestCase):
             return RouteMeasurementRunConfiguration(
                 csv_path="route.csv",
                 previous_csv_path=previous_csv_path,
-                operation_mode=route_measurement_dialog_module.ROUTE_OPERATION_MEASURE,
+                operation_mode=ROUTE_OPERATION_MEASURE,
                 photo_output_dir="photos",
                 photo_settle_s=0.0,
                 photo_autofocus_enabled=False,
@@ -1778,7 +1782,7 @@ class MainRouteMeasurementSessionTest(unittest.TestCase):
         configuration = RouteMeasurementRunConfiguration(
             csv_path="route.csv",
             previous_csv_path="route.csv",
-            operation_mode=route_measurement_dialog_module.ROUTE_OPERATION_MEASURE,
+            operation_mode=ROUTE_OPERATION_MEASURE,
             photo_output_dir="photos",
             photo_settle_s=0.0,
             photo_autofocus_enabled=False,

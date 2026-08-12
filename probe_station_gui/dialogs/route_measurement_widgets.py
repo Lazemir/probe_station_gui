@@ -10,6 +10,7 @@ from PySide6.QtWidgets import QHBoxLayout, QWidget
 from probe_station_gui.shared.wheel_guard import (
     GuardedComboBox as QComboBox,
     GuardedDoubleSpinBox as QDoubleSpinBox,
+    GuardedSpinBox as QSpinBox,
 )
 
 
@@ -134,3 +135,23 @@ class SIPrefixSpinBox(QWidget):
 
     def _clamp_base_value(self, value: float) -> float:
         return max(self._base_minimum, min(self._base_maximum, float(value)))
+
+
+def apply_profile_numeric_value(
+    widget: SIPrefixSpinBox | QSpinBox | QDoubleSpinBox,
+    value: object,
+) -> None:
+    """Apply a finite profile value through the widget's native unit contract."""
+
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return
+    if not math.isfinite(numeric):
+        return
+    if isinstance(widget, SIPrefixSpinBox):
+        widget.set_base_value(numeric)
+    elif isinstance(widget, QSpinBox):
+        widget.setValue(int(round(numeric)))
+    else:
+        widget.setValue(numeric)

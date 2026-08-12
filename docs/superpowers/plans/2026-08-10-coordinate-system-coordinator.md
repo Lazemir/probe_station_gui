@@ -2085,3 +2085,63 @@ git diff --check 8fc83259e07f48bf0f222e80bb3e1d6c3241fd0e..HEAD
   `READY` with `0 Critical / 0 Important / 0 Minor`. Nothing was staged before
   that verdict; the authorized exact commit subject is
   `refactor: separate design session domains`.
+
+#### Task 17a: Separate route measurement dialog domains
+
+- [x] Preserve the canonical `RouteMeasurementDialog` identity, exact
+  constructor, fourteen published signals, and required public runtime slots
+  while replacing its MI-zero implementation with a 266-line composition
+  root. Setup, meter, explicit profile persistence, run controls, and runtime
+  results now have focused owners. `RouteMeasurementProfileMixin`, private
+  compatibility aliases, hidden interrupt controls, and direct LCR
+  implementation imports are deleted.
+- [x] Preserve the safety-critical shared `RouteRunControlState` truth table
+  with exactly one instance in `RouteMeasurementRunControls`. Real offscreen
+  dialog characterization proves Pause changes to an enabled Interrupt before
+  emitting once, pending Interrupt disables before emitting once, only a
+  `paused` wait acknowledgement exposes Resume, and external-measurement waits
+  keep Interrupt while disabling confirmation actions. Five fresh processes
+  pass all eighteen real-dialog state/configuration/result/adapter tests.
+- [x] Preserve profile JSON version, legacy Keithley migration, CSV fallback,
+  session/current-point state, settings-path writes, and the existing
+  `current_configuration` persistence side effect. The explicit unparented
+  profile controller holds only a weak dialog reference, avoiding a verified
+  Qt teardown heap-lifetime hazard. A review-found intent regression was first
+  reproduced RED through a real dialog, adapter, and Main, then corrected:
+  profile selection and an actual route-size clamp publish the finalized point
+  exactly once, while ordinary programmatic point synchronization remains
+  silent. Dialog import loads neither the protected
+  runner nor LCR implementation; Main, presenter, and adapter retain lazy
+  dialog import behavior; child owners have no facade/Main/runner reverse
+  edges or `getattr` coupling.
+- [x] Pass no-hardware verification with process-local `QLocale.c()` and
+  offscreen Qt. Focused route-dialog/App selection ends at `73/73`; all route
+  plus interrupt/design/autofocus safety is `393/393`; App/UI is `908` plus
+  `5` subtests. The single-process aggregate exposes a baseline-proven native
+  Qt order defect: both Task17a and clean `25be042` access-violate at the exact
+  same protected `MicroscopeInteraction._schedule_retry` test, which passes
+  alone. A deterministic fresh-process partition covers the exact collected
+  union with no omission: all `3151/3151` tests plus `16` subtests pass (App
+  `365` plus the isolated node, and every other top-level test directory).
+  The only Python warning is the inherited `BuiltinImporter.module_repr()`.
+  Configured whole-tree Ruff, whole-tree compile, affected/new format, and
+  `git diff --check` pass. The whole-tree format check remains an inherited
+  baseline miss across 341 untouched files and was not used to rewrite scope.
+- [x] Metrics: the six final owners total `1961` physical LOC and `1750`
+  Lizard NLOC. Physical LOC therefore misses the secondary `<=1900` projection
+  by 61 lines after honest shared row/profile-value cleanup and explicit
+  current-point intent ownership; no formatting was compressed to game the
+  metric. Functional cyclomatic complexity is `237` across 103 functions,
+  below the `<=245` gate, with maximum CC `9`, zero
+  Lizard warnings, and `0.00%` duplicate blocks. Owner MI values are
+  `39.10 / 24.26 / 36.51 / 32.20 / 28.86 / 19.15`; every touched/new Python
+  file has positive MI. Active MI-zero decreases exactly `7 -> 6`, with no new
+  MI-zero file.
+- [x] Protect byte-exact Main, design route controls, route runner/run UI/
+  presenter/dialog and GUI adapters/control/operation/external/point/contact
+  trees, and stage autofocus/controller: all 21 checked Git blobs match the
+  Task17a baseline. No hardware, network, or visible GUI was used.
+- [x] Freeze the corrected 17-file snapshot after every gate. The same fresh
+  independent reviewer closed its prior current-point intent finding and
+  returned `READY` with `0 Critical / 0 Important / 0 Minor`; the index and
+  active-worktree Task17a temp set remained empty before staging.
