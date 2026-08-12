@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Optional
 
 from probe_station_gui.settings.axis_calibration_config import AxisCalibrationSettings
@@ -15,6 +16,7 @@ from probe_station_gui.stage.axis_mapping import (
     CalibrationOutOfDomain,
     curve_from_settings,
 )
+from probe_station_gui.stage.calibration_positions import a_position_failure_status
 from probe_station_gui.stage.errors import StageControllerError
 from probe_station_gui.stage.machine_coordinates import (
     MachineCoordinateSnapshotUnavailable,
@@ -23,8 +25,64 @@ from probe_station_gui.stage.needle_targets import normalise_needle_lowering_tar
 from probe_station_gui.stage.types import _Status
 
 
+@dataclass(frozen=True)
+class NeedleHeightSaveResult:
+    success: bool
+    lowering_mm: float | None = None
+    error: str = ""
+
+
 class StageControllerAxisCoordinatesMixin:
     """Controller-facing operations built on the pure six-axis mapper."""
+
+    def request_needle_height_save(self, request_id: object) -> bool:
+        with self._shutdown_gate:
+            if self._shutdown_started.is_set():
+                return False
+            return self._start_background_task(
+                target=self._run_needle_height_save_request,
+                args=(request_id,),
+                busy_message="Wait for the stage to stop before saving needle contact.",
+            )
+
+    def _run_needle_height_save_request(self, request_id: object) -> None:
+        try:
+            with self._state_lock:
+                with self._serial_session():
+                    a_position = self._read_current_a_position()
+                    if a_position is None:
+                        reason = (
+                            self.last_a_position_read_failure()
+                            or "unknown reason"
+                        )
+                        result = NeedleHeightSaveResult(
+                            False,
+                            error=a_position_failure_status(reason),
+                        )
+                    else:
+                        lowering_mm = self._axis_a_lowering_for_configured_coordinate(
+                            a_position
+                        )
+                        try:
+                            self._set_current_axis_work_coordinate_locked("A", 0.0)
+                        except StageControllerError as exc:
+                            result = NeedleHeightSaveResult(
+                                False,
+                                error=f"Unable to set A0 at needle contact: {exc}",
+                            )
+                        else:
+                            result = NeedleHeightSaveResult(
+                                True,
+                                lowering_mm=lowering_mm,
+                            )
+        except Exception as exc:
+            result = NeedleHeightSaveResult(
+                False,
+                error=f"Unable to save needle contact: {exc}",
+            )
+        with self._shutdown_gate:
+            if not self._shutdown_started.is_set():
+                self.needle_height_save_finished.emit(request_id, result)
 
     def apply_axis_calibrations(
         self,

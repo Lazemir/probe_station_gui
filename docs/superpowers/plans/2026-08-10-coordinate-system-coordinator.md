@@ -2618,3 +2618,92 @@ git diff --check 8fc83259e07f48bf0f222e80bb3e1d6c3241fd0e..HEAD
   protected scope, and final hash/index/temp checks. It explicitly closed the
   prior Important and returned `READY` with
   `0 Critical / 0 Important / 0 Minor`.
+
+#### Joystick correctness C2: Keep status reads off the GUI thread
+
+- [x] Pin clean `047a9bc` and preserve the established availability policy:
+  unknown cached position passes the requested delta through, while known cache
+  clips exactly. The baseline selection passed `172` with one established
+  deselection. Strict public/UI RED was `3 failed / 3 passed`: missing cache
+  queried controller status, missing cached A called the blocking read, and the
+  GUI AST still contained that call. A separate deletion RED pinned the orphan
+  refresh helper. Production stayed byte-identical until these failures existed.
+- [x] Delete only the synchronous refresh call from `constrain_jog_distances`,
+  its orphan `_refresh_cached_jog_status_if_missing`, and the GUI
+  `current_a_position` fallback. Cache-miss jog remains pass-through, known
+  cache clipping and A conversion remain exact, and the existing missing-A
+  warning path remains. Replace one obsolete private stage test with the public
+  exploding-serial/cache-miss contract; add focused UI tests. Final strict is
+  `7/7`; five fresh processes are `35/35`.
+- [x] Hardware-free verification passed focused `178` with one established
+  deselection, stage `477+4`, UI `562`, App `365+5` plus the isolated inherited
+  node `1`, and all remaining deterministic partitions. Exact collection and
+  execution were `3248/3248 +16 subtests`. Affected/configured Ruff, new-test
+  format, compile `661`, diff, AST/deletion/import, and protected hashes passed.
+  Metrics: jog queue `558/315/499 CC111/26 max17 MI12.30 ->
+  541/299/483 CC105/25 max17 MI13.86`; joystick
+  `2330/1610/2161 CC488/116 max22 MI0 ->
+  2328/1608/2159 CC487/116 max22 MI0`. Production is `-19 LOC`,
+  `-18 LLOC`, `-18 SLOC`, `-7 CC`, and `-1 block`; MI-zero remains exactly
+  three (Main, StageController, joystick).
+- [x] Freeze the exact four code/test paths. Independent review repeated strict
+  `7/7`, a proportional `81/81`, Ruff, new-test format, compile, diff, AST,
+  protected scope, and exact metrics, and returned `READY` with
+  `0 Critical / 0 Important / 0 Minor`. Commit:
+  `0dd6aad fix: keep joystick status reads off GUI thread`.
+
+#### Stage correctness C3: Save needle height outside the GUI thread
+
+- [x] Pin clean `0dd6aad`. The established needle/stage/UI selection passed
+  `175/175`. The first public tracer RED failed because
+  `request_needle_height_save` did not exist. Subsequent vertical RED/GREEN
+  cycles pinned immediate return, one worker-owned serial session, fresh A
+  capture, lowering conversion, G10 A0, read/G10/unexpected failure results,
+  busy rejection, shutdown suppression, GUI-thread result delivery, matching
+  and stale request IDs, no save on failure, dock wiring, and preservation of
+  the first accepted pending ID when a repeated click is rejected. Independent
+  review then exposed the acknowledged-G10 boundary: a post-command status
+  refresh failure incorrectly discarded a lowering after A had already been
+  zeroed. A strict fake-only RED recorded the exact G10 command followed by
+  `success=False`.
+- [x] Add frozen `NeedleHeightSaveResult` and the deep transaction to the
+  existing axis-coordinate owner. The canonical controller adds one result
+  signal and an RLock-protected shutdown publication gate; no new worker or
+  hardware path is created. GUI click code now only issues a monotonically
+  identified request. The worker performs all status/G10 work under the
+  existing operation lease, state RLock, and serial session; the GUI persists
+  only a matching successful lowering. Late shutdown and stale results are
+  inert. Acknowledged G10 is now the commit boundary: offset/status refresh is
+  best-effort and logged, while the captured lowering remains successful.
+  The corrected strict public contract is `14/14`; five fresh processes pass
+  `70/70`; adjacent needle/dock contract is `22/22`.
+- [x] Hardware-free verification passed stage `484+4`, UI `568`, App `365+5`
+  plus the isolated inherited native-crash node `1`, API `132+2`, camera `331`,
+  coordinates `201`, design `381`, instruments `149+5`, notifications `24`,
+  packaging `3`, route `420`, scripts `31`, settings `167`, and shared `4`.
+  Exact pre-review collection/execution was `3261/3261 +16 subtests`; corrected
+  collect-only is `3262` after adding the acknowledged-G10 regression.
+  Corrected bytes additionally pass stage `485+4`, UI `568`, and the relevant
+  App coordinate/navigation slice `20/20`. Affected/configured
+  Ruff, two-new-test format, compileall, diff, AST/deletion, forward/reverse
+  imports, eleven protected hashes, production duplication `0.00%`, and MI-zero
+  accounting passed. The sole Lizard warning remains the inherited controller
+  `_update_cached_positions` CCN17.
+- [x] Metrics: axis owner `326/166/275 CC53/25 max8 MI27.64 ->
+  384/202/329 CC63/28 max8 MI23.80`; controller
+  `1456/913/1265 CC240/79 max17 MI0 ->
+  1468/922/1277 CC241/79 max17 MI0`; docks
+  `465/299/416 CC52/51 MI36.45 -> 474/301/425 CC52/51 MI36.33`;
+  needle UI `479/245/428 CC71/22 max10 MI21.53 ->
+  472/237/419 CC71/23 max10 MI22.06`. Production aggregate adds `11 CC`
+  and `4 blocks`, all owned by the explicit request/transaction/shutdown/result
+  boundaries. New stage/UI tests have MI `19.64/37.66`. MI-zero remains exactly
+  three; this correctness pass intentionally precedes the controller split.
+- [x] Freeze the exact evidence-bearing snapshot and obtain fresh independent
+  `READY 0/0/0` before commit `fix: save needle height off GUI thread`. The
+  first review returned one Important at the acknowledged-G10 boundary. After
+  the strict RED and correction, the same reviewer independently passed the
+  exact prior repro, pre-ack failure boundaries `3/3`, strict `14/14`, the
+  proportional/public-setter slice `24/24`, Ruff, format, diff, compile, AST,
+  imports/identity, Radon, Lizard, MI, and final hashes, then returned corrected
+  `READY` with `0 Critical / 0 Important / 0 Minor`.

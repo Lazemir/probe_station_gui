@@ -112,35 +112,28 @@ def save_needle_calibration_settings(owner: object, settings: object) -> None:
 
 
 def save_current_needle_height(owner: object) -> None:
-    a_position = owner.stage_controller.latest_a_position()
-    latest_state = owner.stage_controller.latest_stage_state()
-    if latest_state not in (None, "Idle"):
-        owner._show_status("Wait for the stage to stop before saving needle contact.")
+    request_id = int(getattr(owner, "_needle_height_save_request_id", 0)) + 1
+    owner._needle_height_save_request_id = request_id
+    if owner.stage_controller.request_needle_height_save(request_id):
+        owner._pending_needle_height_save_request_id = request_id
+
+
+def on_needle_height_save_finished(
+    owner: object,
+    request_id: object,
+    result: object,
+) -> None:
+    if getattr(owner, "_pending_needle_height_save_request_id", None) != request_id:
         return
-    if a_position is None:
-        a_position = owner.stage_controller.current_a_position()
-    if a_position is None:
-        reason = (
-            owner.stage_controller.last_a_position_read_failure()
-            or "unknown reason"
-        )
-        logger.warning("Unable to save needle down height: %s", reason)
-        owner._show_status(calibration_positions.a_position_failure_status(reason))
-        return
-    latest_state = owner.stage_controller.latest_stage_state()
-    if latest_state not in (None, "Idle"):
-        owner._show_status("Wait for the stage to stop before saving needle contact.")
-        return
-    lowering_mm = owner.stage_controller.axis_a_lowering_for_configured_coordinate(
-        a_position
-    )
-    try:
-        owner.stage_controller.set_current_axis_work_coordinate("A", 0.0)
-    except StageControllerError as exc:
-        logger.warning("Unable to zero A work coordinate for needle contact: %s", exc)
-        owner._show_status(f"Unable to set A0 at needle contact: {exc}")
-        return
-    save_needle_down_position_from_lowering(owner, lowering_mm)
+    owner._pending_needle_height_save_request_id = None
+    if bool(getattr(result, "success", False)):
+        lowering_mm = getattr(result, "lowering_mm", None)
+        if lowering_mm is not None:
+            save_needle_down_position_from_lowering(owner, float(lowering_mm))
+            return
+    error = str(getattr(result, "error", "") or "Unable to save needle contact.")
+    logger.warning("Unable to save needle down height: %s", error)
+    owner._show_status(error)
 
 
 def save_needle_position_from_display_a_coordinate(

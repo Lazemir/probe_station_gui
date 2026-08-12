@@ -250,6 +250,15 @@ def _connect_joystick_motion_actions(owner: MainWindowDockOwner) -> None:
     owner.joystick_panel.needle_current_lower_contact_save_requested.connect(
         lambda: needle_calibration_ui.save_current_needle_height(owner)
     )
+    owner.stage_controller.needle_height_save_finished.connect(
+        lambda request_id, result: (
+            needle_calibration_ui.on_needle_height_save_finished(
+                owner,
+                request_id,
+                result,
+            )
+        )
+    )
     owner.joystick_panel.needle_contact_coordinate_save_requested.connect(
         lambda action, a_coordinate: (
             needle_calibration_ui.save_needle_position_from_display_a_coordinate(

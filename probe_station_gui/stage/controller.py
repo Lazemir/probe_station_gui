@@ -203,6 +203,7 @@ class StageController(
     needles_action_started: Signal = Signal(str)
     needles_action_finished: Signal = Signal(bool, str, str)
     needle_height_changed: Signal = Signal(float)
+    needle_height_save_finished: Signal = Signal(object, object)
     axis_max_feedrates_changed: Signal = Signal(object)
     oscillation_state_changed: Signal = Signal(bool, str)
     status_message: Signal = Signal(str)
@@ -383,6 +384,8 @@ class StageController(
         self._motion_execution = self._build_motion_execution()
         self._async_write_queue: PriorityQueue[_QueuedSerialWrite] = PriorityQueue()
         self._async_write_clear_epoch = 0
+        self._shutdown_gate = threading.RLock()
+        self._shutdown_started = threading.Event()
         self._async_write_shutdown = threading.Event()
         self._async_write_thread = threading.Thread(
             target=self._run_async_write_worker,
@@ -492,6 +495,8 @@ class StageController(
     def shutdown(self) -> None:
         """Stop any outstanding background task before application exit."""
 
+        with self._shutdown_gate:
+            self._shutdown_started.set()
         thread = self._operation_lifecycle.snapshot().owner_thread
         if thread and thread.is_alive():
             thread.join(timeout=2.0)
@@ -794,14 +799,21 @@ class StageController(
         if self._position_reporting_mode != "machine":
             try:
                 self._controller_coordinate_offsets = self._query_work_coordinate_offsets()
-            except StageControllerError as exc:
+            except Exception as exc:
                 logger.warning("Unable to refresh work coordinate offsets: %s", exc)
-        refreshed = self._query_status_with_required_coordinates(
-            serial_connection,
-            axes=(axis,),
-        )
-        if axis == "A" and refreshed is not None:
-            self._update_needles_from_status(refreshed)
+        try:
+            refreshed = self._query_status_with_required_coordinates(
+                serial_connection,
+                axes=(axis,),
+            )
+            if axis == "A" and refreshed is not None:
+                self._update_needles_from_status(refreshed)
+        except Exception as exc:
+            logger.warning(
+                "Unable to refresh stage status after setting %s work coordinate: %s",
+                axis,
+                exc,
+            )
         self.status_message.emit(
             f"{axis} work coordinate set to {self._format_gcode_value(value)} "
             f"in {coordinate_system}."

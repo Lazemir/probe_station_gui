@@ -47,6 +47,7 @@ class _FakeStageController:
             "needles_zone_changed",
             "needles_action_started",
             "needles_action_finished",
+            "needle_height_save_finished",
             "stage_position_changed",
         ):
             setattr(self, name, _Signal())
