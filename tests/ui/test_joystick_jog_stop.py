@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 from PySide6.QtCore import Qt
 
-from probe_station_gui.views import joystick_window as joystick_module
+from probe_station_gui.views.joystick import jog_runtime as joystick_module
 from probe_station_gui.views.joystick_window import JoystickWindow
 
 

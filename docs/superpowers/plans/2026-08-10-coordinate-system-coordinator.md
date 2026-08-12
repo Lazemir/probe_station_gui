@@ -2753,3 +2753,53 @@ git diff --check 8fc83259e07f48bf0f222e80bb3e1d6c3241fd0e..HEAD
   lock/session/status-mask/cache/G10 boundaries, and no facade/duplicate/reverse
   import. Fresh proportional 47, Ruff, format, compile, diff, Radon, MI,
   Lizard, hashes, index, and temp gates passed with C/I/M 0/0/0.
+
+#### Joystick architecture: Separate input and presentation domains
+
+- [x] Pin clean `6695642` and replace the MI-zero `JoystickWindow`
+  implementation with direct private owners, without wrappers, aliases,
+  re-exports, dynamic forwarding, package exports, or reverse owner imports.
+  Ownership TDD first failed for missing modules/base order/identities, then
+  passed `5/5`. The final direct-base order is event dispatch, keyboard input
+  state, jog runtime, homing presentation, needle presentation, the existing
+  feedrate owner, and QWidget. The public class remains canonical in
+  `views.joystick_window`.
+- [x] Move all `115` baseline methods exactly: `24` Qt/global-event routing,
+  `22` binding/chord/watchdog state, `27` jog/runtime, `11` homing,
+  `27` needle, and `4` retained composition methods. Decorator-aware AST is
+  exact for `115/115`; the only normalized qualification is the recursive
+  text-entry helper naming its canonical event-dispatch owner. All runtime
+  signatures, signals/constants, constructor order, canonical identity,
+  deletion, direct-base, and empty owner-DAG checks pass. The C1 timer
+  monkeypatch migrated directly to the jog owner; no compatibility seam was
+  retained.
+- [x] Hardware-free behavior verification passes the ownership gate `5/5`,
+  exact C1/C2/feedrate `45/45`, focused joystick/Main/terminal `116` with
+  the inherited native-crash node deselected plus that node `1/1` isolated,
+  and the exact deterministic union `3272/3272`: API/camera/coordinates/
+  design/instruments `1194`, route/stage/UI `1483`, notifications/
+  packaging/scripts/settings/shared `229`, and App `365+1`. Configured
+  whole Ruff, affected format, compileall, diff-check, imports, AST, signatures,
+  identity, Radon, and Lizard gates pass. No hardware, network, or visible GUI
+  was used.
+- [x] Final structural metrics are residual `687/434/649 CC21/5 max11
+  MI22.82`; event dispatch `300/206/266 CC88/25 max11 MI27.05`; keyboard
+  input `479/295/435 CC128/23 max11 MI11.50`; jog runtime
+  `493/368/449 CC134/28 max22 MI9.09`; homing `175/110/158 CC44/12 max7
+  MI31.89`; and needle `338/244/301 CC95/28 max8 MI14.05`. Event-dispatch
+  and keyboard-input MI remain positive at `16.86/7.50` even after removing
+  comments and docstrings, so the improvement is structural rather than metric
+  padding. MI-zero decreases exactly `2 -> 1`, leaving only `main.py`.
+  Lizard retains the inherited sole CCN22 method. Its `3.00%` duplicate
+  diagnostic consists only of pre-existing repeated key-event logging/
+  acceptance snippets whose exact AST is protected in this mechanical pass;
+  no new owner-policy duplication was introduced.
+- [x] Freeze the exact nine-path evidence snapshot and obtain fresh independent
+  `READY 0/0/0` before commit
+  `refactor: separate joystick input domains`. The reviewer independently
+  confirmed all `115/115` method ASTs, `76/76` class declarations, `89`
+  cross-owner calls, direct MRO and recursive static dispatch, C1/C2 safety,
+  empty owner DAG, comment/docstring-stripped positive MI, and the inherited
+  logging-only duplicate diagnostic. Fresh ownership plus exact behavior was
+  `50/50`; Ruff, format, compile, diff, metrics, hashes, scope, index, and
+  task-temp gates passed with `0 Critical / 0 Important / 0 Minor`.
