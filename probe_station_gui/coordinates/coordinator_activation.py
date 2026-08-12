@@ -7,7 +7,11 @@ from dataclasses import dataclass
 import math
 from typing import Callable, Mapping
 
-from probe_station_gui.design import objective_offsets
+from probe_station_gui.design import (
+    objective_offsets,
+    session_navigation,
+    session_registration,
+)
 from probe_station_gui.design.frame_registration import (
     DesignFrameMetadata,
     find_equivalent_migrated_frame,
@@ -133,21 +137,24 @@ class CoordinateDesignActivation:
                 request,
                 physical_b=physical_b,
             )
-            projection = candidate.prepare_active_frame_link(
+            projection = session_registration.prepare_active_frame_link(
+                candidate,
                 runtime_record,
                 machine_point_for_navigation=mapper,
                 machine_b_deg=physical_b,
                 pivot_machine_xy=pivot,
             )
-            candidate.apply_active_frame_link(runtime_record, projection)
+            session_registration.apply_active_frame_link(
+                candidate,
+                runtime_record,
+                projection,
+            )
         except (DesignModelError, KeyError, OSError, TypeError, ValueError) as exc:
             return self._failure(exc)
         candidate_state = candidate.snapshot_state()
         if not activation.created and not activation.updated:
             self._discard_legacy_migration_unless_current(candidate)
-            return _RegistrationTransitionParts(
-                proposed_session_state=candidate_state
-            )
+            return _RegistrationTransitionParts(proposed_session_state=candidate_state)
         previous = self._registry.get(activation.record.frame_id)
         publication = FrameRecordsPublication.for_committed_record(
             self._registry.snapshot().records,
@@ -170,7 +177,7 @@ class CoordinateDesignActivation:
     def close(self) -> _RegistrationTransitionParts:
         candidate = DesignSession()
         candidate.apply_state(self._session.snapshot_state())
-        candidate.unload_document()
+        session_navigation.unload_document(candidate)
         self._discard_legacy_migration()
         return _RegistrationTransitionParts(
             proposed_session_state=candidate.snapshot_state()
@@ -202,10 +209,7 @@ class CoordinateDesignActivation:
     ) -> _RegistrationTransitionParts | None:
         if not isinstance(result, LegacyDesignStateRewriteResult):
             return None
-        if (
-            result.intent_id != intent_id
-            or self._legacy_rewrite_intent_id != intent_id
-        ):
+        if result.intent_id != intent_id or self._legacy_rewrite_intent_id != intent_id:
             return _RegistrationTransitionParts()
         if not self._legacy_migration_is_current(self._session):
             self._discard_legacy_migration()
@@ -214,9 +218,7 @@ class CoordinateDesignActivation:
         if result.succeeded:
             self._discard_legacy_migration()
             return _RegistrationTransitionParts(
-                notices=(
-                    CoordinateNotice("", code="legacy_migration_completed"),
-                )
+                notices=(CoordinateNotice("", code="legacy_migration_completed"),)
             )
         self._legacy_rewrite_failures += 1
         if self._legacy_rewrite_failures == 1:
@@ -287,12 +289,13 @@ class CoordinateDesignActivation:
         if not (
             candidate.active_frame_id is None
             and isinstance(legacy_state, dict)
-            and len(candidate.source_design_marks_compact()) >= 2
-            and len(candidate.source_stage_marks_compact()) >= 2
+            and len(session_registration.source_design_marks_compact(candidate)) >= 2
+            and len(session_registration.source_stage_marks_compact(candidate)) >= 2
         ):
             return None
         if physical_b is None or request.machine_snapshot is None:
-            candidate.block_legacy_registration_until_b(
+            session_registration.block_legacy_registration_until_b(
+                candidate,
                 "Design registration requires a current B position.",
                 persisted_state=legacy_state,
             )
@@ -333,13 +336,18 @@ class CoordinateDesignActivation:
                 request,
                 physical_b=physical_b,
             )
-            projection = candidate.prepare_active_frame_link(
+            projection = session_registration.prepare_active_frame_link(
+                candidate,
                 runtime_record,
                 machine_point_for_navigation=mapper,
                 machine_b_deg=physical_b,
                 pivot_machine_xy=pivot,
             )
-            candidate.apply_active_frame_link(runtime_record, projection)
+            session_registration.apply_active_frame_link(
+                candidate,
+                runtime_record,
+                projection,
+            )
         except (DesignModelError, KeyError, OSError, TypeError, ValueError) as exc:
             return self._failure(exc)
         replacement_state = self._persisted_state(
@@ -352,8 +360,7 @@ class CoordinateDesignActivation:
             )
         self._next_legacy_migration_generation += 1
         success_notice_code = (
-            "legacy_migration_saved:"
-            f"{self._next_legacy_migration_generation}"
+            f"legacy_migration_saved:{self._next_legacy_migration_generation}"
         )
         try:
             migration_lease = self._legacy_lease(
@@ -430,9 +437,7 @@ class CoordinateDesignActivation:
         return export_persisted_session_state(
             session.snapshot_state(),
             document_size=(
-                None
-                if effective_metadata is None
-                else effective_metadata.source_size
+                None if effective_metadata is None else effective_metadata.source_size
             ),
             document_mtime_ns=(
                 None
@@ -464,8 +469,7 @@ class CoordinateDesignActivation:
             and str(document.source_load_id) == lease.source_load_id
             and str(document.top_cell_name) == lease.top_cell_name
             and tuple(sorted(document.visible_layers)) == lease.visible_layers
-            and int(document.rotation_quarter_turns) % 4
-            == lease.rotation_quarter_turns
+            and int(document.rotation_quarter_turns) % 4 == lease.rotation_quarter_turns
             and session.active_frame_id == lease.frame_id
             and record is not None
             and record.version >= lease.minimum_frame_version
@@ -572,9 +576,7 @@ class CoordinateDesignActivation:
             raise DesignModelError(message)
         try:
             offsets = tuple(
-                float(offset)
-                for offset in raw_offsets
-                if not isinstance(offset, bool)
+                float(offset) for offset in raw_offsets if not isinstance(offset, bool)
             )
             required = tuple(snapshot.axis_index[axis] for axis in ("X", "Y"))
         except (KeyError, TypeError, ValueError) as exc:
@@ -586,8 +588,7 @@ class CoordinateDesignActivation:
         ):
             raise DesignModelError(message)
         if mode == "machine" and any(
-            not math.isclose(offsets[index], 0.0, abs_tol=1e-12)
-            for index in required
+            not math.isclose(offsets[index], 0.0, abs_tol=1e-12) for index in required
         ):
             raise DesignModelError(message)
         return str(mode), offsets
@@ -616,11 +617,7 @@ class CoordinateDesignActivation:
 
     @staticmethod
     def _runtime_record(record, request, *, physical_b):
-        unavailable = {
-            axis
-            for axis in ("X", "Y")
-            if axis not in request.homed_axes
-        }
+        unavailable = {axis for axis in ("X", "Y") if axis not in request.homed_axes}
         if physical_b is None:
             unavailable.add("B")
         if request.pivot_machine_xy is None:
@@ -648,12 +645,8 @@ class CoordinateDesignActivation:
 
         def map_point(machine_xy):
             configured = (
-                snapshot.physical_machine_to_configured_controller(
-                    "X", machine_xy[0]
-                ),
-                snapshot.physical_machine_to_configured_controller(
-                    "Y", machine_xy[1]
-                ),
+                snapshot.physical_machine_to_configured_controller("X", machine_xy[0]),
+                snapshot.physical_machine_to_configured_controller("Y", machine_xy[1]),
             )
             return objective_offsets.raw_stage_to_camera_stage(
                 configured,

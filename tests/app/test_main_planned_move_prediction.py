@@ -179,8 +179,8 @@ def _make_main(
 
     window._pending_persisted_design_state = None
     window._pending_persisted_design_position = None
-    window._log_design_position_reconcile = (
-        lambda predicted, actual: reconciles.append((predicted, actual))
+    window._log_design_position_reconcile = lambda predicted, actual: reconciles.append(
+        (predicted, actual)
     )
     original_smooth = window._manual_jog_prediction.smooth_actual_stage_xy
 
@@ -252,8 +252,8 @@ def _make_design_restore_main(
     window.settings_manager = types.SimpleNamespace(
         save_controller_state=lambda _state: saved_without_design.append(True)
     )
-    window._start_design_document_load = (
-        lambda path, **kwargs: starts.append((path, dict(kwargs)))
+    window._start_design_document_load = lambda path, **kwargs: starts.append(
+        (path, dict(kwargs))
     )
     return window, stage_controller, statuses, starts, saved_without_design
 
@@ -301,8 +301,8 @@ class MainPlannedMovePredictionTest(unittest.TestCase):
         window._last_selected_design_point = None
         window._refresh_design_panel = lambda: None
         starts = []
-        window._start_planned_move_prediction = (
-            lambda target, **kwargs: starts.append((target, kwargs))
+        window._start_planned_move_prediction = lambda target, **kwargs: starts.append(
+            (target, kwargs)
         )
 
         accepted = Main._move_to_design_coordinate(
@@ -376,7 +376,9 @@ class MainPlannedMovePredictionTest(unittest.TestCase):
         self.assertEqual(prediction.stop_axis_velocities, {})
         self.assertEqual(published[-1][:2], (6.0, 7.0))
 
-    def test_fresh_idle_manual_jog_sample_is_ignored_but_stale_idle_reconciles(self) -> None:
+    def test_fresh_idle_manual_jog_sample_is_ignored_but_stale_idle_reconciles(
+        self,
+    ) -> None:
         window, published, reconciles, _smooth_calls = _make_main(state="idle")
         now = time.monotonic()
         window._planned_move_started_at = None
@@ -420,10 +422,12 @@ class MainPlannedMovePredictionTest(unittest.TestCase):
         window._manual_jog_prediction.stage_position = (9.0, 9.0, 9.0)
         window._manual_jog_prediction.stage_xy = (9.0, 9.0)
         window._planned_move_stage_xy = (8.0, 8.0)
-        window._update_coordinate_display = (
-            lambda *, center_xy=None, cursor_xy=None: coordinate_updates.append(center_xy)
+        window._update_coordinate_display = lambda *, center_xy=None, cursor_xy=None: (
+            coordinate_updates.append(center_xy)
         )
-        window._update_design_position = lambda stage_xy: design_updates.append(stage_xy)
+        window._update_design_position = lambda stage_xy: design_updates.append(
+            stage_xy
+        )
         window._can_display_design_position = lambda: True
         window._stage_motion_axes = {"X"}
         window._stage_position_panel = types.SimpleNamespace(
@@ -563,15 +567,10 @@ class MainPersistedDesignRestoreTest(unittest.TestCase):
             _make_design_restore_main((1.0, 2.0, 3.0, 4.0, 5.0))
         )
 
-        with mock.patch.object(
-            main_module.design_workspace.design_navigation,
-            "persisted_design_file_is_current",
-            return_value=True,
-        ):
-            main_module.design_workspace.maybe_restore_persisted_design(
-                window,
-                (1.0, 2.0, 9.0, 0.0, 8.0),
-            )
+        main_module.design_workspace.maybe_restore_persisted_design(
+            window,
+            (1.0, 2.0, 9.0, 0.0, 8.0),
+        )
 
         self.assertEqual(stage_controller.unhomed_requests, [{"Z"}])
         self.assertEqual(stage_controller.homed_axes, {"X", "Y", "A"})
@@ -597,15 +596,10 @@ class MainPersistedDesignRestoreTest(unittest.TestCase):
         )
         stage_controller.homed_axes.remove("Z")
 
-        with mock.patch.object(
-            main_module.design_workspace.design_navigation,
-            "persisted_design_file_is_current",
-            return_value=True,
-        ):
-            main_module.design_workspace.maybe_restore_persisted_design(
-                window,
-                (1.0, 2.0, 9.0, 4.0, 5.0),
-            )
+        main_module.design_workspace.maybe_restore_persisted_design(
+            window,
+            (1.0, 2.0, 9.0, 4.0, 5.0),
+        )
 
         self.assertEqual(stage_controller.unhomed_requests, [{"Z"}])
         self.assertEqual(stage_controller.homed_axes, {"X", "Y", "A"})

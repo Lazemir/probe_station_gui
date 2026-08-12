@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Callable
 
-from probe_station_gui.design import objective_offsets
+from probe_station_gui.design import objective_offsets, session_registration
 from probe_station_gui.design.frame_registration import (
     DesignFrameMetadata,
     commit_xyb_registration,
@@ -171,8 +171,8 @@ class RegistrationCaptureWorkflow:
             return _RegistrationTransitionParts()
         try:
             if token.frame_id is None:
-                self._session.record_legacy_stage_coordinate_provenance(
-                    self._legacy_capture_provenance(result.snapshot)
+                session_registration.record_legacy_stage_coordinate_provenance(
+                    self._session, self._legacy_capture_provenance(result.snapshot)
                 )
             self.observe_effects(effects)
         except Exception as exc:
@@ -219,8 +219,7 @@ class RegistrationCaptureWorkflow:
         matching_armed = bool(
             result.active_operator_pick_slot == token.mark_index
             and token.operator_pick_generation is not None
-            and result.active_operator_pick_generation
-            == token.operator_pick_generation
+            and result.active_operator_pick_generation == token.operator_pick_generation
         )
         if not matching_unarmed and not matching_armed:
             return None
@@ -251,7 +250,11 @@ class RegistrationCaptureWorkflow:
         self._operator_stage_marks.clear()
         self._operator_design_marks = None
         self._fit_residuals = None
-        if effects is not None and effects.restore_baseline and effects.operator_alignment:
+        if (
+            effects is not None
+            and effects.restore_baseline
+            and effects.operator_alignment
+        ):
             self._operator_stage_marks = {
                 index: point
                 for index, point in enumerate(effects.baseline_source_stage_marks)
@@ -281,9 +284,7 @@ class RegistrationCaptureWorkflow:
             RestoreOperatorAlignmentUiEffect(
                 design_marks=design_marks,
                 stage_marks=tuple(
-                    None
-                    if point is None
-                    else (float(point[0]), float(point[1]))
+                    None if point is None else (float(point[0]), float(point[1]))
                     for point in effects.baseline_source_stage_marks
                 ),
             ),
@@ -372,7 +373,8 @@ class RegistrationCaptureWorkflow:
         mapper = self._machine_mapper(snapshot, token.objective_xy_offset)
         try:
             try:
-                projection = self._session.prepare_active_frame_link(
+                projection = session_registration.prepare_active_frame_link(
+                    self._session,
                     committed,
                     machine_point_for_navigation=mapper,
                     machine_b_deg=target_b,
@@ -383,7 +385,8 @@ class RegistrationCaptureWorkflow:
                     {"X", "Y", "B"},
                     str(exc),
                 )
-                projection = self._session.prepare_active_frame_link(
+                projection = session_registration.prepare_active_frame_link(
+                    self._session,
                     runtime_record,
                     machine_b_deg=target_b,
                     pivot_machine_xy=pivot,
@@ -450,9 +453,7 @@ class RegistrationCaptureWorkflow:
                     for point in token.source_design_marks
                 ),
                 stage_marks=tuple(
-                    None
-                    if point is None
-                    else (float(point[0]), float(point[1]))
+                    None if point is None else (float(point[0]), float(point[1]))
                     for point in rollback.baseline_source_stage_marks
                 ),
             ),
@@ -473,11 +474,7 @@ class RegistrationCaptureWorkflow:
         token: RegistrationCaptureToken,
     ) -> bool:
         document = self._session.document
-        record = (
-            None
-            if token.frame_id is None
-            else self._registry.get(token.frame_id)
-        )
+        record = None if token.frame_id is None else self._registry.get(token.frame_id)
         try:
             source_identity = (
                 canonical_source_identity(document.path),
@@ -490,17 +487,17 @@ class RegistrationCaptureWorkflow:
             and id(self._session) == token.session_identity
             and self._session.active_frame_id == token.frame_id
             and (
-                (record is None and token.frame_id is None and token.frame_version is None)
-                or (
-                    record is not None
-                    and record.version == token.frame_version
+                (
+                    record is None
+                    and token.frame_id is None
+                    and token.frame_version is None
                 )
+                or (record is not None and record.version == token.frame_version)
             )
             and source_identity == token.source_identity
             and str(document.top_cell_name) == token.top_cell_name
-            and int(document.rotation_quarter_turns) % 4
-            == token.rotation_quarter_turns
-            and tuple(self._session.source_design_marks_compact())
+            and int(document.rotation_quarter_turns) % 4 == token.rotation_quarter_turns
+            and tuple(session_registration.source_design_marks_compact(self._session))
             == token.source_design_marks
             and tuple(self._session.check_design_marks) == token.check_design_marks
         )
@@ -628,7 +625,11 @@ class RegistrationCaptureWorkflow:
                 canonical_source_identity(document.path),
                 str(document.source_load_id),
             )
-            metadata = None if record is None else DesignFrameMetadata.from_mapping(record.metadata)
+            metadata = (
+                None
+                if record is None
+                else DesignFrameMetadata.from_mapping(record.metadata)
+            )
         except (KeyError, OSError, TypeError, ValueError):
             return None
         return RegistrationCaptureContext(
@@ -641,18 +642,22 @@ class RegistrationCaptureWorkflow:
             pivot_machine_xy=request.pivot_machine_xy,
             objective_xy_offset=request.objective_xy_offset,
             mark_kind="check" if request.check_mark else "source",
-            source_design_marks=tuple(self._session.source_design_marks_compact()),
+            source_design_marks=tuple(
+                session_registration.source_design_marks_compact(self._session)
+            ),
             check_design_marks=tuple(self._session.check_design_marks),
             baseline_source_stage_marks=tuple(self._session.source_stage_marks),
             baseline_check_stage_marks=tuple(self._session.check_stage_marks),
             baseline_registration=self._session.registration,
             baseline_registration_status=str(self._session.registration_status),
             existing_source_machine_marks=(
-                () if record is None or record.transform is None or metadata is None
+                ()
+                if record is None or record.transform is None or metadata is None
                 else tuple(metadata.source_machine_marks)
             ),
             existing_check_machine_marks=(
-                () if record is None or record.transform is None or metadata is None
+                ()
+                if record is None or record.transform is None or metadata is None
                 else tuple(metadata.check_machine_marks)
             ),
             operator_alignment=request.operator_alignment,
@@ -663,7 +668,9 @@ class RegistrationCaptureWorkflow:
         )
 
     @staticmethod
-    def _sample(token: RegistrationCaptureToken, snapshot: object) -> RegistrationSample:
+    def _sample(
+        token: RegistrationCaptureToken, snapshot: object
+    ) -> RegistrationSample:
         physical_pose = snapshot.physical_machine_pose
         physical_b = physical_pose.require("B")
         if token.configured_target_xy is None:
@@ -675,8 +682,12 @@ class RegistrationCaptureWorkflow:
         else:
             configured_xy = token.configured_target_xy
             physical_xy = (
-                snapshot.configured_controller_to_physical_machine("X", configured_xy[0]),
-                snapshot.configured_controller_to_physical_machine("Y", configured_xy[1]),
+                snapshot.configured_controller_to_physical_machine(
+                    "X", configured_xy[0]
+                ),
+                snapshot.configured_controller_to_physical_machine(
+                    "Y", configured_xy[1]
+                ),
             )
         stage_xy = objective_offsets.raw_stage_to_camera_stage(
             configured_xy,
@@ -697,7 +708,9 @@ class RegistrationCaptureWorkflow:
                 snapshot.physical_machine_to_configured_controller("X", machine_xy[0]),
                 snapshot.physical_machine_to_configured_controller("Y", machine_xy[1]),
             )
-            return objective_offsets.raw_stage_to_camera_stage(configured, objective_offset)
+            return objective_offsets.raw_stage_to_camera_stage(
+                configured, objective_offset
+            )
 
         return map_point
 

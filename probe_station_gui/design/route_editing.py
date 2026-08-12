@@ -11,7 +11,9 @@ from probe_station_gui.design.selection_model import (
     MixedEditPlan,
 )
 from probe_station_gui.design.session import DesignSession
+from probe_station_gui.design import session_navigation
 from probe_station_gui.route.model import MeasurementRoute, RouteModelError, RoutePoint
+
 
 @dataclass(frozen=True)
 class RoutePointSelectionPlan:
@@ -42,7 +44,7 @@ def unload_design_document(session: DesignSession) -> RouteEditPlan:
     if session.document is None:
         return RouteEditPlan(False)
     document_name = session.document.path.name
-    session.unload_document()
+    session_navigation.unload_document(session)
     return RouteEditPlan(
         True,
         status_message=f"Unloaded design '{document_name}'.",
@@ -51,7 +53,7 @@ def unload_design_document(session: DesignSession) -> RouteEditPlan:
 
 
 def set_design_top_cell(session: DesignSession, top_cell_name: str) -> RouteEditPlan:
-    session.set_top_cell(top_cell_name)
+    session_navigation.set_top_cell(session, top_cell_name)
     return RouteEditPlan(
         True,
         status_message=f"Switched design top cell to '{top_cell_name}'.",
@@ -60,7 +62,7 @@ def set_design_top_cell(session: DesignSession, top_cell_name: str) -> RouteEdit
 
 
 def create_measurement_route(session: DesignSession) -> RouteEditPlan:
-    route = session.create_route()
+    route = session_navigation.create_route(session)
     return RouteEditPlan(
         True,
         status_message=f"Created route '{route.name}'.",
@@ -104,7 +106,7 @@ def set_design_layer_visibility(
         visible_layers.add(layer_key)
     else:
         visible_layers.discard(layer_key)
-    session.set_visible_layers(visible_layers)
+    session_navigation.set_visible_layers(session, visible_layers)
     return RouteEditPlan(True)
 
 
@@ -127,7 +129,7 @@ def rotate_design_document(
     delta = int(quarter_turn_delta) % 4
     if delta == 0:
         delta = 1
-    rotated_document = session.rotate_document(delta)
+    rotated_document = session_navigation.rotate_document(session, delta)
     selected_point = (
         document.rotate_point(last_selected_design_point, delta)
         if last_selected_design_point is not None
@@ -151,8 +153,8 @@ def load_measurement_route(session: DesignSession, route_path: str) -> RouteEdit
             status_message="Load a design before loading a route.",
         )
     route = MeasurementRoute.load(route_path)
-    session.set_route(route)
-    current_point = session.current_route_point()
+    session_navigation.set_route(session, route)
+    current_point = session_navigation.current_route_point(session)
     return RouteEditPlan(
         True,
         status_message=f"Loaded route '{route.name}' with {len(route.points)} points.",
@@ -168,7 +170,10 @@ def add_design_route_point(
     x_value: float,
     y_value: float,
 ) -> RouteEditPlan:
-    point = session.add_route_point((float(x_value), float(y_value)))
+    point = session_navigation.add_route_point(
+        session,
+        (float(x_value), float(y_value)),
+    )
     return RouteEditPlan(
         True,
         status_message=(
@@ -201,7 +206,7 @@ def add_route_array_points(
         )
     route = session.route
     if route is None:
-        route = session.create_route()
+        route = session_navigation.create_route(session)
     selection: list[int] = []
     if isinstance(selected_indices, (list, tuple)):
         for item in selected_indices:
@@ -285,10 +290,12 @@ def apply_route_entity_changes(
     )
     if route is None:
         if route_change_requested:
-            return RouteEditPlan(False, status_message="Selected route points are stale.")
+            return RouteEditPlan(
+                False, status_message="Selected route points are stale."
+            )
         return RouteEditPlan(True, status_message=plan.status_message)
     if not route_change_requested:
-        current = session.current_route_point()
+        current = session_navigation.current_route_point(session)
         return RouteEditPlan(
             True,
             status_message=plan.status_message,
@@ -323,7 +330,7 @@ def apply_route_entity_changes(
             max(session.selected_route_point_index, 0),
             len(route.points) - 1,
         )
-    current = session.current_route_point()
+    current = session_navigation.current_route_point(session)
     return RouteEditPlan(
         True,
         status_message=plan.status_message,
@@ -338,14 +345,14 @@ def apply_route_entity_changes(
 
 
 def remove_selected_route_point(session: DesignSession) -> RouteEditPlan:
-    point = session.remove_selected_route_point()
+    point = session_navigation.remove_selected_route_point(session)
     if point is None:
         return RouteEditPlan(
             False,
             status_message="No route point is selected.",
             status_timeout_ms=3000,
         )
-    current_point = session.current_route_point()
+    current_point = session_navigation.current_route_point(session)
     return RouteEditPlan(
         True,
         status_message=f"Removed route point {point.label}.",
@@ -375,13 +382,11 @@ def clear_measurement_route_points(session: DesignSession) -> RouteEditPlan:
 
 
 def select_route_point(session: DesignSession, index: int) -> RoutePointSelectionPlan:
-    point = session.select_route_point(int(index))
+    point = session_navigation.select_route_point(session, int(index))
     return RoutePointSelectionPlan(
         selected=point is not None,
         point=point,
-        last_selected_design_point=(
-            point.camera_center if point is not None else None
-        ),
+        last_selected_design_point=(point.camera_center if point is not None else None),
     )
 
 
@@ -396,7 +401,7 @@ def select_route_point_for_measurement(
     if not 0 <= index < len(route.points):
         return RoutePointSelectionPlan(False)
     if session.selected_route_point_index == index:
-        point = session.current_route_point()
+        point = session_navigation.current_route_point(session)
         return RoutePointSelectionPlan(
             False,
             point=point,
@@ -405,7 +410,6 @@ def select_route_point_for_measurement(
             ),
         )
     return select_route_point(session, index)
-
 
 
 __all__ = [

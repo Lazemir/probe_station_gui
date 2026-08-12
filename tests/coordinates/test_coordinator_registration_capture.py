@@ -27,6 +27,7 @@ from probe_station_gui.design.frame_registration import (
 )
 from probe_station_gui.design.registration_lifecycle import RegistrationCancellation
 from probe_station_gui.design.session import DesignSession
+from probe_station_gui.design import session_registration
 from tests.coordinates.coordinator_registration_support import (
     _ConversionFailureSnapshot,
     _ExplodingSnapshot,
@@ -107,7 +108,7 @@ def test_stale_second_capture_restores_exact_pre_batch_baseline_before_conversio
             ),
         )
     )
-    assert session.source_stage_marks_compact() == [(3.0, 4.0)]
+    assert session_registration.source_stage_marks_compact(session) == [(3.0, 4.0)]
     second = coordinator.capture_registration_mark(request).intents[0]
     bumped = replace(draft, version=draft.version + 1)
     coordinator._publish_frame_records(
@@ -168,7 +169,7 @@ def test_replacement_capture_restores_superseded_domain_evidence(
             ),
         )
     )
-    assert session.source_stage_marks_compact() == [(3.0, 4.0)]
+    assert session_registration.source_stage_marks_compact(session) == [(3.0, 4.0)]
     bumped = replace(draft, version=draft.version + 1)
     coordinator._publish_frame_records(FrameRecordsPublication(records=(bumped,)))
 
@@ -188,7 +189,7 @@ def test_replacement_capture_restores_superseded_domain_evidence(
         )
     )
     assert completed.snapshot.registration.source_stage_marks == ((5.0, 6.0),)
-    assert session.source_stage_marks_compact() == [(5.0, 6.0)]
+    assert session_registration.source_stage_marks_compact(session) == [(5.0, 6.0)]
 
 
 def test_context_stale_capture_is_inert_before_snapshot_conversion(
@@ -320,7 +321,7 @@ def test_registration_projection_failure_restores_exact_capture_baseline(
         )
     )
     monkeypatch.setattr(
-        DesignSession,
+        session_registration,
         "prepare_active_frame_link",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("projection")),
     )
@@ -496,13 +497,14 @@ def test_new_source_at_changed_b_rotates_existing_source_and_check_evidence(
         check_machine_points=((1.0, 3.0),),
     )
     coordinator, registry, session = _loaded_coordinator(document, registered)
-    session.link_active_frame(
+    session_registration.link_active_frame(
+        session,
         registered,
         machine_point_for_navigation=lambda point: point,
         machine_b_deg=0.0,
         pivot_machine_xy=(0.0, 0.0),
     )
-    session.set_source_design_mark(2, (1.0, 1.0))
+    session_registration.set_source_design_mark(session, 2, (1.0, 1.0))
 
     capture = coordinator.capture_registration_mark(
         RegistrationCaptureRequest(
@@ -552,7 +554,8 @@ def test_check_only_capture_preserves_transform_source_and_readiness(
         pivot_machine_xy=(0.0, 0.0),
     )
     coordinator, registry, session = _loaded_coordinator(document, registered)
-    session.link_active_frame(
+    session_registration.link_active_frame(
+        session,
         registered,
         machine_point_for_navigation=lambda point: point,
         machine_b_deg=0.0,

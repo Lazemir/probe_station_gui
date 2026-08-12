@@ -44,6 +44,7 @@ from probe_station_gui.design.model import (
     MeasurementTarget,
 )
 from probe_station_gui.design.session import DesignSession
+from probe_station_gui.design import session_navigation
 from probe_station_gui.settings.software_coordinates import (
     CustomFrameSettings,
     SoftwareCoordinateSettings,
@@ -179,7 +180,9 @@ def test_coordinate_transition_submits_typed_machine_capture_intent(
     ]
 
 
-def test_unexpected_pivot_read_failure_is_transient_but_validation_is_permanent() -> None:
+def test_unexpected_pivot_read_failure_is_transient_but_validation_is_permanent() -> (
+    None
+):
     stage = SimpleNamespace(
         latest_machine_coordinate_snapshot=lambda: None,
         homed_axes=lambda: {"X", "Y"},
@@ -248,7 +251,9 @@ def test_coordinate_load_request_and_completion_delegate_to_coordinator(
                 intents=(LoadCoordinateFramesIntent(8, profile.machine_profile_id),),
             )
 
-        def complete(self, completion: CoordinateAdapterCompletion) -> CoordinateTransition:
+        def complete(
+            self, completion: CoordinateAdapterCompletion
+        ) -> CoordinateTransition:
             calls.append(("complete", completion))
             self.current = loaded
             return CoordinateTransition(loaded)
@@ -271,9 +276,7 @@ def test_coordinate_load_request_and_completion_delegate_to_coordinator(
             settings=SimpleNamespace(software_coordinates=object())
         ),
         _current_machine_profile_id=lambda: "rig-8",
-        _reconcile_design_calibration_fingerprints=lambda: calls.append(
-            ("reconcile",)
-        ),
+        _reconcile_design_calibration_fingerprints=lambda: calls.append(("reconcile",)),
     )
     monkeypatch.setattr(
         coordinate_flow,
@@ -289,7 +292,10 @@ def test_coordinate_load_request_and_completion_delegate_to_coordinator(
     assert calls == [
         ("start", MachineProfileObservation("rig-8")),
         ("store_load", 8, {"machine_profile_id": "rig-8"}),
-        ("custom", CustomSystemsRequest(owner.settings_manager.settings.software_coordinates)),
+        (
+            "custom",
+            CustomSystemsRequest(owner.settings_manager.settings.software_coordinates),
+        ),
         ("complete", CoordinateAdapterCompletion(8, result)),
         ("reconcile",),
         ("activate",),
@@ -356,9 +362,7 @@ def test_coordinate_transition_submits_save_and_presents_notices(monkeypatch) ->
     document = CoordinateFrameDocument()
     owner = SimpleNamespace(
         _coordinate_frame_store=SimpleNamespace(
-            publish=lambda request_id, value: events.append(
-                ("save", request_id, value)
-            )
+            publish=lambda request_id, value: events.append(("save", request_id, value))
         ),
         _show_status=lambda message, duration=0: events.append(
             ("status", message, duration)
@@ -534,11 +538,11 @@ def test_failed_design_frame_save_restores_complete_cross_document_workspace(
         (5.0, 10.0),
     )
     workspace = DesignSession(document=baseline_document)
-    workspace.set_targets([baseline_target])
+    session_navigation.set_targets(workspace, [baseline_target])
     candidate = DesignSession()
     candidate.apply_state(workspace.snapshot_state())
-    candidate.set_top_cell("OTHER")
-    candidate.set_visible_layers({(2, 0)})
+    session_navigation.set_top_cell(candidate, "OTHER")
+    session_navigation.set_visible_layers(candidate, {(2, 0)})
     later_target = MeasurementTarget(
         "later-target",
         "Later target",
@@ -565,9 +569,7 @@ def test_failed_design_frame_save_restores_complete_cross_document_workspace(
         ),
         _active_objective_xy_offset=lambda: (0.0, 0.0),
         _coordinate_frame_store=SimpleNamespace(
-            publish=lambda intent_id, document: saved.append(
-                (intent_id, document)
-            )
+            publish=lambda intent_id, document: saved.append((intent_id, document))
         ),
         stage_controller=SimpleNamespace(
             axes_are_homed=lambda axes: bool(set(axes) <= {"X", "Y"}),
@@ -608,7 +610,7 @@ def test_failed_design_frame_save_restores_complete_cross_document_workspace(
         workspace_after=workspace_after,
     )
     assert transition is not None and transition.accepted
-    workspace.set_targets([later_target])
+    session_navigation.set_targets(workspace, [later_target])
     assert workspace.document is candidate.document
     assert owner._design_markup is candidate_markup
     assert len(saved) == 1
@@ -793,7 +795,9 @@ def _owner(events: list[object]) -> SimpleNamespace:
         serial_connection_panel=_Panel(events, "serial_panel"),
         contact_calibration_window=_Panel(events, "contact"),
         oscillation_panel=SimpleNamespace(
-            set_running=lambda running, axis: events.append(("oscillation", running, axis))
+            set_running=lambda running, axis: events.append(
+                ("oscillation", running, axis)
+            )
         ),
         _stage_unhomed_display_origins={"X": 1.0},
         _last_reported_b_position=12.0,
@@ -808,18 +812,16 @@ def _owner(events: list[object]) -> SimpleNamespace:
         _stage_motion_blink_timer=SimpleNamespace(isActive=lambda: False),
     )
     stage_controller.owner = owner
-    owner._restore_persisted_controller_state = (
-        lambda state, **kwargs: events.append(("restore", state, kwargs))
+    owner._restore_persisted_controller_state = lambda state, **kwargs: events.append(
+        ("restore", state, kwargs)
     )
     owner._run_serial_startup_sync = lambda: events.append(("startup_callback",))
     owner._run_controller_reboot_recovery = lambda: events.append(
         ("reboot_recovery_callback",)
     )
     owner._refresh_design_position = lambda: events.append(("refresh_design",))
-    owner._persist_serial_connection_state = (
-        lambda connected: events.append(
-            ("persist_serial_wrapper", connected, owner.serial_connection)
-        )
+    owner._persist_serial_connection_state = lambda connected: events.append(
+        ("persist_serial_wrapper", connected, owner.serial_connection)
     )
     owner._manual_jog_timer = SimpleNamespace(
         stop=lambda: events.append(("manual_timer_stop",))
@@ -827,11 +829,11 @@ def _owner(events: list[object]) -> SimpleNamespace:
     owner._manual_jog_prediction = SimpleNamespace(
         reset_tracking=lambda: events.append(("manual_prediction_reset",))
     )
-    owner._clear_coordinate_move_tracking = (
-        lambda **kwargs: events.append(("clear_coordinate_tracking", kwargs))
+    owner._clear_coordinate_move_tracking = lambda **kwargs: events.append(
+        ("clear_coordinate_tracking", kwargs)
     )
-    owner._clear_planned_move_prediction = (
-        lambda **kwargs: events.append(("clear_prediction", kwargs))
+    owner._clear_planned_move_prediction = lambda **kwargs: events.append(
+        ("clear_prediction", kwargs)
     )
     owner._update_stage_coordinate_apply_state = lambda: events.append(("apply_state",))
     owner._update_stage_position_display = lambda value: events.append(
@@ -848,9 +850,11 @@ def _owner(events: list[object]) -> SimpleNamespace:
         ("update_design_position", value)
     )
     owner._schedule_cancel_state_refresh = lambda: events.append(("schedule_refresh",))
-    owner._apply_axis_feedrate_limits = lambda rates: connection_flow.apply_axis_feedrate_limits(
-        owner,
-        rates,
+    owner._apply_axis_feedrate_limits = lambda rates: (
+        connection_flow.apply_axis_feedrate_limits(
+            owner,
+            rates,
+        )
     )
     owner._apply_joystick_feedrate_preferences = lambda: events.append(
         ("apply_joystick_preferences",)
@@ -886,7 +890,9 @@ def test_on_serial_connected_preserves_attach_order(monkeypatch) -> None:
     monkeypatch.setattr(
         connection_flow,
         "QTimer",
-        SimpleNamespace(singleShot=lambda delay, callback: timer_calls.append((delay, callback))),
+        SimpleNamespace(
+            singleShot=lambda delay, callback: timer_calls.append((delay, callback))
+        ),
     )
     monkeypatch.setattr(
         connection_flow,
@@ -922,7 +928,9 @@ def test_on_serial_disconnected_preserves_detach_cleanup_order(monkeypatch) -> N
     owner = _owner(events)
     owner.serial_connection = _Serial(events, port="COM9")
     original_clear = connection_flow.stage_move_lifecycle.clear_coordinate_move_tracking
-    original_display = coordinate_flow.stage_position_panel.update_stage_position_display
+    original_display = (
+        coordinate_flow.stage_position_panel.update_stage_position_display
+    )
     connection_flow.stage_move_lifecycle.clear_coordinate_move_tracking = (
         lambda _owner, **kwargs: events.append(("clear_coordinate_tracking", kwargs))
     )
@@ -971,7 +979,9 @@ def test_startup_sync_and_reboot_recovery_are_guarded(monkeypatch) -> None:
     monkeypatch.setattr(
         connection_flow,
         "QTimer",
-        SimpleNamespace(singleShot=lambda delay, callback: timer_calls.append((delay, callback))),
+        SimpleNamespace(
+            singleShot=lambda delay, callback: timer_calls.append((delay, callback))
+        ),
     )
     owner = _owner(events)
 
@@ -996,12 +1006,15 @@ def test_startup_sync_and_reboot_recovery_are_guarded(monkeypatch) -> None:
 
     connection_flow.run_controller_reboot_recovery(owner)
     assert owner._controller_reboot_recovery_scheduled is False
-    assert events.count(
-        (
-            "startup_sync",
-            {"auto_home_a": True, "clear_unverified_state": False},
+    assert (
+        events.count(
+            (
+                "startup_sync",
+                {"auto_home_a": True, "clear_unverified_state": False},
+            )
         )
-    ) == 2
+        == 2
+    )
 
 
 def test_feedrate_limit_and_auto_connect_decisions() -> None:
@@ -1039,7 +1052,7 @@ def test_request_lcr_disconnect_persists_before_disconnect() -> None:
         lcr_controller=SimpleNamespace(
             meter_type=lambda: "gwinstek",
             connection_label=lambda: "LCR",
-            request_disconnect=lambda: events.append(("disconnect_lcr",))
+            request_disconnect=lambda: events.append(("disconnect_lcr",)),
         ),
     )
 
@@ -1089,7 +1102,9 @@ def test_restore_persisted_controller_state_imports_current_cache(monkeypatch) -
     )
     owner = SimpleNamespace(
         serial_connection=SimpleNamespace(is_open=True),
-        settings_manager=SimpleNamespace(load_controller_state=lambda: {"session": "ok"}),
+        settings_manager=SimpleNamespace(
+            load_controller_state=lambda: {"session": "ok"}
+        ),
         stage_controller=_RestoreStageController(events, current=True),
         joystick_panel=SimpleNamespace(
             set_axis_feedrate_limits=lambda rates: events.append(
@@ -1119,7 +1134,9 @@ def test_legacy_controller_state_rewrite_reports_typed_success(
     persisted = {"version": 3, "active_frame_id": "frame-7"}
 
     class _Coordinator:
-        def complete(self, completion: CoordinateAdapterCompletion) -> CoordinateTransition:
+        def complete(
+            self, completion: CoordinateAdapterCompletion
+        ) -> CoordinateTransition:
             events.append(
                 (
                     "complete",
@@ -1215,7 +1232,9 @@ def test_legacy_controller_state_rewrite_reports_typed_failure(
     assert statuses == ["Design registration migration could not be finalized."]
 
 
-def test_controller_state_persistence_preserves_legacy_registration_until_frame_save() -> None:
+def test_controller_state_persistence_preserves_legacy_registration_until_frame_save() -> (
+    None
+):
     legacy = {
         "version": 2,
         "source_design_marks": [[0.0, 0.0], [1.0, 0.0]],
@@ -1260,14 +1279,10 @@ def test_controller_state_persistence_reads_detached_application_projection() ->
         ),
         _coordinate_runtime=SimpleNamespace(
             controller_persistence_state=lambda workspace_state: (
-                persisted
-                if workspace_state == "workspace-state"
-                else None
+                persisted if workspace_state == "workspace-state" else None
             )
         ),
-        _design_session=SimpleNamespace(
-            snapshot_state=lambda: "workspace-state"
-        ),
+        _design_session=SimpleNamespace(snapshot_state=lambda: "workspace-state"),
         stage_controller=SimpleNamespace(
             export_cached_controller_state=lambda: {"last_stage_position": [1.0, 2.0]}
         ),
@@ -1286,7 +1301,9 @@ def test_activate_current_design_does_not_read_session_owner(monkeypatch) -> Non
     snapshot = CoordinateSystemSnapshot(False, (), None)
 
     class _Coordinator:
-        def activate_design(self, request: DesignActivationRequest) -> CoordinateTransition:
+        def activate_design(
+            self, request: DesignActivationRequest
+        ) -> CoordinateTransition:
             calls.append(request)
             return CoordinateTransition(snapshot)
 

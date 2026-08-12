@@ -29,6 +29,7 @@ from probe_station_gui.design.selection_model import (
     route_entity_id,
 )
 from probe_station_gui.design.session import DesignSession
+from probe_station_gui.design import session_navigation
 from probe_station_gui.route.model import MeasurementRoute
 from tests.app.test_main_design_navigation import (
     DesignDocument,
@@ -89,7 +90,7 @@ class _LayoutStateAdapter:
 def _make_mixed_edit_window(tmp_path: Path) -> tuple[Main, list[str]]:
     window, _stage, statuses = _make_window()
     document = _make_document(tmp_path)
-    window._design_session.load_document(document)
+    session_navigation.load_document(window._design_session, document)
     route = MeasurementRoute.default_for_document(document)
     route_point = route.add_point((2.0, 3.0))
     window._design_session.route = route
@@ -148,7 +149,7 @@ def test_rejected_design_activation_keeps_previous_session_markup_and_registry(
 ) -> None:
     window, _stage, _statuses = _make_window()
     previous_document = _make_document(tmp_path / "previous-activation")
-    window._design_session.load_document(previous_document)
+    session_navigation.load_document(window._design_session, previous_document)
     previous_markup = MarkupDocument.empty(previous_document.path).append_guide(
         (0.0, 0.0),
         (1.0, 0.0),
@@ -411,7 +412,7 @@ def test_changed_markup_cancel_restores_preload_design(
     window, _stage, statuses = _make_window()
     previous_document = _make_document(tmp_path / "previous")
     previous_session = DesignSession()
-    previous_session.load_document(previous_document)
+    session_navigation.load_document(previous_session, previous_document)
     previous_markup = MarkupDocument.empty(previous_document.path).append_guide(
         (0.0, 0.0),
         (1.0, 0.0),
@@ -455,7 +456,7 @@ def test_changed_markup_cancel_never_commits_or_clears_preload_ui_state(
 ) -> None:
     window, _stage, statuses = _make_window()
     previous_document = _make_document(tmp_path / "previous-live")
-    window._design_session.load_document(previous_document)
+    session_navigation.load_document(window._design_session, previous_document)
     previous_markup = MarkupDocument.empty(previous_document.path).append_guide(
         (0.0, 0.0),
         (1.0, 0.0),
@@ -535,7 +536,7 @@ def test_newer_design_load_invalidates_older_markup_response(
 ) -> None:
     window, _stage, _statuses = _make_window()
     previous_document = _make_document(tmp_path / "previous-generation")
-    window._design_session.load_document(previous_document)
+    session_navigation.load_document(window._design_session, previous_document)
     loads: list[tuple[int, Path]] = []
     window._design_markup_store = types.SimpleNamespace(
         load=lambda request_id, path: loads.append((request_id, Path(path)))
@@ -625,7 +626,7 @@ def test_markup_read_failure_commits_the_already_visible_design(
 ) -> None:
     window, _stage, _statuses = _make_window()
     previous_document = _make_document(tmp_path / "previous-read-failure")
-    window._design_session.load_document(previous_document)
+    session_navigation.load_document(window._design_session, previous_document)
     loads: list[tuple[int, Path]] = []
     window._design_markup_store = types.SimpleNamespace(
         load=lambda request_id, path: loads.append((request_id, Path(path)))
@@ -761,7 +762,8 @@ def test_move_to_design_coordinate_seeds_prediction_and_requests_move_after_acce
     None
 ):
     window, stage_controller, statuses = _make_window()
-    window._design_session.load_document(
+    session_navigation.load_document(
+        window._design_session,
         DesignDocument(
             path=Path("C:/designs/sample.gds"),
             library=object(),
@@ -773,7 +775,7 @@ def test_move_to_design_coordinate_seeds_prediction_and_requests_move_after_acce
             bounds=(0.0, 0.0, 1.0, 1.0),
             polygons_by_layer={(1, 0): (np.asarray([[0.0, 0.0], [1.0, 0.0]]),)},
             visible_layers=frozenset({(1, 0)}),
-        )
+        ),
     )
 
     accepted = Main._move_to_design_coordinate(
@@ -792,7 +794,8 @@ def test_move_to_design_coordinate_seeds_prediction_and_requests_move_after_acce
 
 def test_move_to_design_coordinate_reports_busy_race_rejection() -> None:
     window, _stage_controller, _statuses = _make_window()
-    window._design_session.load_document(
+    session_navigation.load_document(
+        window._design_session,
         DesignDocument(
             path=Path("C:/designs/sample.gds"),
             library=object(),
@@ -804,7 +807,7 @@ def test_move_to_design_coordinate_reports_busy_race_rejection() -> None:
             bounds=(0.0, 0.0, 1.0, 1.0),
             polygons_by_layer={(1, 0): (np.asarray([[0.0, 0.0], [1.0, 0.0]]),)},
             visible_layers=frozenset({(1, 0)}),
-        )
+        ),
     )
 
     accepted = Main._move_to_design_coordinate(

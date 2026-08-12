@@ -33,6 +33,7 @@ from probe_station_gui.coordinates.persistence import (
 )
 from probe_station_gui.coordinates.registry import CoordinateFrameRegistry
 from probe_station_gui.coordinates.transforms import BFrameTransform
+from probe_station_gui.design import session_registration
 from probe_station_gui.design.model import DesignDocument
 from probe_station_gui.design.frame_registration import DesignFrameMetadata
 from probe_station_gui.design.session import DesignSession
@@ -182,12 +183,16 @@ def test_machine_selection_is_renderable_before_any_machine_pose() -> None:
     assert selected.accepted
     assert selected.snapshot.selected_frame_id == "machine"
     assert selected.snapshot.display_plan.selected_frame_id == "machine"
-    assert all(update.value is None for update in selected.snapshot.display_plan.axis_updates)
+    assert all(
+        update.value is None for update in selected.snapshot.display_plan.axis_updates
+    )
 
 
 def test_temporary_b_loss_retains_one_selected_design_intent(tmp_path: Path) -> None:
     document = _document(tmp_path)
-    coordinator = CoordinateSystemCoordinator._adopt_session(session=DesignSession(document=document))
+    coordinator = CoordinateSystemCoordinator._adopt_session(
+        session=DesignSession(document=document)
+    )
     _load(coordinator, (_ready_design_record(document),))
     coordinator.observe_authority(_authority("X", "Y", "Z", "A", "B"))
     selected = coordinator.select_system(CoordinateSystemSelection(DESIGN_ID))
@@ -213,7 +218,9 @@ def test_reload_start_retains_selected_design_as_temporarily_unavailable(
     tmp_path: Path,
 ) -> None:
     document = _document(tmp_path)
-    coordinator = CoordinateSystemCoordinator._adopt_session(session=DesignSession(document=document))
+    coordinator = CoordinateSystemCoordinator._adopt_session(
+        session=DesignSession(document=document)
+    )
     _load(coordinator, (_ready_design_record(document),))
     coordinator.observe_authority(_design_authority())
     coordinator.select_system(CoordinateSystemSelection(DESIGN_ID))
@@ -234,7 +241,9 @@ def test_reload_start_retains_selected_design_as_temporarily_unavailable(
 
 def test_deleted_selected_frame_falls_back_and_persists_machine(tmp_path: Path) -> None:
     document = _document(tmp_path)
-    coordinator = CoordinateSystemCoordinator._adopt_session(session=DesignSession(document=document))
+    coordinator = CoordinateSystemCoordinator._adopt_session(
+        session=DesignSession(document=document)
+    )
     _load(coordinator, (_ready_design_record(document),))
     coordinator.observe_authority(_authority("X", "Y", "Z", "A", "B"))
     coordinator.select_system(CoordinateSystemSelection(DESIGN_ID))
@@ -245,9 +254,13 @@ def test_deleted_selected_frame_falls_back_and_persists_machine(tmp_path: Path) 
     assert reloaded.intents == (PersistCoordinateSelectionIntent("machine"),)
 
 
-def test_blocked_runtime_provenance_retains_recoverable_selection(tmp_path: Path) -> None:
+def test_blocked_runtime_provenance_retains_recoverable_selection(
+    tmp_path: Path,
+) -> None:
     document = _document(tmp_path)
-    coordinator = CoordinateSystemCoordinator._adopt_session(session=DesignSession(document=document))
+    coordinator = CoordinateSystemCoordinator._adopt_session(
+        session=DesignSession(document=document)
+    )
     ready = _ready_design_record(document)
     _load(coordinator, (ready,))
     coordinator.observe_authority(_authority("X", "Y", "Z", "A", "B"))
@@ -297,9 +310,7 @@ def test_custom_sync_does_not_resurrect_deleted_frame_or_drop_unknown_payload(
     assert [record.frame_id for record in synchronized.snapshot.records] == [frame_id]
 
     deleted = settings.without_custom_frame(frame_id)
-    after_delete = coordinator.synchronize_custom_systems(
-        CustomSystemsRequest(deleted)
-    )
+    after_delete = coordinator.synchronize_custom_systems(CustomSystemsRequest(deleted))
 
     assert after_delete.snapshot.records == ()
     assert deleted.to_dict()["custom_frames"] == [
@@ -322,7 +333,9 @@ def test_rejected_custom_sync_does_not_poison_later_authority_observation() -> N
     assert observed.snapshot.records == ()
 
 
-def test_reversed_custom_settings_order_is_idempotent_across_authority_samples() -> None:
+def test_reversed_custom_settings_order_is_idempotent_across_authority_samples() -> (
+    None
+):
     registry = CoordinateFrameRegistry()
     coordinator = CoordinateSystemCoordinator._for_testing(
         registry=registry,
@@ -356,7 +369,9 @@ def test_loaded_design_collision_drops_cached_custom_overlay_without_split_state
     tmp_path: Path,
 ) -> None:
     document = _document(tmp_path)
-    coordinator = CoordinateSystemCoordinator._adopt_session(session=DesignSession(document=document))
+    coordinator = CoordinateSystemCoordinator._adopt_session(
+        session=DesignSession(document=document)
+    )
     _load(coordinator, ())
     settings = SoftwareCoordinateSettings(
         custom_frames=(
@@ -386,7 +401,9 @@ def test_explicit_unavailable_selection_is_rejected_without_changing_intent(
     tmp_path: Path,
 ) -> None:
     document = _document(tmp_path)
-    coordinator = CoordinateSystemCoordinator._adopt_session(session=DesignSession(document=document))
+    coordinator = CoordinateSystemCoordinator._adopt_session(
+        session=DesignSession(document=document)
+    )
     _load(coordinator, (_ready_design_record(document),))
     coordinator.observe_authority(_authority("X", "Y", "Z", "A"))
 
@@ -435,7 +452,9 @@ def test_invalid_pivot_falls_back_to_machine_and_persists_only_once(
     tmp_path: Path,
 ) -> None:
     document = _document(tmp_path)
-    coordinator = CoordinateSystemCoordinator._adopt_session(session=DesignSession(document=document))
+    coordinator = CoordinateSystemCoordinator._adopt_session(
+        session=DesignSession(document=document)
+    )
     _load(coordinator, (_ready_design_record(document),))
     coordinator.observe_authority(_design_authority())
     coordinator.select_system(CoordinateSystemSelection(DESIGN_ID))
@@ -463,7 +482,9 @@ def test_invalid_pivot_falls_back_to_machine_and_persists_only_once(
 
 def test_temporary_missing_pivot_retains_selected_design(tmp_path: Path) -> None:
     document = _document(tmp_path)
-    coordinator = CoordinateSystemCoordinator._adopt_session(session=DesignSession(document=document))
+    coordinator = CoordinateSystemCoordinator._adopt_session(
+        session=DesignSession(document=document)
+    )
     _load(coordinator, (_ready_design_record(document),))
     coordinator.observe_authority(_design_authority())
     coordinator.select_system(CoordinateSystemSelection(DESIGN_ID))
@@ -548,7 +569,7 @@ def test_identical_authority_sample_does_not_relink_active_design(
     coordinator.observe_authority(authority)
     relinks: list[object] = []
     monkeypatch.setattr(
-        session,
+        session_registration,
         "link_active_frame",
         lambda *args, **kwargs: relinks.append((args, kwargs)),
     )
@@ -611,7 +632,9 @@ def test_semantically_corrupt_selected_frame_falls_back_to_machine(
     tmp_path: Path,
 ) -> None:
     document = _document(tmp_path)
-    coordinator = CoordinateSystemCoordinator._adopt_session(session=DesignSession(document=document))
+    coordinator = CoordinateSystemCoordinator._adopt_session(
+        session=DesignSession(document=document)
+    )
     record = _ready_design_record(document)
     _load(coordinator, (record,))
     coordinator.observe_authority(_design_authority())
@@ -660,7 +683,9 @@ def test_publication_deleting_selected_frame_reduces_selection_immediately(
     tmp_path: Path,
 ) -> None:
     document = _document(tmp_path)
-    coordinator = CoordinateSystemCoordinator._adopt_session(session=DesignSession(document=document))
+    coordinator = CoordinateSystemCoordinator._adopt_session(
+        session=DesignSession(document=document)
+    )
     _load(coordinator, (_ready_design_record(document),))
     coordinator.observe_authority(_design_authority())
     coordinator.select_system(CoordinateSystemSelection(DESIGN_ID))
@@ -781,7 +806,9 @@ def test_display_plan_contains_machine_and_uses_same_selection_decision(
     tmp_path: Path,
 ) -> None:
     document = _document(tmp_path)
-    coordinator = CoordinateSystemCoordinator._adopt_session(session=DesignSession(document=document))
+    coordinator = CoordinateSystemCoordinator._adopt_session(
+        session=DesignSession(document=document)
+    )
     _load(coordinator, (_ready_design_record(document),))
     coordinator.observe_authority(_design_authority())
     selected = coordinator.select_system(CoordinateSystemSelection(DESIGN_ID))
@@ -809,7 +836,9 @@ def test_relative_motion_uses_selected_design_snapshot_for_xy_rotation(
             z_zero_machine_mm=1.0,
         ),
     )
-    coordinator = CoordinateSystemCoordinator._adopt_session(session=DesignSession(document=document))
+    coordinator = CoordinateSystemCoordinator._adopt_session(
+        session=DesignSession(document=document)
+    )
     _load(coordinator, (record,))
     coordinator.observe_authority(_design_authority(x_mm=10.0, y_mm=20.0))
     selected = coordinator.select_system(CoordinateSystemSelection(DESIGN_ID))
@@ -842,7 +871,9 @@ def test_non_machine_b_motion_rejects_single_segment_pivot_chord(
             z_zero_machine_mm=1.0,
         ),
     )
-    coordinator = CoordinateSystemCoordinator._adopt_session(session=DesignSession(document=document))
+    coordinator = CoordinateSystemCoordinator._adopt_session(
+        session=DesignSession(document=document)
+    )
     _load(coordinator, (record,))
     coordinator.observe_authority(_design_authority(x_mm=10.0, y_mm=0.0))
     selected = coordinator.select_system(CoordinateSystemSelection(DESIGN_ID))
@@ -863,7 +894,9 @@ def test_non_machine_b_motion_rejects_single_segment_pivot_chord(
 
 def test_relative_motion_rejects_stale_selected_snapshot_lease(tmp_path: Path) -> None:
     document = _document(tmp_path)
-    coordinator = CoordinateSystemCoordinator._adopt_session(session=DesignSession(document=document))
+    coordinator = CoordinateSystemCoordinator._adopt_session(
+        session=DesignSession(document=document)
+    )
     _load(coordinator, (_ready_design_record(document),))
     coordinator.observe_authority(_design_authority())
     selected = coordinator.select_system(CoordinateSystemSelection(DESIGN_ID))
@@ -897,7 +930,9 @@ def test_continuous_relative_motion_rebases_pose_but_not_coordinate_basis(
             z_zero_machine_mm=1.0,
         ),
     )
-    coordinator = CoordinateSystemCoordinator._adopt_session(session=DesignSession(document=document))
+    coordinator = CoordinateSystemCoordinator._adopt_session(
+        session=DesignSession(document=document)
+    )
     _load(coordinator, (record,))
     coordinator.observe_authority(_design_authority(x_mm=10.0, y_mm=20.0))
     selected = coordinator.select_system(CoordinateSystemSelection(DESIGN_ID))

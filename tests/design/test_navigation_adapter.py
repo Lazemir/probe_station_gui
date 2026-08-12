@@ -26,8 +26,6 @@ from probe_station_gui.design.model import (
 from probe_station_gui.design.navigation_adapter import (
     activate_design_frame_for_document,
     apply_loaded_design_document,
-    document_with_persisted_design_view,
-    parse_persisted_visible_layers,
     prepare_design_frame_activation,
     prepare_design_frame_publication,
     prepare_persisted_design_restore,
@@ -43,6 +41,13 @@ from probe_station_gui.design.route_editing import (
     select_route_point,
 )
 from probe_station_gui.design.rigid_registration import DesignRegistration
+from probe_station_gui.design import session_navigation, session_registration
+from probe_station_gui.design.session_state import (
+    document_with_persisted_session_view,
+    export_persisted_session_state,
+    parse_persisted_visible_layers,
+    prepare_persisted_session_restore,
+)
 from probe_station_gui.design.session import DesignSession
 
 
@@ -106,7 +111,7 @@ def test_document_with_persisted_design_view_applies_cell_rotation_and_layers(
 ) -> None:
     document = _make_document(tmp_path)
 
-    restored = document_with_persisted_design_view(
+    restored = document_with_persisted_session_view(
         document,
         {
             "top_cell_name": "ALT",
@@ -188,16 +193,27 @@ def test_design_load_success_plan_uses_current_route_point_camera_center(
 ) -> None:
     document = _make_document(tmp_path)
     session = DesignSession()
-    session.load_document(document)
-    point = session.add_route_point((12.0, 34.0))
+    session_navigation.load_document(session, document)
+    point = session_navigation.add_route_point(session, (12.0, 34.0))
     assert session.route is not None
     session.route.save(tmp_path / "route.probe-route.json")
     session.selected_route_point_index = 0
-    state = session.export_persisted_state()
+    source_stat = document.path.stat()
+    state = export_persisted_session_state(
+        session.snapshot_state(),
+        document_size=source_stat.st_size,
+        document_mtime_ns=source_stat.st_mtime_ns,
+        route_path=str(session.route.path),
+    )
     assert state is not None
 
     restored_session = DesignSession()
-    plan = apply_loaded_design_document(restored_session, document, state)
+    plan = apply_loaded_design_document(
+        restored_session,
+        document,
+        state,
+        prepared_restore=prepare_persisted_session_restore(document, state),
+    )
 
     assert plan.last_selected_design_point == point.camera_center
     assert plan.status_message == "Loaded design 'sample.gds' (TOP)."
@@ -207,7 +223,7 @@ def test_route_array_add_creates_route_and_selects_last_added_point(
     tmp_path: Path,
 ) -> None:
     session = DesignSession()
-    session.load_document(_make_document(tmp_path))
+    session_navigation.load_document(session, _make_document(tmp_path))
 
     plan = add_route_array_points(
         session,
@@ -234,9 +250,9 @@ def test_route_point_selection_is_bounds_checked_and_invalid_clears_selection(
     tmp_path: Path,
 ) -> None:
     session = DesignSession()
-    session.load_document(_make_document(tmp_path))
-    session.add_route_point((1.0, 2.0))
-    session.add_route_point((3.0, 4.0))
+    session_navigation.load_document(session, _make_document(tmp_path))
+    session_navigation.add_route_point(session, (1.0, 2.0))
+    session_navigation.add_route_point(session, (3.0, 4.0))
 
     valid = select_route_point(session, 1)
     invalid = select_route_point(session, 99)
@@ -250,8 +266,11 @@ def test_design_target_move_plans_unknown_missing_registration_and_accepted(
     tmp_path: Path,
 ) -> None:
     session = DesignSession()
-    session.load_document(_make_document(tmp_path))
-    session.set_targets([MeasurementTarget("a", "A", (10.0, 20.0))])
+    session_navigation.load_document(session, _make_document(tmp_path))
+    session_navigation.set_targets(
+        session,
+        [MeasurementTarget("a", "A", (10.0, 20.0))],
+    )
 
     unknown = plan_design_target_move(session, "missing", None)
     unregistered = plan_design_target_move(session, "a", None)
@@ -261,7 +280,9 @@ def test_design_target_move_plans_unknown_missing_registration_and_accepted(
         [(1.0, 2.0), (21.0, 2.0)],
     )
     accepted = plan_design_target_move(
-        session, "a", session.stage_from_design((10.0, 20.0))
+        session,
+        "a",
+        session_navigation.stage_from_design(session, (10.0, 20.0)),
     )
 
     assert not unknown.accepted
@@ -305,9 +326,12 @@ def test_panel_and_position_presentations_include_navigation_state(
 ) -> None:
     session = DesignSession()
     document = _make_document(tmp_path)
-    session.load_document(document)
-    session.set_targets([MeasurementTarget("a", "A", (10.0, 20.0))])
-    session.add_route_point((1.0, 2.0))
+    session_navigation.load_document(session, document)
+    session_navigation.set_targets(
+        session,
+        [MeasurementTarget("a", "A", (10.0, 20.0))],
+    )
+    session_navigation.add_route_point(session, (1.0, 2.0))
     session.source_design_marks = [(0.0, 0.0), None]
     session.check_design_marks = [(5.0, 6.0)]
     registration = RegistrationWorkflowSnapshot(
@@ -384,7 +408,7 @@ def test_design_frame_publication_is_prepared_without_mutating_live_session(
     draft = new_design_frame_draft(document, existing_names=())
     committed = replace(draft, name="registered", version=1)
     session = DesignSession(document=document)
-    session.link_active_frame(draft)
+    session_registration.link_active_frame(session, draft)
     checkpoint = DesignSessionCheckpoint.capture(session)
 
     publication = prepare_design_frame_publication(
@@ -416,7 +440,7 @@ def test_design_frame_activation_is_prepared_on_detached_owners(
     registry = CoordinateFrameRegistry()
     draft = registry.add(new_design_frame_draft(document, existing_names=()))
     session = DesignSession(document=document)
-    session.link_active_frame(draft)
+    session_registration.link_active_frame(session, draft)
     registry_before = registry.snapshot()
     session_before = DesignSessionCheckpoint.capture(session)
 
@@ -478,7 +502,7 @@ def test_reconciled_frame_projection_failure_is_transactional(tmp_path: Path) ->
         )
     )
     session = DesignSession(document=document)
-    session.link_active_frame(existing)
+    session_registration.link_active_frame(session, existing)
     before = registry.snapshot()
     document.path.write_bytes(b"changed-design")
     changed_metadata = DesignFrameMetadata.from_document(document)

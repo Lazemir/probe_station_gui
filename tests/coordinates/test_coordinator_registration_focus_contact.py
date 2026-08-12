@@ -22,7 +22,7 @@ from probe_station_gui.design.frame_registration import (
     set_contact_reference,
     set_focus_reference,
 )
-from probe_station_gui.design.session import DesignSession
+from probe_station_gui.design import session_registration
 from tests.coordinates.coordinator_registration_support import (
     _document,
     _draft,
@@ -43,7 +43,8 @@ def test_focus_move_autofocus_and_durable_z_commit_are_one_ordered_workflow(
         pivot_machine_xy=(0.0, 0.0),
     )
     coordinator, registry, session = _loaded_coordinator(document, registered)
-    session.link_active_frame(
+    session_registration.link_active_frame(
+        session,
         registered,
         machine_point_for_navigation=lambda point: point,
         machine_b_deg=0.0,
@@ -142,7 +143,8 @@ def test_focus_target_uses_request_b_and_pivot_instead_of_session_projection(
         pivot_machine_xy=(0.0, 0.0),
     )
     coordinator, _registry, session = _loaded_coordinator(document, registered)
-    session.link_active_frame(
+    session_registration.link_active_frame(
+        session,
         registered,
         machine_point_for_navigation=lambda point: point,
         machine_b_deg=0.0,
@@ -190,7 +192,8 @@ def test_focus_move_completion_with_wrong_actual_target_is_inert(
         pivot_machine_xy=(0.0, 0.0),
     )
     coordinator, registry, session = _loaded_coordinator(document, registered)
-    session.link_active_frame(
+    session_registration.link_active_frame(
+        session,
         registered,
         machine_point_for_navigation=lambda point: point,
         machine_b_deg=0.0,
@@ -305,7 +308,7 @@ def test_optical_context_change_does_not_cancel_pending_first_contact(
         physical_machine_z_mm=6.0,
     )
     coordinator, _registry, session = _loaded_coordinator(document, focused)
-    session.link_active_frame(focused)
+    session_registration.link_active_frame(session, focused)
     lease = coordinator_model.FirstContactRequest(
         focused.frame_id,
         focused.version,
@@ -354,7 +357,7 @@ def test_resetting_z_invalidates_dependent_a_in_the_same_publication(
         physical_machine_a_mm=8.0,
     )
     coordinator, registry, session = _loaded_coordinator(document, contacted)
-    session.link_active_frame(contacted)
+    session_registration.link_active_frame(session, contacted)
     request_type = getattr(coordinator_model, "FocusReferenceResetRequest")
 
     transition = coordinator.reset_focus_reference(
@@ -389,7 +392,8 @@ def test_failed_focus_reset_preparation_preserves_pending_focus_move(
         pivot_machine_xy=(0.0, 0.0),
     )
     coordinator, registry, session = _loaded_coordinator(document, registered)
-    session.link_active_frame(
+    session_registration.link_active_frame(
+        session,
         registered,
         machine_point_for_navigation=lambda point: point,
         machine_b_deg=0.0,
@@ -420,7 +424,7 @@ def test_failed_focus_reset_preparation_preserves_pending_focus_move(
     baseline = session.snapshot_state()
     records = registry.snapshot().records
     monkeypatch.setattr(
-        DesignSession,
+        session_registration,
         "prepare_active_frame_link",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("projection")),
     )
@@ -467,7 +471,8 @@ def test_first_contact_is_single_write_and_exact_save_rollback_rearms_it(
         physical_machine_z_mm=6.0,
     )
     coordinator, registry, session = _loaded_coordinator(document, focused)
-    session.link_active_frame(
+    session_registration.link_active_frame(
+        session,
         focused,
         machine_point_for_navigation=lambda point: point,
         machine_b_deg=0.0,
@@ -520,7 +525,8 @@ def test_interrupted_physical_a_completion_cannot_commit_or_publish_contact(
         physical_machine_z_mm=6.0,
     )
     coordinator, registry, session = _loaded_coordinator(document, focused)
-    session.link_active_frame(
+    session_registration.link_active_frame(
+        session,
         focused,
         machine_point_for_navigation=lambda point: point,
         machine_b_deg=0.0,

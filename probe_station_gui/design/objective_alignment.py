@@ -14,7 +14,7 @@ from probe_station_gui.design.objective_offsets import (
     objective_xy_offset,
     objective_xy_offset_is_configured,
 )
-from probe_station_gui.design.session import AlignmentPreparation
+from probe_station_gui.design.session_registration import AlignmentPreparation
 from probe_station_gui.settings.manager import Settings
 from probe_station_gui.settings.objective_config import (
     default_objective,
@@ -33,8 +33,12 @@ ALIGNMENT_TARGET_ANGLES = (0.0, 90.0, 180.0, -90.0)
 
 def active_objective_configuration(objective_settings: object) -> tuple[object, object]:
     objectives = getattr(objective_settings, "objectives", {})
-    active_name = normalize_objective_name(getattr(objective_settings, "active_name", ""))
-    active_objective = objectives.get(active_name) if hasattr(objectives, "get") else None
+    active_name = normalize_objective_name(
+        getattr(objective_settings, "active_name", "")
+    )
+    active_objective = (
+        objectives.get(active_name) if hasattr(objectives, "get") else None
+    )
     if active_objective is None:
         active_objective = default_objective(active_name)
     return active_objective, objectives

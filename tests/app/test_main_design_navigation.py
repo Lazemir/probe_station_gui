@@ -23,6 +23,8 @@ from probe_station_gui.coordinates.coordinator_model import (
 )
 from probe_station_gui.design.markup import MarkupDocument
 from probe_station_gui.design.session import DesignSession
+from probe_station_gui.design.session_state import export_persisted_session_state
+from probe_station_gui.design.session_state import prepare_persisted_session_restore
 from probe_station_gui.settings.axis_calibration_config import (
     AxisCalibrationSettings,
     default_axis_calibrations,
@@ -378,7 +380,9 @@ def test_restored_top_cell_reconciles_worker_frame_metadata(tmp_path: Path) -> N
         },
     )
     alt_document = top_document.with_top_cell("ALT")
-    restore_state = DesignSession(document=alt_document).export_persisted_state()
+    restore_state = export_persisted_session_state(
+        DesignSession(document=alt_document).snapshot_state()
+    )
     assert restore_state is not None
     worker_metadata = main_module.DesignFrameMetadata.from_document(top_document)
     captured: list[tuple[DesignDocument, object]] = []
@@ -391,7 +395,11 @@ def test_restored_top_cell_reconciles_worker_frame_metadata(tmp_path: Path) -> N
     Main._on_design_document_loaded(
         window,
         1,
-        main_module._LoadedDesignDocument(top_document, worker_metadata),
+        main_module._LoadedDesignDocument(
+            alt_document,
+            worker_metadata,
+            prepare_persisted_session_restore(alt_document, restore_state),
+        ),
         None,
     )
 

@@ -169,7 +169,11 @@ from probe_station_gui.design.contact_navigation import (
     api_route_adjusted_stage_xy,
     api_route_point_payload,
 )
-from probe_station_gui.design import navigation_adapter as design_navigation, navigation_targeting, route_editing
+from probe_station_gui.design import (
+    navigation_adapter as design_navigation,
+    navigation_targeting,
+    route_editing,
+)
 from probe_station_gui.design.markup import (
     MarkupDocument,
     MarkupLoadChoice,
@@ -182,9 +186,13 @@ from probe_station_gui.design.selection_model import (
     SelectionModel,
     apply_markup_entity_changes,
 )
-from probe_station_gui.design.session import (
-    AlignmentPreparation,
-    DesignSession,
+from probe_station_gui.design.session import DesignSession
+from probe_station_gui.design.session_registration import AlignmentPreparation
+from probe_station_gui.design.session_state import (
+    PreparedDesignSessionRestore,
+    document_with_persisted_session_view,
+    persisted_design_source_is_current,
+    prepare_persisted_session_restore,
 )
 from probe_station_gui.shared.diagnostics import configure_crash_diagnostics
 from probe_station_gui.api.request_bridge import ApiRequestBridge, DeferredApiResponse
@@ -237,8 +245,11 @@ from probe_station_gui.instruments.meters.lcr import (
     RouteMeterConfiguration,
 )
 from probe_station_gui.stage.api_moves import (
-    api_axis_value_map, api_coordinate_move_busy_response, api_coordinate_move_plan,
-    api_coordinate_move_start_failed_response, api_coordinate_move_success_response,
+    api_axis_value_map,
+    api_coordinate_move_busy_response,
+    api_coordinate_move_plan,
+    api_coordinate_move_start_failed_response,
+    api_coordinate_move_success_response,
 )
 from probe_station_gui.stage.coordinate_targets import (
     CoordinateTargetConfig,
@@ -273,7 +284,10 @@ from probe_station_gui.views.microscope_interaction import (
     ClickMoveBindings,
     ClickMoveConfig,
 )
-from probe_station_gui.design import objective_alignment as alignment, objective_offsets as offsets
+from probe_station_gui.design import (
+    objective_alignment as alignment,
+    objective_offsets as offsets,
+)
 from probe_station_gui.route.model import (
     MeasurementRoute,
     structure_number_from_labels,
@@ -356,7 +370,10 @@ from probe_station_gui.route.api_measurement import (
     api_current_contact_response,
     api_current_contact_settings_from_payload,
 )
-from probe_station_gui.route.payload_parsing import payload_float, payload_optional_float
+from probe_station_gui.route.payload_parsing import (
+    payload_float,
+    payload_optional_float,
+)
 from probe_station_gui.route.meter_config import (
     route_meter_configuration_from_payload,
 )
@@ -516,9 +533,7 @@ class _MicroscopeScanLaunchSnapshot:
     scan_name: str
     document_identity: str
     scale: object
-    registration_matrix: (
-        tuple[tuple[float, float], tuple[float, float]] | None
-    )
+    registration_matrix: tuple[tuple[float, float], tuple[float, float]] | None
     registration_offset: tuple[float, float] | None
     objective_xy_offset: tuple[float, float]
 
@@ -595,6 +610,7 @@ class _PendingDesignMarkupLoad:
 class _LoadedDesignDocument:
     document: DesignDocument
     frame_metadata: DesignFrameMetadata
+    prepared_restore: PreparedDesignSessionRestore | None = None
 
 
 @dataclass(frozen=True)
@@ -753,15 +769,9 @@ class Main(QMainWindow):
     CONTACT_SEEK_STEP_MM = (
         needle_calibration_ui.manual_contact_seek.DEFAULT_MANUAL_CONTACT_SEEK_STEP_MM
     )
-    CONTACT_SEEK_MAX_TOTAL_MM = (
-        needle_calibration_ui.manual_contact_seek.DEFAULT_MANUAL_CONTACT_SEEK_MAX_TOTAL_MM
-    )
-    CONTACT_SEEK_QUICK_COUNT = (
-        needle_calibration_ui.manual_contact_seek.DEFAULT_MANUAL_CONTACT_SEEK_QUICK_COUNT
-    )
-    CONTACT_SEEK_CONFIRM_COUNT = (
-        needle_calibration_ui.manual_contact_seek.DEFAULT_MANUAL_CONTACT_SEEK_CONFIRM_COUNT
-    )
+    CONTACT_SEEK_MAX_TOTAL_MM = needle_calibration_ui.manual_contact_seek.DEFAULT_MANUAL_CONTACT_SEEK_MAX_TOTAL_MM
+    CONTACT_SEEK_QUICK_COUNT = needle_calibration_ui.manual_contact_seek.DEFAULT_MANUAL_CONTACT_SEEK_QUICK_COUNT
+    CONTACT_SEEK_CONFIRM_COUNT = needle_calibration_ui.manual_contact_seek.DEFAULT_MANUAL_CONTACT_SEEK_CONFIRM_COUNT
     SAMPLE_LOAD_X_MM = sample_handling.SAMPLE_LOAD_X_MM
     SAMPLE_LOAD_Y_MM = sample_handling.SAMPLE_LOAD_Y_MM
     SAMPLE_UNLOAD_X_MM = sample_handling.SAMPLE_UNLOAD_X_MM
@@ -1019,12 +1029,15 @@ class Main(QMainWindow):
         self._route_measurement_optical_session_token: str | None = None
         self._route_measurement_point_numbers: list[int] = []
         self._route_measurement_current_point: int | None = None
-        self._last_route_measurement_result: tuple[
-            RouteMeasurementRecord,
-            int,
-            int,
-            bool,
-        ] | None = None
+        self._last_route_measurement_result: (
+            tuple[
+                RouteMeasurementRecord,
+                int,
+                int,
+                bool,
+            ]
+            | None
+        ) = None
         self._pending_route_measure_point: int | None = None
         self._route_measurement_session_active = False
         self._route_measurement_context_close_requested = False
@@ -1060,7 +1073,9 @@ class Main(QMainWindow):
         self._pending_focus_structure_request_id: int | None = None
         self._pending_focus_structure_context: object | None = None
         self._pending_focus_structure_fov: tuple[float, float] | None = None
-        self._pending_focus_structure_design_bounds: tuple[float, float, float, float] | None = None
+        self._pending_focus_structure_design_bounds: (
+            tuple[float, float, float, float] | None
+        ) = None
         self._design_focus_signals_connected = False
         self._coordinate_frame_store.loaded.connect(
             self._on_coordinate_frame_document_loaded
@@ -1075,8 +1090,8 @@ class Main(QMainWindow):
         self.statusBar()
         self._objective_widget = self._create_objective_widget()
         self.statusBar().addPermanentWidget(self._objective_widget, 0)
-        self._stage_position_widget = stage_position_panel_adapter.create_stage_position_widget(
-            self
+        self._stage_position_widget = (
+            stage_position_panel_adapter.create_stage_position_widget(self)
         )
         self.statusBar().addPermanentWidget(self._stage_position_widget, 0)
         self._status_log = QPlainTextEdit(self)
@@ -1085,8 +1100,8 @@ class Main(QMainWindow):
         self._status_log.setLineWrapMode(QPlainTextEdit.NoWrap)
         self._status_log.document().setMaximumBlockCount(200)
         self.statusBar().addPermanentWidget(self._status_log, 1)
-        self._status_log_path = (
-            self.settings_manager.log_file_path().with_name("status-history.log")
+        self._status_log_path = self.settings_manager.log_file_path().with_name(
+            "status-history.log"
         )
         self.status_message_requested.connect(
             self._show_status,
@@ -1115,15 +1130,11 @@ class Main(QMainWindow):
             lambda: toggle_design_layout_window(self, True)
         )
         self.grabber.frame_ready.connect(self._on_camera_frame)
-        self.grabber.frame_gap_suppressed.connect(
-            self._on_camera_frame_gap_suppressed
-        )
+        self.grabber.frame_gap_suppressed.connect(self._on_camera_frame_gap_suppressed)
         self.grabber.error.connect(self.on_error)
         self.design_layout_module_ready.connect(self._on_design_layout_module_ready)
         self.design_document_loaded.connect(self._on_design_document_loaded)
-        self.route_measurement_started.connect(
-            self._on_route_measurement_started
-        )
+        self.route_measurement_started.connect(self._on_route_measurement_started)
         self.route_measurement_status.connect(self._on_route_measurement_status)
         self.route_measurement_progress.connect(self._on_route_measurement_progress)
         self.route_measurement_waiting_changed.connect(
@@ -1247,7 +1258,9 @@ class Main(QMainWindow):
                 updates,
             )
         )
-        self.stage_controller.needle_height_changed.connect(self._on_needle_height_changed)
+        self.stage_controller.needle_height_changed.connect(
+            self._on_needle_height_changed
+        )
         self.stage_controller.axis_max_feedrates_changed.connect(
             lambda rates: connection_flow.on_axis_max_feedrates_changed(self, rates)
         )
@@ -1388,9 +1401,7 @@ class Main(QMainWindow):
                 raw_counter=self._latest_raw_camera_counter,
                 wait_raw_callback=self._wait_for_raw_camera_frame,
             ),
-            sessions=OpticalCalibrationSessionAdapter(
-                self._optical_session_manager
-            ),
+            sessions=OpticalCalibrationSessionAdapter(self._optical_session_manager),
             store=OpticalCalibrationStoreAdapter(
                 self._flat_field_calibration_store.install
             ),
@@ -1743,7 +1754,9 @@ class Main(QMainWindow):
     def _telegram_status_snapshot(self) -> telegram_commands.TelegramStatusSnapshot:
         return telegram_commands.TelegramStatusSnapshot(
             latest_status_message=self._latest_status_message,
-            route_thread_active=telegram_commands.thread_alive(self._route_measurement_thread),
+            route_thread_active=telegram_commands.thread_alive(
+                self._route_measurement_thread
+            ),
             route_waiting=self._route_measurement_waiting,
             route_session_active=self._route_measurement_session_active,
             route_current_point=self._route_measurement_current_point,
@@ -1751,9 +1764,14 @@ class Main(QMainWindow):
                 self._api_route_control_state_snapshot().telegram_status_text()
             ),
             stage_status=self._api_stage_status(),
-            microscope_scan_active=telegram_commands.thread_alive(self._microscope_scan_thread),
-            contact_seek_active=telegram_commands.thread_alive(self._contact_seek_thread),
-            camera_frame_available=self._latest_camera_frame_for_notifications is not None,
+            microscope_scan_active=telegram_commands.thread_alive(
+                self._microscope_scan_thread
+            ),
+            contact_seek_active=telegram_commands.thread_alive(
+                self._contact_seek_thread
+            ),
+            camera_frame_available=self._latest_camera_frame_for_notifications
+            is not None,
             stage_axis_names=self.STAGE_AXIS_NAMES,
         )
 
@@ -2070,7 +2088,9 @@ class Main(QMainWindow):
             ),
         )
 
-    def _api_move_to_coordinates(self, targets: object, *, mode: object = "G90", feedrate: object = None) -> dict[str, Any]:
+    def _api_move_to_coordinates(
+        self, targets: object, *, mode: object = "G90", feedrate: object = None
+    ) -> dict[str, Any]:
         move_plan = api_coordinate_move_plan(
             targets,
             axis_names=self.STAGE_AXIS_NAMES,
@@ -2083,7 +2103,10 @@ class Main(QMainWindow):
         )
         if isinstance(move_plan, dict):
             return move_plan
-        if self._coordinate_targets.has_active_move() or self.stage_controller.is_busy():
+        if (
+            self._coordinate_targets.has_active_move()
+            or self.stage_controller.is_busy()
+        ):
             return api_coordinate_move_busy_response()
         if not self._start_coordinate_targets_move(
             move_plan.target_map,
@@ -2168,7 +2191,10 @@ class Main(QMainWindow):
                 "accepted": False,
                 "message": "Serial connection is not available.",
             }
-        if self._coordinate_targets.has_active_move() or self.stage_controller.is_busy():
+        if (
+            self._coordinate_targets.has_active_move()
+            or self.stage_controller.is_busy()
+        ):
             return {
                 "accepted": False,
                 "message": "Stage is busy. Ignoring surface-map target.",
@@ -2216,7 +2242,9 @@ class Main(QMainWindow):
         )
         return {
             "accepted": bool(accepted),
-            "message": "Surface-map XY move accepted." if accepted else "Unable to start XY move.",
+            "message": "Surface-map XY move accepted."
+            if accepted
+            else "Unable to start XY move.",
             "targets": {"X": float(x_mm), "Y": float(y_mm)},
             "current_feedrate_mm_min": feedrate,
         }
@@ -2229,10 +2257,7 @@ class Main(QMainWindow):
                 "status_code": 409,
                 "message": "No probe route is loaded.",
             }
-        registration_valid = (
-            self._coordinate_system_coordinator.snapshot()
-            .registration.registration_valid
-        )
+        registration_valid = self._coordinate_system_coordinator.snapshot().registration.registration_valid
         contacts = [
             api_route_point_payload(
                 route_index=index,
@@ -2442,8 +2467,8 @@ class Main(QMainWindow):
         }
 
     def _api_route_contact_focus(self, payload: dict[str, Any]) -> dict[str, Any]:
-        _contact_number, contact, context_error = self._api_contact_context_from_payload(
-            payload
+        _contact_number, contact, context_error = (
+            self._api_contact_context_from_payload(payload)
         )
         if context_error is not None:
             return context_error
@@ -2680,7 +2705,9 @@ class Main(QMainWindow):
         try:
             self._clear_planned_move_prediction(clear_wait_state=True)
         except Exception:
-            logger.exception("Failed to clear planned move prediction after API route control interrupt.")
+            logger.exception(
+                "Failed to clear planned move prediction after API route control interrupt."
+            )
         self._schedule_status_refreshes(self.MANUAL_JOG_SETTLE_POLL_DELAYS_MS)
         if planned_state is None:
             state, message = self._api_route_control_state_snapshot().interrupt(
@@ -2777,11 +2804,7 @@ class Main(QMainWindow):
             ),
         )
         try:
-            result = (
-                runner.seek_contact(point)
-                if seek
-                else runner.check_contact(point)
-            )
+            result = runner.seek_contact(point) if seek else runner.check_contact(point)
         except (StageControllerError, LCRMeterError, RuntimeError) as exc:
             return api_current_contact_error_response(
                 str(exc),
@@ -2979,7 +3002,9 @@ class Main(QMainWindow):
         timestamp_utc = self._api_timestamp_utc()
         try:
             if request.move_to_contact or request.lower_needles or request.lift_after:
-                stage_lease = self.stage_controller.reserve_external_task("API raw voltage sweep")
+                stage_lease = self.stage_controller.reserve_external_task(
+                    "API raw voltage sweep"
+                )
             if stage_lease is not None and request.lift_before_move:
                 self.stage_controller.run_external_needles_action(
                     "lift",
@@ -3250,11 +3275,13 @@ class Main(QMainWindow):
             status_callback=self.route_measurement_status.emit,
             progress_callback=self.route_measurement_progress.emit,
             photo_callback=self._capture_api_route_photo_artifact,
-            photo_focus_callback=lambda point, position, total: self._api_route_photo_autofocus(
-                point,
-                position,
-                total,
-                range_mm=start_settings.photo_focus_range_mm,
+            photo_focus_callback=lambda point, position, total: (
+                self._api_route_photo_autofocus(
+                    point,
+                    position,
+                    total,
+                    range_mm=start_settings.photo_focus_range_mm,
+                )
             ),
             contact_photo_callback=self._capture_route_contact_photo,
             pre_contact_photo_callback=self._capture_route_pre_contact_photo,
@@ -3430,18 +3457,32 @@ class Main(QMainWindow):
         try:
             self._open_route_measurement_dialog(start_context=False)
         except Exception:
-            logger.exception("Failed to open route measurement controls for API session.")
+            logger.exception(
+                "Failed to open route measurement controls for API session."
+            )
             return False
         return self._route_control_window_is_open()
 
     def _api_route_session_status(self) -> dict[str, Any]:
-        return api_route_session_status_response(getattr(self, "_route_measurement_runner", None), self._api_route_last_status, self._api_route_artifacts_payload())
+        return api_route_session_status_response(
+            getattr(self, "_route_measurement_runner", None),
+            self._api_route_last_status,
+            self._api_route_artifacts_payload(),
+        )
 
     def _api_route_session_action(self, payload: dict[str, Any]) -> dict[str, Any]:
-        return api_route_session_action_response(payload, runner=getattr(self, "_route_measurement_runner", None), interrupt_runner=self._interrupt_route_measurement_runner)
+        return api_route_session_action_response(
+            payload,
+            runner=getattr(self, "_route_measurement_runner", None),
+            interrupt_runner=self._interrupt_route_measurement_runner,
+        )
 
     def _api_route_session_result(self, payload: dict[str, Any]) -> dict[str, Any]:
-        return api_route_session_result_response(payload, runner=self._route_measurement_runner, timestamp_utc=self._api_timestamp_utc())
+        return api_route_session_result_response(
+            payload,
+            runner=self._route_measurement_runner,
+            timestamp_utc=self._api_timestamp_utc(),
+        )
 
     def _api_route_session_seek(self) -> dict[str, Any]:
         return api_route_session_seek_response(self._route_measurement_runner)
@@ -3565,7 +3606,9 @@ class Main(QMainWindow):
             if scan_pattern == "stitch_debug":
                 rows = 3
                 columns = 3
-                overlap_default = self.MICROSCOPE_AREA_SCAN_STITCH_DEBUG_OVERLAP_FRACTION
+                overlap_default = (
+                    self.MICROSCOPE_AREA_SCAN_STITCH_DEBUG_OVERLAP_FRACTION
+                )
                 structure_size_mm = self._microscope_area_scan_float(
                     payload.get(
                         "structure_size_mm",
@@ -3749,24 +3792,60 @@ class Main(QMainWindow):
     def _microscope_area_scan_default_output_dir() -> str:
         root = Path(os.environ.get("LOCALAPPDATA", str(Path.home())))
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        return str(root / "ProbeStationGUI" / "MicroscopeScans" / f"area_scan_{timestamp}")
+        return str(
+            root / "ProbeStationGUI" / "MicroscopeScans" / f"area_scan_{timestamp}"
+        )
 
     def _api_route_artifacts_payload(self) -> list[dict[str, object]]:
         return self._api_route_artifacts_store().public_payloads()
 
     def _api_route_artifacts_store(self) -> ApiRouteArtifactsStore:
-        return ApiRouteArtifactsStore(artifacts=self._api_route_artifacts, lock=self._api_route_artifacts_lock)
+        return ApiRouteArtifactsStore(
+            artifacts=self._api_route_artifacts, lock=self._api_route_artifacts_lock
+        )
 
-    def _capture_api_route_photo_artifact(self, point: RouteMeasurementPoint, position: int, total: int, focus_result: object | None) -> str:
+    def _capture_api_route_photo_artifact(
+        self,
+        point: RouteMeasurementPoint,
+        position: int,
+        total: int,
+        focus_result: object | None,
+    ) -> str:
         before_counter = self._latest_camera_counter()
-        frame, _counter = self._wait_for_camera_frame(after_counter=before_counter, timeout_s=2.0)
+        frame, _counter = self._wait_for_camera_frame(
+            after_counter=before_counter, timeout_s=2.0
+        )
         photo = self._qimage_telegram_photo(frame) or self._latest_camera_frame_photo()
         if photo is None:
             raise RuntimeError("Camera frame is unavailable.")
         photo_bytes, photo_name = photo
-        artifact_id = self._api_route_artifacts_store().add(data=photo_bytes, filename=photo_name, content_type=api_route_photo_content_type(photo_name), kind="route_photo", metadata=api_route_photo_artifact_metadata(point, position=position, total=total, contact_number=self._api_structure_number_for_measurement_point(point), focus_result=route_photo_focus_payload(focus_result)), created_at_utc=self._api_timestamp_utc())
+        artifact_id = self._api_route_artifacts_store().add(
+            data=photo_bytes,
+            filename=photo_name,
+            content_type=api_route_photo_content_type(photo_name),
+            kind="route_photo",
+            metadata=api_route_photo_artifact_metadata(
+                point,
+                position=position,
+                total=total,
+                contact_number=self._api_structure_number_for_measurement_point(point),
+                focus_result=route_photo_focus_payload(focus_result),
+            ),
+            created_at_utc=self._api_timestamp_utc(),
+        )
         if self._route_telegram_adapter().consume_route_photo_request():
-            self._send_telegram_bot_message(route_requested_photo_caption(position=int(position), total=int(total), structure_number=self._api_structure_number_for_measurement_point(point), label=point.label), photo=(photo_bytes, photo_name), reply_markup=self._telegram_default_markup())
+            self._send_telegram_bot_message(
+                route_requested_photo_caption(
+                    position=int(position),
+                    total=int(total),
+                    structure_number=self._api_structure_number_for_measurement_point(
+                        point
+                    ),
+                    label=point.label,
+                ),
+                photo=(photo_bytes, photo_name),
+                reply_markup=self._telegram_default_markup(),
+            )
         return artifact_id
 
     def _api_route_photo_autofocus(
@@ -3778,8 +3857,7 @@ class Main(QMainWindow):
         range_mm: float,
     ) -> object:
         self.route_measurement_status.emit(
-            "Route photo autofocus: "
-            f"point {position}/{total}, +/-{range_mm:.3f} mm."
+            f"Route photo autofocus: point {position}/{total}, +/-{range_mm:.3f} mm."
         )
         return self.stage_controller.run_external_local_autofocus(
             range_mm=range_mm,
@@ -3794,8 +3872,7 @@ class Main(QMainWindow):
             ),
             route=self._design_session.route,
             registration=(
-                self._coordinate_system_coordinator.snapshot()
-                .registration.registration_projection
+                self._coordinate_system_coordinator.snapshot().registration.registration_projection
             ),
             points_factory=self._route_measurement_points,
             route_offset_xy=getattr(self, "_api_route_offset_xy", (0.0, 0.0)),
@@ -4365,12 +4442,16 @@ class Main(QMainWindow):
     def _camera_stage_xy_from_raw_stage_xy(
         self, raw_stage_xy: tuple[float, float]
     ) -> tuple[float, float]:
-        return offsets.raw_stage_to_camera_stage(raw_stage_xy, self._active_objective_xy_offset())
+        return offsets.raw_stage_to_camera_stage(
+            raw_stage_xy, self._active_objective_xy_offset()
+        )
 
     def _raw_stage_xy_from_camera_stage_xy(
         self, camera_stage_xy: tuple[float, float]
     ) -> tuple[float, float]:
-        return offsets.camera_stage_to_raw_stage(camera_stage_xy, self._active_objective_xy_offset())
+        return offsets.camera_stage_to_raw_stage(
+            camera_stage_xy, self._active_objective_xy_offset()
+        )
 
     def _rotation_geometry_snapshot(self) -> RotationGeometrySnapshot:
         try:
@@ -4467,7 +4548,9 @@ class Main(QMainWindow):
                 self.stage_controller.latest_stage_position(),
             )
             stage_position_panel_adapter.refresh_coordinate_frame_display(self)
-            self._show_status("Cleared pending coordinate edits after input mode change.", 2000)
+            self._show_status(
+                "Cleared pending coordinate edits after input mode change.", 2000
+            )
         self._update_stage_coordinate_apply_state()
 
     def _on_software_coordinate_system_changed(self, frame_id: str) -> None:
@@ -4538,26 +4621,29 @@ class Main(QMainWindow):
 
     def _controller_latest_state_is_stale(self) -> bool:
         age_s = self._controller_latest_state_age_s()
-        return (
-            age_s is not None
-            and age_s > self.CONTROLLER_ACTIVE_STATE_STALE_S
-        )
+        return age_s is not None and age_s > self.CONTROLLER_ACTIVE_STATE_STALE_S
 
     def _schedule_cancel_state_refresh(self) -> None:
         for delay_ms in (0, 100, 300, 1000, 2500):
             QTimer.singleShot(delay_ms, self._update_stage_coordinate_apply_state)
 
-    def _update_stage_coordinate_apply_state(self, _pending: bool | None = None) -> None:
+    def _update_stage_coordinate_apply_state(
+        self, _pending: bool | None = None
+    ) -> None:
         panel = getattr(self, "_stage_position_panel", None)
         if panel is None:
             return
-        controller_busy = hasattr(self, "stage_controller") and self.stage_controller.is_busy()
+        controller_busy = (
+            hasattr(self, "stage_controller") and self.stage_controller.is_busy()
+        )
         active = self._coordinate_targets.has_active_move() or controller_busy
         available = panel.has_pending_or_modified_fields()
         panel.set_action_buttons_enabled(
             available
             and not active
-            and stage_position_panel_adapter.gui_coordinate_motion_editing_enabled(self),
+            and stage_position_panel_adapter.gui_coordinate_motion_editing_enabled(
+                self
+            ),
             available or stage_move_lifecycle.has_cancelable_operation(self),
         )
 
@@ -4648,7 +4734,9 @@ class Main(QMainWindow):
         except (TypeError, ValueError):
             return
         if len(normalized) < 2 or len(set(normalized)) < 2:
-            self._show_status("Align requires at least two distinct design points.", 5000)
+            self._show_status(
+                "Align requires at least two distinct design points.", 5000
+            )
             return
         coordinate_snapshot = self._coordinate_system_coordinator.snapshot()
         frame_id = coordinate_snapshot.registration.active_frame_id
@@ -4677,8 +4765,10 @@ class Main(QMainWindow):
         if record is None:
             self._show_status("Design coordinate frame is unavailable.", 6000)
             return
-        transition = self._coordinate_system_coordinator.replace_registration_source_marks(
-            RegistrationSourceMarksRequest(normalized)
+        transition = (
+            self._coordinate_system_coordinator.replace_registration_source_marks(
+                RegistrationSourceMarksRequest(normalized)
+            )
         )
         coordinate_flow.apply_coordinate_transition(self, transition)
         self._alignment_design_draft = normalized
@@ -4733,9 +4823,7 @@ class Main(QMainWindow):
             "latest_machine_coordinate_snapshot",
             None,
         )
-        machine_snapshot = (
-            latest_snapshot() if callable(latest_snapshot) else None
-        )
+        machine_snapshot = latest_snapshot() if callable(latest_snapshot) else None
         self._latest_physical_machine_pose = (
             machine_snapshot.physical_machine_pose
             if machine_snapshot is not None
@@ -4813,8 +4901,7 @@ class Main(QMainWindow):
             != existing_coordinates.custom_frames
         )
         pivot_changed = (
-            settings_to_apply.software_coordinates.pivot
-            != existing_coordinates.pivot
+            settings_to_apply.software_coordinates.pivot != existing_coordinates.pivot
         )
         axis_calibrations_changed = (
             settings_to_apply.axis_calibrations
@@ -4840,9 +4927,7 @@ class Main(QMainWindow):
             frame_id = coordinate_snapshot.registration.active_frame_id
             if frame_id is not None:
                 try:
-                    rotation_geometry_snapshot(
-                        settings_to_apply.software_coordinates
-                    )
+                    rotation_geometry_snapshot(settings_to_apply.software_coordinates)
                     snapshot = stage_controller.latest_machine_coordinate_snapshot()
                     if snapshot is None:
                         raise DesignModelError(
@@ -4856,8 +4941,7 @@ class Main(QMainWindow):
                     )
                     pivot_changed = False
                     coordinates_changed = (
-                        settings_to_apply.software_coordinates
-                        != existing_coordinates
+                        settings_to_apply.software_coordinates != existing_coordinates
                     )
                     self._show_status(str(exc), 6000)
         current_objectives = self.settings_manager.objectives_configuration()
@@ -4919,11 +5003,7 @@ class Main(QMainWindow):
             self._apply_settings(apply_objective_runtime=False)
         else:
             self._apply_settings()
-        if (
-            pivot_changed
-            or objective_authority_changed
-            or axis_calibrations_changed
-        ):
+        if pivot_changed or objective_authority_changed or axis_calibrations_changed:
             coordinate_flow.observe_coordinate_authority(self)
         if active_objective_update_rejected:
             self._show_status(
@@ -5032,7 +5112,9 @@ class Main(QMainWindow):
         combo = self._objective_combo
         if combo is None:
             return
-        current_names = [str(combo.itemData(index) or "") for index in range(combo.count())]
+        current_names = [
+            str(combo.itemData(index) or "") for index in range(combo.count())
+        ]
         plan = alignment.objective_combo_sync_plan(
             current_names, self._objective_names(), objective_name
         )
@@ -5134,17 +5216,21 @@ class Main(QMainWindow):
             self.stage_controller.latest_stage_position(),
             self.stage_controller.is_busy(),
             display_axis_value_from_raw=(
-                lambda axis, raw: stage_position_panel_adapter.display_axis_value_from_raw(
-                    self,
-                    axis,
-                    raw,
+                lambda axis, raw: (
+                    stage_position_panel_adapter.display_axis_value_from_raw(
+                        self,
+                        axis,
+                        raw,
+                    )
                 )
             ),
             raw_axis_value_from_display=(
-                lambda axis, display: stage_position_panel_adapter.raw_axis_value_from_display(
-                    self,
-                    axis,
-                    display,
+                lambda axis, display: (
+                    stage_position_panel_adapter.raw_axis_value_from_display(
+                        self,
+                        axis,
+                        display,
+                    )
                 )
             ),
         )
@@ -5167,7 +5253,9 @@ class Main(QMainWindow):
         active_objective, objectives = alignment.active_objective_configuration(
             objective_settings
         )
-        self.stage_controller.apply_objective_configuration(active_objective, objectives)
+        self.stage_controller.apply_objective_configuration(
+            active_objective, objectives
+        )
         self._sync_objective_combo(objective_settings.active_name)
         self._refresh_objective_calibration_ui()
         if self._design_session.document is not None:
@@ -5212,7 +5300,9 @@ class Main(QMainWindow):
             dialog.reset_requested.connect(self._reset_click_calibration)
             dialog.add_requested.connect(self._add_objective_profile)
             dialog.delete_requested.connect(self._delete_objective_profile)
-            dialog.offset_reference_requested.connect(self._set_objective_offset_reference)
+            dialog.offset_reference_requested.connect(
+                self._set_objective_offset_reference
+            )
             dialog.offset_save_requested.connect(self._save_active_objective_offset)
             dialog.offset_reset_requested.connect(self._reset_active_objective_offset)
             self._click_calibration_dialog = dialog
@@ -5260,8 +5350,7 @@ class Main(QMainWindow):
             active_name,
             flat_field_configured=flat_field_configured,
             lens_configured=bool(
-                profile is not None
-                and profile.distortion_correction_configured
+                profile is not None and profile.distortion_correction_configured
             ),
         )
         if not self._optical_calibration_wizard.prepare(mode):
@@ -5289,7 +5378,9 @@ class Main(QMainWindow):
         if self._objective_mutation_busy():
             self._show_status("Stage is busy; objective not added.", 4000)
             return
-        raw_name, accepted = QInputDialog.getText(self, "Add Objective", "Objective name")
+        raw_name, accepted = QInputDialog.getText(
+            self, "Add Objective", "Objective name"
+        )
         if not accepted:
             return
         if self._objective_mutation_busy():
@@ -5317,8 +5408,11 @@ class Main(QMainWindow):
             self._show_plan_status(preflight)
             return
         response = QMessageBox.question(
-            self, "Delete Objective", f"Delete objective profile {name}?",
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+            self,
+            "Delete Objective",
+            f"Delete objective profile {name}?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
         )
         if response != QMessageBox.Yes:
             return
@@ -5333,7 +5427,9 @@ class Main(QMainWindow):
 
     def _set_objective_offset_reference(self) -> None:
         if self._objective_mutation_busy():
-            self._show_status("Stage is busy; objective offset reference not set.", 4000)
+            self._show_status(
+                "Stage is busy; objective offset reference not set.", 4000
+            )
             return
         raw_stage_xy = self._resolve_alignment_capture_stage_position()
         if raw_stage_xy is None:
@@ -5361,7 +5457,9 @@ class Main(QMainWindow):
         if raw_stage_xy is None:
             return
         plan = alignment.save_active_objective_offset(
-            self.settings_manager.settings, self._objective_offset_reference, raw_stage_xy
+            self.settings_manager.settings,
+            self._objective_offset_reference,
+            raw_stage_xy,
         )
         self._persist_objective_plan(plan)
 
@@ -5390,9 +5488,7 @@ class Main(QMainWindow):
             lens_action.setText("Lens Distortion Calibration")
         lens_dialog = getattr(self, "_lens_distortion_dialog", None)
         if lens_dialog is not None:
-            lens_dialog.set_objectives(
-                self.settings_manager.objectives_configuration()
-            )
+            lens_dialog.set_objectives(self.settings_manager.objectives_configuration())
 
     def _refresh_objective_calibration_ui(self) -> None:
         self._refresh_click_calibration_ui()
@@ -5405,19 +5501,26 @@ class Main(QMainWindow):
         run_id = wizard.active_run_id()
         full_wizard = wizard.mode() is OpticalCalibrationMode.FULL
         if not self._optical_calibration_objective_matches_wizard(wizard):
-            wizard.set_flat_field_result(False, "Active objective changed. Reopen optical calibration.", run_id=run_id)
+            wizard.set_flat_field_result(
+                False,
+                "Active objective changed. Reopen optical calibration.",
+                run_id=run_id,
+            )
             return
-        if self._start_flat_field_calibration(wizard_run_id=run_id, full_wizard=full_wizard):
+        if self._start_flat_field_calibration(
+            wizard_run_id=run_id, full_wizard=full_wizard
+        ):
             return
         if full_wizard:
             self._cancel_optical_calibration_wizard(run_id)
-        wizard.set_flat_field_result(False, "Flat-field calibration did not start.", run_id=run_id)
+        wizard.set_flat_field_result(
+            False, "Flat-field calibration did not start.", run_id=run_id
+        )
 
     def _cancel_optical_calibration_wizard(self, _run_id: object = None) -> None:
         wizard = self._optical_calibration_wizard
-        if (
-            _run_id is not None
-            and (wizard is None or wizard.active_run_id() != _run_id)
+        if _run_id is not None and (
+            wizard is None or wizard.active_run_id() != _run_id
         ):
             return
         self._optical_calibration_runtime.cancel()
@@ -5438,12 +5541,20 @@ class Main(QMainWindow):
         if not self._optical_calibration_objective_matches_wizard(wizard):
             if full_wizard:
                 self._cancel_optical_calibration_wizard(run_id)
-            wizard.set_lens_distortion_result(False, "Active objective changed. Reopen optical calibration.", run_id=run_id)
+            wizard.set_lens_distortion_result(
+                False,
+                "Active objective changed. Reopen optical calibration.",
+                run_id=run_id,
+            )
             return
         state = self._optical_calibration_runtime.state()
         parent_token = state.parent_session_token if full_wizard else None
         if full_wizard and parent_token is None:
-            wizard.set_lens_distortion_result(False, "Optical calibration exposure session is unavailable.", run_id=run_id)
+            wizard.set_lens_distortion_result(
+                False,
+                "Optical calibration exposure session is unavailable.",
+                run_id=run_id,
+            )
             return
         result = self._start_lens_distortion_calibration(
             wizard_run_id=run_id,
@@ -5530,6 +5641,7 @@ class Main(QMainWindow):
                 bool(success), str(message), run_id=outcome.wizard_run_id
             )
         self._show_status(str(message), 10000 if success else 8000)
+
     def _start_lens_distortion_calibration(
         self,
         *,
@@ -5591,6 +5703,7 @@ class Main(QMainWindow):
             max_residual_mean_px=self.LENS_DISTORTION_MAX_RESIDUAL_MEAN_PX,
             max_residual_max_px=self.LENS_DISTORTION_MAX_RESIDUAL_MAX_PX,
         )
+
     def _reset_lens_distortion_calibration(self) -> tuple[bool, str]:
         active_name = normalize_objective_name(
             self.settings_manager.settings.objectives.active_name
@@ -5668,6 +5781,7 @@ class Main(QMainWindow):
             presentation.message,
             10000 if presentation.success else 8000,
         )
+
     def _save_active_objective_distortion(
         self,
         payload: object | None,
@@ -5698,9 +5812,8 @@ class Main(QMainWindow):
         objective_name = normalize_objective_name(objective_name)
         if not objective_name:
             raise RuntimeError("No active objective selected.")
-        if (
-            optical_context is not None
-            and not isinstance(optical_context, OpticalCalibrationOutcome)
+        if optical_context is not None and not isinstance(
+            optical_context, OpticalCalibrationOutcome
         ):
             raise RuntimeError(
                 "Optical calibration result was canceled or is no longer current."
@@ -5852,10 +5965,7 @@ class Main(QMainWindow):
         except Exception as exc:
             logger.exception("Unable to persist accepted click calibration")
             self._reject_objective_calibration_candidate(task_token)
-            message = (
-                "Click-to-move calibration could not be saved: "
-                f"{exc}"
-            )
+            message = f"Click-to-move calibration could not be saved: {exc}"
             try:
                 self.settings_manager.replace_and_save(
                     previous_settings,
@@ -5899,7 +6009,9 @@ class Main(QMainWindow):
                 f"Settings restore failed: {exc}"
             )
         else:
-            message = "Click-to-move calibration was cancelled before it could be applied."
+            message = (
+                "Click-to-move calibration was cancelled before it could be applied."
+            )
         self._show_status(message, 7000)
 
     def _reject_objective_calibration_candidate(self, task_token: object) -> None:
@@ -5996,15 +6108,15 @@ class Main(QMainWindow):
         return 2
 
     def _design_window_is_open(self) -> bool:
-        return self.design_layout_window is not None and self.design_layout_window.isVisible()
+        return (
+            self.design_layout_window is not None
+            and self.design_layout_window.isVisible()
+        )
 
     def _collapse_alignment_panel_if_ready(self) -> None:
         if self.alignment_dock is None or not self._design_window_is_open():
             return
-        if (
-            self._coordinate_system_coordinator.snapshot()
-            .registration.registration_valid
-        ):
+        if self._coordinate_system_coordinator.snapshot().registration.registration_valid:
             self.alignment_dock.set_collapsed(True)
 
     def _collapse_alignment_panel_if_design_open(self) -> None:
@@ -6045,8 +6157,7 @@ class Main(QMainWindow):
         if isinstance(context, _ManualAlignmentCaptureContext):
             context.cancelled.set()
             self.stage_controller.cancel_clicked_point_resolution(
-                context.request_id,
-                "Alignment point capture cancelled."
+                context.request_id, "Alignment point capture cancelled."
             )
         self._manual_alignment_pick_slot = None
         self._refresh_manual_alignment_ui()
@@ -6064,15 +6175,11 @@ class Main(QMainWindow):
 
     def _reset_alignment_capture_points(self) -> None:
         if self._design_backed_alignment_active():
-            transition = (
-                self._coordinate_system_coordinator.clear_registration_source_stage_marks()
-            )
+            transition = self._coordinate_system_coordinator.clear_registration_source_stage_marks()
             coordinate_flow.apply_coordinate_transition(self, transition)
             self._pending_alignment_preparation = None
             self._pending_quick_alignment_rotation = False
-            self._alignment_stage_draft = [None] * len(
-                self._alignment_design_draft
-            )
+            self._alignment_stage_draft = [None] * len(self._alignment_design_draft)
             self._alignment_draft_fit_residuals = None
             self._set_design_snap_enabled(True)
         else:
@@ -6098,7 +6205,9 @@ class Main(QMainWindow):
                 latest_position=self.stage_controller.latest_stage_position(),
             )
         else:
-            plan = alignment.alignment_capture_position_plan(stage_position=stage_position)
+            plan = alignment.alignment_capture_position_plan(
+                stage_position=stage_position
+            )
         if plan.request_status_refresh:
             self.stage_controller.request_status_refresh()
         if plan.status:
@@ -6215,7 +6324,10 @@ class Main(QMainWindow):
         ):
             return
         self._manual_alignment_capture_context = None
-        if context.cancelled.is_set() or self._manual_alignment_pick_slot != context.slot:
+        if (
+            context.cancelled.is_set()
+            or self._manual_alignment_pick_slot != context.slot
+        ):
             self._refresh_manual_alignment_ui()
             self._update_stage_coordinate_apply_state()
             return
@@ -6233,7 +6345,9 @@ class Main(QMainWindow):
         except (IndexError, TypeError, ValueError):
             self._refresh_manual_alignment_ui()
             self._update_stage_coordinate_apply_state()
-            self._show_status("Alignment point capture returned invalid coordinates.", 5000)
+            self._show_status(
+                "Alignment point capture returned invalid coordinates.", 5000
+            )
             return
         self._update_coordinate_display(center_xy=center, cursor_xy=captured)
         self._capture_manual_alignment_point(context.slot, captured, source="image")
@@ -6256,7 +6370,8 @@ class Main(QMainWindow):
         self._update_stage_coordinate_apply_state()
 
         plan = alignment.manual_alignment_capture_plan(
-            slot, captured,
+            slot,
+            captured,
             source=source,
             manual_points=self._manual_alignment_points,
             target_angles=self.ALIGNMENT_TARGET_ANGLES,
@@ -6302,8 +6417,10 @@ class Main(QMainWindow):
         if plan.points is not None:
             self._manual_alignment_points = plan.points
         if plan.apply_prepared_alignment and plan.preparation is not None:
-            transition = self._coordinate_system_coordinator.apply_registration_alignment(
-                RegistrationAlignmentRequest(plan.preparation)
+            transition = (
+                self._coordinate_system_coordinator.apply_registration_alignment(
+                    RegistrationAlignmentRequest(plan.preparation)
+                )
             )
             coordinate_flow.apply_coordinate_transition(self, transition)
             self._finish_alignment_draft()
@@ -6322,7 +6439,10 @@ class Main(QMainWindow):
             (plan.refresh_design_position, self._refresh_design_position),
             (plan.expand_alignment, self._set_alignment_panel_expanded),
             (plan.collapse_alignment_if_ready, self._collapse_alignment_panel_if_ready),
-            (plan.collapse_alignment_if_design_open, self._collapse_alignment_panel_if_design_open),
+            (
+                plan.collapse_alignment_if_design_open,
+                self._collapse_alignment_panel_if_design_open,
+            ),
         ):
             if enabled:
                 callback()
@@ -6363,8 +6483,7 @@ class Main(QMainWindow):
                 getattr(self, "_manual_alignment_capture_context", None) is not None
             )
             self.alignment_panel.set_registration_status(
-                self._coordinate_system_coordinator.snapshot()
-                .registration.registration_status
+                self._coordinate_system_coordinator.snapshot().registration.registration_status
             )
             if self._alignment_draft_fit_residuals is not None:
                 self.alignment_panel.set_fit_residuals(
@@ -6396,8 +6515,7 @@ class Main(QMainWindow):
     def _can_display_design_position(self) -> bool:
         return bool(
             self._design_session.document is not None
-            and self._coordinate_system_coordinator.snapshot()
-            .registration.registration_valid
+            and self._coordinate_system_coordinator.snapshot().registration.registration_valid
         )
 
     def _format_coordinate_label(
@@ -6425,7 +6543,9 @@ class Main(QMainWindow):
     def _resolve_coordinate_systems(
         self, fluidnc_xy: tuple[float, float]
     ) -> dict[str, tuple[float, float]]:
-        coordinates = {f"FluidNC {self.stage_controller.coordinate_display_name()}": fluidnc_xy}
+        coordinates = {
+            f"FluidNC {self.stage_controller.coordinate_display_name()}": fluidnc_xy
+        }
         chip_xy = self._resolve_chip_coordinates(fluidnc_xy)
         if chip_xy is not None:
             coordinates["Chip/Stage registered"] = chip_xy
@@ -6437,10 +6557,7 @@ class Main(QMainWindow):
     def _resolve_chip_coordinates(
         self, fluidnc_xy: tuple[float, float]
     ) -> tuple[float, float] | None:
-        registration = (
-            self._coordinate_system_coordinator.snapshot()
-            .registration.registration_projection
-        )
+        registration = self._coordinate_system_coordinator.snapshot().registration.registration_projection
         if registration is None or not registration.valid:
             return None
         if not registration.source_stage_marks:
@@ -6496,7 +6613,9 @@ class Main(QMainWindow):
             current_design_stage_xy=self._current_design_stage_xy,
         )
         if result.zero_distance:
-            logger.debug("MOTION PREDICTION stop_requested command=%s", commanded_distances)
+            logger.debug(
+                "MOTION PREDICTION stop_requested command=%s", commanded_distances
+            )
             self._manual_jog_timer.stop()
             stage_position_panel_adapter.clear_stage_motion_axes(self)
             self._schedule_status_refreshes(self.MANUAL_JOG_SETTLE_POLL_DELAYS_MS)
@@ -6564,8 +6683,10 @@ class Main(QMainWindow):
         if self.serial_terminal_panel is not None and result.resume_live_poll:
             QTimer.singleShot(
                 self.TERMINAL_RESUME_AFTER_JOG_MS,
-                lambda: self.serial_terminal_panel
-                and self.serial_terminal_panel.set_live_poll_paused(False),
+                lambda: (
+                    self.serial_terminal_panel
+                    and self.serial_terminal_panel.set_live_poll_paused(False)
+                ),
             )
         if result.schedule_status_refreshes:
             self._schedule_status_refreshes(self.MANUAL_JOG_SETTLE_POLL_DELAYS_MS)
@@ -6803,7 +6924,9 @@ class Main(QMainWindow):
                     float(selector(axes_tuple)),
                 )
             except (TypeError, ValueError):
-                logger.exception("Invalid coordinate feedrate selected for %s.", axes_tuple)
+                logger.exception(
+                    "Invalid coordinate feedrate selected for %s.", axes_tuple
+                )
         return max(self.MIN_FEEDRATE_MM_MIN, float(self._current_linear_feedrate()))
 
     def _current_needle_feedrate(self) -> float:
@@ -7023,7 +7146,9 @@ class Main(QMainWindow):
             logger.error("Autofocus failed: %s", message)
         self._schedule_cancel_state_refresh()
 
-    def on_calibration_changed(self, mm_per_pixel_x: float, mm_per_pixel_y: float) -> None:
+    def on_calibration_changed(
+        self, mm_per_pixel_x: float, mm_per_pixel_y: float
+    ) -> None:
         self._show_status(
             f"Calibration: ΔX {mm_per_pixel_x:.6f} mm/px, ΔY {mm_per_pixel_y:.6f} mm/px",
             5000,
@@ -7035,9 +7160,8 @@ class Main(QMainWindow):
         sender = self.sender()
         if not checked:
             # Only exit if no other measure action is checked
-            if (
-                (self._ruler_action is None or not self._ruler_action.isChecked())
-                and (self._rect_action is None or not self._rect_action.isChecked())
+            if (self._ruler_action is None or not self._ruler_action.isChecked()) and (
+                self._rect_action is None or not self._rect_action.isChecked()
             ):
                 self.view.set_measure_mode(None)
             return
@@ -7063,10 +7187,16 @@ class Main(QMainWindow):
                 action.blockSignals(False)
 
     def _load_design_document(self, design_path: str) -> None:
-        self._start_design_document_load(design_path, restore_state=None, show_window=True)
+        self._start_design_document_load(
+            design_path, restore_state=None, show_window=True
+        )
 
     def _start_design_document_load(
-        self, design_path: str, *, restore_state: dict[str, object] | None, show_window: bool
+        self,
+        design_path: str,
+        *,
+        restore_state: dict[str, object] | None,
+        show_window: bool,
     ) -> None:
         transition = self._coordinate_system_coordinator.cancel_registration(
             RegistrationCancellation.DESIGN_CHANGED
@@ -7088,29 +7218,57 @@ class Main(QMainWindow):
         elif self.design_navigator_panel:
             self.design_navigator_panel.set_status_message("Loading design...")
         self._show_status(f"Loading design '{Path(path_text).name}'...")
+
         def load_design() -> None:
             try:
+                if restore_state is not None and not persisted_design_source_is_current(
+                    restore_state
+                ):
+                    raise DesignModelError(
+                        "Cached design file changed or is unavailable. "
+                        "Cleared cached design selection."
+                    )
                 document = DesignDocument.load(path_text)
+                prepared_restore = None
+                if restore_state is not None:
+                    document = document_with_persisted_session_view(
+                        document,
+                        restore_state,
+                    )
+                    prepared_restore = prepare_persisted_session_restore(
+                        document,
+                        restore_state,
+                    )
                 frame_metadata = DesignFrameMetadata.from_document(document)
             except Exception as exc:
                 self.design_document_loaded.emit(generation, None, exc)
                 return
             self.design_document_loaded.emit(
                 generation,
-                _LoadedDesignDocument(document, frame_metadata),
+                _LoadedDesignDocument(
+                    document,
+                    frame_metadata,
+                    prepared_restore,
+                ),
                 None,
             )
 
-        threading.Thread(target=load_design, name="DesignDocumentLoad", daemon=True).start()
+        threading.Thread(
+            target=load_design, name="DesignDocumentLoad", daemon=True
+        ).start()
 
-    def _on_design_document_loaded(self, generation: int, document: object, error: object) -> None:
+    def _on_design_document_loaded(
+        self, generation: int, document: object, error: object
+    ) -> None:
         if generation != self._design_load_generation:
             return
         restore_state = self._design_load_restore_states.pop(generation, None)
         show_window = self._design_load_show_window.pop(generation, True)
         frame_metadata = None
+        prepared_restore = None
         if isinstance(document, _LoadedDesignDocument):
             frame_metadata = document.frame_metadata
+            prepared_restore = document.prepared_restore
             document = document.document
         candidate_session = self._snapshot_design_session()
         previous_markup = getattr(self, "_design_markup", None)
@@ -7120,6 +7278,7 @@ class Main(QMainWindow):
                 document,
                 error,
                 restore_state,
+                prepared_restore,
             )
         except DesignModelError as exc:
             self._set_design_load_pending_ui(False)
@@ -7154,7 +7313,9 @@ class Main(QMainWindow):
         candidate.apply_state(self._design_session.snapshot_state())
         return candidate
 
-    def _apply_design_load_success_plan(self, plan: design_navigation.DesignLoadResultPlan, show_window: bool) -> None:
+    def _apply_design_load_success_plan(
+        self, plan: design_navigation.DesignLoadResultPlan, show_window: bool
+    ) -> None:
         self._reset_manual_alignment(cancel_pick=True)
         self._pending_alignment_preparation = None
         self._last_selected_design_point = plan.last_selected_design_point
@@ -7162,7 +7323,9 @@ class Main(QMainWindow):
         if plan.document_directory is not None:
             self.settings_manager.set_design_last_directory(plan.document_directory)
             if self.design_navigator_panel is not None:
-                self.design_navigator_panel.set_design_dialog_directory(plan.document_directory)
+                self.design_navigator_panel.set_design_dialog_directory(
+                    plan.document_directory
+                )
         if self.design_layout_window is not None and show_window:
             self.design_layout_window.set_status_message("Rendering design...")
             QApplication.processEvents()
@@ -7174,7 +7337,9 @@ class Main(QMainWindow):
         self._show_navigation_status(plan)
         self._restore_route_measurement_state_after_design_load()
 
-    def _apply_design_load_failure_plan(self, plan: design_navigation.DesignLoadResultPlan, show_window: bool) -> None:
+    def _apply_design_load_failure_plan(
+        self, plan: design_navigation.DesignLoadResultPlan, show_window: bool
+    ) -> None:
         message = plan.status_message or ""
         self._show_status(message, plan.status_timeout_ms)
         if self.design_layout_window is not None and show_window:
@@ -7195,9 +7360,9 @@ class Main(QMainWindow):
         return store
 
     def _next_design_markup_request_id(self) -> int:
-        self._design_markup_request_id = int(
-            getattr(self, "_design_markup_request_id", 0)
-        ) + 1
+        self._design_markup_request_id = (
+            int(getattr(self, "_design_markup_request_id", 0)) + 1
+        )
         return self._design_markup_request_id
 
     def _begin_design_markup_load(
@@ -7384,9 +7549,7 @@ class Main(QMainWindow):
         message_box = QMessageBox(self)
         message_box.setIcon(QMessageBox.Icon.Warning)
         message_box.setWindowTitle("Design Markup")
-        message_box.setText(
-            f"'{source_path.name}' changed since its Markup was saved."
-        )
+        message_box.setText(f"'{source_path.name}' changed since its Markup was saved.")
         message_box.setInformativeText(
             "Keep the existing guides, start with an empty Markup, or cancel loading."
         )
@@ -7416,9 +7579,8 @@ class Main(QMainWindow):
             for attribute in ("request_id", "operation", "source_path", "message")
         ):
             return
-        if (
-            failure.operation == "load"
-            and failure.request_id == getattr(self, "_design_markup_load_request_id", None)
+        if failure.operation == "load" and failure.request_id == getattr(
+            self, "_design_markup_load_request_id", None
         ):
             self._design_markup_load_request_id = None
             context = getattr(self, "_design_markup_load_contexts", {}).pop(
@@ -7465,12 +7627,10 @@ class Main(QMainWindow):
     def _prune_design_guide_undo_stack(self) -> list[str]:
         markup = getattr(self, "_design_markup", None)
         direct_ids = getattr(self, "_design_markup_direct_guide_ids", [])
-        current_ids = {
-            guide.id for guide in markup.guides
-        } if markup is not None else set()
-        direct_ids[:] = [
-            guide_id for guide_id in direct_ids if guide_id in current_ids
-        ]
+        current_ids = (
+            {guide.id for guide in markup.guides} if markup is not None else set()
+        )
+        direct_ids[:] = [guide_id for guide_id in direct_ids if guide_id in current_ids]
         return direct_ids
 
     def _publish_design_markup(self) -> None:
@@ -7522,7 +7682,13 @@ class Main(QMainWindow):
         if message is not None:
             self._show_status(message, getattr(plan, "status_timeout_ms", 5000))
 
-    def _apply_route_edit_plan(self, plan: route_editing.RouteEditPlan, *, empty_selection: bool = False, update_selection: bool = True) -> bool:
+    def _apply_route_edit_plan(
+        self,
+        plan: route_editing.RouteEditPlan,
+        *,
+        empty_selection: bool = False,
+        update_selection: bool = True,
+    ) -> bool:
         if not plan.accepted:
             self._show_navigation_status(plan)
             return False
@@ -7598,7 +7764,9 @@ class Main(QMainWindow):
         self._refresh_design_position()
         self._show_navigation_status(plan)
 
-    def _set_design_layer_visibility(self, layer: int, datatype: int, visible: bool) -> None:
+    def _set_design_layer_visibility(
+        self, layer: int, datatype: int, visible: bool
+    ) -> None:
         if not self._design_mutation_ready():
             return
         candidate_session = self._snapshot_design_session()
@@ -7631,10 +7799,7 @@ class Main(QMainWindow):
         if document is None:
             self._show_status("Load a design before rotating it.", 4000)
             return
-        if (
-            self._coordinate_system_coordinator.snapshot()
-            .registration.registration_valid
-        ):
+        if self._coordinate_system_coordinator.snapshot().registration.registration_valid:
             self._show_status(
                 "Clear design registration before rotating the design.",
                 5000,
@@ -7648,7 +7813,9 @@ class Main(QMainWindow):
             return
         route_measurement_thread = getattr(self, "_route_measurement_thread", None)
         if route_measurement_thread is not None and route_measurement_thread.is_alive():
-            self._show_status("Stop route measurement before rotating the design.", 5000)
+            self._show_status(
+                "Stop route measurement before rotating the design.", 5000
+            )
             return
         delta = int(quarter_turn_delta) % 4
         if delta == 0:
@@ -7708,7 +7875,9 @@ class Main(QMainWindow):
         if not self._design_mutation_ready():
             return
         try:
-            plan = route_editing.load_measurement_route(self._design_session, route_path)
+            plan = route_editing.load_measurement_route(
+                self._design_session, route_path
+            )
         except DesignModelError as exc:
             self._show_status(str(exc), 7000)
             return
@@ -7730,7 +7899,9 @@ class Main(QMainWindow):
         if not self._design_mutation_ready():
             return
         try:
-            plan = route_editing.save_measurement_route(self._design_session, route_path)
+            plan = route_editing.save_measurement_route(
+                self._design_session, route_path
+            )
         except DesignModelError as exc:
             self._show_status(str(exc), 5000)
             return
@@ -7741,7 +7912,9 @@ class Main(QMainWindow):
             self._show_status("Design editing is locked.", 4000)
             return
         try:
-            plan = route_editing.add_design_route_point(self._design_session, x_value, y_value)
+            plan = route_editing.add_design_route_point(
+                self._design_session, x_value, y_value
+            )
         except DesignModelError as exc:
             self._show_status(str(exc), 5000)
             return
@@ -7826,9 +7999,7 @@ class Main(QMainWindow):
         markup = getattr(self, "_design_markup", None)
         if markup is None or not markup.guides:
             return
-        self._design_markup = markup.remove_ids(
-            {guide.id for guide in markup.guides}
-        )
+        self._design_markup = markup.remove_ids({guide.id for guide in markup.guides})
         self._design_markup_direct_guide_ids = []
         self._refresh_design_markup_ui()
         self._delete_persisted_design_markup(markup.source_path)
@@ -7918,17 +8089,35 @@ class Main(QMainWindow):
         self._add_design_route_point(design_xy[0], design_xy[1])
 
     def _add_route_array_points(
-        self, origin_x: float, origin_y: float, step_x_dx: float, step_x_dy: float,
-        count_x: int, step_y_dx: float, step_y_dy: float, count_y: int,
-        serpentine: bool, replace_existing: bool, selected_indices: object = None,
+        self,
+        origin_x: float,
+        origin_y: float,
+        step_x_dx: float,
+        step_x_dy: float,
+        count_x: int,
+        step_y_dx: float,
+        step_y_dy: float,
+        count_y: int,
+        serpentine: bool,
+        replace_existing: bool,
+        selected_indices: object = None,
     ) -> None:
         if not self._design_edit_safe():
             self._show_status("Design editing is locked.", 4000)
             return
         try:
             plan = route_editing.add_route_array_points(
-                self._design_session, origin_x, origin_y, step_x_dx, step_x_dy,
-                count_x, step_y_dx, step_y_dy, count_y, serpentine, replace_existing,
+                self._design_session,
+                origin_x,
+                origin_y,
+                step_x_dx,
+                step_x_dy,
+                count_x,
+                step_y_dx,
+                step_y_dy,
+                count_y,
+                serpentine,
+                replace_existing,
                 selected_indices,
             )
         except DesignModelError as exc:
@@ -8283,8 +8472,11 @@ class Main(QMainWindow):
             structure_number_for_point=self._api_structure_number_for_measurement_point,
             design_frame_snapshot=frame_snapshot,
         )
-        if decision.accepted and not self._coordinate_system_coordinator.design_lease_is_current(
-            frame_usability
+        if (
+            decision.accepted
+            and not self._coordinate_system_coordinator.design_lease_is_current(
+                frame_usability
+            )
         ):
             self._show_status(
                 "Design coordinate frame changed before route start.",
@@ -8322,18 +8514,15 @@ class Main(QMainWindow):
         if frame_id is None or frame_version is None:
             return None
         read = Main._request_design_contact_arm(
-            self,
-            FirstContactRequest(str(frame_id), int(frame_version))
+            self, FirstContactRequest(str(frame_id), int(frame_version))
         )
         if read is None:
             return None
 
         def capture(_placement: object):
             try:
-                coordinates = (
-                    self.stage_controller.run_external_current_physical_machine_coordinates(
-                        ("A",)
-                    )
+                coordinates = self.stage_controller.run_external_current_physical_machine_coordinates(
+                    ("A",)
                 )
                 physical_a = float(coordinates["A"])
                 result = PhysicalAReadResult(
@@ -8342,7 +8531,9 @@ class Main(QMainWindow):
                     physical_a_mm=physical_a,
                 )
             except (KeyError, TypeError, ValueError, RuntimeError) as exc:
-                logger.exception("Unable to read physical A for Design contact reference")
+                logger.exception(
+                    "Unable to read physical A for Design contact reference"
+                )
                 result = PhysicalAReadResult(
                     read.intent_id,
                     succeeded=False,
@@ -8418,8 +8609,7 @@ class Main(QMainWindow):
         )
         if not usability.usable:
             raise DesignModelError(
-                usability.rejection_reason
-                or "Design coordinate frame is unavailable."
+                usability.rejection_reason or "Design coordinate frame is unavailable."
             )
         objective_settings = self.settings_manager.objectives_configuration()
         base_offset, active_offset = offsets.base_and_active_objective_offsets(
@@ -8487,9 +8677,7 @@ class Main(QMainWindow):
         )
 
     def _route_optical_session_token(self) -> str:
-        token = str(
-            getattr(self, "_route_measurement_optical_session_token", "") or ""
-        )
+        token = str(getattr(self, "_route_measurement_optical_session_token", "") or "")
         if not token:
             raise RuntimeError("Route optical session is unavailable.")
         return token
@@ -8650,9 +8838,7 @@ class Main(QMainWindow):
                 success, message = runner.run()
         except Exception as exc:
             message = str(exc) or type(exc).__name__
-            self.route_measurement_status.emit(
-                f"Route measurement failed: {message}"
-            )
+            self.route_measurement_status.emit(f"Route measurement failed: {message}")
         finally:
             self._route_measurement_optical_session_token = None
         csv_path = (
@@ -8676,7 +8862,9 @@ class Main(QMainWindow):
         total_points = max(0, int(total))
         waiting = bool(getattr(self, "_route_measurement_waiting", False))
         waiting_reason = self._current_route_measurement_waiting_reason(waiting)
-        self._route_runtime_presenter().route_started(message, total_points, waiting=waiting, waiting_reason=waiting_reason)
+        self._route_runtime_presenter().route_started(
+            message, total_points, waiting=waiting, waiting_reason=waiting_reason
+        )
         self._show_status(message)
         self._update_stage_coordinate_apply_state()
 
@@ -8694,7 +8882,9 @@ class Main(QMainWindow):
         self._update_stage_coordinate_apply_state()
         self._route_runtime_presenter().stop_requested("Stopping route measurement.")
 
-    def _request_route_measurement_point_correction(self, pending_point_number: int | None = None) -> None:
+    def _request_route_measurement_point_correction(
+        self, pending_point_number: int | None = None
+    ) -> None:
         if self._api_route_control_state_snapshot().active:
             self._interrupt_api_route_controlled_operation(
                 "API route control interrupt requested."
@@ -8786,7 +8976,10 @@ class Main(QMainWindow):
                 start_measurement=self._start_route_measurement,
                 current_runner=lambda: self._route_measurement_runner,
                 current_thread=lambda: self._route_measurement_thread,
-                show_status=lambda message, timeout_ms=5000: (self._show_status(message, timeout_ms), self._route_runtime_presenter().set_status(message)),
+                show_status=lambda message, timeout_ms=5000: (
+                    self._show_status(message, timeout_ms),
+                    self._route_runtime_presenter().set_status(message),
+                ),
             ):
                 return None
             runner = self._route_measurement_runner
@@ -8822,7 +9015,9 @@ class Main(QMainWindow):
             return
         context_result = self._api_contact_context(int(point_number))
         if not context_result.get("accepted", False):
-            message = str(context_result.get("message") or "Route contact move rejected.")
+            message = str(
+                context_result.get("message") or "Route contact move rejected."
+            )
             self._show_route_runtime_status(message, 6000)
             return
         point = context_result["point"]
@@ -8846,7 +9041,9 @@ class Main(QMainWindow):
         thread.start()
         self._update_stage_coordinate_apply_state()
 
-    def _run_route_contact_move(self, point: RouteMeasurementPoint, needle_feedrate: float | None) -> None:
+    def _run_route_contact_move(
+        self, point: RouteMeasurementPoint, needle_feedrate: float | None
+    ) -> None:
         success = False
         try:
             with self.stage_controller.reserve_external_task("route contact move"):
@@ -8939,7 +9136,9 @@ class Main(QMainWindow):
         )
         self._apply_route_shift_save_status(status_plan)
 
-    def _route_shift_save_plan(self, runner: object | None, point_number: int | None) -> RouteShiftSavePlan:
+    def _route_shift_save_plan(
+        self, runner: object | None, point_number: int | None
+    ) -> RouteShiftSavePlan:
         thread = self._route_measurement_thread
         route_active = thread is not None and thread.is_alive()
         route_waiting = getattr(self, "_route_measurement_waiting", False)
@@ -8967,7 +9166,9 @@ class Main(QMainWindow):
             current_point=getattr(self, "_route_measurement_current_point", None),
         )
 
-    def _route_shift_adjustment_point(self, shift_plan: RouteShiftSavePlan, runner: object | None) -> tuple[bool, RouteMeasurementPoint | None]:
+    def _route_shift_adjustment_point(
+        self, shift_plan: RouteShiftSavePlan, runner: object | None
+    ) -> tuple[bool, RouteMeasurementPoint | None]:
         point_number = shift_plan.point_number
         if shift_plan.needs_runner_adjustment and runner is not None:
             point_selected, message = runner.set_current_adjustment_point(
@@ -9000,7 +9201,9 @@ class Main(QMainWindow):
                 latest_position_available=latest is not None,
             )
             if position_plan.message:
-                self._show_route_runtime_status(position_plan.message, position_plan.timeout_ms)
+                self._show_route_runtime_status(
+                    position_plan.message, position_plan.timeout_ms
+                )
                 return None
             position = latest
         stage_xy = stage_position_update.stage_xy_from_position(position)
@@ -9025,12 +9228,18 @@ class Main(QMainWindow):
         if offset_xy is not None:
             self._api_route_offset_xy = offset_xy
 
-    def _apply_route_shift_save_status(self, status_plan: RouteShiftSaveStatusPlan) -> None:
+    def _apply_route_shift_save_status(
+        self, status_plan: RouteShiftSaveStatusPlan
+    ) -> None:
         message = status_plan.message
         self._show_status(message, status_plan.timeout_ms)
-        self._route_runtime_presenter().shift_status(message, mark_interrupt_pending=status_plan.mark_interrupt_pending)
+        self._route_runtime_presenter().shift_status(
+            message, mark_interrupt_pending=status_plan.mark_interrupt_pending
+        )
 
-    def _interrupt_route_measurement_runner(self, runner: object, *, reason: str) -> None:
+    def _interrupt_route_measurement_runner(
+        self, runner: object, *, reason: str
+    ) -> None:
         try:
             waiting = bool(
                 runner.status_payload().get("waiting")
@@ -9081,9 +9290,7 @@ class Main(QMainWindow):
             self._send_route_waiting_attention_from_last_result()
             return
         self._pending_route_measure_point = None
-        self._submit_route_measurement_confirmation(
-            f"jump:{int(pending_point_number)}"
-        )
+        self._submit_route_measurement_confirmation(f"jump:{int(pending_point_number)}")
 
     def _current_route_measurement_waiting_reason(self, waiting: bool) -> str:
         if not waiting:
@@ -9224,7 +9431,9 @@ class Main(QMainWindow):
         if contact is None or not bool(getattr(contact, "assessed", False)):
             return ""
         reasons = tuple(getattr(contact, "reasons", ()) or ())
-        reason_text = ", ".join(str(reason) for reason in reasons) if reasons else "none"
+        reason_text = (
+            ", ".join(str(reason) for reason in reasons) if reasons else "none"
+        )
         failure_criteria = tuple(getattr(contact, "failure_criteria", ()) or ())
         failure_text = (
             ", failed_criterion=" + " | ".join(str(item) for item in failure_criteria)
@@ -9305,7 +9514,9 @@ class Main(QMainWindow):
         self._route_measurement_thread = None
 
     def _store_final_api_route_session_status(self, runner: object | None) -> None:
-        status = final_api_route_session_status(getattr(self, "_api_route_session_id", None), runner, logger=logger)
+        status = final_api_route_session_status(
+            getattr(self, "_api_route_session_id", None), runner, logger=logger
+        )
         if status is not None:
             self._api_route_last_status = status
 
@@ -9382,7 +9593,9 @@ class Main(QMainWindow):
 
     def _set_route_measurement_pending(self, pending: bool) -> None:
         self._route_measurement_session_active = bool(pending)
-        if not self._route_runtime_presenter().set_measurement_session_active(bool(pending)):
+        if not self._route_runtime_presenter().set_measurement_session_active(
+            bool(pending)
+        ):
             self._save_route_measurement_pending(bool(pending))
 
     def _save_route_measurement_pending(self, pending: bool) -> None:
@@ -9520,7 +9733,6 @@ class Main(QMainWindow):
         )
         coordinate_flow.apply_coordinate_transition(self, transition)
 
-
     def _design_spacing_ratio_is_reasonable(self, ratio: float) -> bool:
         return abs(float(ratio) - 1.0) <= self.DESIGN_SPACING_RATIO_TOLERANCE
 
@@ -9554,8 +9766,7 @@ class Main(QMainWindow):
         selected_id = str(frame_id).strip()
         if (
             selected_id
-            == self._coordinate_system_coordinator.snapshot()
-            .registration.active_frame_id
+            == self._coordinate_system_coordinator.snapshot().registration.active_frame_id
         ):
             return
         transition = coordinate_flow.activate_current_design(
@@ -9692,9 +9903,9 @@ class Main(QMainWindow):
             self._show_status("Current field of view is unavailable.", 5000)
             return
         self._observe_design_focus_context()
-        self._focus_structure_request_id = int(
-            getattr(self, "_focus_structure_request_id", 0)
-        ) + 1
+        self._focus_structure_request_id = (
+            int(getattr(self, "_focus_structure_request_id", 0)) + 1
+        )
         request_id = self._focus_structure_request_id
         optical = self._registration_optical_observation()
         context = self._coordinate_system_coordinator.focus_search_lease(optical)
@@ -9774,7 +9985,9 @@ class Main(QMainWindow):
             self._show_status(str(exc), 5000)
             return
         if candidate is None:
-            self._show_status("No focus structure fits the current field of view.", 5000)
+            self._show_status(
+                "No focus structure fits the current field of view.", 5000
+            )
             return
         transition = self._coordinate_system_coordinator.offer_focus_candidate(
             FocusCandidateRequest(
@@ -9784,7 +9997,9 @@ class Main(QMainWindow):
             )
         )
         coordinate_flow.apply_coordinate_transition(self, transition)
-        self._show_status("Focus reference found. Review and use the selected point.", 5000)
+        self._show_status(
+            "Focus reference found. Review and use the selected point.", 5000
+        )
 
     def _on_focus_structure_bounds_failed(
         self,
@@ -9919,9 +10134,9 @@ class Main(QMainWindow):
                 token,
                 CoordinateAutofocusResult(
                     token,
-                succeeded=bool(success),
-                physical_z_mm=physical_z,
-                message=str(message or ""),
+                    succeeded=bool(success),
+                    physical_z_mm=physical_z,
+                    message=str(message or ""),
                 ),
             ),
         )
@@ -9961,11 +10176,11 @@ class Main(QMainWindow):
 
     def _connect_design_focus_signals(self) -> None:
         window = getattr(self, "design_layout_window", None)
-        if window is None or bool(getattr(self, "_design_focus_signals_connected", False)):
+        if window is None or bool(
+            getattr(self, "_design_focus_signals_connected", False)
+        ):
             return
-        window.find_focus_reference_requested.connect(
-            self._find_design_focus_reference
-        )
+        window.find_focus_reference_requested.connect(self._find_design_focus_reference)
         window.focus_reference_requested.connect(
             lambda x_value, y_value: self._use_selected_design_focus_reference(
                 (x_value, y_value)
@@ -9992,8 +10207,10 @@ class Main(QMainWindow):
         p = navigation_targeting.design_panel_presentation(
             self._design_session,
             coordinate_snapshot.registration,
-            route_running=route_measurement_thread is not None and route_measurement_thread.is_alive(),
-            pending_alignment_preparation=self._pending_alignment_preparation is not None,
+            route_running=route_measurement_thread is not None
+            and route_measurement_thread.is_alive(),
+            pending_alignment_preparation=self._pending_alignment_preparation
+            is not None,
             design_snap_enabled=self._design_snap_enabled,
         )
         registration_instances = self._design_registration_instances()
@@ -10010,7 +10227,9 @@ class Main(QMainWindow):
             panel.set_document(p.document)
             panel.set_design_registration_active(p.registration_valid)
             panel.set_targets(p.targets, selected_target_id=p.selected_target_id)
-            panel.set_route(p.route, selected_route_point_index=p.selected_route_point_index)
+            panel.set_route(
+                p.route, selected_route_point_index=p.selected_route_point_index
+            )
             panel.set_route_measurement_running(p.route_measurement_running)
             panel.set_calibration_prompt(p.calibration_prompt)
             panel.set_registration_status(p.registration_status)
@@ -10035,19 +10254,21 @@ class Main(QMainWindow):
         if self.design_layout_window is not None:
             self.design_layout_window.set_snap_enabled(p.design_snap_enabled)
             self.design_layout_window.set_document(p.document)
-            self.design_layout_window.set_targets(p.targets, selected_target_id=p.selected_target_id)
-            self.design_layout_window.set_probe_route(p.route, selected_route_point_index=p.selected_route_point_index)
-            self.design_layout_window.set_markup(
-                getattr(self, "_design_markup", None)
+            self.design_layout_window.set_targets(
+                p.targets, selected_target_id=p.selected_target_id
             )
+            self.design_layout_window.set_probe_route(
+                p.route, selected_route_point_index=p.selected_route_point_index
+            )
+            self.design_layout_window.set_markup(getattr(self, "_design_markup", None))
             self.design_layout_window.set_guide_undo_available(
                 bool(self._prune_design_guide_undo_stack())
             )
-            self.design_layout_window.set_route_edit_enabled(
-                self._design_edit_safe()
-            )
+            self.design_layout_window.set_route_edit_enabled(self._design_edit_safe())
             self.design_layout_window.set_navigation_enabled(p.registration_valid)
-            self.design_layout_window.set_registration_marks(p.source_design_marks, p.check_design_marks)
+            self.design_layout_window.set_registration_marks(
+                p.source_design_marks, p.check_design_marks
+            )
             self.design_layout_window.set_stage_registration_marks(p.source_stage_marks)
             self.design_layout_window.set_registration_instances(
                 registration_instances,
@@ -10224,7 +10445,10 @@ class Main(QMainWindow):
         )
 
     def _start_next_pending_stage_axis_move(self) -> None:
-        if self._coordinate_targets.has_active_move() or not self._pending_stage_axis_targets:
+        if (
+            self._coordinate_targets.has_active_move()
+            or not self._pending_stage_axis_targets
+        ):
             return
         if self.stage_controller.is_busy():
             QTimer.singleShot(200, self._start_next_pending_stage_axis_move)
@@ -10427,15 +10651,16 @@ class Main(QMainWindow):
 
     @staticmethod
     def _format_optional_point(point: tuple[float, float] | None) -> str:
-        return "None" if point is None else f"({float(point[0]):.4f}, {float(point[1]):.4f})"
+        return (
+            "None"
+            if point is None
+            else f"({float(point[0]):.4f}, {float(point[1]):.4f})"
+        )
 
     def _resolve_design_fov_size(self) -> tuple[float, float] | None:
         import numpy as np
 
-        registration = (
-            self._coordinate_system_coordinator.snapshot()
-            .registration.registration_projection
-        )
+        registration = self._coordinate_system_coordinator.snapshot().registration.registration_projection
         if registration is None or not registration.valid:
             return None
         stage_fov = self.stage_controller.current_fov_size_mm()
@@ -10696,10 +10921,7 @@ class Main(QMainWindow):
 
     def _resume_resistance_standby_polling(self) -> None:
         lcr_controller = getattr(self, "lcr_controller", None)
-        if (
-            lcr_controller is not None
-            and lcr_controller.live_polling_enabled()
-        ):
+        if lcr_controller is not None and lcr_controller.live_polling_enabled():
             lcr_controller.set_live_polling_enabled(True)
 
     def _cancel_contact_seek(self) -> None:
@@ -10746,7 +10968,9 @@ class Main(QMainWindow):
             objectives = self.settings_manager.objectives_configuration()
             raw_name = getattr(objectives, "active_name", "")
         except Exception:
-            logger.debug("Unable to read active objective for sample focus.", exc_info=True)
+            logger.debug(
+                "Unable to read active objective for sample focus.", exc_info=True
+            )
             raw_name = ""
         return sample_handling.active_sample_objective_name(raw_name)
 
@@ -10785,8 +11009,7 @@ class Main(QMainWindow):
 
     def _design_registration_is_active(self) -> bool:
         return bool(
-            self._coordinate_system_coordinator.snapshot()
-            .registration.registration_valid
+            self._coordinate_system_coordinator.snapshot().registration.registration_valid
         )
 
     def _run_sample_unload(
@@ -10822,7 +11045,6 @@ class Main(QMainWindow):
             load_x_mm=self.SAMPLE_LOAD_X_MM,
             load_y_mm=self.SAMPLE_LOAD_Y_MM,
         )
-
 
     def _on_oscillation_state_changed(self, running: bool, axis: str) -> None:
         if self.oscillation_panel:

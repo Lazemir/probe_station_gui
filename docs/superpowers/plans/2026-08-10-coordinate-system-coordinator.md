@@ -1988,3 +1988,100 @@ git diff --check 8fc83259e07f48bf0f222e80bb3e1d6c3241fd0e..HEAD
   `0 Critical / 0 Important / 0 Minor`. Nothing was staged before that final
   verdict; the authorized exact commit is
   `refactor: separate keithley measurement domains`.
+
+#### Task 16a: Separate design session domains
+
+**Files:**
+- Create: `probe_station_gui/design/session_registration.py`
+- Create: `probe_station_gui/design/session_navigation.py`
+- Modify: `probe_station_gui/design/session.py`
+- Expand: `probe_station_gui/design/session_state.py`
+- Modify: the direct coordinator, navigation, workspace, and Main load-flow callers
+- Create/modify: direct state, registration, navigation, workflow, coordinator,
+  and background-restore tests
+- Modify: `docs/superpowers/plans/2026-08-10-coordinate-system-coordinator.md`
+
+- [x] Drive the persisted-restore safety correction from a strict RED before
+  extraction. The original restore path called `MeasurementRoute.load` on the
+  Qt main thread. The corrected `_LoadedDesignDocument` publication carries an
+  immutable prepared restore: source stat, route read/parse, and
+  `RouteDesignBinding` SHA validation all execute on the existing
+  `DesignDocumentLoad` thread. A stale load generation discards the whole
+  prepared payload before GUI application. Missing or changed design files
+  retain the exact clear behavior and status text and never start document
+  parsing.
+- [x] Make `session_state.py` the canonical owner of detached atomic snapshot,
+  apply, v1/v2/v3 serialization and coercion, persisted-source validation,
+  document-view preparation, route preparation, and pure GUI-thread
+  application. `PreparedDesignSessionRestore` contains all file-derived state.
+  Production export consumes already observed design-frame metadata and route
+  path; the old no-argument synchronous export-I/O path and GUI
+  `file_is_current`/route-load path are deleted.
+- [x] Observe independent absent-module REDs, then make
+  `session_registration.py` the Qt/KLayout-free canonical owner of alignment
+  preparation, active-frame link projection/application, rigid fit, pivot and
+  mark handling, registration invalidation, provenance, and stale-frame
+  policy. Make `session_navigation.py` the Qt/KLayout-free canonical owner of
+  document lifecycle, top/layer/rotation state, targets, route selection and
+  editing, and stage/design projections.
+- [x] Keep canonical `DesignSession` identity in `session.py` as the aggregate
+  state boundary with only direct fields plus snapshot/apply. Keep canonical
+  `DesignSessionState` identity in `session_state.py`. Moved DTOs/functions are
+  imported directly from their owners; the residual exposes no mixin,
+  `__getattr__`, compatibility alias, package export, or accidental
+  `MeasurementRoute` seam. Moved legacy wrappers are deleted instead of
+  forwarding policy.
+- [x] Preserve atomic/deep-copy state, serialized v1/v2/v3 behavior, route
+  ignore/clamp and selection, rotation/source/top/layer state, registration B
+  pivot, frame provenance, status text, and stale-generation behavior. Fresh
+  forward and reverse owner imports load neither Qt nor KLayout. The owner DAG
+  is acyclic: the session aggregate composes state, while coordinators and
+  adapters call the canonical state/registration/navigation owners directly.
+- [x] Pass hardware-free verification under offscreen Qt and process-local
+  `QLocale.c()`. Five fresh restore processes pass `40/40`; the final focused
+  state/registration/navigation/workflow/coordinator gate passes `81/81`.
+  Design passes `380/380`, coordinates pass `201/201`, UI passes `515/515`,
+  and deterministic App chunks pass `373` plus `5` subtests. The complete
+  one-process suite passes `3130` plus `16` subtests in `50.83 s`, with only
+  the inherited `BuiltinImporter.module_repr()` warning.
+- [x] Pass affected Ruff and format, configured whole-tree Ruff with only the
+  inherited `E402`/`F401` classes excluded, whole-tree compile, `git diff
+  --check`, direct-definition/deletion/public-identity/DAG/import-order,
+  protected-byte, and normalized caller-AST gates. Authorized semantic changes
+  are limited to Main `_LoadedDesignDocument`, `_start_design_document_load`,
+  and `_on_design_document_loaded`; workspace
+  `maybe_restore_persisted_design`; and the prepared handoff/removal of GUI
+  stat/view helpers in `navigation_adapter`. All other production changes are
+  direct canonical-call/import migrations with normalized non-import AST
+  parity.
+- [x] Metrics: the former session was
+  `1066 LOC / 681 LLOC / 869 SLOC / CC 225 / 67 blocks / max CC 18 / MI 0.00`;
+  the existing state owner was
+  `195 / 116 / 167 / CC 27 / 7 blocks / max CC 17 / MI 33.35`. Final session,
+  state, registration, and navigation owners are respectively
+  `66 / 49 / 49 / CC 4 / 3 blocks / max CC 2 / MI 50.13`,
+  `434 / 256 / 374 / CC 93 / 17 / max CC 17 / MI 14.84`,
+  `558 / 340 / 451 / CC 101 / 34 / max CC 14 / MI 12.37`, and
+  `280 / 206 / 204 / CC 62 / 23 / max CC 12 / MI 22.83` for
+  LOC/LLOC/SLOC/complexity/blocks/maximum/MI. Together with the narrowed
+  navigation adapter, aggregate complexity changes from `CC 346 / 93 blocks`
+  to `CC 332 / 93 blocks`: `-14 CC` with the same aggregate block count.
+  Lizard retains the same three warning-level functions
+  across the cluster and reports `0.00%` duplication. Every structural owner
+  and touched/new test has positive MI; the only touched MI-zero file is the
+  explicitly necessary pre-existing Main load-flow integration. All-tracked
+  MI-zero decreases exactly `8 -> 7`, active GUI/client/test MI-zero decreases
+  `8 -> 7`, and no file enters MI zero.
+- [x] Freeze the exact `37`-path evidence-bearing source/test/plan snapshot and
+  obtain a fresh fork-none independent read-only review. The first review
+  found one Important residual forwarding pair: the canonical
+  `block_legacy_registration_until_b` called an otherwise unused generic
+  wrapper. A strict ownership RED reproduced the extra public symbol; the
+  policy is now direct in its sole semantic owner and the generic facade is
+  deleted. The corrected registration/state/workflow/restore/activation gate
+  passes `118/118`. The same reviewer independently rechecked the corrected
+  owner, deletion assertion, exact `37`-path hashes, focused/static/metric/
+  Lizard/duplication gates, empty index, and absent task temp, then returned
+  `READY` with `0 Critical / 0 Important / 0 Minor`. Nothing was staged before
+  that verdict; the authorized exact commit subject is
+  `refactor: separate design session domains`.

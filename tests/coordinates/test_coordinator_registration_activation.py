@@ -23,12 +23,28 @@ from probe_station_gui.design.frame_registration import (
     commit_xyb_registration,
 )
 from probe_station_gui.design.session import DesignSession
+from probe_station_gui.design import session_navigation, session_registration
+from probe_station_gui.design.session_state import export_persisted_session_state
 from tests.coordinates.coordinator_registration_support import (
     _document,
     _draft,
     _loaded_coordinator,
     _machine_snapshot,
 )
+
+
+def _export_session(session: DesignSession) -> dict[str, object] | None:
+    document = session.document
+    source_stat = None if document is None else document.path.stat()
+    route_path = None
+    if session.route is not None and session.route.path is not None:
+        route_path = str(session.route.path)
+    return export_persisted_session_state(
+        session.snapshot_state(),
+        document_size=None if source_stat is None else source_stat.st_size,
+        document_mtime_ns=None if source_stat is None else source_stat.st_mtime_ns,
+        route_path=route_path,
+    )
 
 
 def test_design_activation_adopts_candidate_state_without_replacing_session(
@@ -160,13 +176,6 @@ def test_legacy_missing_b_block_uses_preobserved_state_without_serializing(
     session.source_design_marks = ((0.0, 0.0), (1000.0, 0.0))
     session.source_stage_marks = ((3.0, 4.0), (4.0, 4.0))
     metadata = DesignFrameMetadata.from_document(document)
-    monkeypatch.setattr(
-        DesignSession,
-        "export_persisted_state",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("legacy block serialized on the coordinator thread")
-        ),
-    )
 
     activated = coordinator.activate_design(
         coordinator_model.DesignActivationRequest(
@@ -180,7 +189,7 @@ def test_legacy_missing_b_block_uses_preobserved_state_without_serializing(
 
     assert activated.accepted
     assert activated.intents == ()
-    assert session.legacy_registration_waiting_for_b
+    assert session_registration.legacy_registration_waiting_for_b(session)
 
 
 def test_legacy_with_b_without_preobserved_metadata_fails_closed(
@@ -324,7 +333,7 @@ def test_failed_activation_preparation_preserves_live_capture(
     assert [notice.code for notice in completed.notices] == [
         "registration_capture_updated"
     ]
-    assert session.source_stage_marks_compact() == [(3.0, 4.0)]
+    assert session_registration.source_stage_marks_compact(session) == [(3.0, 4.0)]
 
 
 def test_legacy_capture_records_exact_same_generation_wco_provenance(
@@ -352,7 +361,7 @@ def test_legacy_capture_records_exact_same_generation_wco_provenance(
         )
     )
 
-    persisted = session.export_persisted_state()
+    persisted = _export_session(session)
     assert persisted is not None
     assert persisted["stage_coordinate_provenance"] == {
         "position_reporting_mode": "work",
@@ -431,7 +440,7 @@ def test_legacy_migration_finishes_only_after_typed_controller_state_ack(
         "work_offset": [10.0, 20.0, 0.0, 0.0, 0.0, 0.0],
     }
     session._legacy_stage_coordinate_provenance_present = True
-    legacy_state = session.export_persisted_state()
+    legacy_state = _export_session(session)
     assert legacy_state is not None
     rewrite_intent_type = getattr(
         coordinator_model,
@@ -457,7 +466,7 @@ def test_legacy_migration_finishes_only_after_typed_controller_state_ack(
         )
     )
     save = activated.intents[0]
-    migrated_state = session.export_persisted_state()
+    migrated_state = _export_session(session)
     assert migrated_state is not None
 
     frame_saved = coordinator.complete(
@@ -537,8 +546,7 @@ def test_legacy_migration_finishes_only_after_typed_controller_state_ack(
         assert terminal_replay.intents == ()
         assert terminal_replay.notices == ()
         assert (
-            terminal_replay.snapshot.registration.legacy_migration_state
-            == legacy_state
+            terminal_replay.snapshot.registration.legacy_migration_state == legacy_state
         )
 
 
@@ -573,7 +581,8 @@ def test_legacy_rewrite_rebases_on_route_saved_before_frame_ack(
         name="newer same-frame registration",
         version=migrated.version + 1,
     )
-    newer_projection = session.prepare_active_frame_link(
+    newer_projection = session_registration.prepare_active_frame_link(
+        session,
         newer,
         machine_b_deg=0.0,
         pivot_machine_xy=(0.0, 0.0),
@@ -587,12 +596,12 @@ def test_legacy_rewrite_rebases_on_route_saved_before_frame_ack(
             projection=newer_projection,
         )
     ).intents[0]
-    route = session.create_route(name="latest route")
-    session.add_route_point((10.0, 20.0))
-    session.add_route_point((30.0, 40.0))
-    session.select_route_point(0)
+    route = session_navigation.create_route(session, name="latest route")
+    session_navigation.add_route_point(session, (10.0, 20.0))
+    session_navigation.add_route_point(session, (30.0, 40.0))
+    session_navigation.select_route_point(session, 0)
     route.save(tmp_path / "latest-route.json")
-    latest_state = session.export_persisted_state()
+    latest_state = _export_session(session)
     assert latest_state is not None
     assert "route" in latest_state
 
@@ -636,7 +645,7 @@ def test_unavailable_current_legacy_rewrite_state_fails_closed(
         "work_offset": [10.0, 20.0, 0.0, 0.0, 0.0, 0.0],
     }
     session._legacy_stage_coordinate_provenance_present = True
-    legacy_state = session.export_persisted_state()
+    legacy_state = _export_session(session)
     assert legacy_state is not None
     activated = coordinator.activate_design(
         coordinator_model.DesignActivationRequest(
@@ -751,7 +760,8 @@ def test_old_save_failure_cannot_restore_session_over_newer_activation(
         name="pending A",
         version=frame_a.version + 1,
     )
-    projection = session.prepare_active_frame_link(
+    projection = session_registration.prepare_active_frame_link(
+        session,
         changed_a,
         machine_b_deg=0.0,
         pivot_machine_xy=(0.0, 0.0),

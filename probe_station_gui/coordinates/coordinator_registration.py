@@ -9,6 +9,7 @@ from probe_station_gui.design.registration_lifecycle import (
     RegistrationCancellation,
     RegistrationEffects,
 )
+from probe_station_gui.design import session_registration
 from probe_station_gui.design.session import DesignSession
 
 from .coordinator_contact import CoordinateContactWorkflow
@@ -98,13 +99,15 @@ class CoordinateRegistrationReducer:
         return RegistrationWorkflowSnapshot(
             active_frame_id=None if record is None else frame_id,
             active_frame_version=None if record is None else record.version,
-            source_design_marks=tuple(self._session.source_design_marks_compact()),
-            source_stage_marks=tuple(self._session.source_stage_marks_compact()),
+            source_design_marks=tuple(
+                session_registration.source_design_marks_compact(self._session)
+            ),
+            source_stage_marks=tuple(
+                session_registration.source_stage_marks_compact(self._session)
+            ),
             check_design_marks=tuple(self._session.check_design_marks),
             check_stage_marks=tuple(self._session.check_stage_marks),
-            registration_valid=bool(
-                registration is not None and registration.valid
-            ),
+            registration_valid=bool(registration is not None and registration.valid),
             registration_status=str(self._session.registration_status),
             registration_projection=projection,
             operator_stage_marks=self._capture.operator_stage_marks,
@@ -187,9 +190,7 @@ class CoordinateRegistrationReducer:
         self,
         request: FirstContactRequest,
     ) -> _RegistrationTransitionParts:
-        cancelled = self._cancel_state(
-            RegistrationCancellation.ROUTE_CONTEXT_CHANGED
-        )
+        cancelled = self._cancel_state(RegistrationCancellation.ROUTE_CONTEXT_CHANGED)
         return self._merge_cancellation(self._contact.arm(request), cancelled)
 
     def complete(
@@ -219,11 +220,15 @@ class CoordinateRegistrationReducer:
         request: RegistrationSourceMarkRequest,
     ) -> _RegistrationTransitionParts:
         cancelled = self._cancel_state(RegistrationCancellation.MARK_SET_CHANGED)
-        self._session.clear_source_stage_marks()
+        session_registration.clear_source_stage_marks(self._session)
         if request.slot is None:
-            self._session.add_source_design_mark(request.point)
+            session_registration.add_source_design_mark(self._session, request.point)
         else:
-            self._session.set_source_design_mark(request.slot, request.point)
+            session_registration.set_source_design_mark(
+                self._session,
+                request.slot,
+                request.point,
+            )
         return replace(cancelled, view_changed=True)
 
     def replace_source_design_marks(
@@ -232,7 +237,7 @@ class CoordinateRegistrationReducer:
     ) -> _RegistrationTransitionParts:
         cancelled = self._cancel_state(RegistrationCancellation.MARK_SET_CHANGED)
         self._session.source_design_marks = tuple(request.points)
-        self._session.clear_source_stage_marks()
+        session_registration.clear_source_stage_marks(self._session)
         return replace(cancelled, view_changed=True)
 
     def add_check_design_mark(
@@ -240,26 +245,29 @@ class CoordinateRegistrationReducer:
         request: RegistrationCheckMarkRequest,
     ) -> _RegistrationTransitionParts:
         cancelled = self._cancel_state(RegistrationCancellation.MARK_SET_CHANGED)
-        self._session.add_check_design_mark(request.point)
+        session_registration.add_check_design_mark(self._session, request.point)
         return replace(cancelled, view_changed=True)
 
     def clear_source_stage_marks(self) -> _RegistrationTransitionParts:
         cancelled = self._cancel_state(RegistrationCancellation.MARK_SET_CHANGED)
-        self._session.clear_source_stage_marks()
+        session_registration.clear_source_stage_marks(self._session)
         return replace(cancelled, view_changed=True)
 
     def apply_prepared_alignment(
         self,
         request: RegistrationAlignmentRequest,
     ) -> _RegistrationTransitionParts:
-        self._session.apply_prepared_alignment(request.preparation)
+        session_registration.apply_prepared_alignment(
+            self._session,
+            request.preparation,
+        )
         return _RegistrationTransitionParts(view_changed=True)
 
     def invalidate_registration(
         self,
         request: RegistrationInvalidationRequest,
     ) -> _RegistrationTransitionParts:
-        self._session.invalidate_registration(request.reason)
+        session_registration.invalidate_registration(self._session, request.reason)
         return _RegistrationTransitionParts(view_changed=True)
 
     def _cancel_state(
@@ -301,11 +309,15 @@ class CoordinateRegistrationReducer:
         if sample is None or sample.stage_xy is None or effects.operator_alignment:
             return
         if sample.mark_kind == "check":
-            session.add_check_stage_mark(sample.stage_xy)
+            session_registration.add_check_stage_mark(session, sample.stage_xy)
         elif sample.mark_index is not None:
-            session.set_source_stage_mark(sample.mark_index, sample.stage_xy)
+            session_registration.set_source_stage_mark(
+                session,
+                sample.mark_index,
+                sample.stage_xy,
+            )
         else:
-            session.add_source_stage_mark(sample.stage_xy)
+            session_registration.add_source_stage_mark(session, sample.stage_xy)
 
     def _allocate_intent_id(self) -> int:
         self._next_intent_id -= 1

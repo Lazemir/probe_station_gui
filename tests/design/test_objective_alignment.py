@@ -15,7 +15,7 @@ from probe_station_gui.design.objective_alignment import (
     select_active_objective,
     update_objective_calibration,
 )
-from probe_station_gui.design.session import AlignmentPreparation
+from probe_station_gui.design.session_registration import AlignmentPreparation
 from probe_station_gui.settings.manager import Settings
 from probe_station_gui.settings.objective_config import (
     ObjectiveCalibrationSettings,
@@ -125,8 +125,13 @@ def test_objective_change_offset_reports_rejection_states() -> None:
     unavailable = objective_change_offset_plan(settings, "X5", "X20", None, False)
     busy = objective_change_offset_plan(settings, "X5", "X20", (1.0, 2.0), True)
 
-    assert missing.status == "Objective XY offset is not configured for both objectives."
-    assert unavailable.status == "Stage position unavailable; objective offset not applied."
+    assert (
+        missing.status == "Objective XY offset is not configured for both objectives."
+    )
+    assert (
+        unavailable.status
+        == "Stage position unavailable; objective offset not applied."
+    )
     assert busy.status == "Stage is busy; objective offset not applied."
 
 
@@ -158,7 +163,9 @@ def test_profile_add_delete_reset_and_calibration_plans_mutate_settings() -> Non
     ]
 
 
-def test_update_objective_calibration_preserves_old_permissive_matrix_conversion() -> None:
+def test_update_objective_calibration_preserves_old_permissive_matrix_conversion() -> (
+    None
+):
     settings = _settings()
 
     singular = update_objective_calibration(settings, "X20", [[1, 2], [2, 4]])
@@ -240,7 +247,10 @@ def test_manual_alignment_capture_handles_close_aligned_and_rotation_cases() -> 
         manual_points=[(1.0, 1.0), None],
     )
 
-    assert close.status == "Chip alignment points are too close together. Capture two distinct points."
+    assert (
+        close.status
+        == "Chip alignment points are too close together. Capture two distinct points."
+    )
     assert first.status.endswith("Capture point 2 next.")
     assert aligned.rotation_deg == 0.0
     assert aligned.collapse_alignment_if_design_open is True
@@ -250,7 +260,9 @@ def test_manual_alignment_capture_handles_close_aligned_and_rotation_cases() -> 
     assert "unavailable" in str(rotate.status).lower()
 
 
-def test_design_alignment_capture_plans_first_point_rejections_apply_and_rotation() -> None:
+def test_design_alignment_capture_plans_first_point_rejections_apply_and_rotation() -> (
+    None
+):
     first = design_alignment_capture_plan(
         slot=0,
         stage_xy=(10.0, 20.0),

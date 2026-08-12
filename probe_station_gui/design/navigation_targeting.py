@@ -7,7 +7,9 @@ from dataclasses import dataclass
 from probe_station_gui.coordinates.coordinator_model import RegistrationWorkflowSnapshot
 from probe_station_gui.design.model import DesignDocument, MeasurementTarget, Point2D
 from probe_station_gui.design.session import DesignSession
+from probe_station_gui.design import session_navigation
 from probe_station_gui.route.model import MeasurementRoute
+
 
 @dataclass(frozen=True)
 class DesignMovePlan:
@@ -69,17 +71,16 @@ class DesignPositionPresentation:
     check_design_marks: tuple[Point2D, ...]
 
 
-
 def select_design_target(
     session: DesignSession,
     target_id: str,
 ) -> DesignTargetSelectionPlan:
-    target = session.select_target_by_id(target_id)
+    target = session_navigation.select_target_by_id(session, target_id)
     return DesignTargetSelectionPlan(target is not None, target)
 
 
 def select_next_design_target(session: DesignSession) -> DesignTargetSelectionPlan:
-    target = session.select_next_target()
+    target = session_navigation.select_next_target(session)
     return DesignTargetSelectionPlan(
         target is not None,
         target,
@@ -90,7 +91,7 @@ def select_next_design_target(session: DesignSession) -> DesignTargetSelectionPl
 
 
 def select_previous_design_target(session: DesignSession) -> DesignTargetSelectionPlan:
-    target = session.select_previous_target()
+    target = session_navigation.select_previous_target(session)
     return DesignTargetSelectionPlan(
         target is not None,
         target,
@@ -105,7 +106,7 @@ def plan_design_target_move(
     target_id: str,
     stage_xy: Point2D | None,
 ) -> DesignMovePlan:
-    target = session.select_target_by_id(target_id)
+    target = session_navigation.select_target_by_id(session, target_id)
     if target is None:
         return DesignMovePlan(
             False,
@@ -163,19 +164,15 @@ def design_panel_presentation(
     pending_alignment_preparation: bool,
     design_snap_enabled: bool,
 ) -> DesignPanelPresentation:
-    current_target = session.current_target()
+    current_target = session_navigation.current_target(session)
     design_count = len(registration.source_design_marks)
     stage_count = len(registration.source_stage_marks)
     if design_count < 2:
-        calibration_prompt = (
-            "Pick mark 1 with left click and mark 2 with right click in the design window."
-        )
+        calibration_prompt = "Pick mark 1 with left click and mark 2 with right click in the design window."
     elif stage_count < design_count:
         calibration_prompt = f"Center chip mark {stage_count + 1} and capture it."
     elif registration.registration_valid:
-        calibration_prompt = (
-            "Calibration complete. Use the minimap or click in the design window to navigate."
-        )
+        calibration_prompt = "Calibration complete. Use the minimap or click in the design window to navigate."
     else:
         calibration_prompt = (
             f"{design_count} mark pairs captured. Waiting for chip rotation to finish."
@@ -209,7 +206,7 @@ def design_position_presentation(
     fov_design_size: Point2D | None,
     last_selected_design_point: Point2D | None,
 ) -> DesignPositionPresentation:
-    current_target = session.current_target()
+    current_target = session_navigation.current_target(session)
     return DesignPositionPresentation(
         document=session.document,
         targets=list(session.targets),

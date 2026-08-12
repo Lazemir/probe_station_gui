@@ -17,11 +17,11 @@ from .presentation import CoordinateDisplayPlan
 from .transforms import BFrameTransform
 
 if TYPE_CHECKING:
-    from probe_station_gui.design.session import (
+    from probe_station_gui.design.session import DesignSession
+    from probe_station_gui.design.session_registration import (
         DesignFrameLinkProjection,
-        DesignSession,
-        DesignSessionState,
     )
+    from probe_station_gui.design.session_state import DesignSessionState
     from probe_station_gui.design.frame_registration import DesignFrameMetadata
     from probe_station_gui.design.model import DesignDocument
     from probe_station_gui.stage.machine_coordinates import MachineCoordinateSnapshot
@@ -177,7 +177,9 @@ class CoordinateMotionRequest:
             if axis not in STAGE_AXES:
                 raise ValueError(f"Unsupported stage axis {raw_axis!r}.")
             if axis in seen:
-                raise ValueError(f"Coordinate motion axis {axis} appears more than once.")
+                raise ValueError(
+                    f"Coordinate motion axis {axis} appears more than once."
+                )
             value = float(raw_value)
             if not math.isfinite(value):
                 raise ValueError(f"{axis} coordinate must be finite.")
@@ -549,12 +551,8 @@ class DesignSessionCheckpoint:
                 if self.state is None
                 else replace(
                     self.state,
-                    source_stage_marks=tuple(
-                        baseline.baseline_source_stage_marks
-                    ),
-                    check_stage_marks=tuple(
-                        baseline.baseline_check_stage_marks
-                    ),
+                    source_stage_marks=tuple(baseline.baseline_source_stage_marks),
+                    check_stage_marks=tuple(baseline.baseline_check_stage_marks),
                     registration=baseline.baseline_registration,
                     registration_status=(
                         self.state.registration_status

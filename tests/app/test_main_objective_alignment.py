@@ -10,7 +10,7 @@ from probe_station_gui.coordinates.coordinator_model import (
     CoordinateTransition,
 )
 from probe_station_gui.design.objective_offsets import ObjectiveOffsetReference
-from probe_station_gui.design.session import AlignmentPreparation
+from probe_station_gui.design.session_registration import AlignmentPreparation
 from probe_station_gui.settings.manager import Settings
 from probe_station_gui.settings.objective_config import (
     ObjectiveCalibrationSettings,
@@ -59,9 +59,7 @@ class _Stage:
         self.rotations: list[float] = []
         self.applied_objectives: list[object] = []
         self.status_refreshes = 0
-        self.alignment_resolution_requests: list[
-            tuple[object, float, float, int]
-        ] = []
+        self.alignment_resolution_requests: list[tuple[object, float, float, int]] = []
         self.cancel_reasons: list[str] = []
 
     def is_busy(self) -> bool:
@@ -292,9 +290,7 @@ def test_settings_objective_change_is_rejected_for_alive_microscope_scan() -> No
     window._sync_objective_combo = lambda _name: None
     window._refresh_objective_calibration_ui = lambda: None
     window._apply_settings = lambda *, apply_objective_runtime=True: (
-        Main._apply_objective_settings(window)
-        if apply_objective_runtime
-        else None
+        Main._apply_objective_settings(window) if apply_objective_runtime else None
     )
     window._stop_telegram_bot_service = lambda: None
     window._configure_telegram_bot_from_settings = lambda: None
@@ -480,7 +476,9 @@ def test_save_active_objective_offset_non_base_saves_delta_and_refreshes() -> No
     assert statuses == ["Saved X20 objective offset: X=+0.1250, Y=-0.2500 mm."]
 
 
-def test_capture_manual_alignment_point_never_requests_uncompensated_b_rotation() -> None:
+def test_capture_manual_alignment_point_never_requests_uncompensated_b_rotation() -> (
+    None
+):
     window, stage, _manager, statuses = _window()
     window._manual_alignment_pick_slot = 1
     window._manual_alignment_points = [(1.0, 1.0), None]
@@ -574,8 +572,8 @@ def test_clicked_alignment_completion_preserves_requested_slot_order() -> None:
     window._update_coordinate_display = lambda **kwargs: coordinate_updates.append(
         (kwargs.get("center_xy"), kwargs.get("cursor_xy"))
     )
-    window._capture_manual_alignment_point = (
-        lambda slot, point, *, source: captured.append((slot, point, source))
+    window._capture_manual_alignment_point = lambda slot, point, *, source: (
+        captured.append((slot, point, source))
     )
 
     Main._capture_manual_alignment_clicked(window, 5.0, -7.0)
@@ -594,7 +592,9 @@ def test_clicked_alignment_completion_preserves_requested_slot_order() -> None:
     assert captured == [(1, (11.0, 19.0), "image")]
 
 
-def test_cancelled_clicked_alignment_capture_restores_ui_and_ignores_late_point() -> None:
+def test_cancelled_clicked_alignment_capture_restores_ui_and_ignores_late_point() -> (
+    None
+):
     window, stage, _manager, statuses = _window()
     window._manual_alignment_pick_slot = 0
     refreshes: list[str] = []
@@ -620,9 +620,7 @@ def test_cancelled_clicked_alignment_capture_restores_ui_and_ignores_late_point(
 
     assert window._manual_alignment_pick_slot is None
     assert window._manual_alignment_capture_context is None
-    assert stage.cancel_reasons == [
-        f"{request_id}:Alignment point capture cancelled."
-    ]
+    assert stage.cancel_reasons == [f"{request_id}:Alignment point capture cancelled."]
     assert captures == []
     assert len(refreshes) >= 2
     assert statuses[-1] == "Chip alignment image pick cancelled."

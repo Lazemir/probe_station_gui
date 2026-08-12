@@ -16,12 +16,55 @@ from probe_station_gui.design.model import (
     MeasurementTarget,
 )
 from probe_station_gui.design.rigid_registration import DesignRegistration
-from probe_station_gui.design.session import (
-    DesignSession,
-    MeasurementRoute,
+from probe_station_gui.design import session_navigation, session_registration
+from probe_station_gui.design.session import DesignSession
+from probe_station_gui.design.session_state import (
+    apply_prepared_session_restore,
+    export_persisted_session_state,
+    prepare_persisted_session_restore,
 )
+from probe_station_gui.route.model import MeasurementRoute
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _export_session(session: DesignSession) -> dict[str, object] | None:
+    document = session.document
+    document_size = None
+    document_mtime_ns = None
+    if document is not None:
+        try:
+            source_stat = document.path.stat()
+        except OSError:
+            pass
+        else:
+            document_size = source_stat.st_size
+            document_mtime_ns = source_stat.st_mtime_ns
+    route_path = None
+    if session.route is not None and session.route.path is not None:
+        try:
+            session.route.path.stat()
+        except OSError:
+            pass
+        else:
+            route_path = str(session.route.path)
+    return export_persisted_session_state(
+        session.snapshot_state(),
+        document_size=document_size,
+        document_mtime_ns=document_mtime_ns,
+        route_path=route_path,
+    )
+
+
+def _restore_session(
+    session: DesignSession,
+    document: DesignDocument,
+    state: dict[str, object],
+) -> None:
+    apply_prepared_session_restore(
+        session,
+        prepare_persisted_session_restore(document, state),
+    )
 
 
 class _FakeCell:
@@ -214,7 +257,7 @@ class DesignSessionTest(unittest.TestCase):
         session.source_stage_marks = ((1.0, 2.0), (21.0, 2.0))
         session.check_design_marks = [(5.0, 0.0)]
         session.check_stage_marks = [(11.0, 2.0)]
-        session._rebuild_registration()
+        session_registration.rebuild_registration(session)
         session.targets = [
             MeasurementTarget(
                 id="target",
@@ -288,7 +331,7 @@ class DesignSessionTest(unittest.TestCase):
         source.source_stage_marks = ((1.0, 2.0), (21.0, 2.0))
         source.check_design_marks = [(5.0, 0.0)]
         source.check_stage_marks = [(11.0, 2.0)]
-        source._rebuild_registration()
+        session_registration.rebuild_registration(source)
         source.targets = [
             MeasurementTarget(
                 id="target",
@@ -415,12 +458,12 @@ class DesignSessionTest(unittest.TestCase):
         session = DesignSession()
         session.source_design_marks = [(0.0, 0.0), (10.0, 0.0)]
         session.source_stage_marks = [(1.0, 2.0), (21.0, 2.0)]
-        session._rebuild_registration()
+        session_registration.rebuild_registration(session)
 
         self.assertIsNotNone(session.registration)
         self.assertTrue(session.registration.valid)
 
-        session.invalidate_registration("Controller reset.")
+        session_registration.invalidate_registration(session, "Controller reset.")
 
         assert session.registration is not None
         self.assertFalse(session.registration.valid)
@@ -443,9 +486,9 @@ class DesignSessionTest(unittest.TestCase):
         )
         session = DesignSession(document=document)
 
-        session.link_active_frame(frame)
-        state = session.export_persisted_state()
-        session.unload_document()
+        session_registration.link_active_frame(session, frame)
+        state = _export_session(session)
+        session_navigation.unload_document(session)
 
         assert state is not None
         self.assertEqual(state["version"], 3)
@@ -474,19 +517,25 @@ class DesignSessionTest(unittest.TestCase):
             document.rotate_point(point, 1) for point in canonical_marks
         )
         session = DesignSession(document=rotated)
-        session.link_active_frame(frame)
-        state = session.export_persisted_state()
+        session_registration.link_active_frame(session, frame)
+        state = _export_session(session)
         restored = DesignSession()
 
         assert state is not None
         restored_document = document.with_rotation_delta(
             int(state["rotation_quarter_turns"])
         )
-        restored.restore_persisted_state(restored_document, state)
-        restored.link_active_frame(frame)
+        _restore_session(restored, restored_document, state)
+        session_registration.link_active_frame(restored, frame)
 
-        self.assertEqual(tuple(session.source_design_marks_compact()), expected_marks)
-        self.assertEqual(tuple(restored.source_design_marks_compact()), expected_marks)
+        self.assertEqual(
+            tuple(session_registration.source_design_marks_compact(session)),
+            expected_marks,
+        )
+        self.assertEqual(
+            tuple(session_registration.source_design_marks_compact(restored)),
+            expected_marks,
+        )
         self.assertEqual(restored.active_frame_id, frame.frame_id)
 
     def test_active_frame_link_rejects_matching_file_with_wrong_top_cell(self) -> None:
@@ -501,7 +550,7 @@ class DesignSessionTest(unittest.TestCase):
         )
 
         with self.assertRaisesRegex(DesignModelError, "top cell"):
-            session.link_active_frame(frame)
+            session_registration.link_active_frame(session, frame)
 
         self.assertIsNone(session.active_frame_id)
 
@@ -520,7 +569,8 @@ class DesignSessionTest(unittest.TestCase):
         durable = frame
         session = DesignSession(document=document)
 
-        session.link_active_frame(
+        session_registration.link_active_frame(
+            session,
             frame,
             machine_b_deg=42.0,
             pivot_machine_xy=pivot,
@@ -539,7 +589,10 @@ class DesignSessionTest(unittest.TestCase):
             )
             for point in source_machine
         )
-        np.testing.assert_allclose(session.source_stage_marks_compact(), expected)
+        np.testing.assert_allclose(
+            session_registration.source_stage_marks_compact(session),
+            expected,
+        )
         self.assertTrue(session.registration.valid)
         self.assertGreater(session.registration.source_residual_summary.max_error, 0.0)
         self.assertEqual(frame, durable)
@@ -547,17 +600,17 @@ class DesignSessionTest(unittest.TestCase):
     def test_persisted_state_roundtrip_restores_registration(self) -> None:
         document = self._make_document()
         session = DesignSession()
-        session.load_document(document)
+        session_navigation.load_document(session, document)
         session.source_design_marks = [(0.0, 0.0), (10.0, 0.0)]
         session.source_stage_marks = [(1.0, 2.0), (21.0, 2.0)]
         session.check_design_marks = [(5.0, 0.0)]
         session.check_stage_marks = [(11.0, 2.0)]
-        session._rebuild_registration()
+        session_registration.rebuild_registration(session)
 
-        state = session.export_persisted_state()
+        state = _export_session(session)
         assert state is not None
         restored = DesignSession()
-        restored.restore_persisted_state(document, state)
+        _restore_session(restored, document, state)
 
         self.assertIs(restored.document, document)
         self.assertEqual(restored.source_design_marks, session.source_design_marks)
@@ -571,16 +624,16 @@ class DesignSessionTest(unittest.TestCase):
     def test_persisted_state_preserves_stale_registration(self) -> None:
         document = self._make_document()
         session = DesignSession()
-        session.load_document(document)
+        session_navigation.load_document(session, document)
         session.source_design_marks = [(0.0, 0.0), (10.0, 0.0)]
         session.source_stage_marks = [(1.0, 2.0), (21.0, 2.0)]
-        session._rebuild_registration()
-        session.invalidate_registration("Controller reset.")
+        session_registration.rebuild_registration(session)
+        session_registration.invalidate_registration(session, "Controller reset.")
 
-        state = session.export_persisted_state()
+        state = _export_session(session)
         assert state is not None
         restored = DesignSession()
-        restored.restore_persisted_state(document, state)
+        _restore_session(restored, document, state)
 
         assert restored.registration is not None
         self.assertFalse(restored.registration.valid)
@@ -596,20 +649,23 @@ class DesignSessionTest(unittest.TestCase):
             route_path = Path(tmpdir) / "array-a.probe-route.json"
             route.save(route_path)
             session = DesignSession()
-            session.load_document(document)
-            session.set_route(route)
+            session_navigation.load_document(session, document)
+            session_navigation.set_route(session, route)
             session.selected_route_point_index = 1
 
-            state = session.export_persisted_state()
+            state = _export_session(session)
             assert state is not None
             restored = DesignSession()
-            restored.restore_persisted_state(document, state)
+            _restore_session(restored, document, state)
 
         assert restored.route is not None
         self.assertEqual(restored.route.name, "Array A")
         self.assertEqual(len(restored.route.points), 2)
         self.assertEqual(restored.selected_route_point_index, 1)
-        self.assertEqual(restored.current_route_point().camera_center, (30.0, 40.0))
+        self.assertEqual(
+            session_navigation.current_route_point(restored).camera_center,
+            (30.0, 40.0),
+        )
 
     def test_persisted_state_ignores_missing_route_file(self) -> None:
         document = self._make_document()
@@ -619,37 +675,38 @@ class DesignSessionTest(unittest.TestCase):
             route_path = Path(tmpdir) / "array-a.probe-route.json"
             route.save(route_path)
             session = DesignSession()
-            session.load_document(document)
-            session.set_route(route)
-            state = session.export_persisted_state()
+            session_navigation.load_document(session, document)
+            session_navigation.set_route(session, route)
+            state = _export_session(session)
             assert state is not None
             route_path.unlink()
             restored = DesignSession()
-            restored.restore_persisted_state(document, state)
+            _restore_session(restored, document, state)
 
         self.assertIs(restored.document, document)
         self.assertIsNone(restored.route)
 
     def test_target_navigation(self) -> None:
         session = DesignSession()
-        session.set_targets(
+        session_navigation.set_targets(
+            session,
             [
                 MeasurementTarget(id="a", label="A", design_center=(0.0, 0.0)),
                 MeasurementTarget(id="b", label="B", design_center=(1.0, 1.0)),
-            ]
+            ],
         )
 
-        self.assertEqual(session.current_target().id, "a")
-        self.assertEqual(session.select_next_target().id, "b")
-        self.assertEqual(session.select_previous_target().id, "a")
+        self.assertEqual(session_navigation.current_target(session).id, "a")
+        self.assertEqual(session_navigation.select_next_target(session).id, "b")
+        self.assertEqual(session_navigation.select_previous_target(session).id, "a")
 
     def test_prepare_and_apply_source_alignment(self) -> None:
         session = DesignSession()
         session.document = self._make_document()
-        session.capture_source_pair((0.0, 0.0), (10.0, 10.0))
-        session.capture_source_pair((1000.0, 0.0), (10.0, 11.0))
+        session_registration.capture_source_pair(session, (0.0, 0.0), (10.0, 10.0))
+        session_registration.capture_source_pair(session, (1000.0, 0.0), (10.0, 11.0))
 
-        preparation = session.prepare_source_alignment()
+        preparation = session_registration.prepare_source_alignment(session)
 
         self.assertAlmostEqual(preparation.rotation_deg, -90.0)
         self.assertAlmostEqual(preparation.design_distance_mm, 1.0)
@@ -661,11 +718,11 @@ class DesignSessionTest(unittest.TestCase):
         self.assertAlmostEqual(preparation.stage_marks_after_rotation[1][0], 11.0)
         self.assertAlmostEqual(preparation.stage_marks_after_rotation[1][1], -10.0)
 
-        session.apply_prepared_alignment(preparation)
+        session_registration.apply_prepared_alignment(session, preparation)
 
         assert session.registration is not None
         self.assertTrue(session.registration.valid)
-        mapped = session.stage_from_design((500.0, 0.0))
+        mapped = session_navigation.stage_from_design(session, (500.0, 0.0))
         assert mapped is not None
         self.assertAlmostEqual(mapped[0], 10.5)
         self.assertAlmostEqual(mapped[1], -10.0)
@@ -680,7 +737,7 @@ class DesignSessionTest(unittest.TestCase):
         session.source_design_marks = design_marks
         session.source_stage_marks = stage_marks
 
-        preparation = session.prepare_source_alignment()
+        preparation = session_registration.prepare_source_alignment(session)
 
         self.assertEqual(preparation.design_marks, design_marks)
         self.assertEqual(preparation.stage_marks_before_rotation, stage_marks)
@@ -689,7 +746,7 @@ class DesignSessionTest(unittest.TestCase):
         self.assertAlmostEqual(preparation.rms_residual_mm, 0.0, places=12)
         self.assertAlmostEqual(preparation.max_residual_mm, 0.0, places=12)
 
-        session.apply_prepared_alignment(preparation)
+        session_registration.apply_prepared_alignment(session, preparation)
 
         self.assertIsInstance(session.source_design_marks, tuple)
         self.assertIsInstance(session.source_stage_marks, tuple)
@@ -700,7 +757,7 @@ class DesignSessionTest(unittest.TestCase):
     def test_persisted_state_v2_roundtrip_and_v1_slot_migration(self) -> None:
         document = self._make_document()
         session = DesignSession()
-        session.load_document(document)
+        session_navigation.load_document(session, document)
         session.source_design_marks = (
             (0.0, 0.0),
             (10.0, 0.0),
@@ -711,13 +768,13 @@ class DesignSessionTest(unittest.TestCase):
             (21.0, 2.0),
             (1.0, 22.0),
         )
-        session._rebuild_registration()
+        session_registration.rebuild_registration(session)
 
-        state = session.export_persisted_state()
+        state = _export_session(session)
         assert state is not None
         self.assertEqual(state["version"], 2)
         restored = DesignSession()
-        restored.restore_persisted_state(document, state)
+        _restore_session(restored, document, state)
         self.assertEqual(restored.source_design_marks, session.source_design_marks)
         self.assertEqual(restored.source_stage_marks, session.source_stage_marks)
 
@@ -726,7 +783,7 @@ class DesignSessionTest(unittest.TestCase):
         legacy["source_design_marks"] = [[0.0, 0.0], [10.0, 0.0]]
         legacy["source_stage_marks"] = [[1.0, 2.0], [21.0, 2.0]]
         migrated = DesignSession()
-        migrated.restore_persisted_state(document, legacy)
+        _restore_session(migrated, document, legacy)
         self.assertEqual(migrated.source_design_marks, ((0.0, 0.0), (10.0, 0.0)))
         self.assertEqual(migrated.source_stage_marks, ((1.0, 2.0), (21.0, 2.0)))
 
@@ -755,19 +812,24 @@ class DesignSessionTest(unittest.TestCase):
             visible_layers=frozenset({(1, 0)}),
         )
         session = DesignSession()
-        session.load_document(document)
+        session_navigation.load_document(session, document)
         session.source_design_marks = [(0.0, 0.0), (100.0, 0.0)]
         session.source_stage_marks = [(1.0, 2.0), (3.0, 2.0)]
-        session._rebuild_registration()
-        session.set_targets(
-            [MeasurementTarget(id="target", label="Target", design_center=(20.0, 30.0))]
+        session_registration.rebuild_registration(session)
+        session_navigation.set_targets(
+            session,
+            [
+                MeasurementTarget(
+                    id="target", label="Target", design_center=(20.0, 30.0)
+                )
+            ],
         )
-        route = session.create_route()
+        route = session_navigation.create_route(session)
         route.add_point((10.0, 20.0))
         route.set_needle_offsets(1.0, 2.0, -3.0, 4.0)
-        old_target_stage = session.stage_from_design((20.0, 30.0))
+        old_target_stage = session_navigation.stage_from_design(session, (20.0, 30.0))
 
-        rotated = session.rotate_document(1)
+        rotated = session_navigation.rotate_document(session, 1)
 
         self.assertIs(session.document, rotated)
         self.assertEqual(rotated.bounds, (-50.0, 50.0, 150.0, 150.0))
@@ -781,7 +843,10 @@ class DesignSessionTest(unittest.TestCase):
             [(offset.dx, offset.dy) for offset in session.route.needle_offsets],
             [(-2.0, 1.0), (-4.0, -3.0)],
         )
-        new_target_stage = session.stage_from_design(session.targets[0].design_center)
+        new_target_stage = session_navigation.stage_from_design(
+            session,
+            session.targets[0].design_center,
+        )
         assert old_target_stage is not None and new_target_stage is not None
         self.assertAlmostEqual(new_target_stage[0], old_target_stage[0])
         self.assertAlmostEqual(new_target_stage[1], old_target_stage[1])

@@ -14,6 +14,7 @@ from probe_station_gui.design import navigation_adapter as design_navigation
 
 _FRAME_METADATA_UNSET = object()
 
+
 def restore_design_workspace(
     owner: object,
     effect: RestoreDesignWorkspaceUiEffect,
@@ -36,8 +37,7 @@ def restore_design_workspace(
     previous_state = previous.session_state
     if (
         current_state.targets == applied_state.targets
-        and current_state.selected_target_index
-        == applied_state.selected_target_index
+        and current_state.selected_target_index == applied_state.selected_target_index
     ):
         targets = previous_state.targets
         selected_target_index = previous_state.selected_target_index
@@ -179,10 +179,7 @@ def apply_design_workspace_checkpoint(
     owner._design_markup_direct_guide_ids = list(checkpoint.direct_guide_ids)
     owner._design_markup_pending_visibility = checkpoint.pending_visibility
     owner._last_selected_design_point = checkpoint.last_selected_design_point
-    owner._pending_alignment_preparation = (
-        checkpoint.pending_alignment_preparation
-    )
-
+    owner._pending_alignment_preparation = checkpoint.pending_alignment_preparation
 
 
 def controller_state_with_design(owner: object) -> dict[str, object] | None:
@@ -236,7 +233,6 @@ def maybe_restore_persisted_design(
         document_loaded=False,
         axis_names=owner.STAGE_AXIS_NAMES,
         tolerance=owner.DESIGN_RESTORE_POSITION_TOLERANCE,
-        file_is_current=design_navigation.persisted_design_file_is_current,
     )
     if decision.axes_to_mark_unhomed:
         removed_axes = owner.stage_controller.mark_axes_unhomed(
@@ -279,6 +275,7 @@ def save_controller_state_without_design(owner: object) -> None:
     state.pop("design", None)
     state.pop("design_session", None)
     owner.settings_manager.save_controller_state(state)
+
 
 __all__ = [
     "apply_design_workspace_checkpoint",

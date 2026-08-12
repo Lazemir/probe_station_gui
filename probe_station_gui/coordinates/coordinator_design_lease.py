@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 from typing import TYPE_CHECKING
 
-from probe_station_gui.design import objective_offsets
+from probe_station_gui.design import objective_offsets, session_registration
 from probe_station_gui.design.frame_registration import DesignFrameMetadata
 from probe_station_gui.design.model import DesignModelError
 
@@ -231,8 +231,8 @@ class DesignCoordinateLeaseReducer:
             return
         record = self._registry.get(lease.frame_id)
         if record is None or not lease.usable:
-            self._session.invalidate_registration(
-                lease.reason or "Design coordinate frame is unavailable."
+            session_registration.invalidate_registration(
+                self._session, lease.reason or "Design coordinate frame is unavailable."
             )
             self._remember_refresh(lease)
             return
@@ -255,14 +255,18 @@ class DesignCoordinateLeaseReducer:
             )
 
         try:
-            self._session.link_active_frame(
+            session_registration.link_active_frame(
+                self._session,
                 record,
                 machine_point_for_navigation=project_machine,
                 machine_b_deg=machine_snapshot.physical_machine_pose.require("B"),
                 pivot_machine_xy=lease.pivot_machine_xy,
             )
         except (DesignModelError, KeyError, TypeError, ValueError) as exc:
-            self._session.invalidate_registration(str(exc) or type(exc).__name__)
+            session_registration.invalidate_registration(
+                self._session,
+                str(exc) or type(exc).__name__,
+            )
         self._remember_refresh(lease)
 
     def _lease_reason(
@@ -302,9 +306,7 @@ class DesignCoordinateLeaseReducer:
         cls,
         authority: CoordinateAuthorityObservation,
     ) -> frozenset[str]:
-        blocked = {
-            axis for axis in ("X", "Y") if axis not in authority.homed_axes
-        }
+        blocked = {axis for axis in ("X", "Y") if axis not in authority.homed_axes}
         blocked.update(
             axis
             for axis in ("X", "Y", "B")
@@ -346,8 +348,7 @@ class DesignCoordinateLeaseReducer:
                 int(record.version),
                 record.transform,
                 tuple(
-                    (axis, record.readiness[axis])
-                    for axis in sorted(record.readiness)
+                    (axis, record.readiness[axis]) for axis in sorted(record.readiness)
                 ),
                 tuple(
                     sorted(
@@ -368,9 +369,7 @@ class DesignCoordinateLeaseReducer:
                 machine_snapshot.coordinate_system,
                 machine_snapshot.position_reporting_mode,
                 tuple(sorted(machine_snapshot.axis_index.items())),
-                tuple(
-                    sorted(machine_snapshot.physical_machine_pose.values.items())
-                ),
+                tuple(sorted(machine_snapshot.physical_machine_pose.values.items())),
             )
         )
         return (
@@ -400,8 +399,13 @@ class DesignCoordinateLeaseReducer:
             if registration is None
             else (
                 bool(registration.valid),
-                tuple(tuple(float(value) for value in row) for row in registration.matrix),
-                tuple(tuple(float(value) for value in point) for point in registration.source_stage_marks),
+                tuple(
+                    tuple(float(value) for value in row) for row in registration.matrix
+                ),
+                tuple(
+                    tuple(float(value) for value in point)
+                    for point in registration.source_stage_marks
+                ),
                 float(registration.design_unit_mm),
             )
         )

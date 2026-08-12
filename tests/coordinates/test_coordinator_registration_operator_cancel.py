@@ -18,6 +18,7 @@ from probe_station_gui.coordinates.coordinator_model import (
 )
 from probe_station_gui.design.frame_registration import DesignFrameMetadata
 from probe_station_gui.design.registration_lifecycle import RegistrationCancellation
+from probe_station_gui.design import session_registration
 from probe_station_gui.views import main_window_coordinate_flow as coordinate_flow
 from tests.coordinates.coordinator_registration_support import (
     _document,
@@ -232,7 +233,8 @@ def test_changed_frame_version_restores_superseded_operator_draft_once(
     current = registry.get(session.active_frame_id)
     assert current is not None
     newer = replace(current, version=current.version + 1)
-    projection = session.prepare_active_frame_link(
+    projection = session_registration.prepare_active_frame_link(
+        session,
         newer,
         machine_b_deg=0.0,
         pivot_machine_xy=(0.0, 0.0),

@@ -7,6 +7,7 @@ import json
 from typing import Protocol
 
 from probe_station_gui.design.session import DesignSession
+from probe_station_gui.design import session_registration
 
 from .coordinator_model import (
     CoordinateAdapterCompletion,
@@ -111,7 +112,10 @@ class CoordinatePersistenceReducer:
         if records:
             self._registry.reset(mark_design_frame_provenance_pending(records))
         if self._session.active_frame_id and effects.invalidate_session_reason:
-            self._session.invalidate_registration(effects.invalidate_session_reason)
+            session_registration.invalidate_registration(
+                self._session,
+                effects.invalidate_session_reason,
+            )
         self._frames_loaded = False
         return CoordinateTransition(
             snapshot=self.snapshot(),
@@ -167,9 +171,7 @@ class CoordinatePersistenceReducer:
             self._apply_session_link(publication)
             self._journal[request_id] = replace(
                 entry,
-                applied_session_lease=self._capture_session_rollback_lease(
-                    publication
-                ),
+                applied_session_lease=self._capture_session_rollback_lease(publication),
             )
         except Exception:
             self._registry.reset(previous_records)
@@ -194,9 +196,8 @@ class CoordinatePersistenceReducer:
     ) -> _Completion:
         result = completion.result
         result_request_id = getattr(result, "request_id", None)
-        if (
-            not isinstance(result_request_id, int)
-            or result_request_id != int(completion.intent_id)
+        if not isinstance(result_request_id, int) or result_request_id != int(
+            completion.intent_id
         ):
             return CoordinateTransition(self.snapshot()), ()
         if isinstance(result, CoordinateFrameLoadResult):
@@ -206,9 +207,15 @@ class CoordinatePersistenceReducer:
             and result.operation == "load"
         ):
             return self._complete_load_failure(result), ()
-        if isinstance(result, CoordinateFrameStoreSuccess) and result.operation == "save":
+        if (
+            isinstance(result, CoordinateFrameStoreSuccess)
+            and result.operation == "save"
+        ):
             return self._complete_save(result_request_id, succeeded=True)
-        if isinstance(result, CoordinateFrameStoreFailure) and result.operation == "save":
+        if (
+            isinstance(result, CoordinateFrameStoreFailure)
+            and result.operation == "save"
+        ):
             return self._complete_save(result_request_id, succeeded=False)
         return CoordinateTransition(self.snapshot()), ()
 
@@ -224,7 +231,11 @@ class CoordinatePersistenceReducer:
         ):
             return CoordinateTransition(self.snapshot())
         assert document is not None
-        records = document.records if result.runtime_records is None else result.runtime_records
+        records = (
+            document.records
+            if result.runtime_records is None
+            else result.runtime_records
+        )
         effects = self._lifecycle.accept_load(
             FrameLoadResult(request_id, tuple(records))
         )
@@ -302,8 +313,7 @@ class CoordinatePersistenceReducer:
             "operator_alignment_rollback"
             if any(
                 entry.publication.success_notice is not None
-                and entry.publication.success_notice.code
-                == "operator_alignment_saved"
+                and entry.publication.success_notice.code == "operator_alignment_saved"
                 for entry in completed
             )
             else None
@@ -358,9 +368,7 @@ class CoordinatePersistenceReducer:
             else:
                 checkpoint.restore(self._session)
         assert self._document is not None
-        self._document = self._document.with_records(
-            self._registry.snapshot().records
-        )
+        self._document = self._document.with_records(self._registry.snapshot().records)
 
     def _capture_session_rollback_lease(
         self,
@@ -384,9 +392,7 @@ class CoordinatePersistenceReducer:
             visible_layers=tuple(sorted(document.visible_layers)),
             rotation_quarter_turns=int(document.rotation_quarter_turns) % 4,
             active_frame_id=str(frame_id),
-            coordinate_fingerprint=self._coordinate_state_fingerprint(
-                self._session
-            ),
+            coordinate_fingerprint=self._coordinate_state_fingerprint(self._session),
         )
 
     def _session_rollback_lease_is_current(
@@ -406,8 +412,7 @@ class CoordinatePersistenceReducer:
             and str(document.source_load_id) == lease.source_load_id
             and str(document.top_cell_name) == lease.top_cell_name
             and tuple(sorted(document.visible_layers)) == lease.visible_layers
-            and int(document.rotation_quarter_turns) % 4
-            == lease.rotation_quarter_turns
+            and int(document.rotation_quarter_turns) % 4 == lease.rotation_quarter_turns
             and self._session.active_frame_id == lease.active_frame_id
             and self._coordinate_state_fingerprint(self._session)
             == lease.coordinate_fingerprint
@@ -448,8 +453,7 @@ class CoordinatePersistenceReducer:
                 cls._point_fingerprint(registration.check_design_marks),
                 cls._point_fingerprint(registration.check_stage_marks),
                 tuple(
-                    tuple(float(value) for value in row)
-                    for row in registration.matrix
+                    tuple(float(value) for value in row) for row in registration.matrix
                 ),
                 tuple(float(value) for value in registration.offset),
                 float(registration.design_unit_mm),
@@ -502,8 +506,7 @@ class CoordinatePersistenceReducer:
             and str(document.source_load_id) == lease.source_load_id
             and str(document.top_cell_name) == lease.top_cell_name
             and tuple(sorted(document.visible_layers)) == lease.visible_layers
-            and int(document.rotation_quarter_turns) % 4
-            == lease.rotation_quarter_turns
+            and int(document.rotation_quarter_turns) % 4 == lease.rotation_quarter_turns
         )
 
     def _success_notice_is_current(
@@ -545,7 +548,11 @@ class CoordinatePersistenceReducer:
         runtime_record = link.runtime_record or record
         if runtime_record.frame_id != record.frame_id:
             raise ValueError("Runtime session frame does not match the publication.")
-        self._session.apply_active_frame_link(runtime_record, link.projection)
+        session_registration.apply_active_frame_link(
+            self._session,
+            runtime_record,
+            link.projection,
+        )
 
     def _contact_commit_rollback(
         self,

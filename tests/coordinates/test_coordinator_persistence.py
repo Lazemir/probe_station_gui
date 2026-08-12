@@ -35,7 +35,9 @@ from probe_station_gui.coordinates.transforms import BFrameTransform
 from probe_station_gui.design.frame_registration import DesignFrameMetadata
 from probe_station_gui.design.model import DesignDocument, MeasurementTarget
 from probe_station_gui.design.registration_lifecycle import RegistrationCancellation
-from probe_station_gui.design.session import DesignFrameLinkProjection, DesignSession
+from probe_station_gui.design.session import DesignSession
+from probe_station_gui.design.session_registration import DesignFrameLinkProjection
+from probe_station_gui.design import session_navigation, session_registration
 
 
 _FRAME_A = "00000000-0000-0000-0000-00000000000a"
@@ -59,7 +61,9 @@ def _document(tmp_path: Path) -> DesignDocument:
     )
 
 
-def _record(document: DesignDocument, frame_id: str, name: str) -> CoordinateFrameRecord:
+def _record(
+    document: DesignDocument, frame_id: str, name: str
+) -> CoordinateFrameRecord:
     return CoordinateFrameRecord.create_design(
         frame_id=frame_id,
         name=name,
@@ -321,9 +325,7 @@ def test_publication_preserves_rejected_raw_document_slots(tmp_path: Path) -> No
     _complete_load(coordinator, load, document)
 
     save = _save_intent(
-        coordinator._publish_frame_records(
-            FrameRecordsPublication(records=(renamed,))
-        )
+        coordinator._publish_frame_records(FrameRecordsPublication(records=(renamed,)))
     )
 
     serialized = save.document.to_dict()["records"]
@@ -464,7 +466,11 @@ def test_same_frame_failure_preserves_newer_targets_route_and_selections(
     load = coordinator.start(MachineProfileObservation("profile")).intents[0]
     assert isinstance(load, LoadCoordinateFramesIntent)
     _complete_load(coordinator, load, CoordinateFrameDocument(records=(draft,)))
-    session.apply_active_frame_link(draft, _link(draft).projection)
+    session_registration.apply_active_frame_link(
+        session,
+        draft,
+        _link(draft).projection,
+    )
     session._runtime_blocked_persisted_state = {"legacy": "blocked"}
     session._legacy_stage_coordinate_provenance = {"wco": "G54"}
     session._legacy_stage_coordinate_provenance_present = True
@@ -493,12 +499,12 @@ def test_same_frame_failure_preserves_newer_targets_route_and_selections(
         MeasurementTarget("target-a", "A", (100.0, 200.0)),
         MeasurementTarget("target-b", "B", (300.0, 400.0)),
     ]
-    session.set_targets(targets)
+    session_navigation.set_targets(session, targets)
     session.selected_target_index = 1
-    route = session.create_route(name="edited while saving")
-    session.add_route_point((10.0, 20.0))
-    session.add_route_point((30.0, 40.0))
-    session.select_route_point(0)
+    route = session_navigation.create_route(session, name="edited while saving")
+    session_navigation.add_route_point(session, (10.0, 20.0))
+    session_navigation.add_route_point(session, (30.0, 40.0))
+    session_navigation.select_route_point(session, 0)
 
     failed = coordinator.complete(
         CoordinateAdapterCompletion(
@@ -548,7 +554,11 @@ def test_old_failure_does_not_overwrite_newer_same_frame_coordinate_edit(
     load = coordinator.start(MachineProfileObservation("profile")).intents[0]
     assert isinstance(load, LoadCoordinateFramesIntent)
     _complete_load(coordinator, load, CoordinateFrameDocument(records=(draft,)))
-    session.apply_active_frame_link(draft, _link(draft).projection)
+    session_registration.apply_active_frame_link(
+        session,
+        draft,
+        _link(draft).projection,
+    )
     save = _save_intent(
         coordinator._publish_frame_records(
             FrameRecordsPublication(
@@ -571,7 +581,7 @@ def test_old_failure_does_not_overwrite_newer_same_frame_coordinate_edit(
     )
     assert session.registration is not None
     coordinator.cancel_registration(RegistrationCancellation.MARK_SET_CHANGED)
-    session.add_source_design_mark((500.0, 500.0))
+    session_registration.add_source_design_mark(session, (500.0, 500.0))
     edited_design_marks = session.source_design_marks
     edited_stage_marks = session.source_stage_marks
     edited_status = session.registration_status
@@ -851,7 +861,11 @@ def test_terminal_failure_rolls_back_each_frame_and_exact_session_once(
     assert DesignSessionCheckpoint.capture(session) == baseline
     assert transition.snapshot.records == (a0, b0)
     assert transition.notices == (
-        CoordinateNotice("Design coordinate frames could not be saved.", severity="error", duration_ms=6000),
+        CoordinateNotice(
+            "Design coordinate frames could not be saved.",
+            severity="error",
+            duration_ms=6000,
+        ),
     )
 
 
@@ -970,9 +984,7 @@ def test_coalesced_success_keeps_durable_legacy_completion_tag(tmp_path: Path) -
         )
     )
 
-    assert transition.notices == (
-        CoordinateNotice("", code="legacy_migration_saved"),
-    )
+    assert transition.notices == (CoordinateNotice("", code="legacy_migration_saved"),)
 
 
 def test_only_operator_alignment_failure_requests_snap_restore(tmp_path: Path) -> None:

@@ -25,16 +25,22 @@ from probe_station_gui.design.model import (
     DesignModelError,
     Point2D,
 )
-from probe_station_gui.design.session import (
+from probe_station_gui.design import session_navigation, session_registration
+from probe_station_gui.design.session import DesignSession
+from probe_station_gui.design.session_registration import (
     DEFAULT_B_AXIS_ROTATION_PIVOT_STAGE,
     DesignFrameLinkProjection,
-    DesignSession,
+)
+from probe_station_gui.design.session_state import (
+    PreparedDesignSessionRestore,
+    apply_prepared_session_restore,
 )
 from probe_station_gui.route.model import MeasurementRoute
 
 
 DEFAULT_STAGE_AXIS_NAMES = ("X", "Y", "Z", "A", "B", "C")
 DEFAULT_POSITION_TOLERANCE = 1e-3
+
 
 @dataclass(frozen=True)
 class PersistedDesignRestoreDecision:
@@ -122,32 +128,6 @@ def position_axis_mismatches(
     return mismatches
 
 
-def persisted_design_file_is_current(state: dict[str, object]) -> bool:
-    path_text = str(state.get("document_path") or "").strip()
-    if not path_text:
-        return False
-    path = Path(path_text).expanduser()
-    try:
-        stat = path.stat()
-    except OSError:
-        return False
-    saved_size = state.get("document_size")
-    if saved_size is not None:
-        try:
-            if int(saved_size) != int(stat.st_size):
-                return False
-        except (TypeError, ValueError):
-            return False
-    saved_mtime = state.get("document_mtime_ns")
-    if saved_mtime is not None:
-        try:
-            if int(saved_mtime) != int(stat.st_mtime_ns):
-                return False
-        except (TypeError, ValueError):
-            return False
-    return True
-
-
 def prepare_design_frame_publication(
     session: DesignSession,
     records: tuple[CoordinateFrameRecord, ...],
@@ -167,7 +147,8 @@ def prepare_design_frame_publication(
 
     checkpoint = previous_session or DesignSessionCheckpoint.capture(session)
     projection_record = runtime_record or committed_record
-    projection = session.prepare_active_frame_link(
+    projection = session_registration.prepare_active_frame_link(
+        session,
         projection_record,
         machine_point_for_navigation=machine_point_for_navigation,
         machine_b_deg=machine_b_deg,
@@ -209,14 +190,15 @@ def activate_design_frame_for_document(
             existing_names=existing_names,
             metadata=current_metadata,
         )
-        projection = session.prepare_active_frame_link(
+        projection = session_registration.prepare_active_frame_link(
+            session,
             candidate,
             machine_point_for_navigation=machine_point_for_navigation,
             machine_b_deg=machine_b_deg,
             pivot_machine_xy=pivot_machine_xy,
         )
         record = registry.add(candidate)
-        session.apply_active_frame_link(record, projection)
+        session_registration.apply_active_frame_link(session, record, projection)
         return DesignFrameActivation(record=record, created=True)
 
     selected = registry.get(requested_frame_id) if requested_frame_id else None
@@ -226,7 +208,7 @@ def activate_design_frame_for_document(
         provenance_error = design_frame_provenance_error(selected)
         if provenance_error is not None:
             if session.active_frame_id == requested_frame_id:
-                session.clear_registration()
+                session_registration.clear_registration(session)
             raise DesignModelError(provenance_error)
         document_source = source_identity(document.path)
         mismatch_message = None
@@ -238,7 +220,7 @@ def activate_design_frame_for_document(
             )
         if mismatch_message is not None:
             if session.active_frame_id == requested_frame_id:
-                session.clear_registration()
+                session_registration.clear_registration(session)
             raise DesignModelError(mismatch_message)
     if selected is None:
         document_source = source_identity(document.path)
@@ -255,7 +237,7 @@ def activate_design_frame_for_document(
         provenance_error = design_frame_provenance_error(selected)
         if provenance_error is not None:
             if session.active_frame_id == selected.frame_id:
-                session.clear_registration()
+                session_registration.clear_registration(session)
             raise DesignModelError(provenance_error)
     if selected is None:
         candidate = new_design_frame_draft(
@@ -263,14 +245,15 @@ def activate_design_frame_for_document(
             existing_names=existing_names,
             metadata=current_metadata,
         )
-        projection = session.prepare_active_frame_link(
+        projection = session_registration.prepare_active_frame_link(
+            session,
             candidate,
             machine_point_for_navigation=machine_point_for_navigation,
             machine_b_deg=machine_b_deg,
             pivot_machine_xy=pivot_machine_xy,
         )
         selected = registry.add(candidate)
-        session.apply_active_frame_link(selected, projection)
+        session_registration.apply_active_frame_link(session, selected, projection)
         return DesignFrameActivation(record=selected, created=True)
 
     reconciled = design_frame_for_loaded_document(
@@ -279,7 +262,8 @@ def activate_design_frame_for_document(
         current_metadata=current_metadata,
     )
     updated = reconciled != selected
-    projection = session.prepare_active_frame_link(
+    projection = session_registration.prepare_active_frame_link(
+        session,
         reconciled,
         machine_point_for_navigation=machine_point_for_navigation,
         machine_b_deg=machine_b_deg,
@@ -287,7 +271,7 @@ def activate_design_frame_for_document(
     )
     if updated:
         reconciled = registry.replace(reconciled, expected_version=selected.version)
-    session.apply_active_frame_link(reconciled, projection)
+    session_registration.apply_active_frame_link(session, reconciled, projection)
     return DesignFrameActivation(record=reconciled, updated=updated)
 
 
@@ -337,7 +321,8 @@ def prepare_design_frame_activation(
             projection=link.projection,
             publication=publication,
         )
-    projection = session.prepare_active_frame_link(
+    projection = session_registration.prepare_active_frame_link(
+        session,
         activation.record,
         machine_point_for_navigation=machine_point_for_navigation,
         machine_b_deg=machine_b_deg,
@@ -369,7 +354,6 @@ def prepare_persisted_design_restore(
     document_loaded: bool,
     axis_names: tuple[str, ...] = DEFAULT_STAGE_AXIS_NAMES,
     tolerance: float = DEFAULT_POSITION_TOLERANCE,
-    file_is_current: Callable[[dict[str, object]], bool] = persisted_design_file_is_current,
 ) -> PersistedDesignRestoreDecision:
     if cached_state is None or document_loaded:
         return PersistedDesignRestoreDecision()
@@ -389,14 +373,6 @@ def prepare_persisted_design_restore(
                 "Controller X/Y coordinates changed. Cleared cached design selection."
             ),
         )
-    if not file_is_current(design_state):
-        return PersistedDesignRestoreDecision(
-            clear_cached_design=True,
-            status_message=(
-                "Cached design file changed or is unavailable. "
-                "Cleared cached design selection."
-            ),
-        )
     design_path = str(design_state.get("document_path") or "").strip()
     if not design_path:
         return PersistedDesignRestoreDecision(clear_cached_design=True)
@@ -407,39 +383,6 @@ def prepare_persisted_design_restore(
         restore_state=design_state,
         axes_to_mark_unhomed=z_axes,
     )
-
-
-def parse_persisted_visible_layers(value: object) -> set[tuple[int, int]]:
-    layers: set[tuple[int, int]] = set()
-    if not isinstance(value, list):
-        return layers
-    for item in value:
-        if not isinstance(item, (list, tuple)) or len(item) != 2:
-            continue
-        try:
-            layers.add((int(item[0]), int(item[1])))
-        except (TypeError, ValueError):
-            continue
-    return layers
-
-
-def document_with_persisted_design_view(
-    document: DesignDocument,
-    state: dict[str, object],
-) -> DesignDocument:
-    top_cell_name = str(state.get("top_cell_name") or "").strip()
-    if top_cell_name and top_cell_name != document.top_cell_name:
-        document = document.with_top_cell(top_cell_name)
-    try:
-        rotation_quarter_turns = int(state.get("rotation_quarter_turns", 0))
-    except (TypeError, ValueError):
-        rotation_quarter_turns = 0
-    if rotation_quarter_turns:
-        document = document.with_rotation_delta(rotation_quarter_turns)
-    visible_layers = parse_persisted_visible_layers(state.get("visible_layers"))
-    if visible_layers:
-        document = document.with_visible_layers(visible_layers)
-    return document
 
 
 def design_load_error_plan(
@@ -470,25 +413,38 @@ def design_document_loaded_plan(
     document: object,
     error: object,
     restore_state: dict[str, object] | None,
+    prepared_restore: PreparedDesignSessionRestore | None = None,
 ) -> DesignLoadResultPlan:
     if error is not None:
         return design_load_error_plan(error, restore_state)
     if not isinstance(document, DesignDocument):
         return unexpected_design_document_plan(restore_state)
-    return apply_loaded_design_document(session, document, restore_state)
+    return apply_loaded_design_document(
+        session,
+        document,
+        restore_state,
+        prepared_restore=prepared_restore,
+    )
 
 
 def apply_loaded_design_document(
     session: DesignSession,
     document: DesignDocument,
     restore_state: dict[str, object] | None,
+    *,
+    prepared_restore: PreparedDesignSessionRestore | None = None,
 ) -> DesignLoadResultPlan:
-    if restore_state is None:
-        session.load_document(document)
+    if prepared_restore is not None:
+        apply_prepared_session_restore(session, prepared_restore)
+        if session.document is not None:
+            document = session.document
+    elif restore_state is None:
+        session_navigation.load_document(session, document)
     else:
-        document = document_with_persisted_design_view(document, restore_state)
-        session.restore_persisted_state(document, restore_state)
-    current_route_point = session.current_route_point()
+        raise DesignModelError(
+            "Persisted design restore was not prepared on the document-load thread."
+        )
+    current_route_point = session_navigation.current_route_point(session)
     last_selected_design_point = (
         current_route_point.camera_center if current_route_point is not None else None
     )
@@ -503,7 +459,6 @@ def apply_loaded_design_document(
     )
 
 
-
 __all__ = [
     "DesignFrameActivation",
     "DesignLoadResultPlan",
@@ -514,9 +469,6 @@ __all__ = [
     "coerce_position_tuple",
     "design_load_error_plan",
     "design_document_loaded_plan",
-    "document_with_persisted_design_view",
-    "parse_persisted_visible_layers",
-    "persisted_design_file_is_current",
     "position_axis_mismatches",
     "prepare_design_frame_activation",
     "prepare_design_frame_publication",

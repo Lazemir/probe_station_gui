@@ -6,7 +6,7 @@ from dataclasses import dataclass, replace
 import math
 from typing import Callable
 
-from probe_station_gui.design import objective_offsets
+from probe_station_gui.design import objective_offsets, session_registration
 from probe_station_gui.design.focus_candidate import FocusCandidate
 from probe_station_gui.design.frame_registration import (
     DesignFrameMetadata,
@@ -134,7 +134,9 @@ class CoordinateFocusWorkflow:
                 self._lifecycle.cancel(RegistrationCancellation.DESIGN_CHANGED)
             )
             return _RegistrationTransitionParts(
-                notices=(self._warning("Find a new focus reference for the current view."),)
+                notices=(
+                    self._warning("Find a new focus reference for the current view."),
+                )
             )
         effects = self._lifecycle.accept_focus(context)
         self.observe_effects(effects)
@@ -149,7 +151,14 @@ class CoordinateFocusWorkflow:
             )
         try:
             target = self._move_target(request, effects.focus_token, context)
-        except (AttributeError, DesignModelError, KeyError, RuntimeError, TypeError, ValueError) as exc:
+        except (
+            AttributeError,
+            DesignModelError,
+            KeyError,
+            RuntimeError,
+            TypeError,
+            ValueError,
+        ) as exc:
             self._cancel(context, effects.focus_token)
             return _RegistrationTransitionParts(
                 notices=(self._warning(str(exc) or "Design registration is required."),)
@@ -206,7 +215,8 @@ class CoordinateFocusWorkflow:
                 version=current.version + 1,
             )
             physical_b = request.machine_snapshot.physical_machine_pose.require("B")
-            projection = self._session.prepare_active_frame_link(
+            projection = session_registration.prepare_active_frame_link(
+                self._session,
                 reset,
                 machine_point_for_navigation=self._machine_mapper(request),
                 machine_b_deg=physical_b,
@@ -275,9 +285,7 @@ class CoordinateFocusWorkflow:
             return _RegistrationTransitionParts(notices=notices)
         autofocus_id = self._allocate_intent_id()
         self._autofocus[autofocus_id] = pending
-        return _RegistrationTransitionParts(
-            intents=(RunAutofocusIntent(autofocus_id),)
-        )
+        return _RegistrationTransitionParts(intents=(RunAutofocusIntent(autofocus_id),))
 
     def _complete_autofocus(
         self,
@@ -316,8 +324,11 @@ class CoordinateFocusWorkflow:
                 set_focus_reference(current, physical_machine_z_mm=effects.commit_z_mm),
                 version=current.version + 1,
             )
-            physical_b = pending.request.machine_snapshot.physical_machine_pose.require("B")
-            projection = self._session.prepare_active_frame_link(
+            physical_b = pending.request.machine_snapshot.physical_machine_pose.require(
+                "B"
+            )
+            projection = session_registration.prepare_active_frame_link(
+                self._session,
                 focused,
                 machine_point_for_navigation=self._machine_mapper(pending.request),
                 machine_b_deg=physical_b,

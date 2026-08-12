@@ -23,6 +23,7 @@ from probe_station_gui.coordinates.registry import CoordinateFrameRegistry
 from probe_station_gui.design.frame_registration import new_design_frame_draft
 from probe_station_gui.design.model import DesignDocument
 from probe_station_gui.design.session import DesignSession
+from probe_station_gui.design import session_registration
 from probe_station_gui.settings.axis_calibration_config import (
     default_axis_calibrations,
 )
@@ -169,7 +170,7 @@ def test_conversion_failure_restores_tentative_batch_and_starts_clean(
         objective_xy_offset=(0.0, 0.0),
     )
     _capture(coordinator, _machine_snapshot(3.0, 4.0), request=request)
-    assert session.source_stage_marks_compact() == [(3.0, 4.0)]
+    assert session_registration.source_stage_marks_compact(session) == [(3.0, 4.0)]
 
     started = coordinator.capture_registration_mark(request)
     intent = started.intents[0]
@@ -199,7 +200,7 @@ def test_conversion_failure_restores_tentative_batch_and_starts_clean(
     assert session.snapshot_state() == baseline
     fresh = _capture(coordinator, _machine_snapshot(5.0, 6.0), request=request)
     assert fresh.intents == ()
-    assert session.source_stage_marks_compact() == [(5.0, 6.0)]
+    assert session_registration.source_stage_marks_compact(session) == [(5.0, 6.0)]
 
 
 @pytest.mark.parametrize("failure_kind", ("fit", "preparation"))
@@ -220,7 +221,7 @@ def test_non_operator_commit_rollback_refreshes_design_views_once(
     if failure_kind == "preparation":
         second_snapshot = _machine_snapshot(4.0, 4.0)
         monkeypatch.setattr(
-            DesignSession,
+            session_registration,
             "prepare_active_frame_link",
             lambda *_args, **_kwargs: (_ for _ in ()).throw(
                 RuntimeError("preparation failed")
