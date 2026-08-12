@@ -2277,3 +2277,67 @@ git diff --check 8fc83259e07f48bf0f222e80bb3e1d6c3241fd0e..HEAD
   `0 Critical / 0 Important / 0 Minor`. Nothing was staged before that final
   verdict; the authorized exact commit subject is
   `refactor: separate lcr meter domains`.
+
+#### Task 19a: Separate stage click-move calibration domain
+
+- [x] Capture the clean `bde134d` baseline before editing. The original
+  click-move owner was
+  `1168 LOC / 626 LLOC / 1075 SLOC / CC 186 / 45 blocks / max CC 18 /
+  MI 0.00`; the six existing click/calibration/autofocus files passed
+  `111/111`. Stage controller, autofocus owners, errors, planning/types,
+  package roots, Main, joystick, serial terminal, route production, and every
+  existing test were protected from behavior edits.
+- [x] Observe four strict ownership RED boundaries. The new-module assertion
+  first failed with `find_spec=None`; the host-base assertion then failed with
+  the exact missing private class; the exact-move assertion failed with zero
+  versus thirteen owner methods; and the final import/DAG contract failed on
+  the stale `logging`, `math`, and autofocus shift imports. Minimal GREEN steps
+  created the owner, inserted the private base, moved the exact bodies, and
+  removed only dead imports. The pure-import assertion was narrowed before
+  GREEN to reject direct GUI/hardware dependencies rather than the inherited
+  standard serial dependency of the existing stage-error owner.
+- [x] Make `click_move_calibration.py` the private deep owner of calibration
+  acquisition, adaptive probing, active-objective verification, least-squares
+  and axis-slope fitting, calibrated target completion, return-to-origin,
+  magnitudes, and shift adapters. All thirteen decorator-aware method ASTs
+  retain their baseline SHA-256 values. The owner logger remains exactly
+  `probe_station_gui.stage.click_move`; it has no controller/click-move/view/
+  route/Main reverse import, Qt import, package export, alias, or wrapper.
+- [x] Keep canonical `StageControllerClickMoveMixin` in `click_move.py` with
+  all thirty retained method ASTs exact and all ten public signatures intact.
+  It directly inherits `_StageControllerClickCalibrationMixin`; the canonical
+  root/controller `StageController` identity and direct base order are exact,
+  with the private owner appearing immediately after the click mixin in the
+  runtime MRO. Request queuing, safety/homing/precision order, calibration
+  tokens, cancellation, frame synchronization, objective mismatch, numeric
+  thresholds, return-to-origin, and signal order are therefore unchanged.
+- [x] Pass fresh no-hardware verification under offscreen Qt and process-local
+  `QLocale.c()`: final focused coverage passes `116`; all stage passes `477`
+  plus `4` subtests; microscope UI passes `43`; App passes `365` plus `5`
+  subtests with the inherited order-sensitive node deselected, and that exact
+  protected node passes alone. A raw App run reproduced the established access
+  violation at protected `MicroscopeInteraction._schedule_retry`. The exact
+  collected union is instead covered without omission by fresh deterministic
+  directory partitions: `3187/3187` tests plus `16` subtests pass.
+- [x] Pass affected and configured whole-tree Ruff, affected format,
+  whole-tree compile, `git diff --check`, forward/reverse import, identity,
+  MRO, exact-definition/deletion/AST, logger, protected-byte, scope, and
+  prospective MI-zero gates. All seventeen pinned protected source/test hashes
+  match; exact tracked scope proves route and every other existing test remain
+  unchanged. Task-local temporary roots are absent.
+- [x] Metrics: the residual click owner is
+  `634 LOC / 311 LLOC / 563 SLOC / CC 87 / 32 blocks / max CC 10 / MI 12.18`;
+  calibration is
+  `570 / 324 / 540 / CC 105 / 14 blocks / max CC 18 / MI 8.04`; the new
+  ownership test has MI `38.36`. Radon's class-summary accounting becomes
+  `CC 192 / 46 blocks`, while actual functional complexity is exactly unchanged
+  at `44 functions / summed CCN 181 / max 18`. The sole Lizard warning is the
+  exact moved `_calibrate_axis_series` CCN-18 body and duplicate rate is
+  `0.00%`. Every touched/new Python file has positive MI; all-tracked and
+  active MI-zero both decrease exactly `5 -> 4`, with no new MI-zero file.
+- [x] Freeze the exact four-path evidence-bearing snapshot. A fresh fork-none
+  independent read-only review rechecked all hashes, scope/index, the complete
+  `43 -> 30 + 13` decorator-aware AST split, signatures, root identity/MRO,
+  imports/logger, protected bytes, focused `116`, Ruff/format/diff, and exact
+  Radon/Lizard/MI-zero arithmetic. It returned `READY` with
+  `0 Critical / 0 Important / 0 Minor`; nothing was staged before that verdict.
