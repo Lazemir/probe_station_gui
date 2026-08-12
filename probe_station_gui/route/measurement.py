@@ -79,6 +79,7 @@ from probe_station_gui.route.point_execution_adapters import (
     PointExecutionAdapters,
     RouteMeasurementEvents,
 )
+from probe_station_gui.route.run_control_mailbox import _RouteRunControlMailbox
 
 
 logger = logging.getLogger(__name__)
@@ -217,27 +218,23 @@ class RouteMeasurementRunner:
         self._wait_before_first_point = bool(wait_before_first_point)
         self._design_frame_snapshot = design_frame_snapshot
         self._last_run_result: dict[str, object] | None = None
-        self._stop_requested = threading.Event()
-        self._point_interrupt_requested = threading.Event()
-        self._pause_requested = threading.Event()
-        self._confirmation_condition = threading.Condition()
-        self._pending_confirmation: str | None = None
+        self._run_control = _RouteRunControlMailbox(
+            waiting_changed=self._events.waiting,
+        )
         self._stage_task_active = False
         self._progress_started_at: float | None = None
         self._route_offset_lock = threading.Lock()
         self._route_offset_xy: Point2D = (0.0, 0.0)
         self._last_recorded_point: RouteMeasurementPoint | None = None
         self._contact_state = ContactMeasurementState()
-        self._waiting_condition = threading.Condition()
-        self._waiting = False
         self._csv_write_retry_interval_s = self.CSV_WRITE_RETRY_INTERVAL_S
         self._point_adapters = PointExecutionAdapters.create(
             stage_controller=self._stage_controller,
             lcr_controller=self._lcr_controller,
             callbacks=self._events,
             append_csv=self._append_csv_record,
-            stopped=self._stop_requested.is_set,
-            interrupted=self._point_interrupt_requested.is_set,
+            stopped=self._run_control.stop_requested,
+            interrupted=self._run_control.interrupt_requested,
         )
         self._legacy_contact = LegacyContactBindings(
             stage_controller=self._stage_controller,
@@ -251,8 +248,8 @@ class RouteMeasurementRunner:
             contact_xy=self._adjusted_stage_xy,
             photo_xy=self._adjusted_photo_stage_xy,
             settle_photo=self._sleep_photo_settle,
-            stop_requested=self._route_point_stop_requested,
-            clear_interrupt=self._point_interrupt_requested.clear,
+            stop_requested=self._run_control.point_stop_requested,
+            clear_interrupt=self._run_control.clear_interrupt,
             set_seek_enabled=self._set_auto_contact_seek_enabled,
             status=self._status,
         )
@@ -314,21 +311,10 @@ class RouteMeasurementRunner:
         return self._contact_quality_limits
 
     def is_waiting(self) -> bool:
-        with self._waiting_condition:
-            return bool(self._waiting)
+        return self._run_control.is_waiting()
 
     def wait_until_waiting(self, timeout_s: float) -> bool:
-        deadline = time.monotonic() + max(0.0, float(timeout_s))
-        with self._waiting_condition:
-            while True:
-                if self._waiting:
-                    return True
-                if self._stop_requested.is_set():
-                    return False
-                remaining = deadline - time.monotonic()
-                if remaining <= 0.0:
-                    return False
-                self._waiting_condition.wait(timeout=min(0.05, remaining))
+        return self._run_control.wait_until_waiting(timeout_s)
 
     def set_current_adjustment_point(self, point_number: int) -> tuple[bool, str]:
         index = self.index_for_point_number(int(point_number))
@@ -339,42 +325,25 @@ class RouteMeasurementRunner:
         return True, ""
 
     def stop(self) -> None:
-        self._stop_requested.set()
-        with self._confirmation_condition:
-            self._confirmation_condition.notify_all()
+        self._run_control.request_stop()
 
     def submit_confirmation(self, action: str) -> bool:
-        normalized = str(action).strip().lower()
-        if normalized.isdigit():
-            normalized = f"jump:{int(normalized)}"
-        elif normalized.startswith("jump:"):
-            try:
-                normalized = f"jump:{int(normalized.split(':', 1)[1].strip())}"
-            except ValueError:
-                return False
-        elif normalized not in {"next", "measure", "remeasure", "skip"}:
-            return False
-        with self._confirmation_condition:
-            self._pending_confirmation = normalized
-            self._confirmation_condition.notify_all()
-        return True
+        return self._run_control.submit_confirmation(action)
 
     def submit_jump(self, point_number: int) -> bool:
         return self.submit_confirmation(f"jump:{int(point_number)}")
 
     def request_current_point_correction(self) -> None:
-        self._point_interrupt_requested.set()
-        with self._confirmation_condition:
-            self._confirmation_condition.notify_all()
+        self._run_control.request_interrupt()
 
     def current_point_correction_requested(self) -> bool:
-        return self._point_interrupt_requested.is_set()
+        return self._run_control.interrupt_requested()
 
     def clear_current_point_correction_request(self) -> None:
-        self._point_interrupt_requested.clear()
+        self._run_control.clear_interrupt()
 
     def request_pause_after_current_point(self) -> None:
-        self._pause_requested.set()
+        self._run_control.request_pause()
 
     def set_auto_next_ok_or_short(self, enabled: bool) -> None:
         with self._auto_next_lock:
@@ -529,16 +498,10 @@ class RouteMeasurementRunner:
             )
         ).require_preparation()
 
-    def _route_point_stop_requested(self) -> bool:
-        return (
-            self._stop_requested.is_set()
-            or self._point_interrupt_requested.is_set()
-        )
-
     def _route_point_reference_capture_eligible(self) -> bool:
         """Allow capture during a pause request, but never after stop/interrupt."""
 
-        return not self._route_point_stop_requested()
+        return not self._run_control.point_stop_requested()
 
     def _set_auto_contact_seek_enabled(self, enabled: bool) -> None:
         self._auto_contact_seek_on_bad_contact = bool(enabled)
@@ -663,7 +626,7 @@ class RouteMeasurementRunner:
 
     def _start_route_run(self) -> str | None:
         self._begin_stage_task()
-        if self._stop_requested.is_set():
+        if self._run_control.stop_requested():
             return "Route measurement stopped by user."
         initial_needle_action = (
             "raise"
@@ -679,7 +642,7 @@ class RouteMeasurementRunner:
             initial_needle_action,
             self._needle_feedrate,
         )
-        if self._stop_requested.is_set():
+        if self._run_control.stop_requested():
             return "Route measurement stopped by user."
         return None
 
@@ -725,7 +688,7 @@ class RouteMeasurementRunner:
         total: int,
         progress: _RouteRunProgress,
     ) -> _RoutePointFlowResult:
-        if self._stop_requested.is_set():
+        if self._run_control.stop_requested():
             return _RoutePointFlowResult(
                 position_index=position_index,
                 stop_message="Route measurement stopped by user.",
@@ -855,7 +818,7 @@ class RouteMeasurementRunner:
         position_index: int,
     ) -> _RoutePointFlowResult:
         assert result.record is not None
-        self._consume_pause_request()
+        self._run_control.consume_pause()
         decision = self._wait_after_rejected_result(
             point=point,
             record=result.record,
@@ -931,7 +894,7 @@ class RouteMeasurementRunner:
                 self._csv_writer.append(record)
                 return
             except PermissionError:
-                if self._route_point_stop_requested():
+                if self._run_control.point_stop_requested():
                     raise _RouteMeasurementStopped(
                         "Route measurement stopped by user."
                     )
@@ -952,15 +915,15 @@ class RouteMeasurementRunner:
     def _wait_before_csv_write_retry(self) -> bool:
         retry_interval_s = max(0.0, float(self._csv_write_retry_interval_s))
         if retry_interval_s <= 0.0:
-            return not self._route_point_stop_requested()
+            return not self._run_control.point_stop_requested()
         deadline = time.monotonic() + retry_interval_s
         while True:
-            if self._route_point_stop_requested():
+            if self._run_control.point_stop_requested():
                 return False
             remaining = deadline - time.monotonic()
             if remaining <= 0.0:
                 return True
-            self._stop_requested.wait(min(remaining, 0.05))
+            self._run_control.wait_for_stop(min(remaining, 0.05))
 
     def _route_point_auto_next(
         self,
@@ -981,15 +944,14 @@ class RouteMeasurementRunner:
         point: RouteMeasurementPoint,
         auto_next: bool,
     ) -> tuple[bool, bool]:
-        with self._confirmation_condition:
-            self._pending_confirmation = None
+        self._run_control.clear_confirmation()
         with self._route_offset_lock:
             self._last_recorded_point = point
-        pause_after_point = self._consume_pause_request()
+        pause_after_point = self._run_control.consume_pause()
         auto_next = auto_next and not pause_after_point
         if not auto_next:
             self._finish_stage_task()
-            self._set_waiting(True)
+            self._run_control.set_waiting(True)
         return auto_next, pause_after_point
 
     def _saved_route_point_confirmation_result(
@@ -1021,7 +983,7 @@ class RouteMeasurementRunner:
             "choose Measure or Skip."
         )
         decision = self._wait_for_valid_confirmation()
-        self._set_waiting(False)
+        self._run_control.set_waiting(False)
         loop_decision, saved_count = self._route_point_confirmation_loop_decision(
             decision,
             point=point,
@@ -1079,7 +1041,7 @@ class RouteMeasurementRunner:
                 self._lcr_controller.close()
             except Exception as exc:
                 message = f"{message} Instrument close failed: {exc}"
-        self._set_waiting(False)
+        self._run_control.set_waiting(False)
         return message
 
     def _measure_manual_contact_and_advance(
@@ -1096,8 +1058,8 @@ class RouteMeasurementRunner:
             total=total,
         )
         if manual_record is None:
-            if self._point_interrupt_requested.is_set():
-                self._point_interrupt_requested.clear()
+            if self._run_control.interrupt_requested():
+                self._run_control.clear_interrupt()
                 return _RoutePointLoopDecision(position_index=position_index), 0
             return (
                 _RoutePointLoopDecision(
@@ -1155,7 +1117,7 @@ class RouteMeasurementRunner:
     ) -> _RoutePointLoopDecision:
         if clear_stage_cancel:
             self._clear_stage_cancel_after_point_interrupt()
-        self._point_interrupt_requested.clear()
+        self._run_control.clear_interrupt()
         decision = self._wait_after_interrupted_point(
             point=point,
             position=position,
@@ -1221,15 +1183,15 @@ class RouteMeasurementRunner:
 
     def _sleep_photo_settle(self) -> bool:
         if self._photo_settle_s <= 0.0:
-            return not self._stop_requested.is_set()
+            return not self._run_control.stop_requested()
         deadline = time.monotonic() + self._photo_settle_s
         while True:
-            if self._stop_requested.is_set():
+            if self._run_control.stop_requested():
                 return False
             remaining = deadline - time.monotonic()
             if remaining <= 0.0:
                 return True
-            if self._stop_requested.wait(min(remaining, 0.05)):
+            if self._run_control.wait_for_stop(min(remaining, 0.05)):
                 return False
 
     def _status(self, message: str) -> None:
@@ -1249,22 +1211,9 @@ class RouteMeasurementRunner:
                 int(point_number),
             )
 
-    def _set_waiting(self, waiting: bool) -> None:
-        with self._waiting_condition:
-            self._waiting = bool(waiting)
-            self._waiting_condition.notify_all()
-        if self._events.waiting is not None:
-            self._events.waiting(bool(waiting))
-
     def _auto_next_ok_or_short_enabled(self) -> bool:
         with self._auto_next_lock:
             return bool(self._auto_next_ok_or_short)
-
-    def _consume_pause_request(self) -> bool:
-        requested = self._pause_requested.is_set()
-        if requested:
-            self._pause_requested.clear()
-        return requested
 
     def _measure_manual_contact_here(
         self,
@@ -1389,7 +1338,7 @@ class RouteMeasurementRunner:
 
     def _point_interrupt_cancelled_exception(self, exc: BaseException) -> bool:
         return bool(
-            self._point_interrupt_requested.is_set()
+            self._run_control.interrupt_requested()
             and str(exc) == "Operation cancelled."
         )
 
@@ -1436,19 +1385,18 @@ class RouteMeasurementRunner:
         position: int,
         total: int,
     ) -> str:
-        self._consume_pause_request()
-        with self._confirmation_condition:
-            self._pending_confirmation = None
+        self._run_control.consume_pause()
+        self._run_control.clear_confirmation()
         with self._route_offset_lock:
             self._last_recorded_point = point
         self._finish_stage_task()
         self._emit_progress(position, total, int(point.index))
-        self._set_waiting(True)
+        self._run_control.set_waiting(True)
         self._status(
             f"Route measurement ready: point {position}/{total} {point.label}."
         )
         decision = self._wait_for_valid_confirmation()
-        self._set_waiting(False)
+        self._run_control.set_waiting(False)
         return decision
 
     def _wait_after_interrupted_point(
@@ -1458,19 +1406,18 @@ class RouteMeasurementRunner:
         position: int,
         total: int,
     ) -> str:
-        self._consume_pause_request()
-        with self._confirmation_condition:
-            self._pending_confirmation = None
+        self._run_control.consume_pause()
+        self._run_control.clear_confirmation()
         with self._route_offset_lock:
             self._last_recorded_point = point
         self._finish_stage_task()
-        self._set_waiting(True)
+        self._run_control.set_waiting(True)
         self._status(
             f"Route measurement: point {position}/{total} interrupted; "
             "correct position, then Measure or Skip."
         )
         decision = self._wait_for_valid_confirmation()
-        self._set_waiting(False)
+        self._run_control.set_waiting(False)
         return decision
 
     def _wait_after_rejected_result(
@@ -1482,12 +1429,11 @@ class RouteMeasurementRunner:
         total: int,
         emit_result: bool = True,
     ) -> str:
-        with self._confirmation_condition:
-            self._pending_confirmation = None
+        self._run_control.clear_confirmation()
         with self._route_offset_lock:
             self._last_recorded_point = point
         self._finish_stage_task()
-        self._set_waiting(True)
+        self._run_control.set_waiting(True)
         if emit_result:
             self._point_adapters.events.emit_result(
                 record, position, total, False
@@ -1510,12 +1456,12 @@ class RouteMeasurementRunner:
                 "correct contact, then Measure, Remeasure, or Skip."
             )
         decision = self._wait_for_valid_confirmation()
-        self._set_waiting(False)
+        self._run_control.set_waiting(False)
         return decision
 
     def _wait_for_valid_confirmation(self) -> str:
         while True:
-            decision = self._wait_for_confirmation()
+            decision = self._run_control.wait_for_confirmation()
             if not decision.startswith("jump:"):
                 return decision
             if self._jump_target_index(decision) is not None:
@@ -1524,17 +1470,7 @@ class RouteMeasurementRunner:
             self._status(
                 f"Route measurement: point {point_number} is not enabled or not found."
             )
-            self._set_waiting(True)
-
-    def _wait_for_confirmation(self) -> str:
-        with self._confirmation_condition:
-            while not self._stop_requested.is_set():
-                if self._pending_confirmation is not None:
-                    decision = self._pending_confirmation
-                    self._pending_confirmation = None
-                    return decision
-                self._confirmation_condition.wait(timeout=0.2)
-        return "stop"
+            self._run_control.set_waiting(True)
 
     def _jump_target_index(self, decision: str) -> int | None:
         if not decision.startswith("jump:"):

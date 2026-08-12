@@ -2396,3 +2396,81 @@ git diff --check 8fc83259e07f48bf0f222e80bb3e1d6c3241fd0e..HEAD
   `3` and focused safety `139`, protected bytes, Ruff/format/compile/diff, and
   exact metrics. It returned `READY` with
   `0 Critical / 0 Important / 0 Minor`; nothing was staged before that verdict.
+
+#### Task 20a: Isolate the route run-control mailbox
+
+- [x] Capture the clean `886ddea` baseline before editing. The established
+  route pause/interrupt/contact/photo/point selection passed `139/139`.
+  `route/measurement.py` was
+  `1629 LOC / 761 LLOC / 1502 SLOC / CC 274 / 92 blocks / max CC 13 /
+  MI 0.00`; all existing tests and the route, stage, Task 17 dialog, and
+  external-session safety owners were initially protected.
+- [x] Drive the private owner and every synchronization contract vertically
+  through strict RED/GREEN. The first assertion failed on absent
+  `route.run_control_mailbox`; subsequent failures proved stop wake, one-shot
+  Pause, persistent Interrupt, confirmation normalization/consumption,
+  confirmation clearing, stop/wait timeouts, Pause not stopping a point, and
+  reentrant waiting publication before their minimal implementation. The
+  direct mailbox suite ends at `21/21`.
+- [x] Make private `_RouteRunControlMailbox` the sole owner of stop, Pause,
+  Interrupt, pending confirmation, and waiting synchronization. Stop takes
+  precedence over a queued confirmation and wakes waiters; Pause is consumed
+  once only at safe checkpoints; Interrupt persists until explicit recognized
+  acknowledgement; confirmation remains one newest-only normalized slot; and
+  waiting callbacks run after releasing the non-reentrant condition lock.
+  Fixed `0.2 s` confirmation polling and `0.05 s` bounded wait slices remain
+  exact.
+- [x] Keep every public `RouteMeasurementRunner` control method direct and
+  canonical with its exact signature. `submit_jump` remains Runner-owned and
+  `_wait_for_valid_confirmation` retains semantic route-point validation. The
+  runner composes one mailbox without constructor injection; seven old state
+  fields and four thin private helpers are deleted with no wrapper, alias,
+  `__getattr__`, package export, or re-export. Point-stop is exactly
+  Stop-or-Interrupt and never Pause; photo settle remains Stop-only; CSV retry
+  preserves the composite point-stop check. The Task 20-pre point-entry clear
+  remains absent and acknowledged Interrupt still clears only at recognized
+  interrupted-result seams.
+- [x] Migrate the sole pre-existing test reach-through directly from deleted
+  `runner._set_waiting` to canonical private-owner
+  `runner._run_control.set_waiting`. Its normalized AST differs only by that
+  attribute chain; no production compatibility method was retained. Every
+  other existing test remains byte-identical.
+- [x] Pass fresh no-hardware verification under offscreen Qt and process-local
+  `QLocale.c()`. Final mailbox/ownership/original-safety/App focused coverage
+  passes `173`; all route passes `413`; focused App/UI route safety passes
+  `115` plus `5` subtests. Five fresh mailbox/ownership processes each pass
+  `31`, for `155/155`. The exact collected union is covered without omission
+  by deterministic directory partitions: `3221/3221` tests plus `16` subtests
+  pass. App uses the established `365`-test run with one protected
+  `_schedule_retry` node deselected plus that node `1/1` in a clean process;
+  UI passes `542`.
+- [x] Pass affected and configured whole-tree Ruff, new-file format,
+  whole-tree compile, `git diff --check`, direct-definition/deletion,
+  signature, forward/reverse import, private-DAG, normalized test-AST,
+  protected-scope, and MI-zero gates. Mailbox imports only the standard
+  library, is not package-exported, and the extraction adds no Qt or hardware
+  dependency. Lizard reports zero warnings and `0.00%` duplicate blocks.
+  Task-local temporary roots are absent.
+- [x] Metrics: residual measurement is
+  `1565 LOC / 701 LLOC / 1442 SLOC / CC 256 / 88 blocks / max CC 13 /
+  MI 0.00`; the mailbox is
+  `114 / 91 / 92 / CC 31 / 17 blocks / max CC 5 / MI 38.65` for
+  LOC/LLOC/SLOC/complexity/blocks/maximum/MI. Aggregate Radon complexity is
+  `CC 287 / 105 blocks`; functional Lizard complexity changes from
+  `87 functions / summed CCN 263 / max 13` to
+  `99 / 275 / 13`. The explicit `+13 CC / +13 Radon blocks` and
+  `+12 functional CCN` are the private stop/pause/interrupt/confirmation/
+  waiting synchronization interface rather than duplicated policy. The new
+  direct and ownership tests have MI `35.35 / 56.62`. The intermediate
+  all-tracked and active MI-zero count intentionally remains exactly `4`;
+  `measurement.py` is the only touched MI-zero file and no file enters MI zero.
+- [x] Freeze the exact six-path evidence-bearing snapshot and obtain a fresh
+  fork-none independent read-only review with no Critical, Important, or Minor
+  finding before staging and the exact commit
+  `refactor: isolate route run control mailbox`.
+  The reviewer independently repeated the focused `173`, affected Ruff,
+  new-file format, in-memory compile, diff, Radon, and Lizard gates; manually
+  audited every concurrency, acknowledgement, direct-owner, deletion, DAG,
+  test-seam, and protected-scope invariant; retained all six frozen hashes; and
+  returned `READY` with `0 Critical / 0 Important / 0 Minor`. Nothing was
+  staged before that verdict.

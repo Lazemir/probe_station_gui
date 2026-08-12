@@ -28,7 +28,7 @@ def test_waiting_ordinary_route_interrupt_does_not_cancel_stage() -> None:
 
     with tempfile.TemporaryDirectory() as tmpdir:
         runner = _ordinary_runner(tmpdir, stage_controller)
-        runner._set_waiting(True)
+        runner._run_control.set_waiting(True)
 
         Main._interrupt_route_measurement_runner(
             window,
