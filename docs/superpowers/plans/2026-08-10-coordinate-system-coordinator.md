@@ -2803,3 +2803,40 @@ git diff --check 8fc83259e07f48bf0f222e80bb3e1d6c3241fd0e..HEAD
   logging-only duplicate diagnostic. Fresh ownership plus exact behavior was
   `50/50`; Ruff, format, compile, diff, metrics, hashes, scope, index, and
   task-temp gates passed with `0 Critical / 0 Important / 0 Minor`.
+
+#### Main prerequisite: Isolate API stage-command runtime
+
+- [x] Pin clean `4d9cba6` and extract the serialized deferred API stage-command
+  lifecycle into canonical non-Qt `api.stage_command_runtime.ApiStageCommandRuntime`.
+  The owner exposes only `submit`, `active`, and `wait_until_idle`; Main directly
+  composes it, applies the existing route-window guard before submission, and
+  injects dispatch with `apply_route_control_guard=False`. Shutdown directly
+  waits on the runtime. The old reservation DTO, six Main methods, three state
+  attributes, forwarding seams, aliases, exports, and reverse imports are absent.
+- [x] TDD covered absent module, single reservation, named daemon worker,
+  publication-before-release, cancellation/exception/start failure, wait timeout,
+  lazy import/construction, and architecture deletion. An independent race audit
+  added deterministic simultaneous-submit, request-copy, factory-construction,
+  blocked-waiter, callback-exception, and real-runtime shutdown contracts; all
+  passed without a production correction. Final focused runtime/Main/shutdown/
+  bridge/optical selection is `73/73`. Twelve explicit test-owner seams replaced
+  22 stale `Main.__new__` fixtures; the affected App quartet is `51/51`, with no
+  production fallback.
+- [x] Exact deterministic no-hardware verification covers the collected union
+  `3281/3281`: API `146+2` subtests; App `359+5` with the inherited native-crash
+  node deselected plus that node `1/1`; UI/route/stage `1484`; remaining camera/
+  coordinates/design/instruments/notifications/packaging/scripts/settings/shared
+  `1291+5`. Affected/configured Ruff, structural format, compileall, diff-check,
+  import laziness/order, AST/DAG/Main identity, and protected route/stage/camera/
+  settings scopes pass. No hardware, network, or visible GUI was used.
+- [x] Metrics: Main `11143/10521` LOC/SLOC and Radon `1904/534` become
+  `11019/10405` and `1886/527`; Lizard `1905/533` becomes `1887/527`. The new
+  runtime is `118/97` LOC/SLOC, Radon `13/8` max3, Lizard `11/6` max3, MI45.79.
+  Shutdown MI is 22.48; new tests are positive MI. Main deliberately remains the
+  sole MI-zero file in this first prerequisite. Full evidence is recorded in
+  `.scratch/main-stage-runtime-report.md`.
+- [x] Freeze the exact 13-path scoped snapshot and obtain fresh independent
+  READY 0/0/0 before commit `refactor: isolate api stage command runtime`.
+  Reviewer confirmed all 13 hashes, empty index/task temp, old/new lifecycle,
+  concurrency, dispatch, shutdown, ownership, and call-site semantics; its fresh
+  exact gate passed `73/73` with `0 Critical / 0 Important / 0 Minor`.

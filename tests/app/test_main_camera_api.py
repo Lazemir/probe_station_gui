@@ -160,6 +160,7 @@ def test_settings_dialog_transaction_preserves_concurrent_exposure_policy(
     stale_dialog_settings = Settings()
     stale_dialog_settings.design_last_directory = "C:/dialog-selection"
     window = Main.__new__(Main)
+    window._api_stage_command_runtime = SimpleNamespace(active=lambda: False)
     window.settings_manager = manager
     window._coordinate_system_coordinator = _StaticCoordinateSystemCoordinator(
         CoordinateSystemSnapshot(False, (), None)

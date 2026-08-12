@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import threading
 from types import SimpleNamespace
 
 import pytest
 
+from probe_station_gui.api.stage_command_runtime import ApiStageCommandRuntime
 from probe_station_gui.views import main_window_shutdown as shutdown_ui
 
 
@@ -82,8 +84,10 @@ def test_shutdown_fails_closed_when_runtime_does_not_drain() -> None:
 def test_shutdown_fails_closed_while_api_stage_worker_is_running() -> None:
     waits: list[float] = []
     owner = SimpleNamespace(
-        _wait_for_api_stage_command_workers=lambda *, timeout_s: (
-            waits.append(timeout_s) or False
+        _api_stage_command_runtime=SimpleNamespace(
+            wait_until_idle=lambda *, timeout_s: (
+                waits.append(timeout_s) or False
+            )
         ),
     )
 
@@ -91,6 +95,35 @@ def test_shutdown_fails_closed_while_api_stage_worker_is_running() -> None:
         shutdown_ui._stop_api_stage_command_workers(owner)
 
     assert waits == [0.0]
+
+
+def test_shutdown_checks_real_stage_runtime_until_worker_releases() -> None:
+    dispatch_started = threading.Event()
+    release_dispatch = threading.Event()
+
+    def dispatch(_request: dict[str, object]) -> dict[str, object]:
+        dispatch_started.set()
+        assert release_dispatch.wait(timeout=1.0)
+        return {"accepted": True, "status_code": 200}
+
+    runtime = ApiStageCommandRuntime(dispatch)
+    response = runtime.submit(
+        {"action": "stage_local_focus", "payload": {}},
+        "stage_local_focus",
+    )
+    owner = SimpleNamespace(_api_stage_command_runtime=runtime)
+    assert dispatch_started.wait(timeout=1.0)
+
+    with pytest.raises(RuntimeError, match="API stage command is still stopping"):
+        shutdown_ui._stop_api_stage_command_workers(owner)
+
+    release_dispatch.set()
+    assert response.wait(timeout_s=1.0) == {
+        "accepted": True,
+        "status_code": 200,
+    }
+    assert runtime.wait_until_idle(timeout_s=1.0)
+    shutdown_ui._stop_api_stage_command_workers(owner)
 
 
 def test_shutdown_cancels_and_drains_manual_alignment_capture() -> None:
@@ -201,8 +234,10 @@ def test_close_event_preserves_shutdown_order(monkeypatch) -> None:
         _microscope_scan_stop_requested=SimpleNamespace(
             set=lambda: events.append(("scan_stop_requested",))
         ),
-        _wait_for_api_stage_command_workers=lambda *, timeout_s: (
-            events.append(("api_workers", timeout_s)) or True
+        _api_stage_command_runtime=SimpleNamespace(
+            wait_until_idle=lambda *, timeout_s: (
+                events.append(("api_workers", timeout_s)) or True
+            )
         ),
         _exposure_policy_adapter=SimpleNamespace(
             shutdown=lambda **kwargs: events.append(
@@ -537,6 +572,9 @@ def test_exposure_shutdown_timeout_blocks_camera_teardown_and_close(
     owner = SimpleNamespace(
         serial_connection=SimpleNamespace(is_open=False),
         lcr_controller=SimpleNamespace(is_connected=lambda: False),
+        _api_stage_command_runtime=SimpleNamespace(
+            wait_until_idle=lambda *, timeout_s: timeout_s == 0.0
+        ),
         _exposure_policy_adapter=SimpleNamespace(shutdown=fail_adapter_shutdown),
         _exposure_policy_controller=SimpleNamespace(
             shutdown=lambda **kwargs: events.append(

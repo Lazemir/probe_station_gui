@@ -144,6 +144,7 @@ def _settings() -> Settings:
 
 def _window() -> tuple[Main, _Stage, _SettingsManager, list[str]]:
     window = Main.__new__(Main)
+    window._api_stage_command_runtime = types.SimpleNamespace(active=lambda: False)
     stage = _Stage()
     manager = _SettingsManager()
     statuses: list[str] = []

@@ -18,6 +18,7 @@ def test_api_lens_reset_returns_conflict_during_active_operation(
     blocker: str,
 ) -> None:
     window = Main.__new__(Main)
+    window._api_stage_command_runtime = SimpleNamespace(active=lambda: False)
     window._optical_calibration_runtime = SimpleNamespace(
         state=lambda: SimpleNamespace(active_run_id=None, parent_session_token=None)
     )
@@ -135,6 +136,7 @@ def test_api_lens_start_returns_thread_failure_instead_of_202(monkeypatch) -> No
 
 def test_api_force_click_reset_returns_conflict_during_scan_startup() -> None:
     window = Main.__new__(Main)
+    window._api_stage_command_runtime = SimpleNamespace(active=lambda: False)
     window._optical_calibration_runtime = SimpleNamespace(
         state=lambda: SimpleNamespace(active_run_id=None, parent_session_token=None)
     )
@@ -176,6 +178,7 @@ def test_click_to_move_start_is_rejected_during_scan_startup() -> None:
     )
 
     window = Main.__new__(Main)
+    window._api_stage_command_runtime = SimpleNamespace(active=lambda: False)
     window._optical_calibration_runtime = SimpleNamespace(
         state=lambda: SimpleNamespace(active_run_id=None, parent_session_token=None)
     )
@@ -221,6 +224,7 @@ def test_click_to_move_start_is_rejected_during_scan_startup() -> None:
 
 def test_gui_click_reset_is_rejected_during_calibration_startup() -> None:
     window = Main.__new__(Main)
+    window._api_stage_command_runtime = SimpleNamespace(active=lambda: False)
     window._optical_calibration_runtime = SimpleNamespace(
         state=lambda: SimpleNamespace(active_run_id=None, parent_session_token=None)
     )
@@ -261,6 +265,7 @@ def test_gui_click_reset_is_rejected_during_calibration_startup() -> None:
 
 def test_reset_lens_distortion_preserves_click_calibration() -> None:
     window = Main.__new__(Main)
+    window._api_stage_command_runtime = SimpleNamespace(active=lambda: False)
     window._optical_calibration_runtime = SimpleNamespace(
         state=lambda: SimpleNamespace(active_run_id=None, parent_session_token=None)
     )
@@ -298,6 +303,7 @@ def test_reset_lens_distortion_preserves_click_calibration() -> None:
 
 def test_api_click_to_move_calibration_force_resets_before_start() -> None:
     window = Main.__new__(Main)
+    window._api_stage_command_runtime = SimpleNamespace(active=lambda: False)
     window._optical_calibration_runtime = SimpleNamespace(
         state=lambda: SimpleNamespace(active_run_id=None, parent_session_token=None)
     )

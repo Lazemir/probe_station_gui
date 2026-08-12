@@ -196,6 +196,7 @@ from probe_station_gui.design.session_state import (
 )
 from probe_station_gui.shared.diagnostics import configure_crash_diagnostics
 from probe_station_gui.api.request_bridge import ApiRequestBridge, DeferredApiResponse
+from probe_station_gui.api.stage_command_runtime import ApiStageCommandRuntime
 from probe_station_gui.api.server import ProbeStationApiServer
 from probe_station_gui.api.keys import API_KEY_FILENAME, ApiKeyStore
 from probe_station_gui.camera.api_control import (
@@ -621,15 +622,6 @@ class _ManualAlignmentCaptureContext:
 
 
 @dataclass
-class _ApiStageCommandReservation:
-    operation_id: str
-    action: str
-    completion: DeferredApiResponse
-    thread: threading.Thread | None = None
-    state: str = "reserved"
-
-
-@dataclass
 class _DesignContactArmDispatch:
     request: FirstContactRequest
     read_intent: ReadPhysicalAIntent | None = None
@@ -852,11 +844,12 @@ class Main(QMainWindow):
         )
         self._api_bridge: ApiRequestBridge | None = None
         self._api_server: ProbeStationApiServer | None = None
-        self._api_stage_command_worker_lock = threading.Lock()
-        self._api_stage_command_worker_changed = threading.Condition(
-            self._api_stage_command_worker_lock
+        self._api_stage_command_runtime = ApiStageCommandRuntime(
+            lambda command_request: self._dispatch_api_command_request(
+                command_request,
+                apply_route_control_guard=False,
+            )
         )
-        self._api_stage_command_reservation: _ApiStageCommandReservation | None = None
         self._api_settings_signature: tuple[bool, str, int] | None = None
         self._telegram_bot_service: TelegramBotCommandService | None = None
         self._telegram_bot_signature: tuple[str, str] | None = None
@@ -1812,128 +1805,11 @@ class Main(QMainWindow):
             route_guard = self._probe_route_api_window_guard(action, payload)
             if route_guard is not None:
                 return route_guard
-            return self._start_deferred_api_stage_command(command_request, action)
+            return self._api_stage_command_runtime.submit(command_request, action)
         return self._dispatch_api_command_request(
             command_request,
             apply_route_control_guard=True,
         )
-
-    def _api_stage_command_worker_state(
-        self,
-    ) -> tuple[threading.Lock, threading.Condition]:
-        lock = getattr(self, "_api_stage_command_worker_lock", None)
-        changed = getattr(self, "_api_stage_command_worker_changed", None)
-        if lock is None or changed is None:
-            lock = threading.Lock()
-            changed = threading.Condition(lock)
-            self._api_stage_command_worker_lock = lock
-            self._api_stage_command_worker_changed = changed
-        if not hasattr(self, "_api_stage_command_reservation"):
-            self._api_stage_command_reservation = None
-        return lock, changed
-
-    def _api_stage_command_worker_active(self) -> bool:
-        lock, _changed = self._api_stage_command_worker_state()
-        with lock:
-            reservation = self._api_stage_command_reservation
-            return bool(reservation is not None and reservation.state != "released")
-
-    def _wait_for_api_stage_command_workers(self, *, timeout_s: float) -> bool:
-        _lock, changed = self._api_stage_command_worker_state()
-        with changed:
-            return bool(
-                changed.wait_for(
-                    lambda: self._api_stage_command_reservation is None,
-                    timeout=max(0.0, float(timeout_s)),
-                )
-            )
-
-    def _release_api_stage_command_reservation(
-        self,
-        reservation: _ApiStageCommandReservation,
-    ) -> bool:
-        lock, changed = self._api_stage_command_worker_state()
-        with lock:
-            if (
-                self._api_stage_command_reservation is not reservation
-                or reservation.state == "released"
-            ):
-                return False
-            reservation.state = "released"
-            self._api_stage_command_reservation = None
-            changed.notify_all()
-            return True
-
-    def _start_deferred_api_stage_command(
-        self,
-        command_request: dict[str, Any],
-        action: str,
-    ) -> dict[str, Any] | DeferredApiResponse:
-        completion = DeferredApiResponse()
-        reservation = _ApiStageCommandReservation(
-            operation_id=uuid.uuid4().hex,
-            action=str(action),
-            completion=completion,
-        )
-        lock, changed = self._api_stage_command_worker_state()
-        with lock:
-            active = self._api_stage_command_reservation
-            if active is not None and active.state != "released":
-                return {
-                    "accepted": False,
-                    "status_code": 409,
-                    "message": f"API stage command is already running: {active.action}.",
-                }
-            self._api_stage_command_reservation = reservation
-            changed.notify_all()
-        request = dict(command_request)
-        try:
-            thread = threading.Thread(
-                target=self._run_deferred_api_stage_command,
-                args=(request, reservation),
-                name=f"ApiStageCommand-{action}",
-                daemon=True,
-            )
-            with lock:
-                reservation.thread = thread
-                reservation.state = "running"
-                changed.notify_all()
-            thread.start()
-        except Exception as exc:
-            self._release_api_stage_command_reservation(reservation)
-            return {
-                "accepted": False,
-                "status_code": 500,
-                "message": f"API stage command could not start: {exc}",
-            }
-        return completion
-
-    def _run_deferred_api_stage_command(
-        self,
-        command_request: dict[str, Any],
-        reservation: _ApiStageCommandReservation,
-    ) -> None:
-        try:
-            response = self._dispatch_api_command_request(
-                command_request,
-                apply_route_control_guard=False,
-            )
-        except Exception as exc:
-            logger.exception("API stage command failed.")
-            response = {
-                "accepted": False,
-                "status_code": 500,
-                "message": str(exc),
-            }
-        lock, changed = self._api_stage_command_worker_state()
-        with lock:
-            if self._api_stage_command_reservation is reservation:
-                reservation.state = "publishing"
-                changed.notify_all()
-        try:
-            reservation.completion.complete(response)
-        finally:
-            self._release_api_stage_command_reservation(reservation)
 
     def _submit_api_command_request_from_api_thread(
         self,
@@ -5173,7 +5049,7 @@ class Main(QMainWindow):
         allow_stage_task: bool = False,
         optical_context: OpticalCalibrationOutcome | None = None,
     ) -> bool:
-        if self._api_stage_command_worker_active():
+        if self._api_stage_command_runtime.active():
             return True
         if self._microscope_scan_running():
             return True

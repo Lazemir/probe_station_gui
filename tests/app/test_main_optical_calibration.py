@@ -490,7 +490,7 @@ def test_objective_change_is_blocked_while_calibration_context_is_active() -> No
     manager.settings.objectives.active_name = "X20"
     window.settings_manager = manager
     window.stage_controller = SimpleNamespace(is_busy=lambda: False)
-    window._api_stage_command_worker_active = lambda: False
+    window._api_stage_command_runtime = SimpleNamespace(active=lambda: False)
     window._microscope_scan_running = lambda: False
     window._optical_calibration_runtime = SimpleNamespace(
         state=lambda: SimpleNamespace(active_run_id="lens-pre-stage", parent_session_token=None)

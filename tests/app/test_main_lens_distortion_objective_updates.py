@@ -18,6 +18,7 @@ from tests.app.lens_distortion_test_support import (
 
 def test_click_calibration_update_keeps_stage_calibrated_distortion_matrix() -> None:
     window = Main.__new__(Main)
+    window._api_stage_command_runtime = SimpleNamespace(active=lambda: False)
     window._optical_calibration_runtime = SimpleNamespace(
         state=lambda: SimpleNamespace(active_run_id=None, parent_session_token=None)
     )
@@ -69,6 +70,7 @@ def test_click_calibration_active_update_is_rejected_after_new_operation_starts(
     blocker: str,
 ) -> None:
     window = Main.__new__(Main)
+    window._api_stage_command_runtime = SimpleNamespace(active=lambda: False)
     window._optical_calibration_runtime = SimpleNamespace(
         state=lambda: SimpleNamespace(active_run_id=None, parent_session_token=None)
     )
@@ -131,6 +133,7 @@ def test_click_calibration_active_update_is_rejected_after_new_operation_starts(
 
 def test_click_calibration_active_update_allows_own_stage_task() -> None:
     window = Main.__new__(Main)
+    window._api_stage_command_runtime = SimpleNamespace(active=lambda: False)
     window._optical_calibration_runtime = SimpleNamespace(
         state=lambda: SimpleNamespace(active_run_id=None, parent_session_token=None)
     )
@@ -166,6 +169,7 @@ def test_click_calibration_active_update_allows_own_stage_task() -> None:
 
 def test_click_calibration_token_loss_before_publish_rolls_back_settings() -> None:
     window = Main.__new__(Main)
+    window._api_stage_command_runtime = SimpleNamespace(active=lambda: False)
     window._optical_calibration_runtime = SimpleNamespace(
         state=lambda: SimpleNamespace(active_run_id=None, parent_session_token=None)
     )

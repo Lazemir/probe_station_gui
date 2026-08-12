@@ -26,6 +26,7 @@ class MainWindowShutdownOwner(Protocol):
     microscope_scan_dialog: Any
     _api_server: Any
     _api_bridge: Any
+    _api_stage_command_runtime: Any
     _design_position_timer: Any
     _manual_jog_timer: Any
     _stage_motion_blink_timer: Any
@@ -138,9 +139,7 @@ def _retire_focus_structure_worker(owner: MainWindowShutdownOwner) -> None:
     worker = getattr(owner, "_focus_structure_bounds_worker", None)
     if worker is None:
         return
-    timeout = float(
-        getattr(owner, "FOCUS_STRUCTURE_WORKER_SHUTDOWN_TIMEOUT_S", 0.25)
-    )
+    timeout = float(getattr(owner, "FOCUS_STRUCTURE_WORKER_SHUTDOWN_TIMEOUT_S", 0.25))
     worker.stop(timeout_s=max(0.0, timeout))
 
 
@@ -165,8 +164,7 @@ def _stop_microscope_scan(owner: MainWindowShutdownOwner) -> None:
 
 
 def _stop_api_stage_command_workers(owner: MainWindowShutdownOwner) -> None:
-    wait = getattr(owner, "_wait_for_api_stage_command_workers", None)
-    if callable(wait) and not wait(timeout_s=0.0):
+    if not owner._api_stage_command_runtime.wait_until_idle(timeout_s=0.0):
         raise RuntimeError("API stage command is still stopping.")
 
 
@@ -176,8 +174,7 @@ def _stop_manual_alignment_capture(owner: MainWindowShutdownOwner) -> None:
         return
     context.cancelled.set()
     owner.stage_controller.cancel_clicked_point_resolution(
-        context.request_id,
-        "Alignment point capture cancelled for shutdown."
+        context.request_id, "Alignment point capture cancelled for shutdown."
     )
     if not owner.stage_controller.wait_for_active_task(timeout_s=2.0):
         raise RuntimeError("Alignment point capture is still stopping.")
