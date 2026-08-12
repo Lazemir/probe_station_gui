@@ -9,16 +9,19 @@ readings are a small convenience layer over this list measurement.
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator, Mapping
-from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
-import logging
 import math
-import re
-import time
 from dataclasses import dataclass, replace
 from typing import Sequence
 
 import numpy as np
+
+from probe_station_measure.instrument_drivers.Keithley import (
+    Keithley_2400_2182A_session as _session_owner,
+)
+from probe_station_measure.instrument_drivers.Keithley import (
+    Keithley_2400_2182A_trigger_link as _trigger_link_owner,
+)
 
 from probe_station_measure.ohmmeter import (
     OHMMETER_RANGE_MANUAL,
@@ -30,8 +33,6 @@ from probe_station_measure.ohmmeter import (
     resolve_ohmmeter_ranges,
 )
 
-
-logger = logging.getLogger(__name__)
 
 MAX_2400_SOURCE_LIST_POINTS = 2500
 MAX_2400_SOURCE_LIST_POINTS_PER_COMMAND = 100
@@ -395,10 +396,7 @@ def evaluate_contact_quality(
         reasons.append("step_noise_too_high")
     if compliance_hits > criteria.max_compliance_hits:
         reasons.append("compliance_hit")
-    if (
-        quality.polarity_sign_mismatch_count
-        > criteria.max_polarity_sign_mismatch_count
-    ):
+    if quality.polarity_sign_mismatch_count > criteria.max_polarity_sign_mismatch_count:
         reasons.append("polarity_sign_mismatch")
     good = not reasons
     return ContactQualityCheck(
@@ -423,67 +421,33 @@ class Keithley2400With2182A(AbstractOhmmeter):
         timeout_ms: int = DEFAULT_VISA_TIMEOUT_MS,
         resource_manager: object | None = None,
     ) -> None:
-        if resource_manager is None:
-            try:
-                import pyvisa
-            except ImportError as exc:  # pragma: no cover - environment specific
-                raise RuntimeError(
-                    "Keithley measurements require pyvisa. "
-                    "Install probe-station-measure with the 'visa' extra."
-                ) from exc
-            resource_manager = pyvisa.ResourceManager()
-            self._owns_resource_manager = True
-        else:
-            self._owns_resource_manager = False
-        self._resource_manager = resource_manager
-        self._source = None
-        self._voltmeter = None
         self._config = Keithley2400With2182AConfig().normalized()
-        self._common_config_key: Keithley2400With2182AConfig | None = None
-        self._source_list_cache: tuple[float, ...] = ()
-        self._prepared_voltage_list_key: tuple[
-            Keithley2400With2182AConfig,
-            tuple[float, ...],
-            int,
-        ] | None = None
-        self._prepared_source_voltages: tuple[float, ...] = ()
-        self._source_output_enabled = False
-        self._source_output_context_enabled_depth = 0
-        self._source = self._open_resource(source_resource, timeout_ms)
-        if voltmeter_resource is not None and str(voltmeter_resource).strip():
-            self._voltmeter = self._open_resource(voltmeter_resource, timeout_ms)
-
-    def _open_resource(self, address: str, timeout_ms: int):
-        handle = self._resource_manager.open_resource(str(address).strip())
-        handle.timeout = int(timeout_ms)
-        for attribute, value in (
-            ("read_termination", "\n"),
-            ("write_termination", "\n"),
-        ):
-            try:
-                setattr(handle, attribute, value)
-            except Exception:
-                logger.debug(
-                    "VISA handle does not accept %s=%r",
-                    attribute,
-                    value,
-                    exc_info=True,
-                )
-        return handle
+        self._session = _session_owner.KeithleySession(
+            source_resource,
+            voltmeter_resource,
+            timeout_ms=timeout_ms,
+            resource_manager=resource_manager,
+        )
+        self._trigger_link = _trigger_link_owner.TriggerLinkBatch(
+            self._session,
+            max_source_list_points=MAX_2400_SOURCE_LIST_POINTS,
+            max_source_list_points_per_command=(
+                MAX_2400_SOURCE_LIST_POINTS_PER_COMMAND
+            ),
+            max_trace_points=MAX_2182A_TRACE_POINTS,
+            default_timeout_ms=DEFAULT_VISA_TIMEOUT_MS,
+            max_timeout_ms=MAX_BUFFERED_MEASUREMENT_TIMEOUT_MS,
+            base_timeout_s=BUFFERED_MEASUREMENT_BASE_TIMEOUT_S,
+            point_overhead_s=BUFFERED_MEASUREMENT_POINT_OVERHEAD_S,
+            nplc_point_s=BUFFERED_MEASUREMENT_NPLC_POINT_S,
+        )
 
     def identify(self) -> str:
-        parts = []
-        source_id = self._safe_query(self._source, "*IDN?")
-        voltmeter_id = self._safe_query(self._voltmeter, "*IDN?")
-        if source_id:
-            parts.append(f"2400 {source_id}")
-        if voltmeter_id:
-            parts.append(f"2182A {voltmeter_id}")
-        return "; ".join(parts)
+        return self._session.identify()
 
     def configure(self, config: Keithley2400With2182AConfig | None = None) -> None:
         self._config = (config or self._config).normalized()
-        self._configure_common(self._config, force=True)
+        self._session.configure_common(self._config, force=True)
 
     def configure_measurement(
         self,
@@ -651,42 +615,12 @@ class Keithley2400With2182A(AbstractOhmmeter):
     def output(self, enabled: bool = True) -> Iterator["Keithley2400With2182A"]:
         """Keep the 2400 output relay in one state across several operations."""
 
-        requested_enabled = bool(enabled)
-        previous_enabled = bool(self._source_output_enabled)
-        if requested_enabled:
-            self._source_output_context_enabled_depth += 1
-        try:
-            if requested_enabled and self._common_config_key is None:
-                self._configure_common(self._config)
-            if requested_enabled:
-                self._prime_output_context_source_voltage(self._config)
-            self._set_source_output_enabled(requested_enabled)
+        with self._session.output(
+            self._config,
+            bool(enabled),
+            prime_source=self._session.prepared_key is None,
+        ):
             yield self
-        finally:
-            if requested_enabled:
-                self._source_output_context_enabled_depth = max(
-                    0,
-                    self._source_output_context_enabled_depth - 1,
-                )
-                if previous_enabled:
-                    self._set_source_output_enabled(
-                        True,
-                        best_effort=True,
-                        zero_voltage=False,
-                    )
-                else:
-                    source = self._source
-                    if source is not None:
-                        self._try_write(source, ":SOUR:VOLT:MODE FIX")
-                        self._try_write(source, ":SOUR:VOLT 0")
-                        self._try_write(source, ":OUTP ON")
-                    self._source_output_enabled = True
-            else:
-                self._set_source_output_enabled(
-                    previous_enabled,
-                    best_effort=True,
-                    zero_voltage=True,
-                )
 
     def measure_pair(
         self,
@@ -723,7 +657,7 @@ class Keithley2400With2182A(AbstractOhmmeter):
         self._config = cfg
 
         if (
-            self._voltmeter is not None
+            self._session._voltmeter is not None
             and cfg.use_buffer
             and cfg.use_trigger_link
             and len(source_voltages) > 1
@@ -732,9 +666,10 @@ class Keithley2400With2182A(AbstractOhmmeter):
             chunk_size = max(1, int(cfg.max_buffer_points_per_chunk))
             for offset in range(0, len(source_voltages), chunk_size):
                 readings.extend(
-                    self._measure_voltage_list_buffered_trigger_link(
+                    self._trigger_link.measure(
                         source_voltages[offset : offset + chunk_size],
                         cfg,
+                        _voltage_list_reading,
                         after_measurement=(
                             after_measurement
                             if offset + chunk_size >= len(source_voltages)
@@ -743,7 +678,11 @@ class Keithley2400With2182A(AbstractOhmmeter):
                     )
                 )
             return readings
-        return self._measure_voltage_list_software(source_voltages, cfg)
+        return self._session.measure_software(
+            source_voltages,
+            cfg,
+            _voltage_list_reading,
+        )
 
     def measure_repeated_voltage_list(
         self,
@@ -844,7 +783,7 @@ class Keithley2400With2182A(AbstractOhmmeter):
     ) -> None:
         """Prepare a buffered route batch without starting source output."""
 
-        if self._voltmeter is None:
+        if self._session._voltmeter is None:
             return
         cfg = self._config.normalized()
         measurement_count = max(1, int(count))
@@ -858,22 +797,14 @@ class Keithley2400With2182A(AbstractOhmmeter):
             for _index in range(list_count)
             for voltage in (-cfg.measurement_voltage_v, cfg.measurement_voltage_v)
         ]
-        self._prepare_voltage_list_buffered_trigger_link(
+        self._trigger_link.prepare(
             source_voltages,
             cfg,
             measure_points=measurement_count * 2,
         )
 
     def abort(self) -> None:
-        if self._voltmeter is not None:
-            self._try_write(self._voltmeter, "ABOR")
-        if self._source is not None:
-            self._try_write(self._source, ":ABOR")
-            self._set_source_output_enabled(
-                False,
-                best_effort=True,
-                force=True,
-            )
+        self._session.abort()
 
     def abort_measurement(self) -> None:
         self.abort()
@@ -881,541 +812,18 @@ class Keithley2400With2182A(AbstractOhmmeter):
     def trace_status(self) -> dict[str, TraceBufferStatus]:
         """Return trace-buffer state for diagnostics."""
 
-        status = {
-            "source": self._trace_status(
-                self._require_source(),
-                supports_actual_points=True,
-            ),
-        }
-        if self._voltmeter is not None:
-            status["voltmeter"] = self._trace_status(
-                self._require_voltmeter(),
-                supports_actual_points=False,
-            )
-        return status
+        return self._session.trace_status(TraceBufferStatus)
 
     def visa_resource_roles(self) -> dict[str, dict[str, object]]:
         """Return station-owned VISA roles exposed by this logical meter."""
 
-        roles: dict[str, dict[str, object]] = {}
-        if self._source is not None:
-            roles["meter.source"] = {
-                "role": "meter.source",
-                "kind": "source_meter",
-                "model": "Keithley 2400",
-                "required": True,
-            }
-        if self._voltmeter is not None:
-            roles["meter.voltmeter"] = {
-                "role": "meter.voltmeter",
-                "kind": "voltmeter",
-                "model": "Keithley 2182A",
-                "required": False,
-            }
-        return roles
+        return self._session.visa_resource_roles()
 
     def visa_handle_for_role(self, role: str):
-        normalized = _normalize_visa_role(role)
-        if normalized in {"meter.source", "source", "source_meter", "meter"}:
-            return self._require_source()
-        if normalized in {"meter.voltmeter", "voltmeter", "meter.voltage"}:
-            return self._require_voltmeter()
-        raise KeyError(f"Unsupported Keithley VISA role: {role}")
+        return self._session.visa_handle_for_role(role)
 
     def close(self) -> None:
-        source = self._source
-        voltmeter = self._voltmeter
-        if source is not None:
-            self._try_write(source, ":SOUR:VOLT:MODE FIX")
-            self._try_write(source, ":SOUR:VOLT 0")
-            self._try_write(source, ":OUTP ON")
-            self._source_output_enabled = True
-            _close_handle(source)
-        self._source = None
-        self._voltmeter = None
-        if voltmeter is not None:
-            _close_handle(voltmeter)
-        if self._owns_resource_manager:
-            _close_handle(self._resource_manager)
-
-    def _configure_common(
-        self,
-        cfg: Keithley2400With2182AConfig,
-        *,
-        force: bool = False,
-    ) -> None:
-        if not force and self._common_config_key == cfg:
-            return
-        source = self._require_source()
-        voltmeter = self._voltmeter
-        terminal_scpi = "FRON" if cfg.terminals == "front" else "REAR"
-        self._prepared_voltage_list_key = None
-
-        self._try_clear(source)
-        if voltmeter is not None:
-            self._try_clear(voltmeter)
-        self._write(source, "*CLS")
-        if voltmeter is not None:
-            self._write(voltmeter, "*CLS")
-            self._try_write(voltmeter, "INIT:CONT OFF")
-        self._try_write(source, ":ABOR")
-        if voltmeter is not None:
-            self._try_write(voltmeter, "ABOR")
-        self._try_write(source, ":TRIG:CLE")
-        self._try_write(source, f":ROUT:TERM {terminal_scpi}")
-
-        self._write(source, ":ARM:SOUR IMM")
-        self._write(source, ":ARM:COUN 1")
-        self._write(source, ":ARM:DIR ACC")
-        self._write(source, ":ARM:OUTP NONE")
-        self._write(source, ":TRIG:SOUR IMM")
-        self._write(source, ":TRIG:COUN 1")
-        self._write(source, ":TRIG:DIR ACC")
-        self._write(source, ":TRIG:INP NONE")
-        self._write(source, ":TRIG:OUTP NONE")
-        self._write(source, ":TRIG:DEL 0")
-
-        if voltmeter is not None:
-            self._write(voltmeter, "CONF:VOLT")
-            self._write(voltmeter, "SENS:CHAN 1")
-            self._write(voltmeter, f"SENS:VOLT:RANG {cfg.voltmeter_range_v:.12g}")
-            self._write(voltmeter, f"SENS:VOLT:NPLC {cfg.nplc:.12g}")
-            self._write(voltmeter, "TRIG:SOUR IMM")
-            self._write(voltmeter, "TRIG:COUN 1")
-            self._write(voltmeter, "SAMP:COUN 1")
-            self._write(voltmeter, "TRIG:DEL 0")
-            self._try_write(voltmeter, "TRIG:DEL:AUTO OFF")
-            self._try_write(voltmeter, "SENS:VOLT:DFIL:STAT OFF")
-            self._try_write(voltmeter, "FORM:ELEM READ")
-            self._try_write(voltmeter, "TRAC:CLE")
-
-        if voltmeter is None:
-            self._write(source, ":SENS:FUNC:CONC ON")
-            self._write(source, ':SENS:FUNC:ON "VOLT:DC"')
-            self._write(source, ':SENS:FUNC:ON "CURR:DC"')
-        else:
-            self._try_write(source, ":SENS:FUNC:CONC OFF")
-            self._write(source, ':SENS:FUNC "CURR:DC"')
-        self._write(source, ":SOUR:FUNC VOLT")
-        self._write(source, ":SOUR:VOLT:MODE FIX")
-        self._write(source, f":SOUR:VOLT:RANG {cfg.source_voltage_range_v:.12g}")
-        self._write(source, f":SENS:CURR:PROT {cfg.compliance_current_a:.12g}")
-        self._write(source, f":SENS:CURR:RANG {cfg.current_range_a:.12g}")
-        self._write(source, f":SENS:CURR:NPLC {cfg.nplc:.12g}")
-        if voltmeter is None:
-            self._write(source, ":FORM:ELEM VOLT,CURR")
-        else:
-            self._try_write(source, ":FORM:ELEM VOLT,CURR")
-        if not self._source_output_context_enabled():
-            self._write(source, ":SOUR:VOLT 0")
-            self._write(source, ":OUTP ON")
-            self._source_output_enabled = True
-        self._raise_scpi_errors(source, "2400 source", "configuration")
-        if voltmeter is not None:
-            self._raise_scpi_errors(voltmeter, "2182A voltmeter", "configuration")
-        self._common_config_key = cfg
-
-    def _measure_voltage_list_software(
-        self,
-        source_voltages: Sequence[float],
-        cfg: Keithley2400With2182AConfig,
-    ) -> list[VoltageListReading]:
-        self._configure_common(
-            cfg,
-            force=not self._source_output_context_enabled(),
-        )
-        source = self._require_source()
-        voltmeter = self._voltmeter
-        readings: list[VoltageListReading] = []
-        try:
-            self._set_source_output_enabled(True)
-            for voltage in source_voltages:
-                self._write(source, f":SOUR:VOLT {voltage:.12g}")
-                if cfg.trigger_delay_s > 0:
-                    time.sleep(cfg.trigger_delay_s)
-                self._write(source, "INIT")
-                voltage_reading = math.nan
-                if voltmeter is not None:
-                    voltage_reading = float(self._query(voltmeter, "READ?"))
-                source_values = _parse_float_list(self._query(source, "FETC?"))
-                if len(source_values) < 2:
-                    raise RuntimeError("2400 FETC? did not return voltage,current")
-                if voltmeter is None:
-                    voltage_reading = float(source_values[0])
-                current = float(source_values[1])
-                readings.append(
-                    _voltage_list_reading(
-                        source_voltage_v=float(voltage),
-                        measured_voltage_v=voltage_reading,
-                        current_a=current,
-                        compliance_current_a=cfg.compliance_current_a,
-                    )
-                )
-        finally:
-            if self._source_output_context_enabled():
-                self._source_output_enabled = True
-            else:
-                self._try_write(source, ":SOUR:VOLT 0")
-                self._try_write(source, ":OUTP ON")
-                self._source_output_enabled = True
-        self._raise_scpi_errors(source, "2400 source", "software measurement")
-        if voltmeter is not None:
-            self._raise_scpi_errors(voltmeter, "2182A voltmeter", "software measurement")
-        return readings
-
-    def _measure_voltage_list_buffered_trigger_link(
-        self,
-        source_voltages: Sequence[float],
-        cfg: Keithley2400With2182AConfig,
-        *,
-        after_measurement: Callable[[], object] | None = None,
-    ) -> list[VoltageListReading]:
-        source = self._require_source()
-        voltmeter = self._require_voltmeter()
-        points = len(source_voltages)
-        if points < 1:
-            raise ValueError("Source voltage list cannot be empty")
-        if points > 2500:
-            raise ValueError("2400 trace buffer accepts at most 2500 readings")
-        if points > MAX_2182A_TRACE_POINTS:
-            raise ValueError("2182A trace buffer accepts at most 1024 readings")
-        requested_voltages = tuple(float(value) for value in source_voltages)
-        if not self._prepared_voltage_list_matches(requested_voltages, cfg, points):
-            self._prepare_voltage_list_buffered_trigger_link(
-                requested_voltages,
-                cfg,
-                measure_points=points,
-            )
-
-        try:
-            self._write(voltmeter, "INIT")
-            time.sleep(0.1)
-            self._set_source_output_enabled(True)
-            self._write(source, ":INIT")
-            try:
-                with _temporary_timeout(
-                    source,
-                    _buffered_measurement_timeout_ms(points, cfg),
-                ):
-                    self._query(source, "*OPC?")
-            except Exception as exc:
-                self._try_clear(source)
-                self._try_write(source, ":ABOR")
-                self._try_write(source, ":TRIG:CLE")
-                self._try_write(voltmeter, "ABOR")
-                self._try_write(voltmeter, "TRIG:SOUR IMM")
-                self._try_write(voltmeter, "TRIG:COUN 1")
-                self._try_write(voltmeter, "SAMP:COUN 1")
-                raise RuntimeError(
-                    "2400 buffered Trigger Link sequence did not complete "
-                    f"for {points} source points. Check Trigger Link line "
-                    "mapping and the 2182A external-trigger state."
-                ) from exc
-        finally:
-            if self._source_output_context_enabled():
-                self._try_write(source, ":SOUR:VOLT:MODE FIX")
-                self._source_output_enabled = True
-            else:
-                self._try_write(source, ":SOUR:VOLT:MODE FIX")
-                self._try_write(source, ":SOUR:VOLT 0")
-                self._try_write(source, ":OUTP ON")
-                self._source_output_enabled = True
-            self._prepared_voltage_list_key = None
-
-        if after_measurement is not None:
-            after_measurement()
-
-        source_trace, voltmeter_trace = self._read_trace_buffers_parallel()
-        self._try_write(source, "TRAC:FEED:CONT NEV")
-        self._try_write(voltmeter, "TRAC:FEED:CONT NEV")
-        self._try_write(voltmeter, "TRIG:SOUR IMM")
-        self._try_write(voltmeter, "TRIG:COUN 1")
-        self._try_write(voltmeter, "SAMP:COUN 1")
-        self._try_write(source, ":SOUR:VOLT:MODE FIX")
-        self._raise_scpi_errors(source, "2400 source", "buffered measurement")
-        self._raise_scpi_errors(voltmeter, "2182A voltmeter", "buffered measurement")
-
-        if len(source_trace) < points * 2:
-            raise RuntimeError(
-                f"2400 buffer returned {len(source_trace)} values for {points} points"
-            )
-        if len(voltmeter_trace) < points:
-            raise RuntimeError(
-                f"2182A buffer returned {len(voltmeter_trace)} values for {points} points"
-            )
-        readings: list[VoltageListReading] = []
-        for index, source_voltage in enumerate(source_voltages):
-            current = float(source_trace[index * 2 + 1])
-            measured_voltage = float(voltmeter_trace[index])
-            readings.append(
-                _voltage_list_reading(
-                    source_voltage_v=float(source_voltage),
-                    measured_voltage_v=measured_voltage,
-                    current_a=current,
-                    compliance_current_a=cfg.compliance_current_a,
-                )
-            )
-        return readings
-
-    def _prepare_voltage_list_buffered_trigger_link(
-        self,
-        source_voltages: Sequence[float],
-        cfg: Keithley2400With2182AConfig,
-        *,
-        measure_points: int | None = None,
-    ) -> None:
-        source = self._require_source()
-        voltmeter = self._require_voltmeter()
-        source_list = tuple(float(value) for value in source_voltages)
-        points = len(source_list) if measure_points is None else int(measure_points)
-        if points < 1:
-            raise ValueError("Source voltage list cannot be empty")
-        if points > len(source_list):
-            raise ValueError("Prepared source list is shorter than trigger count")
-        if len(source_list) > MAX_2400_SOURCE_LIST_POINTS:
-            raise ValueError("2400 source list accepts at most 2500 readings")
-        if points > MAX_2182A_TRACE_POINTS:
-            raise ValueError("2182A trace buffer accepts at most 1024 readings")
-
-        self._configure_common(cfg)
-
-        self._try_write(source, ":ABOR")
-        self._try_write(voltmeter, "ABOR")
-        self._try_write(source, "TRAC:FEED:CONT NEV")
-        self._try_write(voltmeter, "TRAC:FEED:CONT NEV")
-        self._try_write(source, "*CLS")
-        self._try_write(voltmeter, "*CLS")
-        self._try_write(source, ":TRIG:CLE")
-        self._write(source, ":SOUR:VOLT:MODE LIST")
-        if not self._source_list_covers(source_list):
-            self._write_source_voltage_list(source_list)
-            self._source_list_cache = source_list
-        self._write(source, f":TRIG:COUN {points}")
-        self._write(source, ":TRIG:SOUR TLIN")
-        self._write(source, ":TRIG:DIR SOUR")
-        self._write(source, ":TRIG:INP SOUR")
-        self._write(source, ":TRIG:ILIN 1")
-        self._write(source, ":TRIG:OLIN 2")
-        self._write(source, ":TRIG:OUTP SOUR")
-        self._write(source, "TRIG:DEL 0")
-        self._write(source, ":SOUR:DEL 0")
-        self._write(source, "TRAC:CLE")
-        self._write(source, f"TRAC:POIN {points}")
-        self._write(source, "TRAC:FEED SENS")
-        self._raise_scpi_errors(source, "2400 source", "source list setup")
-
-        self._write(voltmeter, "TRIG:SOUR EXT")
-        self._write(voltmeter, "TRIG:DEL 0")
-        self._write(voltmeter, f"TRIG:COUN {points}")
-        self._write(voltmeter, "SAMP:COUN 1")
-        self._write(voltmeter, "TRAC:CLE")
-        self._write(voltmeter, f"TRAC:POIN {points}")
-        self._write(voltmeter, "TRAC:FEED SENS")
-        self._raise_scpi_errors(voltmeter, "2182A voltmeter", "buffer setup")
-
-        self._write(voltmeter, "TRAC:FEED:CONT NEXT")
-        self._write(source, "TRAC:FEED:CONT NEXT")
-        self._prepared_source_voltages = source_list
-        self._prepared_voltage_list_key = (
-            cfg,
-            source_list[:points],
-            points,
-        )
-
-    def _prepared_voltage_list_matches(
-        self,
-        requested_voltages: tuple[float, ...],
-        cfg: Keithley2400With2182AConfig,
-        points: int,
-    ) -> bool:
-        return self._prepared_voltage_list_key == (
-            cfg,
-            requested_voltages[:points],
-            points,
-        )
-
-    def _source_list_covers(self, requested_voltages: tuple[float, ...]) -> bool:
-        cached = self._source_list_cache
-        return (
-            len(cached) >= len(requested_voltages)
-            and cached[: len(requested_voltages)] == requested_voltages
-        )
-
-    def _read_trace_buffers_parallel(self) -> tuple[list[float], list[float]]:
-        source = self._require_source()
-        voltmeter = self._require_voltmeter()
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            source_future = executor.submit(
-                lambda: _parse_float_list(self._query(source, "TRAC:DATA?"))
-            )
-            voltmeter_future = executor.submit(
-                lambda: _parse_float_list(self._query(voltmeter, "TRAC:DATA?"))
-            )
-            return source_future.result(), voltmeter_future.result()
-
-    def _write_source_voltage_list(self, values: Sequence[float]) -> None:
-        source = self._require_source()
-        values = [float(value) for value in values]
-        if not values:
-            raise ValueError("Source voltage list cannot be empty")
-        if len(values) > MAX_2400_SOURCE_LIST_POINTS:
-            raise ValueError(
-                "2400 source list accepts at most "
-                f"{MAX_2400_SOURCE_LIST_POINTS} points"
-            )
-        for offset in range(0, len(values), MAX_2400_SOURCE_LIST_POINTS_PER_COMMAND):
-            chunk = values[offset : offset + MAX_2400_SOURCE_LIST_POINTS_PER_COMMAND]
-            command_name = (
-                ":SOUR:LIST:VOLT"
-                if offset == 0
-                else ":SOUR:LIST:VOLT:APPend"
-            )
-            command = (
-                f"{command_name} "
-                + ",".join(f"{value:.12g}" for value in chunk)
-            )
-            try:
-                self._write(source, command)
-            except Exception as exc:
-                details = "; ".join(
-                    self._read_scpi_errors(
-                        source,
-                        "2400 source",
-                        "source list setup",
-                    )
-                )
-                suffix = f" SCPI errors: {details}" if details else ""
-                raise RuntimeError(
-                    "2400 source-list write failed "
-                    f"({len(values)} points total, chunk offset {offset}, "
-                    f"{len(chunk)} points, {len(command)} characters)."
-                    f"{suffix}"
-                ) from exc
-            self._raise_scpi_errors(source, "2400 source", "source list setup")
-
-    def _source_output_context_enabled(self) -> bool:
-        return self._source_output_context_enabled_depth > 0
-
-    def _prime_output_context_source_voltage(
-        self,
-        cfg: Keithley2400With2182AConfig,
-    ) -> None:
-        if self._prepared_voltage_list_key is not None:
-            return
-        source = self._source
-        if source is None:
-            return
-        voltage = -abs(float(cfg.normalized().measurement_voltage_v))
-        self._write(source, ":SOUR:VOLT:MODE FIX")
-        self._write(source, f":SOUR:VOLT {voltage:.12g}")
-
-    def _set_source_output_enabled(
-        self,
-        enabled: bool,
-        *,
-        best_effort: bool = False,
-        force: bool = False,
-        zero_voltage: bool = True,
-    ) -> None:
-        source = self._source
-        if source is None:
-            if best_effort:
-                return
-            source = self._require_source()
-        write = self._try_write if best_effort else self._write
-        enabled = bool(enabled)
-        if not enabled and zero_voltage:
-            write(source, ":SOUR:VOLT 0")
-        if force or self._source_output_enabled != enabled:
-            write(source, f":OUTP {'ON' if enabled else 'OFF'}")
-        self._source_output_enabled = enabled
-
-    def _require_source(self):
-        if self._source is None:
-            raise RuntimeError("Keithley 2400 source is not open")
-        return self._source
-
-    def _require_voltmeter(self):
-        if self._voltmeter is None:
-            raise RuntimeError("Keithley 2182A voltmeter is not open")
-        return self._voltmeter
-
-    @staticmethod
-    def _write(handle, command: str) -> None:
-        handle.write(command)
-
-    @staticmethod
-    def _query(handle, query: str) -> str:
-        if hasattr(handle, "query"):
-            return str(handle.query(query)).strip()
-        return str(handle.ask(query)).strip()
-
-    def _try_write(self, handle, command: str) -> None:
-        try:
-            self._write(handle, command)
-        except Exception:
-            logger.debug("Keithley command failed: %s", command, exc_info=True)
-
-    def _try_clear(self, handle) -> None:
-        clearer = getattr(handle, "clear", None)
-        if not callable(clearer):
-            return
-        try:
-            clearer()
-        except Exception:
-            logger.debug("Keithley device clear failed", exc_info=True)
-
-    def _safe_query(self, handle, query: str) -> str:
-        if handle is None:
-            return ""
-        try:
-            return self._query(handle, query).strip()
-        except Exception:
-            logger.debug("Keithley query failed: %s", query, exc_info=True)
-            return ""
-
-    def _trace_status(
-        self,
-        handle,
-        *,
-        supports_actual_points: bool,
-    ) -> TraceBufferStatus:
-        points = _optional_int(self._safe_query(handle, "TRAC:POIN?"))
-        actual_points = (
-            _optional_int(self._safe_query(handle, "TRAC:POIN:ACT?"))
-            if supports_actual_points
-            else None
-        )
-        free_response = self._safe_query(handle, "TRAC:FREE?")
-        free_bytes, reserved_bytes = _optional_int_pair(free_response)
-        feed = self._safe_query(handle, "TRAC:FEED?") or None
-        control = self._safe_query(handle, "TRAC:FEED:CONT?") or None
-        return TraceBufferStatus(
-            points=points,
-            actual_points=actual_points,
-            free_bytes=free_bytes,
-            reserved_bytes=reserved_bytes,
-            feed=feed,
-            control=control,
-        )
-
-    def _raise_scpi_errors(self, handle, label: str, context: str) -> None:
-        errors = self._read_scpi_errors(handle, label, context)
-        if errors:
-            details = "; ".join(errors)
-            raise RuntimeError(f"{label} SCPI error after {context}: {details}")
-
-    def _read_scpi_errors(self, handle, label: str, context: str) -> list[str]:
-        errors: list[str] = []
-        for _index in range(8):
-            response = self._safe_query(handle, "SYST:ERR?")
-            if not response:
-                break
-            code = _scpi_error_code(response)
-            if code == 0:
-                break
-            errors.append(response)
-        return errors
+        self._session.close()
 
 
 class Keithley2400SourceMeter(Keithley2400With2182A):
@@ -1436,40 +844,6 @@ class Keithley2400SourceMeter(Keithley2400With2182A):
         )
 
 
-@contextmanager
-def _temporary_timeout(handle, timeout_ms: int) -> Iterator[None]:
-    previous_timeout = getattr(handle, "timeout", None)
-    if previous_timeout is None:
-        yield
-        return
-    handle.timeout = int(timeout_ms)
-    try:
-        yield
-    finally:
-        handle.timeout = previous_timeout
-
-
-def _buffered_measurement_timeout_ms(
-    points: int,
-    cfg: Keithley2400With2182AConfig,
-) -> int:
-    point_count = max(1, int(points))
-    nplc = max(0.01, _finite_float(cfg.nplc, 1.0))
-    trigger_delay_s = max(0.0, _finite_float(cfg.trigger_delay_s, 0.0))
-    timeout_s = BUFFERED_MEASUREMENT_BASE_TIMEOUT_S + point_count * (
-        BUFFERED_MEASUREMENT_POINT_OVERHEAD_S
-        + BUFFERED_MEASUREMENT_NPLC_POINT_S * nplc
-        + trigger_delay_s
-    )
-    return max(
-        DEFAULT_VISA_TIMEOUT_MS,
-        min(
-            MAX_BUFFERED_MEASUREMENT_TIMEOUT_MS,
-            int(math.ceil(timeout_s * 1000.0)),
-        ),
-    )
-
-
 def _differential_reading(
     negative: PolarityReading,
     positive: PolarityReading,
@@ -1484,8 +858,7 @@ def _differential_reading(
         math.isfinite(threshold)
         and threshold > 0.0
         and (
-            abs(negative.current_a) >= threshold
-            or abs(positive.current_a) >= threshold
+            abs(negative.current_a) >= threshold or abs(positive.current_a) >= threshold
         )
     )
     return DifferentialReading(
@@ -1541,9 +914,7 @@ def _voltage_list_reading(
 ) -> VoltageListReading:
     threshold = abs(compliance_current_a) * 0.99
     compliance_hit = (
-        math.isfinite(threshold)
-        and threshold > 0.0
-        and abs(current_a) >= threshold
+        math.isfinite(threshold) and threshold > 0.0 and abs(current_a) >= threshold
     )
     return VoltageListReading(
         source_voltage_v=source_voltage_v,
@@ -1571,19 +942,6 @@ def _resistance_from_voltage_current(voltage: float, current: float) -> float:
     if current == 0.0:
         return math.inf
     return float(voltage / current)
-
-
-def _parse_float_list(response: str) -> list[float]:
-    values: list[float] = []
-    for token in re.split(r"[\s,]+", str(response).strip()):
-        if not token:
-            continue
-        values.append(float(token))
-    return values
-
-
-def _normalize_visa_role(role: object) -> str:
-    return str(role or "").strip().lower().replace("-", "_")
 
 
 def _setting_value(
@@ -1650,30 +1008,6 @@ def _max_abs_voltage(values: object) -> float | None:
     return max_voltage if found else None
 
 
-def _optional_int(response: str) -> int | None:
-    try:
-        return int(float(str(response).strip()))
-    except (TypeError, ValueError):
-        return None
-
-
-def _optional_int_pair(response: str) -> tuple[int | None, int | None]:
-    values = [item.strip() for item in str(response).split(",", 1)]
-    if len(values) != 2:
-        return None, None
-    return _optional_int(values[0]), _optional_int(values[1])
-
-
-def _scpi_error_code(response: str) -> int | None:
-    match = re.match(r"\s*([+-]?\d+)", str(response))
-    if match is None:
-        return None
-    try:
-        return int(match.group(1))
-    except ValueError:
-        return None
-
-
 def _positive_finite(value: object, default: float) -> float:
     value_float = abs(_finite_float(value, default))
     return value_float if value_float > 0.0 else float(default)
@@ -1697,10 +1031,3 @@ def _finite_float(value: object, default: float) -> float:
     if not math.isfinite(result):
         return float(default)
     return result
-
-
-def _close_handle(handle) -> None:
-    try:
-        handle.close()
-    except Exception:
-        logger.debug("Failed to close handle", exc_info=True)

@@ -1905,3 +1905,86 @@ git diff --check 8fc83259e07f48bf0f222e80bb3e1d6c3241fd0e..HEAD
   `READY` with `0 Critical / 0 Important / 0 Minor`. Nothing was staged before
   that verdict; the authorized exact commit is
   `refactor: separate camera worker domains`.
+
+#### Task 15a: Separate Keithley measurement domains
+
+**Files:**
+- Create: `probe_station_measure/instrument_drivers/Keithley/Keithley_2400_2182A_session.py`
+- Create: `probe_station_measure/instrument_drivers/Keithley/Keithley_2400_2182A_trigger_link.py`
+- Modify: `probe_station_measure/instrument_drivers/Keithley/Keithley_2400_2182A.py`
+- Create: failure-path and direct-owner tests
+- Modify: `docs/superpowers/plans/2026-08-10-coordinate-system-coordinator.md`
+
+- [x] Characterize inherited failure and lifecycle behavior before extraction.
+  The first strict RED proved that a partial owned-resource open leaked the
+  already-open source and resource manager. The minimal constructor cleanup
+  turned it GREEN. Further strict RED/GREEN characterizations preserve
+  software-exception cleanup at `0 V` with output ON; buffered `*OPC?` abort,
+  Trigger-Link reset, timeout restoration, and safe output order; exact SCPI
+  and source-list diagnostics; short source/voltmeter traces; repeated abort
+  and close order; callback timing; intentional software/source-only callback
+  omission; and optimistic output caching after direct VISA mutation. The
+  first independent frozen review then found an Important post-open failure:
+  if VISA timeout setup raised, the newly opened local handle had not yet been
+  assigned to the session and leaked. Four strict REDs covered source and
+  second-handle failures with injected and internally owned resource managers;
+  the minimal `_open_resource` cleanup now closes every successfully opened
+  handle while preserving the rule that only an internally created resource
+  manager is closed.
+- [x] Observe separate absent-module REDs, then make the session owner
+  canonical for lazy VISA open/ID, common SCPI configuration, software-loop
+  acquisition, relay/output state, abort, trace diagnostics, VISA roles,
+  low-level errors, partial-open cleanup, and close. Make the Trigger-Link
+  owner canonical for prepared source-list state/cache, chunked list writes,
+  two-instrument trigger/buffer acquisition, parallel trace download, failure
+  reset, and bounded timeout policy.
+- [x] Keep every public model, configuration, evaluation function, canonical
+  pair-driver class, and canonical source-only subclass in the original
+  module. Their ASTs, identities, package/root exports, `__all__`, and all `21`
+  driver public signatures/decorators are exact. The residual coordinates the
+  two module-qualified private owners and public result construction. All
+  `22` moved legacy private methods are deleted; the owner DAG is
+  original -> session + Trigger-Link -> session with no reverse import,
+  re-export, compatibility alias, or duplicate SCPI policy body.
+- [x] Preserve hardware protocol behavior. SCPI command order, Trigger-Link
+  line roles, trace concurrency, source-list chunk limits, timeout calculation,
+  result shapes, contact-quality evaluation, `0 V` output-ON safety, prepared
+  cache behavior, and callback timing remain exact. Fresh forward and reverse
+  imports preserve canonical identity and start no threads. The root package
+  still leaves the pair driver, `pyvisa`, and `qcodes` unloaded; direct
+  Keithley-package imports retain the existing eager optional-driver behavior.
+- [x] Pass fake-only verification. The final focused driver/failure/owner/
+  import/client gate passes `42` plus `2` subtests. Five clean processes each
+  pass the `13` failure tests plus concurrent trace and trace-status tests,
+  for `75` tests plus `10` subtests.
+  Six LCR factory/controller integrations pass; all instrument and API-client
+  tests pass `152` plus `5` subtests. The complete offscreen, process-local
+  `QLocale.c()` no-hardware/no-network suite passes `3120` plus `16` subtests
+  with only the inherited `BuiltinImporter.module_repr()` warning.
+- [x] Pass whole-tree Ruff, affected format, whole compileall,
+  `git diff --check`, public-AST/signature/identity, direct-definition,
+  deletion, DAG, import-order, lazy-root, protected-byte, scope, and MI-zero
+  gates. Lizard has zero warnings and `0.00%` duplicate rate. The protected
+  LCR, root/Keithley package, ohmmeter, client VISA, Main, and all GUI/design/
+  route/stage/camera files retain their baseline blobs.
+- [x] Metrics: the former driver was
+  `1706 LOC / 944 LLOC / 1515 SLOC / CC 291 / 83 blocks / max CC 14 / MI 0.00`.
+  Final residual, session, and Trigger-Link owners are respectively
+  `1033 / 460 / 892 / CC 155 / 53 blocks / MI 9.97`,
+  `495 / 346 / 447 / CC 114 / 29 / MI 12.13`, and
+  `326 / 189 / 300 / CC 45 / 11 / MI 25.69` for
+  LOC/LLOC/SLOC/complexity/MI. Partial-open cleanup and explicit owner
+  composition change aggregate complexity to `CC 314 / 93 blocks`; the
+  maximum remains `14`, and no policy is duplicated. Both new test files have
+  positive MI (`22.69 / 34.66`). All-tracked MI-zero decreases exactly
+  `9 -> 8`, active GUI/client/test MI-zero remains `8 -> 8`, and no new MI-zero
+  file is introduced.
+- [x] Freeze the complete evidence-bearing source/test/plan snapshot and
+  obtain a fresh fork-none independent review. The first review found one
+  Important partial-open timeout-setup handle leak. After the four-case TDD
+  correction, the same reviewer rechecked exact hashes, ownership, protocol
+  parity, focused `42` plus `2` subtests, five-process stress, broad `152` plus
+  `5` subtests, static/import/protected/metric gates, and returned `READY` with
+  `0 Critical / 0 Important / 0 Minor`. Nothing was staged before that final
+  verdict; the authorized exact commit is
+  `refactor: separate keithley measurement domains`.
