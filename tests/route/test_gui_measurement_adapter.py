@@ -5,7 +5,7 @@ from typing import cast
 
 import pytest
 
-from probe_station_gui.instruments.meters.lcr import LCRMeterError
+from probe_station_gui.instruments.meters.lcr_session_backend import LCRMeterError
 from probe_station_gui.route.gui_measurement_adapter import (
     GuiRouteEventBindings,
     setup_gui_route_meter,

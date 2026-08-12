@@ -37,7 +37,7 @@ from probe_station_gui.route.dialog_adapter import (
     RouteMeasurementPointRequestCallbacks,
     request_route_measurement_for_point,
 )
-from probe_station_gui.instruments.meters.lcr import LCRMeterError
+from probe_station_gui.instruments.meters.lcr_session_backend import LCRMeterError
 from probe_station_gui.settings.manager import ObjectiveCalibrationSettings, Settings
 from probe_station_gui.stage.api_moves import api_move_feedrate
 from probe_station_gui.stage.controller import StageControllerError

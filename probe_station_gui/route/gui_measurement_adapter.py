@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Protocol
 
-from probe_station_gui.instruments.meters.lcr import LCRMeterError
+from probe_station_gui.instruments.meters.lcr_session_backend import LCRMeterError
 from probe_station_gui.route.measurement_records import (
     RouteContactHeightRecord,
     RouteMeasurementPoint,

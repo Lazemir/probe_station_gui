@@ -2145,3 +2145,135 @@ git diff --check 8fc83259e07f48bf0f222e80bb3e1d6c3241fd0e..HEAD
   independent reviewer closed its prior current-point intent finding and
   returned `READY` with `0 Critical / 0 Important / 0 Minor`; the index and
   active-worktree Task17a temp set remained empty before staging.
+
+#### Task 18a: Separate LCR meter domains
+
+- [x] Drive lifecycle safety from strict fake-only REDs before extraction.
+  `MeterWorkerRuntime` now has an atomic one-shot acceptance/stop boundary,
+  FIFO execution and request/result correlation on one worker thread,
+  deterministic cancellation of every accepted queued call, synchronous
+  post-stop rejection, nested-call safety, no self-join, and eventual retired
+  cleanup. Five fresh corrected processes pass the lifecycle/worker selection
+  `30` tests plus `3` subtests each (`150` plus `15` total).
+- [x] Characterize and correct controller/session failure paths before moving
+  ownership. A blocked read is aborted out of band and shutdown stays within
+  two seconds; late publications are suppressed; output/session cleanup is
+  exactly once across enter, partial-enter, body, disconnect, shutdown, and
+  weak-atexit failures. Same-resource unexpected reconfiguration errors leave
+  the worker reusable, changed-resource replacement failure closes the
+  candidate exactly once, and one atexit failure cannot block other live
+  controllers. Connect/read/poll/reconfigure signal order and request identity
+  remain exact. All retained tests use fakes; an early malformed fake resource
+  key reached installed PyVISA only far enough for a missing `ASRL4` open to
+  fail without changing device or application state, and was immediately
+  replaced by the intended injected fake.
+- [x] Close the independent-review thread-affinity finding through a strict
+  RED. Disabling live polling had performed the live output `__exit__` inline
+  on the GUI caller while a read ran on `LCRMeterWorker`. The corrected live
+  owner changes only immutable-visible state plus the stop event; the
+  controller queues teardown behind accepted work (or executes inline when
+  already on the worker), returns without waiting for a blocked read, and
+  ignores a stale teardown after re-enable. The strict fake records exact
+  `enter -> read -> exit` order with all three operations on
+  `LCRMeterWorker`; shutdown rejection remains covered by worker retirement.
+- [x] Close the second independent-review output-ownership finding through
+  strict shutdown and atexit REDs. Manual/public output contexts had existed
+  only in generator-local state, so retirement could close the session and
+  stop the worker before the generator called `__exit__`. The live owner now
+  registers every successfully entered manual context, finishes by identity,
+  and drains nested contexts LIFO before standby output and session close.
+  Finalizers are idempotent and suppress only the exact shutdown-requested
+  worker-stopping result, whether retirement is still draining the registered
+  context or has already removed it. Strict fake
+  events are `enter -> exit -> close` for shutdown-inside-output and
+  `enter1 -> enter2 -> exit2 -> exit1 -> close` for atexit, entirely on
+  `LCRMeterWorker`; concurrent blocked exit remains registered until complete,
+  preserves a body exception, and still exits/closes exactly once. An
+  overlapping body unwind also returns its original error promptly while
+  retirement owns the blocked exit; the same worker-stopping error outside
+  shutdown remains visible. The transient ownership-query helper used during
+  the first correction was deleted once the exact shutdown rule made it
+  unnecessary.
+- [x] Close the fourth independent-review worker-finalization finding through
+  a deterministic barrier RED. A retirement callback could be registered
+  after the old single drain but before `_stopped=True` and remain forever.
+  Finalization now atomically detaches one callback batch under the condition,
+  runs it on the worker with failure isolation, repeats for callbacks accepted
+  during that batch, and sets CLOSED/stopped only while observing an empty list
+  under the same condition. The repaired test pauses between a completed batch
+  and terminal recheck: both callbacks run on the same worker, none remains,
+  and a callback offered after CLOSED never runs on the caller thread.
+- [x] Observe independent absent-module REDs, then make
+  `lcr_session_backend.py` the Qt-free canonical owner of `LCRMeterError`,
+  normalized immutable configuration, lazy driver open/reset/identify,
+  session configuration, VISA roles/operations, and error coercion. Make
+  `lcr_live_session.py` the Qt-free owner of the long-lived session,
+  immutable `LiveSessionState`, connection/replacement, polling, output,
+  abort, and cleanup. Imports of either owner load neither Qt, PyVISA, nor
+  QCoDeS and start no thread.
+- [x] Keep canonical `LCRMeterController` in `lcr.py`; move canonical
+  `RouteMeter` into the deepened `lcr_route_session.py`; and deepen
+  `worker.py` around the lifecycle contract. Production and tests import all
+  moved identities directly. The old `LCRMeterError`, `RouteMeter`,
+  `RouteSessionError`, private session bodies, compatibility aliases,
+  `__getattr__`, and duplicate policy are absent. Constructor/public method
+  signatures, five controller signals, constants, serialized operations,
+  polling/output reuse, route reconnect retry, cross-thread abort, and error
+  text/order remain exact. The worker's explicit `queue_if_busy` submission
+  keeps this nonblocking teardown ordered without weakening ordinary busy-call
+  rejection. The owner DAG is acyclic: controller composes live,
+  route, backend, and worker; live and route depend on backend; backend and
+  worker have no sibling dependency.
+- [x] Preserve every one of the `65` pre-existing meter test identities
+  exactly once; the final focused owner selection passes `96` tests plus `3`
+  subtests. Instruments pass `143` plus `5`; the focused route-dialog/contact
+  selection passes `92`; and all route tests pass `379`. App and UI reproduce
+  only the inherited protected Qt-order access violation at
+  `MicroscopeInteraction._schedule_retry`; deterministic fresh-process runs
+  pass App `365` plus the isolated node and `5` subtests, and UI `541` plus the
+  isolated node. The exact collected suite is covered without omission by
+  deterministic partitions: `3176/3176` tests plus `16` subtests pass under
+  process-local `QLocale.c()` and offscreen Qt. No unified rerun is used to
+  conceal the inherited order-sensitive crash.
+- [x] Pass affected Ruff/format, configured whole-tree Ruff with only the
+  inherited `E402`/`F401` classes excluded, whole-tree compile,
+  `git diff --check`, public identity/signature/signal, deletion, forward and
+  reverse lazy-import, owner-DAG, normalized import-only caller AST, and
+  protected-byte gates. The twelve explicitly protected LCR helper, Keithley,
+  meter-config, route/contact, stage, and design-session files match the
+  Task18a baseline, as do the complete camera/stage/design trees. Task temp
+  artifacts are absent.
+- [x] Metrics: the former controller, route, and worker cluster was
+  respectively `1439/848/1259`, `152/45/134`, and `201/145/165` for
+  LOC/LLOC/SLOC, totaling `CC 329 / 115 blocks` with maximum `14`; the
+  controller itself was MI zero. Final controller, backend, live, route, and
+  worker owners are respectively `841/397/715 / CC 109/49 / MI 11.66`,
+  `465/211/420 / CC 86/18 / MI 24.67`,
+  `276/206/241 / CC 60/22 / MI 28.95`,
+  `373/147/338 / CC 52/21 / MI 29.82`, and
+  `306/219/262 / CC 75/23 / MI 18.51`. Aggregate complexity is
+  `CC 382 / 133 blocks`, maximum `13`: the honest safety/deep-owner result is
+  seventeen CC and three blocks over the `<=365 / <=130` projection while the
+  maximum gate passes. The `+53 CC / +18 blocks` over baseline is entirely
+  RED-driven one-shot worker, thread-affinity teardown, manual-context
+  registry/LIFO retirement, cancellation, abort, replacement, and cleanup
+  ownership rather than shallow forwarding or duplicated lifecycle policy;
+  further collapsing would weaken these proven boundaries. Lizard reports
+  zero warnings and `0.00%` duplicate blocks.
+  Every structural owner and touched/new test has positive MI; the sole
+  touched MI-zero exception is import-only, normalized-AST-exact `main.py`.
+  All-tracked and active MI-zero both decrease exactly `6 -> 5`, with no new
+  MI-zero file.
+- [x] Refreeze the corrected exact evidence-bearing source/test/plan snapshot
+  and obtain a corrected independent read-only review. The initial frozen
+  review found one Important GUI-thread output teardown, one Important unowned
+  manual-output shutdown path, one Important concurrent retirement/body error
+  masking window, and one Important late retirement-registration gap; the
+  strict REDs and lifecycle-owner corrections above close all four paths. The
+  same reviewer rechecked the final `17` hashes, exact scope/index/temp,
+  focused `96` plus `3` subtests, adjacent `44` plus `5`, static/import/metric
+  gates, direct identities, and absence of shallow or duplicated lifecycle
+  policy, then returned `READY` with
+  `0 Critical / 0 Important / 0 Minor`. Nothing was staged before that final
+  verdict; the authorized exact commit subject is
+  `refactor: separate lcr meter domains`.

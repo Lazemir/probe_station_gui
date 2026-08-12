@@ -236,12 +236,12 @@ from probe_station_gui.instruments.api_sweep import (
     api_raw_voltage_sweep_request_from_payload,
     api_raw_voltage_sweep_success_response,
 )
-from probe_station_gui.instruments.meters.lcr import (
-    LCRMeterController,
-    LCRMeterError,
-    ROUTE_METER_GWINSTEK,  # noqa: F401 - re-exported for legacy callers/tests
-    ROUTE_METER_KEITHLEY,  # noqa: F401 - re-exported for legacy callers/tests
-    ROUTE_METER_KEITHLEY_2400,  # noqa: F401 - re-exported for legacy callers/tests
+from probe_station_gui.instruments.meters.lcr import LCRMeterController
+from probe_station_gui.instruments.meters.lcr_session_backend import LCRMeterError
+from probe_station_gui.route.meter_config import (
+    ROUTE_METER_GWINSTEK,  # noqa: F401 - imported for callers/tests
+    ROUTE_METER_KEITHLEY,  # noqa: F401 - imported for callers/tests
+    ROUTE_METER_KEITHLEY_2400,  # noqa: F401 - imported for callers/tests
     RouteMeterConfiguration,
 )
 from probe_station_gui.stage.api_moves import (

@@ -1,5 +1,6 @@
 import sys
 import types
+from dataclasses import replace
 
 _ORIGINAL_PYSIDE6 = {
     name: module
@@ -11,9 +12,7 @@ _ORIGINAL_PYSIDE6 = {
 def _module_names(root: str) -> list[str]:
     dotted = f"{root}."
     return [
-        name
-        for name in list(sys.modules)
-        if name == root or name.startswith(dotted)
+        name for name in list(sys.modules) if name == root or name.startswith(dotted)
     ]
 
 
@@ -71,13 +70,15 @@ _restore_real_imports()
 _install_pyside6_stubs_if_missing()
 
 import probe_station_gui.instruments.meters.lcr as lcr_module
+import probe_station_gui.instruments.meters.lcr_route_session as lcr_route_session_module
+import probe_station_gui.instruments.meters.lcr_session_backend as lcr_session_backend_module
 from PySide6.QtCore import Qt
-from probe_station_gui.instruments.meters.lcr import (
-    LCRMeterError,
-    LCRMeterController,
-    RouteMeter,
-    _LCRSession,
+from probe_station_gui.instruments.meters.gwinstek_session import (
+    GWInstekLCRSession,
 )
+from probe_station_gui.instruments.meters.lcr import LCRMeterController
+from probe_station_gui.instruments.meters.lcr_route_session import RouteMeter
+from probe_station_gui.instruments.meters.lcr_session_backend import LCRMeterError
 from probe_station_gui.route.meter_config import (
     GWInstekRouteMeterSettings,
     KeithleyRouteMeterSettings,
@@ -88,6 +89,13 @@ from probe_station_gui.route.meter_config import (
 )
 
 _restore_pyside6_modules()
+
+
+def _replace_live_session_configuration(controller, **changes) -> None:
+    live_session = controller._live_session
+    live_session.apply_configuration(
+        replace(live_session.snapshot().configuration, **changes)
+    )
 
 
 def _connect_direct(signal, slot) -> None:
@@ -211,7 +219,7 @@ class _TextOnlyVisaHandle:
         return self.read_text
 
 
-class _FakeLCRSession(_LCRSession):
+class _FakeLCRSession(GWInstekLCRSession):
     backend_name = "fake-lcr"
 
     def __init__(self) -> None:
@@ -269,13 +277,12 @@ class _FakeKeithleySession:
         trigger: bool = False,
         after_measurement=None,
     ) -> list[dict[str, object]]:
-        self.route_batches.append((int(count), bool(trigger), after_measurement is not None))
+        self.route_batches.append(
+            (int(count), bool(trigger), after_measurement is not None)
+        )
         if after_measurement is not None:
             after_measurement()
-        return [
-            {"differential_resistance_ohm": 42.0}
-            for _index in range(int(count))
-        ]
+        return [{"differential_resistance_ohm": 42.0} for _index in range(int(count))]
 
     def prepare_route_measurements(
         self,

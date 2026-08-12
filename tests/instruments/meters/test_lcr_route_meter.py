@@ -16,7 +16,9 @@ try:
         _FakeLCRSession,
         _SourceSilentKeithleySession,
         _TextOnlyVisaHandle,
-        lcr_module,
+        _replace_live_session_configuration,
+        lcr_route_session_module,
+        lcr_session_backend_module,
     )
 except ImportError:
     from lcr_test_support import (
@@ -34,7 +36,9 @@ except ImportError:
         _FakeLCRSession,
         _SourceSilentKeithleySession,
         _TextOnlyVisaHandle,
-        lcr_module,
+        _replace_live_session_configuration,
+        lcr_route_session_module,
+        lcr_session_backend_module,
     )
 
 
@@ -42,10 +46,10 @@ class LCRRouteMeterTest(unittest.TestCase):
     def test_controller_exposes_station_owned_visa_roles(self) -> None:
         controller = LCRMeterController()
         session = _FakeKeithleySession()
-        controller._meter_type = ROUTE_METER_KEITHLEY
-        controller._session = session
+        _replace_live_session_configuration(controller, meter_type=ROUTE_METER_KEITHLEY)
+        controller._live_session._session = session
         stopped = []
-        controller._stop_polling_session = lambda: stopped.append(True)
+        controller._live_session.pause_polling = lambda: stopped.append(True)
 
         roles = controller.visa_resource_roles()
         response = controller.visa_operation(
@@ -158,8 +162,8 @@ class LCRRouteMeterTest(unittest.TestCase):
             created.append((source, voltmeter, timeout_ms))
             return session
 
-        original = lcr_module._open_keithley_session
-        lcr_module._open_keithley_session = fake_open
+        original = lcr_route_session_module.open_keithley_session
+        lcr_route_session_module.open_keithley_session = fake_open
         try:
             meter = RouteMeter(
                 RouteMeterConfiguration(
@@ -177,7 +181,7 @@ class LCRRouteMeterTest(unittest.TestCase):
 
             value = meter.read_primary_value_now()
         finally:
-            lcr_module._open_keithley_session = original
+            lcr_route_session_module.open_keithley_session = original
 
         self.assertEqual(value, 42.0)
         self.assertEqual(created, [("GPIB0::1::INSTR", "GPIB0::2::INSTR", 1234)])
@@ -198,8 +202,8 @@ class LCRRouteMeterTest(unittest.TestCase):
                 self.identify_count += 1
                 return "fake-lcr"
 
-        original = lcr_module._LCRSession
-        lcr_module._LCRSession = _OpeningFakeLCRSession
+        original = lcr_route_session_module.GWInstekLCRSession
+        lcr_route_session_module.GWInstekLCRSession = _OpeningFakeLCRSession
         try:
             meter = RouteMeter(
                 RouteMeterConfiguration(
@@ -223,7 +227,7 @@ class LCRRouteMeterTest(unittest.TestCase):
                 )
             )
         finally:
-            lcr_module._LCRSession = original
+            lcr_route_session_module.GWInstekLCRSession = original
 
         session = meter._session
         self.assertIsInstance(session, _OpeningFakeLCRSession)
@@ -292,12 +296,15 @@ class LCRRouteMeterTest(unittest.TestCase):
             short_threshold_ohm=10.0,
             poll_interval_ms=250,
         )
-        original = lcr_module._open_keithley_session
-        lcr_module._open_keithley_session = fake_open
+        original = lcr_session_backend_module.open_keithley_session
+        lcr_session_backend_module.open_keithley_session = fake_open
         try:
-            opened = controller._open_configured_session()
+            opened = lcr_session_backend_module.open_configured_session(
+                controller._live_session.snapshot().configuration,
+                timeout_ms=LCRMeterController.DEFAULT_TIMEOUT_MS,
+            )
         finally:
-            lcr_module._open_keithley_session = original
+            lcr_session_backend_module.open_keithley_session = original
 
         self.assertIs(opened, session)
         self.assertEqual(
@@ -348,13 +355,13 @@ class LCRRouteMeterTest(unittest.TestCase):
             poll_interval_ms=250,
         )
         started = []
-        controller._start_polling_thread = lambda: started.append(True)
-        original = lcr_module._open_keithley_session
-        lcr_module._open_keithley_session = fake_open
+        controller._worker_runtime.wake = lambda: started.append(True)
+        original = lcr_session_backend_module.open_keithley_session
+        lcr_session_backend_module.open_keithley_session = fake_open
         try:
             controller.connect_now()
         finally:
-            lcr_module._open_keithley_session = original
+            lcr_session_backend_module.open_keithley_session = original
 
         self.assertTrue(controller.is_connected())
         self.assertEqual(
@@ -400,7 +407,9 @@ class LCRRouteMeterTest(unittest.TestCase):
             short_threshold_ohm=10.0,
             poll_interval_ms=250,
         )
-        controller._open_configured_session = lambda: session
+        controller._live_session._session_opener = (
+            lambda _configuration, *, timeout_ms: session
+        )
 
         with self.assertRaisesRegex(LCRMeterError, "Keithley 2400 did not respond"):
             controller.connect_now()
@@ -438,13 +447,15 @@ class LCRRouteMeterTest(unittest.TestCase):
         session = _FakeLCRSession()
         session.identify = lambda: "fake-lcr"
         started = []
-        controller._open_configured_session = lambda: session
-        controller._start_polling_thread = lambda: started.append(True)
+        controller._live_session._session_opener = (
+            lambda _configuration, *, timeout_ms: session
+        )
+        controller._worker_runtime.wake = lambda: started.append(True)
 
         controller.connect_now()
 
         self.assertTrue(controller.is_connected())
-        self.assertIs(controller._session, session)
+        self.assertIs(controller._live_session._session, session)
         self.assertEqual(started, [True])
 
     def test_controller_rejects_route_meter_type_mismatch(self) -> None:
@@ -474,7 +485,7 @@ class LCRRouteMeterTest(unittest.TestCase):
             short_threshold_ohm=10.0,
             poll_interval_ms=250,
         )
-        controller._session = _FakeLCRSession()
+        controller._live_session._session = _FakeLCRSession()
 
         with self.assertRaises(LCRMeterError):
             controller.apply_route_meter_configuration(
@@ -491,6 +502,7 @@ class LCRRouteMeterTest(unittest.TestCase):
         )
 
         self.assertEqual(config.nplc_label(), "7.5")
+
 
 if __name__ == "__main__":
     unittest.main()
