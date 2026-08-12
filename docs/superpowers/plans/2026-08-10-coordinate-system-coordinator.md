@@ -2341,3 +2341,58 @@ git diff --check 8fc83259e07f48bf0f222e80bb3e1d6c3241fd0e..HEAD
   imports/logger, protected bytes, focused `116`, Ruff/format/diff, and exact
   Radon/Lizard/MI-zero arithmetic. It returned `READY` with
   `0 Critical / 0 Important / 0 Minor`; nothing was staged before that verdict.
+
+#### Task 20-pre: Preserve route interrupt through the point checkpoint
+
+- [x] Capture the clean `a086c19` safety baseline before editing. The selected
+  route pause/interrupt/contact/photo/point coverage passed `136/136`.
+  `route/measurement.py` was
+  `1630 LOC / 762 LLOC / 1503 SLOC / CC 274 / 92 blocks / max CC 13 /
+  MI 0.00`; its point-entry path unconditionally cleared the Interrupt after
+  the stop check and before constructing the immutable point request.
+- [x] Reproduce the root cause through three strict fake-only REDs before any
+  production edit. A pre-first-point Interrupt in `photo_then_measure` failed
+  to reach correction waiting and allowed point completion; simultaneous
+  pending Pause plus Interrupt reached an ordinary paused saved-point wait;
+  and the two-point acknowledgement scenario likewise never reached the
+  interrupted-result seam. The isolated selection failed all `3/3` for those
+  exact reasons.
+- [x] Apply the single minimal behavior correction: delete only the premature
+  `_point_interrupt_requested.clear()` at `_run_route_point` entry. Interrupt
+  now remains set until `RoutePointExecution` observes it and returns an
+  interrupted result. The established `_interrupted_route_point_loop_decision`
+  seam acknowledges and clears it before a confirmed retry/skip/next point;
+  the separate recognized manual-contact seam remains unchanged.
+- [x] Characterize the safety outcome directly. Before-first-point and
+  Pause-plus-Interrupt both enter correction waiting without photo, contact
+  callback, needle lower, meter read, or CSV record. Interrupt wins over a
+  pending Pause. After the interrupted result is acknowledged, point two runs
+  normally and the flag remains clear. The final new regression selection
+  passes `3/3`, and the focused safety selection passes `139/139`.
+- [x] Pass fresh no-hardware verification under offscreen Qt and process-local
+  `QLocale.c()`: all route tests pass `382`; focused App route and Task 17
+  dialog/UI safety passes `115` plus `5` subtests. The exact collected union is
+  covered without omission by deterministic fresh-process partitions:
+  `3190/3190` tests plus `16` subtests pass. App retains the established split
+  of `365` tests plus the isolated protected `_schedule_retry` node; UI passes
+  `542`.
+- [x] Pass affected and configured whole-tree Ruff, new-test format,
+  whole-tree compile, `git diff --check`, exact one-line production diff, and
+  protected-byte gates. All `62` tracked stage/autofocus/click-calibration,
+  Task 17 route-dialog, point-execution, contact-lifecycle, and external-route
+  files match `a086c19`. The pre-existing monolithic measurement file is not
+  bulk-formatted, preserving the one-line safety diff. Task-local temporary
+  roots are absent.
+- [x] Metrics: final `measurement.py` is
+  `1629 LOC / 761 LLOC / 1502 SLOC / CC 274 / 92 blocks / max CC 13 /
+  MI 0.00`. Lizard remains exactly
+  `87 functions / summed CCN 263 / max 13` with no warning. The new test is
+  `217 / 102 / 191` for LOC/LLOC/SLOC, `CC 40 / 9 blocks`, MI `32.78`, with
+  zero Lizard warnings and `0.00%` duplicate rate. The all-tracked and active
+  MI-zero count remains `4`; no new MI-zero file is introduced.
+- [x] Freeze the exact three-path evidence-bearing snapshot. A fresh fork-none
+  independent read-only review rechecked the one-line production deletion,
+  all hashes/scope/index, full interrupt/acknowledgement semantics, fresh new
+  `3` and focused safety `139`, protected bytes, Ruff/format/compile/diff, and
+  exact metrics. It returned `READY` with
+  `0 Critical / 0 Important / 0 Minor`; nothing was staged before that verdict.

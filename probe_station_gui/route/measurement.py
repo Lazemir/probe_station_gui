@@ -730,7 +730,6 @@ class RouteMeasurementRunner:
                 position_index=position_index,
                 stop_message="Route measurement stopped by user.",
             )
-        self._point_interrupt_requested.clear()
         position = position_index + 1
         point = self._points[position_index]
         self._emit_progress(position, total, int(point.index))
