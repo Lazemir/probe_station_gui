@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from typing import Iterable
 
 import numpy as np
 
-Point2D = tuple[float, float]
+from probe_station_gui.design.model import DesignModelError, Point2D
 
 
 @dataclass(frozen=True)
@@ -18,6 +18,176 @@ class ResidualMetrics:
     count: int = 0
     rms_mm: float = 0.0
     max_mm: float = 0.0
+
+
+@dataclass(frozen=True)
+class ResidualSummary:
+    """Residual error statistics for registration check marks."""
+
+    count: int = 0
+    rms: float = 0.0
+    max_error: float = 0.0
+
+
+@dataclass(frozen=True)
+class DesignRegistration:
+    """Rigid physical-mm transform between design and stage coordinates."""
+
+    source_design_marks: tuple[Point2D, ...]
+    source_stage_marks: tuple[Point2D, ...]
+    check_design_marks: tuple[Point2D, ...] = ()
+    check_stage_marks: tuple[Point2D, ...] = ()
+    matrix: np.ndarray = field(default_factory=lambda: np.eye(2, dtype=float))
+    offset: np.ndarray = field(default_factory=lambda: np.zeros(2, dtype=float))
+    design_unit_mm: float = 1.0
+    distance_scale_ratio: float = 1.0
+    source_residuals: tuple[float, ...] = ()
+    source_residual_summary: ResidualSummary = field(default_factory=ResidualSummary)
+    residuals: tuple[float, ...] = ()
+    residual_summary: ResidualSummary = field(default_factory=ResidualSummary)
+    valid: bool = False
+    stale_reason: str = ""
+
+    @classmethod
+    def empty(cls) -> "DesignRegistration":
+        """Return an invalid placeholder registration."""
+
+        return cls(
+            source_design_marks=(),
+            source_stage_marks=(),
+            valid=False,
+            stale_reason="Registration not built.",
+        )
+
+    @classmethod
+    def from_marks(
+        cls,
+        source_design_marks: Iterable[Point2D],
+        source_stage_marks: Iterable[Point2D],
+        *,
+        check_design_marks: Iterable[Point2D] = (),
+        check_stage_marks: Iterable[Point2D] = (),
+        design_unit_mm: float = 1.0,
+    ) -> "DesignRegistration":
+        """Build a rigid physical-mm transform from design and stage mark pairs."""
+
+        design_marks = cls._finite_points(source_design_marks, label="Design source")
+        stage_marks = cls._finite_points(source_stage_marks, label="Stage source")
+        check_design = cls._finite_points(check_design_marks, label="Design check")
+        check_stage = cls._finite_points(check_stage_marks, label="Stage check")
+        try:
+            fit = fit_rigid_registration(
+                design_points=design_marks,
+                machine_points=stage_marks,
+                design_unit_mm=design_unit_mm,
+                check_design_points=check_design,
+                check_machine_points=check_stage,
+            )
+        except ValueError as exc:
+            raise DesignModelError(str(exc)) from exc
+
+        source = np.asarray(design_marks, dtype=float) * float(design_unit_mm)
+        stage = np.asarray(stage_marks, dtype=float)
+        predicted_source = (fit.rotation @ source.T).T + fit.offset_machine_mm
+        source_errors = np.linalg.norm(stage - predicted_source, axis=1)
+        source_residuals = tuple(float(value) for value in source_errors)
+        source_summary = cls._residual_summary(source_residuals)
+
+        residuals: list[float] = []
+        for design_point, stage_point in zip(check_design, check_stage):
+            design_mm = np.asarray(design_point, dtype=float) * float(design_unit_mm)
+            predicted = fit.rotation @ design_mm + fit.offset_machine_mm
+            actual = np.asarray(stage_point, dtype=float)
+            residuals.append(float(np.linalg.norm(actual - predicted)))
+        summary = cls._residual_summary(residuals)
+
+        return cls(
+            source_design_marks=design_marks,
+            source_stage_marks=stage_marks,
+            check_design_marks=check_design,
+            check_stage_marks=check_stage,
+            matrix=fit.rotation,
+            offset=fit.offset_machine_mm,
+            design_unit_mm=float(design_unit_mm),
+            distance_scale_ratio=fit.distance_scale_ratio,
+            source_residuals=source_residuals,
+            source_residual_summary=source_summary,
+            residuals=tuple(residuals),
+            residual_summary=summary,
+            valid=True,
+        )
+
+    @property
+    def scale(self) -> float:
+        """Return the measured spacing ratio retained for compatibility."""
+
+        return self.distance_scale_ratio
+
+    @property
+    def rotation_deg(self) -> float:
+        """Return the fitted proper-rotation angle in degrees."""
+
+        return float(
+            math.degrees(math.atan2(float(self.matrix[1, 0]), float(self.matrix[0, 0])))
+        )
+
+    @staticmethod
+    def _finite_points(
+        points: Iterable[Point2D],
+        *,
+        label: str,
+    ) -> tuple[Point2D, ...]:
+        normalized: list[Point2D] = []
+        for point in points:
+            try:
+                if len(point) != 2:
+                    raise ValueError
+                x_value = float(point[0])
+                y_value = float(point[1])
+            except (TypeError, ValueError, IndexError) as exc:
+                raise DesignModelError(
+                    f"{label} marks must be finite 2D points."
+                ) from exc
+            if not math.isfinite(x_value) or not math.isfinite(y_value):
+                raise DesignModelError(f"{label} marks must be finite 2D points.")
+            normalized.append((x_value, y_value))
+        return tuple(normalized)
+
+    @staticmethod
+    def _residual_summary(residuals: Iterable[float]) -> ResidualSummary:
+        values = tuple(float(value) for value in residuals)
+        if not values:
+            return ResidualSummary()
+        residual_array = np.asarray(values, dtype=float)
+        return ResidualSummary(
+            count=len(values),
+            rms=float(np.sqrt(np.mean(np.square(residual_array)))),
+            max_error=float(np.max(residual_array)),
+        )
+
+    def design_to_stage(self, point: Point2D) -> Point2D:
+        """Transform a design-space point into stage-space coordinates."""
+
+        if not self.valid:
+            raise DesignModelError(self.stale_reason or "Registration is not valid.")
+        vec = np.asarray(point, dtype=float) * self.design_unit_mm
+        result = self.matrix @ vec + self.offset
+        return (float(result[0]), float(result[1]))
+
+    def stage_to_design(self, point: Point2D) -> Point2D:
+        """Transform a stage-space point back into design coordinates."""
+
+        if not self.valid:
+            raise DesignModelError(self.stale_reason or "Registration is not valid.")
+        inverse = np.linalg.inv(self.matrix)
+        vec = np.asarray(point, dtype=float) - self.offset
+        result = (inverse @ vec) / self.design_unit_mm
+        return (float(result[0]), float(result[1]))
+
+    def mark_stale(self, reason: str) -> "DesignRegistration":
+        """Return a stale copy retaining the previous transform for diagnostics."""
+
+        return replace(self, valid=False, stale_reason=reason)
 
 
 @dataclass(frozen=True)
@@ -85,7 +255,9 @@ def fit_rigid_registration(
     if len(check_design) != len(check_machine):
         raise ValueError("Design and machine check mark counts must match.")
     if not math.isfinite(design_unit_mm) or design_unit_mm <= 0.0:
-        raise ValueError("Design unit conversion must be a positive finite millimetre value.")
+        raise ValueError(
+            "Design unit conversion must be a positive finite millimetre value."
+        )
 
     design_mm = design * float(design_unit_mm)
     design_center = np.mean(design_mm, axis=0)
@@ -160,7 +332,9 @@ def _residual_metrics(vectors: np.ndarray) -> ResidualMetrics:
 
 
 __all__ = [
+    "DesignRegistration",
     "ResidualMetrics",
+    "ResidualSummary",
     "RigidRegistrationFit",
     "fit_rigid_registration",
 ]

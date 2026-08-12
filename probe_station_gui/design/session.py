@@ -15,11 +15,11 @@ from probe_station_gui.design.frame_registration import DesignFrameMetadata
 from probe_station_gui.design.model import (
     DesignDocument,
     DesignModelError,
-    DesignRegistration,
     LayerKey,
     MeasurementTarget,
     Point2D,
 )
+from probe_station_gui.design.rigid_registration import DesignRegistration
 from probe_station_gui.design.session_state import (
     DesignSessionState,
     export_persisted_session_state,
@@ -139,9 +139,7 @@ class DesignSession:
             snapshot,
             document_size=document_size,
             document_mtime_ns=document_mtime_ns,
-            route_path=(
-                None if route_state is None else str(route_state["path"])
-            ),
+            route_path=(None if route_state is None else str(route_state["path"])),
         )
 
     def restore_persisted_state(
@@ -333,7 +331,9 @@ class DesignSession:
         self.source_design_marks = tuple(
             rotate_point(point) for point in self.source_design_marks_compact()
         )
-        self.check_design_marks = [rotate_point(point) for point in self.check_design_marks]
+        self.check_design_marks = [
+            rotate_point(point) for point in self.check_design_marks
+        ]
         self.targets = [
             replace(target, design_center=rotate_point(target.design_center))
             for target in self.targets
@@ -433,9 +433,13 @@ class DesignSession:
 
         metadata = DesignFrameMetadata.from_mapping(frame.metadata)
         if self.document is None:
-            raise DesignModelError("Load a design before selecting its coordinate frame.")
+            raise DesignModelError(
+                "Load a design before selecting its coordinate frame."
+            )
         if source_identity(metadata.source_path) != source_identity(self.document.path):
-            raise DesignModelError("Coordinate frame belongs to a different design file.")
+            raise DesignModelError(
+                "Coordinate frame belongs to a different design file."
+            )
         if metadata.top_cell_name != self.document.top_cell_name:
             raise DesignModelError(
                 "Coordinate frame belongs to a different design top cell."
@@ -491,7 +495,9 @@ class DesignSession:
         """Apply a previously validated frame projection to this session."""
 
         if projection.frame_id != frame.frame_id:
-            raise DesignModelError("Design frame projection no longer matches the frame.")
+            raise DesignModelError(
+                "Design frame projection no longer matches the frame."
+            )
         self._runtime_blocked_persisted_state = None
         self._legacy_stage_coordinate_provenance = None
         self._legacy_stage_coordinate_provenance_present = False
@@ -575,7 +581,9 @@ class DesignSession:
         self.registration = None
         pair_count = self.source_pair_count()
         if pair_count < 2:
-            self.registration_status = "Calibration step 2/4: choose the second design mark."
+            self.registration_status = (
+                "Calibration step 2/4: choose the second design mark."
+            )
         else:
             self.registration_status = (
                 f"{pair_count} mark pairs captured. Preparing chip rotation."
@@ -628,14 +636,14 @@ class DesignSession:
         design_count = len(self.source_design_marks_compact())
         stage_count = len(self.source_stage_marks_compact())
         if design_count < 2:
-            return (
-                "Pick mark 1 with left click and mark 2 with right click in the design window."
-            )
+            return "Pick mark 1 with left click and mark 2 with right click in the design window."
         if stage_count < design_count:
             return f"Center chip mark {stage_count + 1} and capture it."
         if self.registration is not None and self.registration.valid:
             return "Calibration complete. Use the minimap or click in the design window to navigate."
-        return f"{design_count} mark pairs captured. Waiting for chip rotation to finish."
+        return (
+            f"{design_count} mark pairs captured. Waiting for chip rotation to finish."
+        )
 
     def prepare_source_alignment(self) -> AlignmentPreparation:
         """Fit all captured pairs and prepare their B-axis correction."""
@@ -996,7 +1004,9 @@ class DesignSession:
         return (x_value, y_value)
 
     @staticmethod
-    def _serialize_points(points: list[Point2D] | tuple[Point2D, ...]) -> list[list[float]]:
+    def _serialize_points(
+        points: list[Point2D] | tuple[Point2D, ...],
+    ) -> list[list[float]]:
         return [[float(point[0]), float(point[1])] for point in points]
 
     @staticmethod

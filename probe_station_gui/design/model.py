@@ -3,14 +3,12 @@
 from __future__ import annotations
 
 import importlib
-import math
-import uuid
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, ClassVar, Iterable, Mapping, Optional
 
-from probe_station_gui.design.rigid_registration import fit_rigid_registration
+from probe_station_gui.design import document_snap, document_source
 
 
 class _LazyModule:
@@ -87,15 +85,6 @@ class MeasurementTarget:
 
 
 @dataclass(frozen=True)
-class ResidualSummary:
-    """Residual error statistics for registration check marks."""
-
-    count: int = 0
-    rms: float = 0.0
-    max_error: float = 0.0
-
-
-@dataclass(frozen=True)
 class SnapResult:
     """Nearest visible snap target for a design-space point."""
 
@@ -104,167 +93,6 @@ class SnapResult:
     distance: float
     segment_start: Point2D | None = None
     segment_end: Point2D | None = None
-
-
-@dataclass(frozen=True)
-class DesignRegistration:
-    """Rigid physical-mm transform between design and stage coordinates."""
-
-    source_design_marks: tuple[Point2D, ...]
-    source_stage_marks: tuple[Point2D, ...]
-    check_design_marks: tuple[Point2D, ...] = ()
-    check_stage_marks: tuple[Point2D, ...] = ()
-    matrix: np.ndarray = field(default_factory=lambda: np.eye(2, dtype=float))
-    offset: np.ndarray = field(default_factory=lambda: np.zeros(2, dtype=float))
-    design_unit_mm: float = 1.0
-    distance_scale_ratio: float = 1.0
-    source_residuals: tuple[float, ...] = ()
-    source_residual_summary: ResidualSummary = field(default_factory=ResidualSummary)
-    residuals: tuple[float, ...] = ()
-    residual_summary: ResidualSummary = field(default_factory=ResidualSummary)
-    valid: bool = False
-    stale_reason: str = ""
-
-    @classmethod
-    def empty(cls) -> "DesignRegistration":
-        """Return an invalid placeholder registration."""
-
-        return cls(
-            source_design_marks=(),
-            source_stage_marks=(),
-            valid=False,
-            stale_reason="Registration not built.",
-        )
-
-    @classmethod
-    def from_marks(
-        cls,
-        source_design_marks: Iterable[Point2D],
-        source_stage_marks: Iterable[Point2D],
-        *,
-        check_design_marks: Iterable[Point2D] = (),
-        check_stage_marks: Iterable[Point2D] = (),
-        design_unit_mm: float = 1.0,
-    ) -> "DesignRegistration":
-        """Build a rigid physical-mm transform from design and stage mark pairs."""
-
-        design_marks = cls._finite_points(source_design_marks, label="Design source")
-        stage_marks = cls._finite_points(source_stage_marks, label="Stage source")
-        check_design = cls._finite_points(check_design_marks, label="Design check")
-        check_stage = cls._finite_points(check_stage_marks, label="Stage check")
-        try:
-            fit = fit_rigid_registration(
-                design_points=design_marks,
-                machine_points=stage_marks,
-                design_unit_mm=design_unit_mm,
-                check_design_points=check_design,
-                check_machine_points=check_stage,
-            )
-        except ValueError as exc:
-            raise DesignModelError(str(exc)) from exc
-
-        source = np.asarray(design_marks, dtype=float) * float(design_unit_mm)
-        stage = np.asarray(stage_marks, dtype=float)
-        predicted_source = (fit.rotation @ source.T).T + fit.offset_machine_mm
-        source_errors = np.linalg.norm(stage - predicted_source, axis=1)
-        source_residuals = tuple(float(value) for value in source_errors)
-        source_summary = cls._residual_summary(source_residuals)
-
-        residuals: list[float] = []
-        for design_point, stage_point in zip(check_design, check_stage):
-            design_mm = np.asarray(design_point, dtype=float) * float(design_unit_mm)
-            predicted = fit.rotation @ design_mm + fit.offset_machine_mm
-            actual = np.asarray(stage_point, dtype=float)
-            residuals.append(float(np.linalg.norm(actual - predicted)))
-        summary = cls._residual_summary(residuals)
-
-        return cls(
-            source_design_marks=design_marks,
-            source_stage_marks=stage_marks,
-            check_design_marks=check_design,
-            check_stage_marks=check_stage,
-            matrix=fit.rotation,
-            offset=fit.offset_machine_mm,
-            design_unit_mm=float(design_unit_mm),
-            distance_scale_ratio=fit.distance_scale_ratio,
-            source_residuals=source_residuals,
-            source_residual_summary=source_summary,
-            residuals=tuple(residuals),
-            residual_summary=summary,
-            valid=True,
-        )
-
-    @property
-    def scale(self) -> float:
-        """Return the measured spacing ratio retained for compatibility."""
-
-        return self.distance_scale_ratio
-
-    @property
-    def rotation_deg(self) -> float:
-        """Return the fitted proper-rotation angle in degrees."""
-
-        return float(
-            math.degrees(
-                math.atan2(float(self.matrix[1, 0]), float(self.matrix[0, 0]))
-            )
-        )
-
-    @staticmethod
-    def _finite_points(
-        points: Iterable[Point2D],
-        *,
-        label: str,
-    ) -> tuple[Point2D, ...]:
-        normalized: list[Point2D] = []
-        for point in points:
-            try:
-                if len(point) != 2:
-                    raise ValueError
-                x_value = float(point[0])
-                y_value = float(point[1])
-            except (TypeError, ValueError, IndexError) as exc:
-                raise DesignModelError(f"{label} marks must be finite 2D points.") from exc
-            if not math.isfinite(x_value) or not math.isfinite(y_value):
-                raise DesignModelError(f"{label} marks must be finite 2D points.")
-            normalized.append((x_value, y_value))
-        return tuple(normalized)
-
-    @staticmethod
-    def _residual_summary(residuals: Iterable[float]) -> ResidualSummary:
-        values = tuple(float(value) for value in residuals)
-        if not values:
-            return ResidualSummary()
-        residual_array = np.asarray(values, dtype=float)
-        return ResidualSummary(
-            count=len(values),
-            rms=float(np.sqrt(np.mean(np.square(residual_array)))),
-            max_error=float(np.max(residual_array)),
-        )
-
-    def design_to_stage(self, point: Point2D) -> Point2D:
-        """Transform a design-space point into stage-space coordinates."""
-
-        if not self.valid:
-            raise DesignModelError(self.stale_reason or "Registration is not valid.")
-        vec = np.asarray(point, dtype=float) * self.design_unit_mm
-        result = self.matrix @ vec + self.offset
-        return (float(result[0]), float(result[1]))
-
-    def stage_to_design(self, point: Point2D) -> Point2D:
-        """Transform a stage-space point back into design coordinates."""
-
-        if not self.valid:
-            raise DesignModelError(self.stale_reason or "Registration is not valid.")
-        inverse = np.linalg.inv(self.matrix)
-        vec = np.asarray(point, dtype=float) - self.offset
-        result = (inverse @ vec) / self.design_unit_mm
-        return (float(result[0]), float(result[1]))
-
-    def mark_stale(self, reason: str) -> "DesignRegistration":
-        """Return a stale copy retaining the previous transform for diagnostics."""
-
-        return replace(self, valid=False, stale_reason=reason)
 
 
 @dataclass(frozen=True)
@@ -310,7 +138,9 @@ class DesignDocument:
         default_factory=dict,
         repr=False,
     )
-    snap_long_segment_indices: tuple[int, ...] = field(default_factory=tuple, repr=False)
+    snap_long_segment_indices: tuple[int, ...] = field(
+        default_factory=tuple, repr=False
+    )
     snap_geometry_built: bool = field(default=False, repr=False)
     rotation_quarter_turns: int = 0
     file_backed: bool = False
@@ -347,9 +177,8 @@ class DesignDocument:
                 "plot_paths_by_layer",
                 self._build_plot_paths(self.polygons_by_layer, self.visible_layers),
             )
-        if (
-            not self.snap_geometry_built
-            and (len(self.snap_vertices) > 0 or len(self.snap_segment_starts) > 0)
+        if not self.snap_geometry_built and (
+            len(self.snap_vertices) > 0 or len(self.snap_segment_starts) > 0
         ):
             object.__setattr__(self, "snap_geometry_built", True)
 
@@ -357,72 +186,25 @@ class DesignDocument:
     def load(cls, path: str | Path) -> "DesignDocument":
         """Read lightweight metadata from a GDS/OASIS file using KLayout."""
 
-        resolved = Path(path).expanduser().resolve()
         try:
-            import klayout.db as db
-        except ImportError as exc:
-            raise DesignModelError(
-                "KLayout is not installed. Install it to enable GDS design navigation."
-            ) from exc
-
-        layout = db.Layout()
-        try:
-            layout.read(str(resolved))
-        except Exception as exc:  # pragma: no cover - KLayout specific
-            raise DesignModelError(f"Failed to load design '{resolved}': {exc}") from exc
-
-        cells = tuple(layout.each_cell())
-        if not cells:
-            raise DesignModelError(f"Design '{resolved}' does not contain any cells.")
-        top_level = tuple(layout.top_cells())
-        top_cell = top_level[0] if top_level else cells[0]
-        cell_names = tuple(
-            sorted(str(cell.name) for cell in cells if str(cell.name))
-        )
-        if not cell_names:
-            raise DesignModelError(f"Design '{resolved}' does not expose named cells.")
-        cell_bounds = {
-            str(cell.name): cls._klayout_bounds(cell.bbox(), layout.dbu)
-            for cell in cells
-            if str(cell.name) and not cell.bbox().empty()
-        }
-        top_cell_name = str(top_cell.name or cell_names[0])
-        if top_cell_name not in cell_bounds:
-            geometry_cell_name = next(
-                (
-                    str(cell.name)
-                    for group in (top_level or cells, cells)
-                    for cell in group
-                    if str(cell.name) in cell_bounds
-                ),
-                None,
-            )
-            if geometry_cell_name is not None:
-                top_cell_name = geometry_cell_name
-        if top_cell_name not in cell_bounds:
-            raise DesignModelError(f"Top cell '{top_cell_name}' has no polygon geometry.")
-
-        available_layers = frozenset(
-            (int(info.layer), int(info.datatype)) for info in layout.layer_infos()
-        )
-        bounds = cell_bounds[top_cell_name]
-        user_unit = float(layout.dbu) * 1e-6
-        del cells, top_level, top_cell, layout
+            source = document_source.load_file_source(path)
+        except document_source.DocumentSourceError as exc:
+            raise DesignModelError(str(exc)) from exc
         return cls(
-            path=resolved,
-            library=None,
-            top_cell=None,
-            top_cell_name=top_cell_name,
-            cell_names=cell_names,
-            dbu=1e-6,
-            user_unit=user_unit,
-            bounds=bounds,
-            polygons_by_layer={},
-            visible_layers=available_layers,
-            file_backed=True,
-            available_layers=available_layers,
-            cell_bounds=cell_bounds,
-            source_load_id=uuid.uuid4().hex,
+            path=source.path,
+            library=source.library,
+            top_cell=source.top_cell,
+            top_cell_name=source.top_cell_name,
+            cell_names=source.cell_names,
+            dbu=source.dbu,
+            user_unit=source.user_unit,
+            bounds=source.bounds,
+            polygons_by_layer=source.polygons_by_layer,
+            visible_layers=source.available_layers,
+            file_backed=source.file_backed,
+            available_layers=source.available_layers,
+            cell_bounds=source.cell_bounds,
+            source_load_id=source.source_load_id,
         )
 
     @classmethod
@@ -436,46 +218,48 @@ class DesignDocument:
         rotation_quarter_turns: int = 0,
     ) -> "DesignDocument":
         rotation_quarter_turns = int(rotation_quarter_turns) % 4
-        cells = tuple(getattr(library, "cells", ()))
-        cell_by_name = {
-            str(getattr(cell, "name", "")): cell for cell in cells if getattr(cell, "name", "")
-        }
-        if top_cell_name not in cell_by_name:
-            raise DesignModelError(f"Cell '{top_cell_name}' was not found in '{path.name}'.")
-        top_cell = cell_by_name[top_cell_name]
-        polygons_by_layer = cls._extract_fixture_polygons(top_cell)
-        if not polygons_by_layer:
-            raise DesignModelError(f"Top cell '{top_cell_name}' has no polygon geometry.")
+        try:
+            source = document_source.load_fixture_source(
+                path=path,
+                library=library,
+                top_cell_name=top_cell_name,
+            )
+        except document_source.DocumentSourceError as exc:
+            raise DesignModelError(str(exc)) from exc
+        polygons_by_layer = source.polygons_by_layer
         if rotation_quarter_turns:
-            raw_bounds = cls._calculate_bounds(polygons_by_layer)
             polygons_by_layer = cls._rotate_polygons_by_layer(
                 polygons_by_layer,
-                raw_bounds,
+                source.bounds,
                 rotation_quarter_turns,
             )
-        bounds = cls._calculate_bounds(polygons_by_layer)
+        try:
+            bounds = document_source.polygon_bounds(polygons_by_layer)
+        except document_source.DocumentSourceError as exc:
+            raise DesignModelError(str(exc)) from exc
         layers = frozenset(polygons_by_layer.keys())
         if visible_layers is None:
             effective_layers = layers
         else:
-            effective_layers = frozenset(layer for layer in visible_layers if layer in layers)
+            effective_layers = frozenset(
+                layer for layer in visible_layers if layer in layers
+            )
             if not effective_layers:
                 effective_layers = layers
-        dbu = float(getattr(library, "unit", 1e-6))
-        precision = float(getattr(library, "precision", dbu))
-        user_unit = precision if precision > 0 else dbu
         return cls(
-            path=path,
-            library=library,
-            top_cell=top_cell,
-            top_cell_name=top_cell_name,
-            cell_names=tuple(sorted(str(name) for name in cell_by_name.keys())),
-            dbu=dbu,
-            user_unit=user_unit,
+            path=source.path,
+            library=source.library,
+            top_cell=source.top_cell,
+            top_cell_name=source.top_cell_name,
+            cell_names=source.cell_names,
+            dbu=source.dbu,
+            user_unit=source.user_unit,
             bounds=bounds,
             polygons_by_layer=polygons_by_layer,
             visible_layers=effective_layers,
-            plot_paths_by_layer=cls._build_plot_paths(polygons_by_layer, effective_layers),
+            plot_paths_by_layer=cls._build_plot_paths(
+                polygons_by_layer, effective_layers
+            ),
             rotation_quarter_turns=rotation_quarter_turns,
         )
 
@@ -548,7 +332,10 @@ class DesignDocument:
             self.bounds,
             delta,
         )
-        bounds = self._calculate_bounds(polygons_by_layer)
+        try:
+            bounds = document_source.polygon_bounds(polygons_by_layer)
+        except document_source.DocumentSourceError as exc:
+            raise DesignModelError(str(exc)) from exc
         empty_points = np.empty((0, 2), dtype=float)
         return replace(
             self,
@@ -630,153 +417,35 @@ class DesignDocument:
         """Return the nearest visible snap target and its geometry metadata."""
 
         self._ensure_snap_geometry()
-        target = np.asarray(point, dtype=float)
-        vertex_point = target
-        vertex_distance_sq = float("inf")
-        segment_point = target
-        segment_distance_sq = float("inf")
-        segment_start: Point2D | None = None
-        segment_end: Point2D | None = None
-        midpoint_point = target
-        midpoint_distance_sq = float("inf")
-        midpoint_start: Point2D | None = None
-        midpoint_end: Point2D | None = None
-
-        vertex_indices, segment_indices = self._snap_candidate_indices(
-            target,
+        geometry = document_snap.SnapGeometry.from_arrays(
+            self.snap_vertices,
+            self.snap_segment_starts,
+            self.snap_segment_ends,
+            bounds=self.bounds,
+            grid_divisions=self.SNAP_GRID_DIVISIONS,
+            max_segment_cells=self.SNAP_GRID_MAX_SEGMENT_CELLS,
+            cell_size=self.snap_grid_cell_size,
+            vertex_bins=self.snap_vertex_bins,
+            segment_bins=self.snap_segment_bins,
+            long_segment_indices=self.snap_long_segment_indices,
+        )
+        match = geometry.nearest(
+            point,
             max_distance=max_distance,
+            vertex_priority_ratio=self.SNAP_VERTEX_PRIORITY_RATIO,
         )
-
-        if len(vertex_indices):
-            candidate_vertices = self.snap_vertices[vertex_indices]
-            vertex_delta = candidate_vertices - target
-            vertex_distance_sq_array = np.einsum("ij,ij->i", vertex_delta, vertex_delta)
-            vertex_index = int(np.argmin(vertex_distance_sq_array))
-            vertex_distance_sq = float(vertex_distance_sq_array[vertex_index])
-            vertex_point = np.asarray(candidate_vertices[vertex_index], dtype=float)
-
-        if len(segment_indices):
-            candidate_starts = self.snap_segment_starts[segment_indices]
-            candidate_ends = self.snap_segment_ends[segment_indices]
-            segments = candidate_ends - candidate_starts
-            lengths_sq = np.einsum("ij,ij->i", segments, segments)
-            valid_lengths = np.maximum(lengths_sq, 1e-18)
-            projections = np.einsum(
-                "ij,ij->i",
-                np.broadcast_to(target, candidate_starts.shape) - candidate_starts,
-                segments,
-            ) / valid_lengths
-            projections = np.clip(projections, 0.0, 1.0)
-            snapped_points = candidate_starts + segments * projections[:, np.newaxis]
-            segment_delta = snapped_points - target
-            segment_distance_sq_array = np.einsum("ij,ij->i", segment_delta, segment_delta)
-            segment_index = int(np.argmin(segment_distance_sq_array))
-            segment_distance_sq = float(segment_distance_sq_array[segment_index])
-            segment_point = np.asarray(snapped_points[segment_index], dtype=float)
-            start = candidate_starts[segment_index]
-            end = candidate_ends[segment_index]
-            segment_start = (float(start[0]), float(start[1]))
-            segment_end = (float(end[0]), float(end[1]))
-
-            midpoints = (candidate_starts + candidate_ends) * 0.5
-            midpoint_delta = midpoints - target
-            midpoint_distance_sq_array = np.einsum(
-                "ij,ij->i",
-                midpoint_delta,
-                midpoint_delta,
-            )
-            midpoint_index = int(np.argmin(midpoint_distance_sq_array))
-            midpoint_distance_sq = float(midpoint_distance_sq_array[midpoint_index])
-            midpoint_point = np.asarray(midpoints[midpoint_index], dtype=float)
-            midpoint_segment_start = candidate_starts[midpoint_index]
-            midpoint_segment_end = candidate_ends[midpoint_index]
-            midpoint_start = (
-                float(midpoint_segment_start[0]),
-                float(midpoint_segment_start[1]),
-            )
-            midpoint_end = (
-                float(midpoint_segment_end[0]),
-                float(midpoint_segment_end[1]),
-            )
-
-        point_mode = "vertex"
-        point = vertex_point
-        point_distance_sq = vertex_distance_sq
-        point_segment_start: Point2D | None = None
-        point_segment_end: Point2D | None = None
-        if midpoint_distance_sq < point_distance_sq:
-            point_mode = "segment_center"
-            point = midpoint_point
-            point_distance_sq = midpoint_distance_sq
-            point_segment_start = midpoint_start
-            point_segment_end = midpoint_end
-        midpoint_within_threshold = (
-            max_distance is not None
-            and midpoint_distance_sq <= float(max_distance) * float(max_distance)
-        )
-        if point_mode == "segment_center" and midpoint_within_threshold:
-            return SnapResult(
-                point=(float(point[0]), float(point[1])),
-                mode=point_mode,
-                distance=math.sqrt(max(0.0, point_distance_sq)),
-                segment_start=point_segment_start,
-                segment_end=point_segment_end,
-            )
-
-        if (
-            vertex_distance_sq < float("inf")
-            and (
-                segment_distance_sq == float("inf")
-                or vertex_distance_sq
-                <= segment_distance_sq * (self.SNAP_VERTEX_PRIORITY_RATIO ** 2)
-            )
-        ):
-            return SnapResult(
-                point=(float(vertex_point[0]), float(vertex_point[1])),
-                mode="vertex",
-                distance=math.sqrt(max(0.0, vertex_distance_sq)),
-            )
-
-        if segment_distance_sq < float("inf"):
-            return SnapResult(
-                point=(float(segment_point[0]), float(segment_point[1])),
-                mode="segment",
-                distance=math.sqrt(max(0.0, segment_distance_sq)),
-                segment_start=segment_start,
-                segment_end=segment_end,
-            )
-
         return SnapResult(
-            point=(float(target[0]), float(target[1])),
-            mode="free",
-            distance=0.0,
+            point=match.point,
+            mode=match.mode,
+            distance=match.distance,
+            segment_start=match.segment_start,
+            segment_end=match.segment_end,
         )
 
     def _ensure_snap_geometry(self) -> None:
         if self.snap_geometry_built:
             return
-        (
-            snap_vertices,
-            snap_segment_starts,
-            snap_segment_ends,
-            snap_grid_cell_size,
-            snap_vertex_bins,
-            snap_segment_bins,
-            snap_long_segment_indices,
-        ) = self._build_snap_geometry(
-            self.polygons_by_layer,
-            self.visible_layers,
-            self.bounds,
-        )
-        self.set_snap_geometry(
-            snap_vertices,
-            snap_segment_starts,
-            snap_segment_ends,
-            snap_grid_cell_size,
-            snap_vertex_bins,
-            snap_segment_bins,
-            snap_long_segment_indices,
-        )
+        self.set_snap_geometry(*self.build_snap_geometry())
 
     def has_snap_geometry(self) -> bool:
         """Return whether snap geometry is available without doing work."""
@@ -796,11 +465,13 @@ class DesignDocument:
     ]:
         """Build snap arrays for the visible layers."""
 
-        return self._build_snap_geometry(
-            self.polygons_by_layer,
-            self.visible_layers,
-            self.bounds,
-        )
+        return document_snap.SnapGeometry.build(
+            polygons_by_layer=self.polygons_by_layer,
+            visible_layers=self.visible_layers,
+            bounds=self.bounds,
+            grid_divisions=self.SNAP_GRID_DIVISIONS,
+            max_segment_cells=self.SNAP_GRID_MAX_SEGMENT_CELLS,
+        ).as_tuple()
 
     def set_snap_geometry(
         self,
@@ -814,64 +485,30 @@ class DesignDocument:
     ) -> None:
         """Install precomputed snap arrays on this immutable document object."""
 
-        object.__setattr__(self, "snap_vertices", snap_vertices)
-        object.__setattr__(self, "snap_segment_starts", snap_segment_starts)
-        object.__setattr__(self, "snap_segment_ends", snap_segment_ends)
-        if snap_grid_cell_size is None or snap_vertex_bins is None or snap_segment_bins is None:
-            (
-                snap_grid_cell_size,
-                snap_vertex_bins,
-                snap_segment_bins,
-                snap_long_segment_indices,
-            ) = self._build_snap_spatial_index(
-                snap_vertices,
-                snap_segment_starts,
-                snap_segment_ends,
-                self.bounds,
-            )
-        object.__setattr__(self, "snap_grid_cell_size", float(snap_grid_cell_size))
-        object.__setattr__(self, "snap_vertex_bins", snap_vertex_bins)
-        object.__setattr__(self, "snap_segment_bins", snap_segment_bins)
+        geometry = document_snap.SnapGeometry.from_arrays(
+            snap_vertices,
+            snap_segment_starts,
+            snap_segment_ends,
+            bounds=self.bounds,
+            grid_divisions=self.SNAP_GRID_DIVISIONS,
+            max_segment_cells=self.SNAP_GRID_MAX_SEGMENT_CELLS,
+            cell_size=snap_grid_cell_size,
+            vertex_bins=snap_vertex_bins,
+            segment_bins=snap_segment_bins,
+            long_segment_indices=snap_long_segment_indices,
+        )
+        object.__setattr__(self, "snap_vertices", geometry.vertices)
+        object.__setattr__(self, "snap_segment_starts", geometry.segment_starts)
+        object.__setattr__(self, "snap_segment_ends", geometry.segment_ends)
+        object.__setattr__(self, "snap_grid_cell_size", geometry.cell_size)
+        object.__setattr__(self, "snap_vertex_bins", geometry.vertex_bins)
+        object.__setattr__(self, "snap_segment_bins", geometry.segment_bins)
         object.__setattr__(
             self,
             "snap_long_segment_indices",
-            tuple(snap_long_segment_indices or ()),
+            geometry.long_segment_indices,
         )
         object.__setattr__(self, "snap_geometry_built", True)
-
-    def _snap_candidate_indices(
-        self,
-        target: np.ndarray,
-        *,
-        max_distance: float | None,
-    ) -> tuple[np.ndarray, np.ndarray]:
-        if (
-            max_distance is None
-            or not math.isfinite(float(max_distance))
-            or max_distance <= 0.0
-            or self.snap_grid_cell_size <= 0.0
-        ):
-            return (
-                np.arange(len(self.snap_vertices), dtype=np.intp),
-                np.arange(len(self.snap_segment_starts), dtype=np.intp),
-            )
-
-        radius = float(max_distance)
-        vertex_radius = radius * self.SNAP_VERTEX_PRIORITY_RATIO
-        vertex_indices = self._indices_from_bins(
-            self.snap_vertex_bins,
-            target,
-            vertex_radius,
-            self.snap_grid_cell_size,
-        )
-        segment_indices = self._indices_from_bins(
-            self.snap_segment_bins,
-            target,
-            radius,
-            self.snap_grid_cell_size,
-            extra_indices=self.snap_long_segment_indices,
-        )
-        return vertex_indices, segment_indices
 
     def dbu_to_um(self, value: float) -> float:
         """Convert design database units to micrometers."""
@@ -895,82 +532,6 @@ class DesignDocument:
             self.dbu_to_um(bottom),
             self.dbu_to_um(right),
             self.dbu_to_um(top),
-        )
-
-    @staticmethod
-    def _extract_fixture_polygons(
-        cell: Any,
-    ) -> dict[LayerKey, tuple[np.ndarray, ...]]:
-        """Read polygons from legacy in-memory fixtures without a GDS dependency."""
-
-        polygons_by_layer: dict[LayerKey, list[np.ndarray]] = {}
-        polygon_map: Any = None
-        if hasattr(cell, "get_polygons"):
-            try:
-                polygon_map = cell.get_polygons(apply_repetitions=True, by_spec=True)
-            except TypeError:
-                try:
-                    polygon_map = cell.get_polygons(by_spec=True)
-                except Exception:
-                    polygon_map = None
-            except Exception:
-                polygon_map = None
-        if isinstance(polygon_map, dict):
-            for spec, polygons in polygon_map.items():
-                if not isinstance(spec, tuple) or len(spec) < 2:
-                    continue
-                layer = (int(spec[0]), int(spec[1]))
-                for polygon in polygons:
-                    points = np.asarray(polygon, dtype=float)
-                    if points.ndim != 2 or points.shape[1] != 2 or len(points) < 2:
-                        continue
-                    polygons_by_layer.setdefault(layer, []).append(points)
-        if polygons_by_layer:
-            return {
-                layer: tuple(polygons) for layer, polygons in sorted(polygons_by_layer.items())
-            }
-
-        raw_polygons = getattr(cell, "polygons", ())
-        for polygon in raw_polygons:
-            layer = int(getattr(polygon, "layer", 0))
-            datatype = int(getattr(polygon, "datatype", 0))
-            points = np.asarray(getattr(polygon, "points", ()), dtype=float)
-            if points.ndim != 2 or points.shape[1] != 2 or len(points) < 2:
-                continue
-            polygons_by_layer.setdefault((layer, datatype), []).append(points)
-        return {
-            layer: tuple(polygons) for layer, polygons in sorted(polygons_by_layer.items())
-        }
-
-    @staticmethod
-    def _calculate_bounds(
-        polygons_by_layer: dict[LayerKey, tuple[np.ndarray, ...]]
-    ) -> tuple[float, float, float, float]:
-        mins_x: list[float] = []
-        mins_y: list[float] = []
-        maxs_x: list[float] = []
-        maxs_y: list[float] = []
-        for polygons in polygons_by_layer.values():
-            for polygon in polygons:
-                mins_x.append(float(np.min(polygon[:, 0])))
-                mins_y.append(float(np.min(polygon[:, 1])))
-                maxs_x.append(float(np.max(polygon[:, 0])))
-                maxs_y.append(float(np.max(polygon[:, 1])))
-        if not mins_x:
-            raise DesignModelError("Unable to determine document bounds.")
-        return (min(mins_x), min(mins_y), max(maxs_x), max(maxs_y))
-
-    @staticmethod
-    def _klayout_bounds(
-        box: Any,
-        dbu: float,
-    ) -> tuple[float, float, float, float]:
-        design_box = box.to_dtype(float(dbu))
-        return (
-            float(design_box.left),
-            float(design_box.bottom),
-            float(design_box.right),
-            float(design_box.top),
         )
 
     @staticmethod
@@ -1087,162 +648,12 @@ class DesignDocument:
             paths_by_layer[layer_key] = (x_data, y_data)
         return paths_by_layer
 
-    @staticmethod
-    def _build_snap_geometry(
-        polygons_by_layer: dict[LayerKey, tuple[np.ndarray, ...]],
-        visible_layers: Iterable[LayerKey],
-        bounds: tuple[float, float, float, float],
-    ) -> tuple[
-        np.ndarray,
-        np.ndarray,
-        np.ndarray,
-        float,
-        dict[tuple[int, int], tuple[int, ...]],
-        dict[tuple[int, int], tuple[int, ...]],
-        tuple[int, ...],
-    ]:
-        vertices: list[np.ndarray] = []
-        segment_starts: list[np.ndarray] = []
-        segment_ends: list[np.ndarray] = []
-        for layer_key in visible_layers:
-            for polygon in polygons_by_layer.get(layer_key, ()):
-                if len(polygon) == 0:
-                    continue
-                closed = polygon
-                if len(polygon) > 1 and not np.array_equal(polygon[0], polygon[-1]):
-                    closed = np.vstack((polygon, polygon[0]))
-                vertices.append(np.asarray(closed, dtype=float))
-                if len(closed) > 1:
-                    segment_starts.append(np.asarray(closed[:-1], dtype=float))
-                    segment_ends.append(np.asarray(closed[1:], dtype=float))
-        vertex_array = (
-            np.vstack(vertices) if vertices else np.empty((0, 2), dtype=float)
-        )
-        segment_start_array = (
-            np.vstack(segment_starts) if segment_starts else np.empty((0, 2), dtype=float)
-        )
-        segment_end_array = (
-            np.vstack(segment_ends) if segment_ends else np.empty((0, 2), dtype=float)
-        )
-        (
-            cell_size,
-            vertex_bins,
-            segment_bins,
-            long_segment_indices,
-        ) = DesignDocument._build_snap_spatial_index(
-            vertex_array,
-            segment_start_array,
-            segment_end_array,
-            bounds,
-        )
-        return (
-            vertex_array,
-            segment_start_array,
-            segment_end_array,
-            cell_size,
-            vertex_bins,
-            segment_bins,
-            long_segment_indices,
-        )
-
-    @staticmethod
-    def _build_snap_spatial_index(
-        vertices: np.ndarray,
-        segment_starts: np.ndarray,
-        segment_ends: np.ndarray,
-        bounds: tuple[float, float, float, float],
-    ) -> tuple[
-        float,
-        dict[tuple[int, int], tuple[int, ...]],
-        dict[tuple[int, int], tuple[int, ...]],
-        tuple[int, ...],
-    ]:
-        left, bottom, right, top = bounds
-        span = max(abs(float(right) - float(left)), abs(float(top) - float(bottom)))
-        if not math.isfinite(span) or span <= 0.0:
-            span = 1.0
-        cell_size = span / float(DesignDocument.SNAP_GRID_DIVISIONS)
-        if cell_size <= 0.0 or not math.isfinite(cell_size):
-            cell_size = 1.0
-
-        vertex_bins_list: dict[tuple[int, int], list[int]] = {}
-        for index, vertex in enumerate(vertices):
-            key = DesignDocument._snap_grid_key(vertex, cell_size)
-            vertex_bins_list.setdefault(key, []).append(index)
-
-        segment_bins_list: dict[tuple[int, int], list[int]] = {}
-        long_segment_indices: list[int] = []
-        for index, (start, end) in enumerate(zip(segment_starts, segment_ends)):
-            min_x = min(float(start[0]), float(end[0]))
-            max_x = max(float(start[0]), float(end[0]))
-            min_y = min(float(start[1]), float(end[1]))
-            max_y = max(float(start[1]), float(end[1]))
-            x0 = math.floor(min_x / cell_size)
-            x1 = math.floor(max_x / cell_size)
-            y0 = math.floor(min_y / cell_size)
-            y1 = math.floor(max_y / cell_size)
-            cell_count = (x1 - x0 + 1) * (y1 - y0 + 1)
-            if cell_count > DesignDocument.SNAP_GRID_MAX_SEGMENT_CELLS:
-                long_segment_indices.append(index)
-                continue
-            for gx in range(x0, x1 + 1):
-                for gy in range(y0, y1 + 1):
-                    segment_bins_list.setdefault((gx, gy), []).append(index)
-
-        vertex_bins = {key: tuple(values) for key, values in vertex_bins_list.items()}
-        segment_bins = {key: tuple(values) for key, values in segment_bins_list.items()}
-        return cell_size, vertex_bins, segment_bins, tuple(long_segment_indices)
-
-    @staticmethod
-    def _snap_grid_key(point: np.ndarray, cell_size: float) -> tuple[int, int]:
-        return (
-            math.floor(float(point[0]) / cell_size),
-            math.floor(float(point[1]) / cell_size),
-        )
-
-    @staticmethod
-    def _indices_from_bins(
-        bins: dict[tuple[int, int], tuple[int, ...]],
-        target: np.ndarray,
-        radius: float,
-        cell_size: float,
-        *,
-        extra_indices: tuple[int, ...] = (),
-    ) -> np.ndarray:
-        x0 = math.floor((float(target[0]) - radius) / cell_size)
-        x1 = math.floor((float(target[0]) + radius) / cell_size)
-        y0 = math.floor((float(target[1]) - radius) / cell_size)
-        y1 = math.floor((float(target[1]) + radius) / cell_size)
-        indices: set[int] = set(extra_indices)
-        for gx in range(x0, x1 + 1):
-            for gy in range(y0, y1 + 1):
-                values = bins.get((gx, gy))
-                if values:
-                    indices.update(values)
-        if not indices:
-            return np.empty((0,), dtype=np.intp)
-        return np.fromiter(indices, dtype=np.intp, count=len(indices))
-
-    @staticmethod
-    def _project_point_to_segment(
-        point: np.ndarray, start: np.ndarray, end: np.ndarray
-    ) -> np.ndarray:
-        segment = np.asarray(end, dtype=float) - np.asarray(start, dtype=float)
-        length_sq = float(segment @ segment)
-        if length_sq <= 1e-18:
-            return np.asarray(start, dtype=float)
-        t = float((point - start) @ segment) / length_sq
-        t = min(1.0, max(0.0, t))
-        return np.asarray(start, dtype=float) + segment * t
-
 
 __all__ = [
     "DesignDocument",
     "DesignModelError",
-    "DesignRegistration",
     "LayerKey",
     "MeasurementTarget",
     "Point2D",
-    "ResidualSummary",
     "SnapResult",
 ]

@@ -8,10 +8,10 @@ from typing import Iterable, Protocol
 
 from probe_station_gui.design.model import (
     DesignDocument,
-    DesignRegistration,
     MeasurementTarget,
     Point2D,
 )
+from probe_station_gui.design.rigid_registration import DesignRegistration
 from probe_station_gui.route.model import MeasurementRoute
 
 
@@ -152,26 +152,16 @@ def export_persisted_session_state(
         registration = state.registration
         result.update(
             {
-                "source_design_marks": _serialize_points(
-                    state.source_design_marks
-                ),
-                "source_stage_marks": _serialize_points(
-                    state.source_stage_marks
-                ),
-                "check_design_marks": _serialize_points(
-                    state.check_design_marks
-                ),
-                "check_stage_marks": _serialize_points(
-                    state.check_stage_marks
-                ),
+                "source_design_marks": _serialize_points(state.source_design_marks),
+                "source_stage_marks": _serialize_points(state.source_stage_marks),
+                "check_design_marks": _serialize_points(state.check_design_marks),
+                "check_stage_marks": _serialize_points(state.check_stage_marks),
                 "registration_valid": bool(
                     registration is not None and registration.valid
                 ),
                 "registration_status": state.registration_status,
                 "registration_stale_reason": (
-                    registration.stale_reason
-                    if registration is not None
-                    else ""
+                    registration.stale_reason if registration is not None else ""
                 ),
             }
         )
@@ -189,9 +179,7 @@ def export_persisted_session_state(
     if state.route is not None and route_path:
         result["route"] = {
             "path": str(route_path),
-            "selected_route_point_index": int(
-                state.selected_route_point_index
-            ),
+            "selected_route_point_index": int(state.selected_route_point_index),
         }
     return result
 
@@ -201,11 +189,7 @@ def _copy_points(points: Iterable[Point2D]) -> tuple[Point2D, ...]:
 
 
 def _serialize_points(points: Iterable[Point2D]) -> list[list[float]]:
-    return [
-        [float(point[0]), float(point[1])]
-        for point in points
-        if point is not None
-    ]
+    return [[float(point[0]), float(point[1])] for point in points if point is not None]
 
 
 __all__ = ["DesignSessionState", "export_persisted_session_state"]

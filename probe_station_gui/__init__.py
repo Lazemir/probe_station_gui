@@ -13,7 +13,6 @@ _LAZY_EXPORTS = {
         "probe_station_gui.views.design_navigator_panel",
         "DesignNavigatorPanel",
     ),
-    "DesignRegistration": ("probe_station_gui.design.model", "DesignRegistration"),
     "JoystickWindow": ("probe_station_gui.views.joystick_window", "JoystickWindow"),
     "MeasurementTarget": ("probe_station_gui.design.model", "MeasurementTarget"),
     "MicroscopeView": ("probe_station_gui.views.microscope_view", "MicroscopeView"),

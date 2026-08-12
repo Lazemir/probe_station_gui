@@ -1671,3 +1671,95 @@ git diff --check 8fc83259e07f48bf0f222e80bb3e1d6c3241fd0e..HEAD
   background-thread exposure completion reaches the GUI thread through the
   signal proxy and classified the `+42 CC / +24 blocks` as justified explicit
   composition ports with `0.00%` duplicated policy.
+
+#### Task 13a: Separate design document domains
+
+**Files:**
+- Create: `probe_station_gui/design/document_source.py`
+- Create: `probe_station_gui/design/document_snap.py`
+- Modify: `probe_station_gui/design/model.py`
+- Modify: `probe_station_gui/design/rigid_registration.py`
+- Modify: direct registration import callers/tests only
+- Modify: `docs/superpowers/plans/2026-08-10-coordinate-system-coordinator.md`
+
+- [x] Observe independent strict REDs before each canonical production slice.
+  Source and snap test collection each failed first with the exact absent-owner
+  `ModuleNotFoundError`; delegation regressions then failed while
+  `DesignDocument` still executed the old bodies. Registration tests failed
+  with the exact missing-symbol `ImportError` before the value types moved.
+  Later surface REDs caught the stale root-package registration export and the
+  duplicate snap type aliases/dead projection seam before their deletion.
+- [x] Keep `DesignDocument`, `DesignModelError`, `MeasurementTarget`,
+  `SnapResult`, `LayerKey`, and `Point2D` canonical in `model.py`, with exactly
+  those six public exports. The document retains immutable lifecycle changes,
+  `_from_components`, top-cell/layer/rotation selection, plot paths, unit
+  conversion, and the established snap API, while delegating source and snap
+  policy instead of duplicating it.
+- [x] Make `document_source.py` own file and fixture normalization, lazy
+  function-local KLayout loading, fresh `source_load_id`, named-cell and layer
+  metadata, database/user units, bounds, and fixture contour extraction. File
+  documents retain no live KLayout layout/cell, and forward/reverse imports
+  plus construction leave `klayout`, `klayout.db`, and `klayout.lay` absent
+  from `sys.modules` until an actual file load.
+- [x] Make `document_snap.py` own closed-contour array construction, the
+  `256`-division spatial index, the `64`-cell long-segment budget, bounded
+  candidate lookup, midpoint/vertex/segment/free priority, and an owner-local
+  result DTO. Precomputed arrays remain caller-owned by identity; only a
+  missing index is built. No duplicate `LayerKey`/`Point2D`, old private
+  compatibility alias, or package export remains.
+- [x] Move `ResidualSummary` and `DesignRegistration` canonically and with
+  exact class AST into `rigid_registration.py`. Proper-rotation fitting,
+  spacing-ratio diagnostics, immutable matrices, source/check residuals,
+  inverse transforms, validation, and stale lifecycle semantics remain exact.
+  All production/test callers import the new owner directly; `model.py`, the
+  design package, and the root lazy package expose no registration alias.
+- [x] Use the acyclic owner graph `model -> document_source + document_snap`
+  and `rigid_registration -> model`; neither child imports its parent or its
+  sibling. Five import-only callers retain exact normalized non-import AST.
+  The root package changes only by deleting the stale lazy registration entry.
+  Recent plot/presentation/tool/layout/route/KLayout worker and pane modules,
+  and all other production trees, remain byte-identical to baseline.
+- [x] Preserve document serialization, selection, registration, rotation,
+  click/layout/plot/snap/KLayout, coordinate, and application behavior. The
+  final owner/core gate passes `139`; complete Design passes `374`, coordinates
+  `201`, and UI `495`. Deterministic App coverage passes `368` plus `5`
+  subtests with one inherited Qt-order node deselected, and that node passes
+  alone, for all `369` App tests. The combined Design/UI/App coverage is
+  therefore `1238` plus `5` subtests.
+- [x] Prove the App-only native Qt order failure is inherited rather than a
+  Task 13a regression. The same six-module selection at a separately archived,
+  blob-verified exact `78ef89ad` baseline and at the current tree both reach
+  the identical access violation in unchanged
+  `microscope_interaction.py:548`; the exact node and its full module pass in
+  fresh processes. The final complete one-process offscreen `QLocale.c()`
+  no-hardware suite passes `3054` plus `14` subtests with only the inherited
+  `BuiltinImporter.module_repr()` warning.
+- [x] Pass affected Ruff and format, whole-tree Ruff with only the inherited
+  `E402`/`F401` classes excluded, whole-tree compileall, `git diff --check`,
+  direct-definition/deletion/public-identity/DAG/import-order gates, caller
+  AST parity, protected-byte checks, and prospective MI-zero accounting.
+- [x] Metrics: the original model was
+  `1248 LOC / 757 LLOC / 1096 SLOC / CC 238 / 53 blocks / max CC 20 / MI 0.00`;
+  the original rigid owner was `166 / 101 / 128 / CC 26 / 9 blocks / max CC 10
+  / MI 33.41`. Final model, source, snap, and rigid owners are respectively
+  `659 / 367 / 568 / CC 114 / 33 blocks / MI 7.96`,
+  `230 / 152 / 196 / CC 53 / 7 / MI 31.92`,
+  `408 / 213 / 360 / CC 58 / 10 / MI 19.98`, and
+  `340 / 220 / 268 / CC 53 / 20 / MI 21.38` for LOC/LLOC/SLOC/complexity/MI.
+  Explicit source/snap composition ports change aggregate production
+  complexity from `CC 264 / 62 blocks` to `CC 278 / 70 blocks`; maximum CC
+  remains `20`. Every structural/new/touched file has positive MI except the
+  explicitly allowed pre-existing MI-zero `design/session.py`, whose only
+  change is the unavoidable direct import and whose non-import AST is exact.
+  All-tracked MI-zero decreases exactly `12 -> 11`, active GUI/client/test
+  MI-zero decreases `11 -> 10`, and no new MI-zero file is introduced.
+- [x] Freeze the complete evidence-bearing source/test/plan snapshot. A fresh
+  fork-none independent read-only review compared the full old and new owners,
+  repeated the exact `139`, Ruff/format/diff, scope/hash/protected-byte,
+  AST/DAG/import/lazy/array, Radon/Lizard, and MI-zero gates, and returned
+  `READY` with `0 Critical / 0 Important / 0 Minor`. Its initial Minor found
+  only the documented snap/aggregate CC arithmetic; after the plan-only
+  `58 / 278` correction it re-ran the focused and metric gates and confirmed
+  all `13` source/test hashes unchanged. Nothing was staged before the final
+  verdict; the exact commit remains
+  `refactor: separate design document domains`.

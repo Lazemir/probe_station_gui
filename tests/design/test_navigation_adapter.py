@@ -21,7 +21,6 @@ from probe_station_gui.design.frame_registration import (
 from probe_station_gui.design.model import (
     DesignDocument,
     DesignModelError,
-    DesignRegistration,
     MeasurementTarget,
 )
 from probe_station_gui.design.navigation_adapter import (
@@ -43,15 +42,20 @@ from probe_station_gui.design.route_editing import (
     add_route_array_points,
     select_route_point,
 )
+from probe_station_gui.design.rigid_registration import DesignRegistration
 from probe_station_gui.design.session import DesignSession
 
 
 class _FakeCell:
-    def __init__(self, name: str, polygons_by_spec: dict[tuple[int, int], list[np.ndarray]]) -> None:
+    def __init__(
+        self, name: str, polygons_by_spec: dict[tuple[int, int], list[np.ndarray]]
+    ) -> None:
         self.name = name
         self._polygons_by_spec = polygons_by_spec
 
-    def get_polygons(self, *args: object, **kwargs: object) -> dict[tuple[int, int], list[np.ndarray]]:
+    def get_polygons(
+        self, *args: object, **kwargs: object
+    ) -> dict[tuple[int, int], list[np.ndarray]]:
         return self._polygons_by_spec
 
 
@@ -74,20 +78,14 @@ def _make_document(tmp_path: Path) -> DesignDocument:
             (1, 0): [
                 np.asarray([[0.0, 0.0], [100.0, 0.0], [100.0, 100.0], [0.0, 100.0]])
             ],
-            (2, 0): [
-                np.asarray([[10.0, 10.0], [20.0, 10.0], [20.0, 20.0]])
-            ],
+            (2, 0): [np.asarray([[10.0, 10.0], [20.0, 10.0], [20.0, 20.0]])],
         },
     )
     alt = _FakeCell(
         "ALT",
         {
-            (3, 1): [
-                np.asarray([[0.0, 0.0], [30.0, 0.0], [30.0, 10.0]])
-            ],
-            (4, 2): [
-                np.asarray([[1.0, 1.0], [5.0, 1.0], [5.0, 5.0]])
-            ],
+            (3, 1): [np.asarray([[0.0, 0.0], [30.0, 0.0], [30.0, 10.0]])],
+            (4, 2): [np.asarray([[1.0, 1.0], [5.0, 1.0], [5.0, 5.0]])],
         },
     )
     return DesignDocument._from_components(
@@ -185,7 +183,9 @@ def test_persisted_restore_z_mismatch_requests_unhome_without_status(
     assert not decision.clear_cached_design
 
 
-def test_design_load_success_plan_uses_current_route_point_camera_center(tmp_path: Path) -> None:
+def test_design_load_success_plan_uses_current_route_point_camera_center(
+    tmp_path: Path,
+) -> None:
     document = _make_document(tmp_path)
     session = DesignSession()
     session.load_document(document)
@@ -203,7 +203,9 @@ def test_design_load_success_plan_uses_current_route_point_camera_center(tmp_pat
     assert plan.status_message == "Loaded design 'sample.gds' (TOP)."
 
 
-def test_route_array_add_creates_route_and_selects_last_added_point(tmp_path: Path) -> None:
+def test_route_array_add_creates_route_and_selects_last_added_point(
+    tmp_path: Path,
+) -> None:
     session = DesignSession()
     session.load_document(_make_document(tmp_path))
 
@@ -258,12 +260,17 @@ def test_design_target_move_plans_unknown_missing_registration_and_accepted(
         [(0.0, 0.0), (10.0, 0.0)],
         [(1.0, 2.0), (21.0, 2.0)],
     )
-    accepted = plan_design_target_move(session, "a", session.stage_from_design((10.0, 20.0)))
+    accepted = plan_design_target_move(
+        session, "a", session.stage_from_design((10.0, 20.0))
+    )
 
     assert not unknown.accepted
     assert unknown.status_message == "Unknown target 'missing'."
     assert not unregistered.accepted
-    assert unregistered.status_message == "Design registration is required before moving to a target."
+    assert (
+        unregistered.status_message
+        == "Design registration is required before moving to a target."
+    )
     assert accepted.accepted
     assert accepted.stage_xy == (16.0, 22.0)
 
@@ -271,20 +278,31 @@ def test_design_target_move_plans_unknown_missing_registration_and_accepted(
 def test_design_coordinate_move_plans_unloaded_busy_unregistered_and_accepted(
     tmp_path: Path,
 ) -> None:
-    assert not plan_design_coordinate_move(False, False, (1.0, 2.0), None, "design").accepted
+    assert not plan_design_coordinate_move(
+        False, False, (1.0, 2.0), None, "design"
+    ).accepted
 
     busy = plan_design_coordinate_move(True, True, (1.0, 2.0), (3.0, 4.0), "design")
-    missing_registration = plan_design_coordinate_move(True, False, (1.0, 2.0), None, "design")
-    accepted = plan_design_coordinate_move(True, False, (1.0, 2.0), (3.0, 4.0), "design")
+    missing_registration = plan_design_coordinate_move(
+        True, False, (1.0, 2.0), None, "design"
+    )
+    accepted = plan_design_coordinate_move(
+        True, False, (1.0, 2.0), (3.0, 4.0), "design"
+    )
 
     assert busy.status_message == "Stage is busy. Ignoring design move request."
-    assert missing_registration.status_message == "Design click-to-move requires completed registration."
+    assert (
+        missing_registration.status_message
+        == "Design click-to-move requires completed registration."
+    )
     assert accepted.accepted
     assert accepted.last_selected_design_point == (1.0, 2.0)
     assert accepted.pending_planned_move_target_xy == (3.0, 4.0)
 
 
-def test_panel_and_position_presentations_include_navigation_state(tmp_path: Path) -> None:
+def test_panel_and_position_presentations_include_navigation_state(
+    tmp_path: Path,
+) -> None:
     session = DesignSession()
     document = _make_document(tmp_path)
     session.load_document(document)
@@ -316,7 +334,10 @@ def test_panel_and_position_presentations_include_navigation_state(tmp_path: Pat
     assert panel.selected_target_id == "a"
     assert panel.selected_route_point_index == 0
     assert panel.route_measurement_running
-    assert panel.calibration_prompt == "Calibration step 4/4: chip rotation is in progress."
+    assert (
+        panel.calibration_prompt
+        == "Calibration step 4/4: chip rotation is in progress."
+    )
     assert position.current_design_position == (9.0, 10.0)
     assert position.fov_design_size == (11.0, 12.0)
     assert position.selected_design_point == (1.0, 2.0)

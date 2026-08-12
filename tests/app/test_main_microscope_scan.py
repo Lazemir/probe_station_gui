@@ -11,7 +11,7 @@ from probe_station_gui.camera.imaging import MicroscopeScaleCalibration
 from probe_station_gui.camera.microscope_scan_runtime_adapters import (
     build_microscope_scan_plan,
 )
-from probe_station_gui.design.model import DesignRegistration
+from probe_station_gui.design.rigid_registration import DesignRegistration
 
 
 class _FakeScanThread:
@@ -28,8 +28,7 @@ class _FakeScanThread:
 
 def _tile_signature(tiles):
     return tuple(
-        (tile.index, tile.row, tile.column, tile.stage_xy, tile.label)
-        for tile in tiles
+        (tile.index, tile.row, tile.column, tile.stage_xy, tile.label) for tile in tiles
     )
 
 
@@ -60,9 +59,7 @@ def _install_usable_design_frame(
         current_design_lease=lambda: frame_usability,
         design_lease_is_current=lambda snapshot: snapshot is frame_usability,
         project_design_to_camera_stage=lambda snapshot, point: (
-            registration.design_to_stage(point)
-            if snapshot is frame_usability
-            else None
+            registration.design_to_stage(point) if snapshot is frame_usability else None
         ),
     )
 
@@ -148,8 +145,9 @@ def test_design_scan_entry_starts_worker_without_waiting_for_camera(
     monkeypatch.setattr(
         Main._start_microscope_scan.__globals__["threading"],
         "Thread",
-        lambda **kwargs: created_threads.append(_FakeScanThread(**kwargs))
-        or created_threads[-1],
+        lambda **kwargs: (
+            created_threads.append(_FakeScanThread(**kwargs)) or created_threads[-1]
+        ),
     )
     window = Main.__new__(Main)
     window.serial_connection = types.SimpleNamespace(is_open=True)
@@ -194,8 +192,9 @@ def test_design_scan_plan_uses_launch_registration_and_objective_offset_snapshot
     monkeypatch.setattr(
         Main._start_microscope_scan.__globals__["threading"],
         "Thread",
-        lambda **kwargs: created_threads.append(_FakeScanThread(**kwargs))
-        or created_threads[-1],
+        lambda **kwargs: (
+            created_threads.append(_FakeScanThread(**kwargs)) or created_threads[-1]
+        ),
     )
     document = types.SimpleNamespace(bounds=(0.0, 0.0, 0.2, 0.2))
     launch_registration = DesignRegistration.from_marks(
@@ -335,8 +334,8 @@ def test_camera_auto_exposure_frame_reader_uses_fresh_raw_frame() -> None:
     image = QImage(8, 6, QImage.Format_RGB32)
     image.fill(QColor(12, 34, 56))
     calls: list[dict[str, object]] = []
-    window._wait_for_raw_camera_frame = (
-        lambda **kwargs: calls.append(kwargs) or (image, 18)
+    window._wait_for_raw_camera_frame = lambda **kwargs: (
+        calls.append(kwargs) or (image, 18)
     )
 
     frame = Main._read_camera_auto_exposure_frame(window, 17, 1.25)
@@ -370,8 +369,9 @@ def test_api_microscope_area_scan_builds_stitch_debug_plan(monkeypatch) -> None:
     created_threads: list[_FakeScanThread] = []
     monkeypatch.setattr(
         "main.threading.Thread",
-        lambda **kwargs: created_threads.append(_FakeScanThread(**kwargs))
-        or created_threads[-1],
+        lambda **kwargs: (
+            created_threads.append(_FakeScanThread(**kwargs)) or created_threads[-1]
+        ),
     )
     window = _area_scan_window()
 
@@ -405,8 +405,9 @@ def test_api_microscope_area_scan_defaults_to_large_area_overlap(monkeypatch) ->
     created_threads: list[_FakeScanThread] = []
     monkeypatch.setattr(
         "main.threading.Thread",
-        lambda **kwargs: created_threads.append(_FakeScanThread(**kwargs))
-        or created_threads[-1],
+        lambda **kwargs: (
+            created_threads.append(_FakeScanThread(**kwargs)) or created_threads[-1]
+        ),
     )
     window = _area_scan_window()
 
@@ -423,8 +424,9 @@ def test_api_microscope_area_scan_rejects_removed_auto_exposure(monkeypatch) -> 
     created_threads: list[_FakeScanThread] = []
     monkeypatch.setattr(
         "main.threading.Thread",
-        lambda **kwargs: created_threads.append(_FakeScanThread(**kwargs))
-        or created_threads[-1],
+        lambda **kwargs: (
+            created_threads.append(_FakeScanThread(**kwargs)) or created_threads[-1]
+        ),
     )
     window = _area_scan_window()
 

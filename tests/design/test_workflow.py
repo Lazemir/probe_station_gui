@@ -13,9 +13,9 @@ from probe_station_gui.design.frame_registration import (
 from probe_station_gui.design.model import (
     DesignDocument,
     DesignModelError,
-    DesignRegistration,
     MeasurementTarget,
 )
+from probe_station_gui.design.rigid_registration import DesignRegistration
 from probe_station_gui.design.session import (
     DesignSession,
     MeasurementRoute,
@@ -117,7 +117,9 @@ class DesignDocumentTest(unittest.TestCase):
         self.assertEqual(document.top_cell_name, "MAIN")
         self.assertEqual(document.layer_keys(), ((1, 0),))
 
-    def test_snap_point_info_prefers_vertex_or_segment_from_cached_geometry(self) -> None:
+    def test_snap_point_info_prefers_vertex_or_segment_from_cached_geometry(
+        self,
+    ) -> None:
         document = DesignDocument(
             path=REPO_ROOT / "tests" / "fixtures" / "synthetic.gds",
             library=object(),
@@ -229,12 +231,8 @@ class DesignSessionTest(unittest.TestCase):
         session.selected_route_point_index = 0
         session.registration_status = "Ready."
         session.active_frame_id = "design:frame-1"
-        session._runtime_blocked_persisted_state = {
-            "route": {"point_ids": ["p001"]}
-        }
-        session._legacy_stage_coordinate_provenance = {
-            "axes": ["X", "Y", "B"]
-        }
+        session._runtime_blocked_persisted_state = {"route": {"point_ids": ["p001"]}}
+        session._legacy_stage_coordinate_provenance = {"axes": ["X", "Y", "B"]}
         session._legacy_stage_coordinate_provenance_present = True
 
         state = session.snapshot_state()
@@ -267,9 +265,7 @@ class DesignSessionTest(unittest.TestCase):
         session.check_stage_marks.append((12.0, 2.0))
         session.targets[0].metadata["groups"].append("changed")
         session.route.points[0].metadata["tags"].append("changed")
-        session._runtime_blocked_persisted_state["route"]["point_ids"].append(
-            "p002"
-        )
+        session._runtime_blocked_persisted_state["route"]["point_ids"].append("p002")
         session._legacy_stage_coordinate_provenance["axes"].append("A")
 
         self.assertEqual(state.check_design_marks, ((5.0, 0.0),))
@@ -539,8 +535,7 @@ class DesignSessionTest(unittest.TestCase):
         )
         expected = tuple(
             tuple(
-                np.asarray(pivot)
-                + rotation @ (np.asarray(point) - np.asarray(pivot))
+                np.asarray(pivot) + rotation @ (np.asarray(point) - np.asarray(pivot))
             )
             for point in source_machine
         )
@@ -675,7 +670,9 @@ class DesignSessionTest(unittest.TestCase):
         self.assertAlmostEqual(mapped[0], 10.5)
         self.assertAlmostEqual(mapped[1], -10.0)
 
-    def test_prepare_alignment_uses_all_pairs_and_rotates_every_stage_mark(self) -> None:
+    def test_prepare_alignment_uses_all_pairs_and_rotates_every_stage_mark(
+        self,
+    ) -> None:
         session = DesignSession()
         session.document = self._make_document()
         design_marks = ((0.0, 0.0), (1000.0, 0.0), (0.0, 2000.0))

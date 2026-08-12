@@ -5,7 +5,11 @@ import math
 import numpy as np
 import pytest
 
-from probe_station_gui.design.model import DesignModelError, DesignRegistration
+from probe_station_gui.design.model import DesignModelError
+from probe_station_gui.design.rigid_registration import (
+    DesignRegistration,
+    ResidualSummary,
+)
 
 
 def _transform(
@@ -22,9 +26,41 @@ def _transform(
     )
     translation = np.asarray(offset, dtype=float)
     return [
-        tuple(float(value) for value in scale * rotation @ np.asarray(point) + translation)
+        tuple(
+            float(value) for value in scale * rotation @ np.asarray(point) + translation
+        )
         for point in points
     ]
+
+
+def test_registration_types_have_one_canonical_owner() -> None:
+    import probe_station_gui
+
+    from probe_station_gui.design import model, rigid_registration
+
+    assert DesignRegistration.__module__ == (
+        "probe_station_gui.design.rigid_registration"
+    )
+    assert ResidualSummary.__module__ == ("probe_station_gui.design.rigid_registration")
+    assert set(model.__all__) == {
+        "DesignDocument",
+        "DesignModelError",
+        "LayerKey",
+        "MeasurementTarget",
+        "Point2D",
+        "SnapResult",
+    }
+    assert not hasattr(model, "DesignRegistration")
+    assert not hasattr(model, "ResidualSummary")
+    assert "DesignRegistration" not in probe_station_gui.__all__
+    assert not hasattr(probe_station_gui, "DesignRegistration")
+    assert set(rigid_registration.__all__) == {
+        "DesignRegistration",
+        "ResidualMetrics",
+        "ResidualSummary",
+        "RigidRegistrationFit",
+        "fit_rigid_registration",
+    }
 
 
 @pytest.mark.parametrize(
