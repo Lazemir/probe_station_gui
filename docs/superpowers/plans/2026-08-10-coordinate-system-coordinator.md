@@ -1833,3 +1833,75 @@ git diff --check 8fc83259e07f48bf0f222e80bb3e1d6c3241fd0e..HEAD
   `0 Critical / 0 Important / 0 Minor`. Nothing was staged before that final
   verdict; the authorized next action is the exact commit
   `refactor: separate settings dialog integrations`.
+
+#### Task 14a: Separate camera worker domains
+
+**Files:**
+- Create: `probe_station_gui/camera/genicam_nodes.py`
+- Create: `probe_station_gui/camera/settings_transactions.py`
+- Modify: `probe_station_gui/camera/worker.py`
+- Create/modify: direct owner, lifecycle, ownership, and shared fake tests
+- Modify: `docs/superpowers/plans/2026-08-10-coordinate-system-coordinator.md`
+
+- [x] Drive lifecycle corrections from strict REDs before extraction. The
+  original image is released even when deep copy raises; `Grabber` is a
+  one-shot `NEW -> RUNNING/ACCEPTING -> STOPPING -> STOPPED` worker; stop
+  closes command acceptance atomically before clearing the run flag; and all
+  six post-stop requests reject synchronously through their original signal
+  with the original correlation fields. Accepted pre-stop commands publish
+  exactly once as completed, cancelled, or rejected, with no signal under the
+  non-reentrant lifecycle lock.
+- [x] Preserve executor/acquisition ownership. Settings execute FIFO on one
+  executor thread, callbacks retain request IDs, queued Qt delivery reaches
+  the receiver thread, submit rejection and cancelled futures publish once,
+  and executor shutdown completes before acquisition teardown and camera
+  release. Hardware-free overlap coverage proves settings neither stop nor
+  restart active acquisition. Backend loading remains optional and lazy.
+- [x] Observe independent absent-module REDs, then make
+  `camera/genicam_nodes.py` the Qt/rotpy-free owner of node maps, snapshot
+  schema, availability metadata, enum/category discovery, node lookup,
+  coercion, reads, writes, and command execution. Make
+  `camera/settings_transactions.py` the Qt/rotpy-free owner of validated
+  batches, reverse rollback, keyed temporary overrides, retryable restore,
+  and streaming result state. `Grabber` composes both module-qualified owners;
+  neither new owner imports the worker, and no moved alias, wrapper, re-export,
+  package export, or separate dispatch module remains.
+- [x] Preserve the public camera boundary: constructor, six request methods,
+  seven signals, start/stop/frame methods, root `Grabber` identity, and
+  `__all__` are exact. The original `15` worker-test identities exist exactly
+  once across their canonical owners. Five fresh lifecycle processes pass
+  `100`; final focused owner/lifecycle coverage passes `44`; adjacent
+  API/scan/settings/Main/import coverage passes `110`.
+- [x] Pass broad and complete no-hardware verification under offscreen Qt and
+  process-local `QLocale.c()`. Camera passes `331`; UI passes `515`; combined
+  camera/App/UI passes `1214` plus `5` subtests with the one inherited
+  Qt-order node deselected, and that unchanged node passes alone. The complete
+  suite passes `3103` plus `14` subtests with only the inherited
+  `BuiltinImporter.module_repr()` warning.
+- [x] Pass touched and whole-tree Ruff, touched format, compileall,
+  `git diff --check`, direct-definition/deletion/DAG/import-order/lazy-rotpy,
+  identity/signature/signal, protected-byte, scope, and MI-zero gates.
+  Lizard retains exactly the two moved transaction warnings (`26` and `17`)
+  and reports `0.00%` duplication; no new warning is introduced.
+- [x] Metrics: the former worker was
+  `1289 LOC / 800 LLOC / 1185 SLOC / CC 275 / 57 blocks / max CC 26 / MI 0.00`.
+  Final worker, node, and transaction owners are respectively
+  `794 / 513 / 714 / CC 142 / 37 blocks / max CC 11 / MI 7.81`,
+  `433 / 285 / 398 / CC 110 / 26 / max CC 14 / MI 22.05`, and
+  `216 / 122 / 198 / CC 64 / 6 / max CC 26 / MI 36.85` for
+  LOC/LLOC/SLOC/complexity/blocks/maximum/MI. Explicit lifecycle states,
+  command rejection, initialization, and owner ports change aggregate
+  complexity to `CC 316 / 69 blocks`; every touched Python file has positive
+  MI. All-tracked MI-zero decreases exactly `10 -> 9`, active GUI/client/test
+  MI-zero decreases `9 -> 8`, and no new MI-zero file is introduced.
+- [x] Freeze the complete source/test/plan snapshot and obtain a fresh
+  fork-none independent review. The first freeze audit found one Important:
+  an exception during partial camera initialization could bypass deinit and
+  release because the local camera was not yet returned. Strict REDs now
+  cover init, stream/pixel/begin, both owner constructors, acquisition end,
+  deinit, and release ordering; the minimal lifecycle fix passed all focused,
+  stress, adjacent, broad, full, static, import, metric, and protected gates.
+  The corrected ten-path freeze was independently hash-verified and returned
+  `READY` with `0 Critical / 0 Important / 0 Minor`. Nothing was staged before
+  that verdict; the authorized exact commit is
+  `refactor: separate camera worker domains`.
