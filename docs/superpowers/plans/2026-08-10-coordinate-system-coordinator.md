@@ -2474,3 +2474,77 @@ git diff --check 8fc83259e07f48bf0f222e80bb3e1d6c3241fd0e..HEAD
   test-seam, and protected-scope invariant; retained all six frozen hashes; and
   returned `READY` with `0 Critical / 0 Important / 0 Minor`. Nothing was
   staged before that verdict.
+
+#### Task 20b: Separate the private route run coordinator
+
+- [x] Capture the clean `fbba72f` post-mailbox baseline before editing. The
+  established route/mailbox/interrupt/App safety selection passed `173/173`.
+  `route/measurement.py` was
+  `1565 LOC / 701 LLOC / 1442 SLOC / CC 256 / 88 blocks / max CC 13 /
+  MI 0.00`. Four private run DTO/types and every run-orchestration method were
+  frozen by decorator-aware AST before extraction; no existing test reached
+  through those private seams.
+- [x] Drive the owner shape vertically through strict RED/GREEN. The absent
+  module failed `find_spec`; the minimal module skeleton passed. Subsequent
+  isolated failures proved the missing private owner identity, direct Runner
+  base, canonical four-type ownership/deletion, direct one-line public
+  `run()` wrapper, exact method ownership/deletion, and one-way neutral import
+  DAG before each corresponding production step. The final ownership suite
+  passes `7/7`.
+- [x] Make private `_RouteRunCoordinator` the sole owner of four run types and
+  twenty-three cohesive orchestration methods: whole-run, validation, meter
+  open, startup/start index, initial and per-point loops, accepted/rejected
+  finish, auto-next and saved-point confirmation, completion/cleanup,
+  manual-contact advance, confirmation/Interrupt decisions, the three waiting
+  flows, valid confirmation, and jump targeting. The twenty-two pre-existing
+  private method ASTs are exact; `_run_route` is the exact former `run` AST
+  after its sole name change. The owner imports only neutral route records,
+  point execution, recording/formatting, and the standard library: no
+  measurement/Main/external-session/Qt/serial/stage reverse dependency.
+- [x] Keep canonical `RouteMeasurementRunner` in `measurement.py`, directly
+  based on the private owner. Every public descriptor and all `32` public
+  signature names remain direct and exact; `run()` remains a direct canonical
+  one-line `return self._run_route()` wrapper. Point request/snapshot, CSV
+  append/retry, stage begin/finish, callbacks/photo/focus/contact, manual
+  contact implementation, and public interfaces remain in the runner. The
+  moved private names have no alias, forwarding wrapper, `__getattr__`,
+  package export, or re-export. Task 20-pre Interrupt acknowledgement and the
+  Task 20a mailbox ownership remain unchanged.
+- [x] Pass fresh no-hardware verification under offscreen Qt and process-local
+  `QLocale.c()`: final focused ownership/mailbox/route safety passes `180`;
+  all route passes `420`; focused App/route-dialog/UI passes `126` plus `5`
+  subtests; and five fresh ownership/mailbox/Interrupt processes pass
+  `205/205`. App passes `365` plus `5` subtests with the established protected
+  order-sensitive node deselected, and that exact node passes alone; UI passes
+  `542`. The exact collected union is covered without omission by deterministic
+  directory partitions: `3228/3228` tests plus `16` subtests pass.
+- [x] Pass affected Ruff, configured whole-tree Ruff while ignoring only the
+  inherited `E402/F401` debt, new-file format, in-memory compile of `647`
+  Python files, `git diff --check`, forward/reverse imports, identity/MRO,
+  exact-definition/deletion/AST, package-surface, private-DAG, protected-byte,
+  and MI-zero gates. Main, the mailbox, point execution, external session,
+  contact lifecycle, operation/dialog, stage/click owners, and every existing
+  test remain byte-identical. Lizard reports no warning and `0.00%` duplicate
+  blocks. Exact Task 20b temporary roots are absent.
+- [x] Metrics: residual measurement is
+  `921 LOC / 407 LLOC / 828 SLOC / CC 150 / 62 blocks / max CC 13 / MI 1.06`;
+  the coordinator is
+  `656 / 306 / 618 / CC 112 / 28 blocks / max CC 10 / MI 9.84`; the new
+  ownership test is `148 / 56 / 123`, MI `39.10`. Relative to the single
+  donor, aggregate Radon accounting is `CC 262 / 90 blocks`, an explicit
+  `+6 CC / +2 blocks` from the private owner class summary and required direct
+  public `run` wrapper. Functional measurement/mailbox/coordinator complexity
+  is `100 functions / summed CCN 276 / max 13`, exactly `+1 function / +1 CCN`
+  from that wrapper versus Task 20a. All structural files have positive MI;
+  all-tracked and active MI-zero both decrease exactly `4 -> 3`, leaving only
+  Main, stage controller, and joystick window.
+- [x] Freeze the exact four-path evidence-bearing snapshot and obtain a fresh
+  fork-none independent read-only review with no Critical, Important, or Minor
+  finding before staging and the exact commit
+  `refactor: separate route run coordinator`.
+  The reviewer independently repeated focused `180`, affected/configured Ruff,
+  new-file format, diff, compile, import/MRO/DAG, AST/deletion, Radon/Lizard/MI,
+  protected-byte, and final freeze gates; manually audited host-call resolution,
+  cleanup/result ordering, Task 20-pre/20a safety semantics, and the absence of
+  shallow policy duplication; retained all four frozen hashes; and returned
+  `READY` with `0 Critical / 0 Important / 0 Minor`.
