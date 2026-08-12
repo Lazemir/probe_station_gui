@@ -116,7 +116,7 @@ class JoystickWindow(JoystickFeedrateMixin, QWidget):
     KEYBOARD_JOG_AXIS_DROP_CHORD_WINDOW_MS = 160
     KEYBOARD_JOG_DIRECTION_CHANGE_CHORD_WINDOW_MS = 250
     KEYBOARD_JOG_PHYSICAL_KEY_WATCHDOG_MS = 80
-    JOG_STOP_RESEND_DELAYS_MS = (80, 180, 400, 900, 1500)
+    JOG_STOP_RESEND_DELAY_MS = 120
     MANUAL_JOG_AXES = VISIBLE_STAGE_AXES
     MANUAL_AXIS_MODES = ("G91", "G90")
     LINEAR_AXES = {"X", "Y", "Z"}
@@ -670,6 +670,7 @@ class JoystickWindow(JoystickFeedrateMixin, QWidget):
 
         if self.serial_connection and self.serial_connection.is_open:
             self.stop_jog()
+        self._invalidate_jog_stop_resend()
         self.serial_connection = serial_connection
         if not serial_connection or not serial_connection.is_open:
             self._active_axes = None
@@ -741,7 +742,10 @@ class JoystickWindow(JoystickFeedrateMixin, QWidget):
             button.setEnabled(enabled)
 
     def set_axis_a_ready(self, ready: bool) -> None:
+        was_ready = self._axis_a_ready
         self._axis_a_ready = ready
+        if ready and not was_ready:
+            self._invalidate_jog_stop_resend()
         if not ready and not self._motion_safety_disabled:
             self.stop_jog()
             self._pending_jog_axes = None
@@ -893,8 +897,14 @@ class JoystickWindow(JoystickFeedrateMixin, QWidget):
             return
         self._active_axes = None
         self._pending_jog_axes = None
+        stop_serial = self.serial_connection
         self.send_command(b"\x85")
-        self._schedule_jog_stop_resend()
+        if (
+            stop_serial is not None
+            and self.serial_connection is stop_serial
+            and getattr(stop_serial, "is_open", False)
+        ):
+            self._schedule_jog_stop_resend()
         if had_active_axes:
             self.jog_stopped.emit()
         logger.debug("Stop jog command issued")
@@ -984,6 +994,7 @@ class JoystickWindow(JoystickFeedrateMixin, QWidget):
             self._active_jog_projection_lease = None
             self.jog_command_changed.emit(tuple(), float(feedrate))
             return
+        self._invalidate_jog_stop_resend()
         self._active_jog_projection_lease = next_projection_lease
         if projector is None:
             commanded_axes = {axis for axis, _distance in commanded_distances}
@@ -2120,25 +2131,41 @@ class JoystickWindow(JoystickFeedrateMixin, QWidget):
             return 0
         return self.KEYBOARD_JOG_SECONDARY_AXIS_ACTIVATION_MS
 
+    def _invalidate_jog_stop_resend(self) -> None:
+        self._jog_stop_resend_generation = (
+            getattr(self, "_jog_stop_resend_generation", 0) + 1
+        )
+
     def _schedule_jog_stop_resend(self) -> None:
-        self._jog_stop_resend_generation += 1
+        serial_connection = self.serial_connection
+        if serial_connection is None:
+            return
+        self._invalidate_jog_stop_resend()
         generation = self._jog_stop_resend_generation
 
-        def resend(expected_generation: int) -> None:
+        def resend(expected_generation: int, expected_serial: serial.Serial) -> None:
             if expected_generation != self._jog_stop_resend_generation:
                 return
-            if self._key_stack or self._active_axes is not None:
+            if self.serial_connection is not expected_serial:
                 return
-            if not self.serial_connection or not self.serial_connection.is_open:
+            if (
+                self._key_stack
+                or self._pending_jog_axes is not None
+                or self._pending_key_activations
+                or self._active_axes is not None
+            ):
+                return
+            if not expected_serial.is_open:
                 return
             self.send_command(b"\x85")
             logger.debug("Resent stop jog command")
 
-        for delay_ms in self.JOG_STOP_RESEND_DELAYS_MS:
-            QTimer.singleShot(
-                delay_ms,
-                lambda expected_generation=generation: resend(expected_generation),
-            )
+        QTimer.singleShot(
+            self.JOG_STOP_RESEND_DELAY_MS,
+            lambda expected_generation=generation, expected_serial=serial_connection: (
+                resend(expected_generation, expected_serial)
+            ),
+        )
 
     @staticmethod
     def _is_text_entry_widget(widget: Optional[QWidget]) -> bool:

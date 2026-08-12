@@ -2548,3 +2548,73 @@ git diff --check 8fc83259e07f48bf0f222e80bb3e1d6c3241fd0e..HEAD
   cleanup/result ordering, Task 20-pre/20a safety semantics, and the absence of
   shallow policy duplication; retained all four frozen hashes; and returned
   `READY` with `0 Critical / 0 Important / 0 Minor`.
+
+#### Joystick correctness C1: Restore bounded keyboard jog stop
+
+- [x] Pin the clean `4932667` baseline and drive the safety correction with
+  fake-serial/offscreen-Qt RED/GREEN. The established joystick, stage-jog,
+  terminal, and Main coordination selection passed `109/109` before edits.
+  The new strict suite initially produced `9 failed / 4 passed`: the final key
+  release scheduled five resends at `80/180/400/900/1500 ms`, no canonical
+  `120 ms` constant existed, and stale callbacks survived a new accepted jog,
+  serial replacement, A disable/re-enable, and pending-input states. Production
+  remained byte-identical until that RED was recorded; the final strict suite
+  passes `13/13`, and five fresh processes pass `65/65`.
+- [x] Replace the unbounded resend tuple with the single named
+  `JOG_STOP_RESEND_DELAY_MS = 120`. A final release sends one immediate `0x85`
+  before scheduling exactly one callback. The callback captures both its
+  generation and exact serial object and sends only while that same open serial
+  remains attached and held keys, pending axes, pending key activations, and
+  active axes are all absent. Accepted jog publication, serial transitions, and
+  A re-enable invalidate older generations; a newer stop supersedes an older
+  callback. Inactive stop remains a no-op. All traffic continues through the
+  existing realtime command queue, with no status query, `?`, or read I/O and
+  no change to Main/terminal polling coordination.
+- [x] Pass focused and adjacent hardware-free gates under offscreen Qt:
+  ownership/safety plus the baseline selection passes `122/122`; the expanded
+  joystick/stage/Main/terminal selection passes `171` plus its one
+  basetemp-sensitive node in a fresh process. The byte-protected dirty-key
+  transition script retains its inherited obsolete `settings_manager` import;
+  a process-local shim exposing the canonical `KeyBinding` runs its unchanged
+  bytes and all six dirty-transition scenarios pass, without a production
+  compatibility alias. Before independent review, deterministic directory
+  partitions covered the exact then-collected union: `3241/3241` tests plus
+  `16` subtests passed. The inherited
+  App Qt teardown access violation is avoided by running the established
+  pending-click node separately (`365 + 1` tests plus `5` subtests).
+- [x] Pass affected Ruff, configured whole-tree Ruff while ignoring only the
+  inherited `E402/F401` debt, new-test format, in-memory compile of `660`
+  Python files, `git diff --check`, AST timer/guard/no-I/O assertions, and exact
+  protected-byte checks for Main, StageController, the stage jog queue, serial
+  terminal, dirty-transition script, and every pre-existing focused test. The
+  pre-existing whole joystick file remains outside Ruff's formatter baseline;
+  only the new test is format-clean. Baseline joystick metrics were
+  `2303 LOC / 1597 LLOC / 2135 SLOC / CC 482 / 115 blocks / max CC 22 /
+  MI 0.00`; final metrics are
+  `2330 / 1610 / 2161 / CC 488 / 116 blocks / max CC 22 / MI 0.00`.
+  The safety test is `354 / 247 / 270 / CC 74 / 38 blocks / max CC 7 /
+  MI 21.84`. The explicit production `+6 CC / +1 block` is the generation
+  invalidation owner, callback guards, and post-write serial-ownership check.
+  Lizard retains the sole inherited `_apply_axes`
+  CCN-22 warning and `0.00%` duplication. All-tracked and active MI-zero remain
+  exactly `3`, intentionally leaving Main, StageController, and joystick.
+- [x] Freeze the exact three-path snapshot and obtain a fresh independent
+  read-only review with no Critical, Important, or Minor finding before staging
+  the exact commit `fix: restore bounded keyboard jog stop`. The first frozen
+  review found one Important normal-error path: an immediate stop write raising
+  `SerialException` detached the serial before the scheduler captured it, so a
+  delayed callback could dereference `None`. A strict RED reproduced the
+  unwanted timer after one failed immediate attempt. The corrected `stop_jog`
+  captures the original serial before the write and schedules only when the
+  same open object remains attached; the scheduler is also inert when detached.
+  The failure test is GREEN with one immediate attempt, detached serial, and
+  zero timers. Corrected proportional evidence passes strict `14/14`, focused
+  `123/123`, five fresh processes `70/70`, and adjacent `172` plus the isolated
+  basetemp-sensitive node; affected/configured Ruff, new-test format, compile,
+  diff, AST, Radon, Lizard, protected-byte, and MI-zero gates remain clean.
+  The corrected independent re-review repeated the exact prior failure repro
+  (`1/1`), strict suite (`14/14`), relevant focused slice (`89/89`), affected
+  Ruff, new-test format, compile, diff, AST, manual serial/timer/no-I/O audit,
+  protected scope, and final hash/index/temp checks. It explicitly closed the
+  prior Important and returned `READY` with
+  `0 Critical / 0 Important / 0 Minor`.
