@@ -1763,3 +1763,73 @@ git diff --check 8fc83259e07f48bf0f222e80bb3e1d6c3241fd0e..HEAD
   all `13` source/test hashes unchanged. Nothing was staged before the final
   verdict; the exact commit remains
   `refactor: separate design document domains`.
+
+#### Task 13b: Separate settings dialog integrations
+
+**Files:**
+- Create: `probe_station_gui/dialogs/settings/api_access.py`
+- Create: `probe_station_gui/dialogs/settings/telegram.py`
+- Modify: `probe_station_gui/dialogs/settings_dialog.py`
+- Create: direct API, Telegram, coordinator, and ownership tests
+- Modify: `docs/superpowers/plans/2026-08-10-coordinate-system-coordinator.md`
+
+- [x] Observe independent strict absent-module REDs before creating either
+  owner. API and Telegram test collection each failed with the exact expected
+  `ModuleNotFoundError` for its canonical module. The later residual ownership
+  RED passed all `8` behavior characterizations and failed only because the
+  three moved class definitions and residual aliases still existed.
+- [x] Make `settings/api_access.py` the sole owner of `ApiSettingsWidget`.
+  Direct tests preserve deterministic user/key grouping, masked secrets,
+  permission checkboxes, refresh write suppression, immediate create/rename/
+  delete/check persistence, clipboard delivery, and the blank-host fallback.
+- [x] Make `settings/telegram.py` the sole owner of
+  `TelegramSettingsWidget` and internal `TelegramLinkWorker`. Temp-only,
+  no-network tests preserve environment/edit/global token precedence, global
+  token save semantics, alert collection, one link thread, queued GUI result
+  delivery, forget behavior, daemon test-send signal delivery, and the bounded
+  cancel -> quit -> `3000 ms` wait sequence.
+- [x] Keep canonical `SettingsDialog`, `LoggingSettingsWidget`, and
+  `NeedleSettingsWidget` in the original module with its exact existing
+  `__all__`. The residual composes module-qualified owners and contains no
+  moved-class definition, re-export, alias, wrapper, or package export.
+  Logging and needle controls are not split.
+- [x] Preserve the coordinator lifecycle. Characterization covers cloned
+  input/results; exact controls -> API -> Telegram -> jog -> coordinates ->
+  objectives -> axes -> measurement -> needles -> logging -> camera collection;
+  hidden camera lazy refresh; synchronous completion deferral; asynchronous
+  success/failure; emission before terminal completion; Apply never closing;
+  Save closing only on success; and Telegram shutdown on accept/reject.
+- [x] Preserve import, thread, persistence, and caller behavior. Fresh forward
+  and reverse imports start no thread and leave the optional third-party
+  `telegram` package unloaded. Main, auxiliary, joystick, settings manager and
+  document, API key storage, Telegram notification helpers, the settings
+  package, and all Task 12 camera/exposure owners retain all `14` protected
+  baseline blobs. The moved class ASTs are exact and the owner DAG is acyclic.
+- [x] Verification is fresh, offscreen, process-local `QLocale.c()`, and uses
+  unique temporary basetemps. New owner/coordinator/ownership tests pass `20`;
+  the focused owner plus public/exposure/API/notification gate passes `98`;
+  Settings/API/notification/joystick/Main integration passes `479` plus `2`
+  subtests; broad App/UI/camera passes `1186` plus `5` subtests; and the full
+  no-hardware/no-network suite passes `3074` plus `14` subtests with only the
+  inherited `BuiltinImporter.module_repr()` warning. Whole-tree Ruff, affected
+  format, compileall, and `git diff --check` pass.
+- [x] Metrics: the former owner was
+  `1130 LOC / 745 LLOC / 993 SLOC / CC 200 / 68 blocks / max CC 10 / MI 0.00`.
+  Residual, API, and Telegram owners are respectively
+  `457 / 292 / 391 / CC 63 / 28 blocks / MI 25.39`,
+  `388 / 227 / 351 / CC 72 / 18 / MI 18.87`, and
+  `332 / 242 / 285 / CC 65 / 22 / MI 21.88` for LOC/LLOC/SLOC/complexity/MI.
+  Aggregate complexity remains exactly `CC 200 / 68 blocks / max CC 10`;
+  Lizard has zero warnings and `0.00%` duplicate rate. Every touched Python
+  file has positive MI. All-tracked MI-zero decreases exactly `11 -> 10`,
+  active GUI/client/test MI-zero decreases `10 -> 9`, and no new MI-zero file
+  is introduced.
+- [x] Freeze the complete evidence-bearing source/test/plan snapshot. A fresh
+  fork-none independent review verified the production parity, depth, imports,
+  protected blobs, metrics, and status allowlist. Its first pass found two
+  Minor test-claim gaps: edit/global token precedence and shutdown call order.
+  Tests alone were tightened, the direct `5` and focused `98` gates passed,
+  all production hashes remained exact, and re-review returned `READY` with
+  `0 Critical / 0 Important / 0 Minor`. Nothing was staged before that final
+  verdict; the authorized next action is the exact commit
+  `refactor: separate settings dialog integrations`.
