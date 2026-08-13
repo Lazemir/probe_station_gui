@@ -1,8 +1,9 @@
-"""Ownership contracts for the first fifteen ``Main`` application domains."""
+"""Ownership contracts for all twenty-two ``Main`` application domains."""
 
 from __future__ import annotations
 
 import ast
+import hashlib
 import importlib
 import inspect
 from pathlib import Path
@@ -414,16 +415,132 @@ OWNER_SPECS = {
             "_clear_route_measurement_dialog": "(self) -> 'None'",
         },
     ),
+    "route_launch_setup": (
+        "_MainRouteLaunchSetupMixin",
+        """_start_route_measurement_session _cancel_route_measurement_session
+        _start_route_measurement _prepare_route_measurement_launch
+        _apply_gui_route_start_preflight _route_measurement_photo_preflight
+        _build_route_measurement_runner _start_route_measurement_runner
+        _route_measurement_start_plan _snapshot_active_route_design_frame
+        _design_contact_success_callback _request_design_contact_arm
+        _on_design_contact_arm_requested _arm_design_contact_on_gui
+        _on_design_contact_a_read_finished""".split(),
+    ),
+    "route_capture_run": (
+        "_MainRouteCaptureRunMixin",
+        """_route_measurement_points _capture_route_photo _route_photo_autofocus
+        _route_optical_session_token _record_route_photo
+        _capture_route_pre_contact_photo _capture_route_contact_photo
+        _record_route_contact_height _current_route_name _run_route_measurement
+        _on_route_measurement_started _request_stop_route_measurement
+        _request_route_measurement_point_correction
+        _submit_route_measurement_confirmation
+        _apply_route_measurement_confirmation_runtime
+        _submit_route_measurement_jump _request_route_contact_move
+        _run_route_contact_move _on_route_contact_move_finished""".split(),
+    ),
+    "route_control": (
+        "_MainRouteControlMixin",
+        """_request_pause_route_measurement _save_route_measurement_shift
+        _route_shift_save_plan _route_shift_adjustment_point
+        _route_shift_current_stage_xy _update_api_route_offset_from_runner
+        _apply_route_shift_save_status _interrupt_route_measurement_runner
+        _on_route_measurement_status _on_route_measurement_progress
+        _on_route_measurement_current_point_changed
+        _on_route_measurement_waiting_changed
+        _current_route_measurement_waiting_reason""".split(),
+    ),
+    "route_results": (
+        "_MainRouteResultsMixin",
+        """_on_route_measurement_result _route_record_needs_contact_attention
+        _send_route_waiting_attention_from_last_result _send_route_attention_alert
+        _on_route_measurement_recorded _format_route_measurement_record
+        _format_route_contact_diagnostics _on_route_measurement_finished
+        _join_finished_route_measurement_thread _store_final_api_route_session_status
+        _clear_finished_route_measurement_state _route_measurement_csv_record_count
+        _route_measurement_next_point_number _set_route_measurement_resume_point
+        _select_route_point_for_measurement _save_route_measurement_current_point
+        _set_route_measurement_pending _save_route_measurement_pending
+        _save_route_measurement_session_metadata _select_route_point
+        _set_route_needle_offsets _set_route_edit_enabled""".split(),
+    ),
+    "registration_focus": (
+        "_MainRegistrationFocusMixin",
+        """_add_design_source_mark _add_design_check_mark
+        _capture_stage_source_mark _capture_stage_check_mark
+        _capture_stage_registration_mark
+        _on_registration_machine_coordinate_snapshot_finished
+        _design_spacing_ratio_is_reasonable _clear_design_registration
+        _design_registration_instances _reconcile_missing_design_registration_instance
+        _select_design_registration_instance _new_design_registration_instance
+        _invalidate_design_registration _on_design_target_selected
+        _select_next_design_target _select_previous_design_target
+        _move_to_design_target _move_to_minimap_design_point
+        _open_design_window_from_minimap_point _move_to_design_coordinate
+        _find_design_focus_reference _ensure_focus_structure_bounds_worker
+        _on_focus_structure_bounds_ready _on_focus_structure_bounds_failed
+        _design_focus_optical_context_key _clear_design_focus_overlay_state
+        _use_selected_design_focus_reference _observe_design_focus_context
+        _on_registration_focus_move_finished _on_registration_focus_move_signal
+        _on_registration_focus_autofocus_finished _registration_optical_observation
+        _reset_design_focus_reference _connect_design_focus_signals
+        _refresh_design_panel""".split(),
+    ),
+    "stage_design_position": (
+        "_MainStageDesignPositionMixin",
+        """_on_stage_axis_editing_finished _apply_pending_stage_coordinate_targets
+        _start_coordinate_axis_move _start_coordinate_targets_move
+        _apply_coordinate_common_feedrate_plan _apply_coordinate_move_feedrate
+        _start_next_pending_stage_axis_move _raw_target_from_display_value
+        _resolve_stage_axis_target _api_machine_display_position
+        _api_machine_coordinate_snapshot _resolve_api_stage_axis_target
+        _stage_axis_target_limit_error _machine_axis_target_limit_error
+        _refresh_controller_status _refresh_design_position
+        _flush_pending_design_position _update_design_position
+        _log_design_position_reconcile _format_optional_point
+        _resolve_design_fov_size""".split(),
+    ),
+    "scan_sample_meter": (
+        "_MainScanSampleMeterMixin",
+        """_clear_microscope_scan_dialog _request_stop_microscope_scan
+        _show_microscope_scan_start_rejection _start_microscope_scan
+        _run_microscope_scan _on_microscope_scan_status
+        _on_microscope_scan_finished _move_to_design_window_point
+        _on_needle_height_changed _on_lcr_connection_changed
+        _on_lcr_reading_updated _on_lcr_reading_started
+        _on_lcr_reading_summary_updated _on_resistance_standby_enabled_changed
+        _resume_resistance_standby_polling _cancel_contact_seek
+        _contact_seek_measure_quality _display_a_for_needle_lowering
+        _set_design_snap_enabled _on_design_snap_enabled_changed
+        _sample_handling_active _latest_stage_z _active_sample_objective_name
+        _remember_sample_focus_from_latest _sample_load_focus_z
+        _sample_focus_cache _sample_workflow_can_start
+        _design_registration_is_active _run_sample_unload _run_sample_load
+        _on_oscillation_state_changed _save_oscillation_configuration""".split(),
+    ),
+}
+
+OWNER_SIGNATURE_SHA256 = {
+    "route_launch_setup": "5f0e999f41d060f52f710c263a90fbfb23bba5bcf67a53ee7060504cdf47c502",
+    "route_capture_run": "797e1508c3ea0b37e4cc810e6beec0fd965265496c89e73b9f9cc1dc5995cd7e",
+    "route_control": "b9362026cbe754a9837e9b6e746183939e006439332f84d821345c328e73c14d",
+    "route_results": "801f4c3ccba2cf9d04b181add711847839446de5ee3b81c10436ab47c9035389",
+    "registration_focus": "e0be34f7f38da698f1fc768e7e93dd4a9f5ef8984bc7deae535757daaf4f207c",
+    "stage_design_position": "ee80cb6ae2acb7e6fe0178537e654461b4f2cb088ccdd048c6f619584809c575",
+    "scan_sample_meter": "4981a0c643979b59f0391a315cc6083810d6418f72f150355a38a29edb619f89",
 }
 
 OWNER_SUPPORT_CLASSES = {
     "camera_pipeline": {"_MicroscopeScanLaunchSnapshot"},
     "alignment": {"_ManualAlignmentCaptureContext"},
     "design_load": {"_LoadedDesignDocument", "_PendingDesignMarkupLoad"},
+    "route_launch_setup": {"_DesignContactArmDispatch"},
 }
 
 
-def _load_owner(module_name: str) -> tuple[object, type, dict[str, str]]:
+def _load_owner(
+    module_name: str,
+) -> tuple[object, type, dict[str, str] | list[str]]:
     class_name, signatures = OWNER_SPECS[module_name]
     module = importlib.import_module(f"probe_station_gui.application.{module_name}")
     return module, getattr(module, class_name), signatures
@@ -468,6 +585,13 @@ def test_main_direct_base_order_is_exact() -> None:
         "_MainDesignLoadMixin",
         "_MainDesignMarkupMixin",
         "_MainDesignEditDialogMixin",
+        "_MainRouteLaunchSetupMixin",
+        "_MainRouteCaptureRunMixin",
+        "_MainRouteControlMixin",
+        "_MainRouteResultsMixin",
+        "_MainRegistrationFocusMixin",
+        "_MainStageDesignPositionMixin",
+        "_MainScanSampleMeterMixin",
         "QMainWindow",
     )
     assert Main.__module__ == "main"
@@ -533,6 +657,34 @@ def test_design_edit_dialog_owner_is_direct_and_canonical() -> None:
     _assert_owner("design_edit_dialog")
 
 
+def test_route_launch_setup_owner_is_direct_and_canonical() -> None:
+    _assert_owner("route_launch_setup")
+
+
+def test_route_capture_run_owner_is_direct_and_canonical() -> None:
+    _assert_owner("route_capture_run")
+
+
+def test_route_control_owner_is_direct_and_canonical() -> None:
+    _assert_owner("route_control")
+
+
+def test_route_results_owner_is_direct_and_canonical() -> None:
+    _assert_owner("route_results")
+
+
+def test_registration_focus_owner_is_direct_and_canonical() -> None:
+    _assert_owner("registration_focus")
+
+
+def test_stage_design_position_owner_is_direct_and_canonical() -> None:
+    _assert_owner("stage_design_position")
+
+
+def test_scan_sample_meter_owner_is_direct_and_canonical() -> None:
+    _assert_owner("scan_sample_meter")
+
+
 def _assert_owner(module_name: str) -> None:
     from main import Main
 
@@ -543,17 +695,26 @@ def _assert_owner(module_name: str) -> None:
         for node in ast.parse(inspect.getsource(module)).body
         if isinstance(node, ast.ClassDef)
     } == {owner.__name__, *OWNER_SUPPORT_CLASSES.get(module_name, set())}
+    expected_names = set(signatures)
     assert {
         name
         for name, value in owner.__dict__.items()
         if inspect.isroutine(value) or isinstance(value, (staticmethod, classmethod))
-    } == set(signatures)
-    for name in signatures:
+    } == expected_names
+    for name in expected_names:
         assert name not in Main.__dict__
         assert inspect.getattr_static(Main, name) is owner.__dict__[name]
-    assert {
+    actual_signatures = {
         name: str(inspect.signature(getattr(owner, name))) for name in signatures
-    } == signatures
+    }
+    if isinstance(signatures, dict):
+        assert actual_signatures == signatures
+    else:
+        payload = "\n".join(f"{name}:{actual_signatures[name]}" for name in signatures)
+        assert (
+            hashlib.sha256(payload.encode()).hexdigest()
+            == OWNER_SIGNATURE_SHA256[module_name]
+        )
 
 
 def test_application_package_has_no_owner_re_exports() -> None:

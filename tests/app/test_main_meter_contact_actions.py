@@ -3,6 +3,7 @@ import unittest
 from unittest import mock
 
 import probe_station_gui.application.api_meter_visa as api_meter_visa_owner
+import probe_station_gui.application.api_stage_contact as api_stage_contact_owner
 
 from tests.app.main_coordinate_feedrate_support import (
     LCRMeterError,
@@ -115,8 +116,8 @@ class MainMeterContactActionsTest(unittest.TestCase):
 
         window = Main.__new__(Main)
         window.lcr_controller = _FailingLcr()
-        window._api_route_meter_configuration = (
-            lambda _payload, voltages_v=None: RouteMeterConfiguration()
+        window._api_route_meter_configuration = lambda _payload, voltages_v=None: (
+            RouteMeterConfiguration()
         )
 
         response = Main._api_configure_meter(window, {})
@@ -196,7 +197,9 @@ class MainMeterContactActionsTest(unittest.TestCase):
         assert response is not None
         self.assertFalse(response["accepted"], response)
         self.assertEqual(response["status_code"], 409)
-        self.assertEqual(response["message"], "Measurement instrument task is still running.")
+        self.assertEqual(
+            response["message"], "Measurement instrument task is still running."
+        )
         self.assertEqual(lcr.wait_calls, [45.0])
         self.assertEqual(lcr.applied_configurations, [])
 
@@ -269,21 +272,21 @@ class MainMeterContactActionsTest(unittest.TestCase):
             ) -> None:
                 pass
 
-            def read_voltage_sweep_now(self, _voltages_v: list[float]) -> dict[str, object]:
+            def read_voltage_sweep_now(
+                self, _voltages_v: list[float]
+            ) -> dict[str, object]:
                 raise RuntimeError(
                     "VI_ERROR_TMO (-1073807339): Timeout expired before operation completed."
                 )
 
         window = Main.__new__(Main)
         window.lcr_controller = _FailingLcr()
-        window._api_route_meter_configuration = (
-            lambda _payload, voltages_v=None: RouteMeterConfiguration()
+        window._api_route_meter_configuration = lambda _payload, voltages_v=None: (
+            RouteMeterConfiguration()
         )
         window._api_contact_number = lambda _payload, required=False: None
         window._api_bool = lambda _payload, *names, default=False: default
-        window._api_float = (
-            lambda _payload, *names, default=0.0, minimum=None: default
-        )
+        window._api_float = lambda _payload, *names, default=0.0, minimum=None: default
         window._api_needle_feedrate = lambda _payload: None
         window._api_timestamp_utc = lambda: "2026-06-06T12:00:00+00:00"
 
@@ -311,14 +314,16 @@ class MainMeterContactActionsTest(unittest.TestCase):
             run_external_needles_action=lambda action, feedrate: calls.append(
                 ("needles", action, feedrate)
             ),
-            run_external_move_to_xy=lambda x_mm, y_mm: calls.append(("move", x_mm, y_mm)),
+            run_external_move_to_xy=lambda x_mm, y_mm: calls.append(
+                ("move", x_mm, y_mm)
+            ),
         )
         window.lcr_controller = types.SimpleNamespace()
-        window._api_route_meter_configuration = (
-            lambda _payload, voltages_v=None: RouteMeterConfiguration()
+        window._api_route_meter_configuration = lambda _payload, voltages_v=None: (
+            RouteMeterConfiguration()
         )
-        window._api_prepare_route_meter_controller = (
-            lambda _configuration, prefix="": setup_error
+        window._api_prepare_route_meter_controller = lambda _configuration, prefix="": (
+            setup_error
         )
 
         response = Main._api_raw_voltage_sweep(window, {"voltages_v": [0.0]})
@@ -326,7 +331,9 @@ class MainMeterContactActionsTest(unittest.TestCase):
         self.assertEqual(response, setup_error)
         self.assertEqual(calls, [])
 
-    def test_api_raw_voltage_sweep_returns_contact_context_rejection_unchanged(self) -> None:
+    def test_api_raw_voltage_sweep_returns_contact_context_rejection_unchanged(
+        self,
+    ) -> None:
         context_error = {
             "accepted": False,
             "status_code": 409,
@@ -339,14 +346,16 @@ class MainMeterContactActionsTest(unittest.TestCase):
             run_external_needles_action=lambda action, feedrate: calls.append(
                 ("needles", action, feedrate)
             ),
-            run_external_move_to_xy=lambda x_mm, y_mm: calls.append(("move", x_mm, y_mm)),
+            run_external_move_to_xy=lambda x_mm, y_mm: calls.append(
+                ("move", x_mm, y_mm)
+            ),
         )
         window.lcr_controller = types.SimpleNamespace()
-        window._api_route_meter_configuration = (
-            lambda _payload, voltages_v=None: RouteMeterConfiguration()
+        window._api_route_meter_configuration = lambda _payload, voltages_v=None: (
+            RouteMeterConfiguration()
         )
-        window._api_prepare_route_meter_controller = (
-            lambda _configuration, prefix="": None
+        window._api_prepare_route_meter_controller = lambda _configuration, prefix="": (
+            None
         )
         window._api_contact_context = lambda _contact_number: context_error
 
@@ -367,7 +376,9 @@ class MainMeterContactActionsTest(unittest.TestCase):
         contact = {"contact_number": 7, "label": "Pad 7"}
 
         class _Lcr:
-            def read_voltage_sweep_now(self, voltages_v: list[float]) -> dict[str, object]:
+            def read_voltage_sweep_now(
+                self, voltages_v: list[float]
+            ) -> dict[str, object]:
                 calls.append(("read", tuple(voltages_v)))
                 return {
                     "points": [
@@ -381,14 +392,16 @@ class MainMeterContactActionsTest(unittest.TestCase):
             run_external_needles_action=lambda action, feedrate: calls.append(
                 ("needles", action, feedrate)
             ),
-            run_external_move_to_xy=lambda x_mm, y_mm: calls.append(("move", x_mm, y_mm)),
+            run_external_move_to_xy=lambda x_mm, y_mm: calls.append(
+                ("move", x_mm, y_mm)
+            ),
         )
         window.lcr_controller = _Lcr()
-        window._api_route_meter_configuration = (
-            lambda _payload, voltages_v=None: RouteMeterConfiguration()
+        window._api_route_meter_configuration = lambda _payload, voltages_v=None: (
+            RouteMeterConfiguration()
         )
-        window._api_prepare_route_meter_controller = (
-            lambda _configuration, prefix="": None
+        window._api_prepare_route_meter_controller = lambda _configuration, prefix="": (
+            None
         )
         window._api_contact_context = lambda _contact_number: {
             "accepted": True,
@@ -396,9 +409,13 @@ class MainMeterContactActionsTest(unittest.TestCase):
             "contact": contact,
         }
         window._api_route_adjusted_stage_xy = lambda selected_point: (
-            1.25,
-            2.5,
-        ) if selected_point is point else (0.0, 0.0)
+            (
+                1.25,
+                2.5,
+            )
+            if selected_point is point
+            else (0.0, 0.0)
+        )
         window._api_needle_feedrate = lambda _payload: 75.0
         window._api_timestamp_utc = lambda: "2026-06-26T12:00:00+00:00"
         window._api_json_ready = lambda result: result
@@ -422,7 +439,9 @@ class MainMeterContactActionsTest(unittest.TestCase):
         self.assertTrue(response["accepted"], response)
         self.assertEqual(response["contact"], contact)
         self.assertEqual(response["voltages_v"], [0.0, 0.1])
-        self.assertEqual(response["iv_pairs"], [{"voltage_v": 0.01, "current_a": 2.0e-6}])
+        self.assertEqual(
+            response["iv_pairs"], [{"voltage_v": 0.01, "current_a": 2.0e-6}]
+        )
         self.assertEqual(
             calls,
             [
@@ -437,11 +456,15 @@ class MainMeterContactActionsTest(unittest.TestCase):
             ],
         )
 
-    def test_api_raw_voltage_sweep_with_lift_after_false_leaves_needles_down(self) -> None:
+    def test_api_raw_voltage_sweep_with_lift_after_false_leaves_needles_down(
+        self,
+    ) -> None:
         calls: list[tuple[object, ...]] = []
 
         class _Lcr:
-            def read_voltage_sweep_now(self, voltages_v: list[float]) -> dict[str, object]:
+            def read_voltage_sweep_now(
+                self, voltages_v: list[float]
+            ) -> dict[str, object]:
                 calls.append(("read", tuple(voltages_v)))
                 return {"points": []}
 
@@ -451,14 +474,16 @@ class MainMeterContactActionsTest(unittest.TestCase):
             run_external_needles_action=lambda action, feedrate: calls.append(
                 ("needles", action, feedrate)
             ),
-            run_external_move_to_xy=lambda x_mm, y_mm: calls.append(("move", x_mm, y_mm)),
+            run_external_move_to_xy=lambda x_mm, y_mm: calls.append(
+                ("move", x_mm, y_mm)
+            ),
         )
         window.lcr_controller = _Lcr()
-        window._api_route_meter_configuration = (
-            lambda _payload, voltages_v=None: RouteMeterConfiguration()
+        window._api_route_meter_configuration = lambda _payload, voltages_v=None: (
+            RouteMeterConfiguration()
         )
-        window._api_prepare_route_meter_controller = (
-            lambda _configuration, prefix="": None
+        window._api_prepare_route_meter_controller = lambda _configuration, prefix="": (
+            None
         )
         window._api_needle_feedrate = lambda _payload: 55.0
         window._api_timestamp_utc = lambda: "2026-06-26T12:00:00+00:00"
@@ -499,27 +524,31 @@ class MainMeterContactActionsTest(unittest.TestCase):
         logged: list[str] = []
 
         class _Lcr:
-            def read_voltage_sweep_now(self, voltages_v: list[float]) -> dict[str, object]:
+            def read_voltage_sweep_now(
+                self, voltages_v: list[float]
+            ) -> dict[str, object]:
                 calls.append(("read", tuple(voltages_v)))
                 return {"points": []}
 
         def run_needles_action(action: str, feedrate: float | None) -> None:
             calls.append(("needles", action, feedrate))
             if action == "lift":
-                raise main_module.StageControllerError("lift failed")
+                raise api_stage_contact_owner.StageControllerError("lift failed")
 
         window = Main.__new__(Main)
         window.stage_controller = types.SimpleNamespace(
             reserve_external_task=lambda label: _stage_lease(label, calls),
             run_external_needles_action=run_needles_action,
-            run_external_move_to_xy=lambda x_mm, y_mm: calls.append(("move", x_mm, y_mm)),
+            run_external_move_to_xy=lambda x_mm, y_mm: calls.append(
+                ("move", x_mm, y_mm)
+            ),
         )
         window.lcr_controller = _Lcr()
-        window._api_route_meter_configuration = (
-            lambda _payload, voltages_v=None: RouteMeterConfiguration()
+        window._api_route_meter_configuration = lambda _payload, voltages_v=None: (
+            RouteMeterConfiguration()
         )
-        window._api_prepare_route_meter_controller = (
-            lambda _configuration, prefix="": None
+        window._api_prepare_route_meter_controller = lambda _configuration, prefix="": (
+            None
         )
         window._api_needle_feedrate = lambda _payload: 55.0
         window._api_timestamp_utc = lambda: "2026-06-26T12:00:00+00:00"
@@ -564,7 +593,9 @@ class MainMeterContactActionsTest(unittest.TestCase):
 
     def test_api_raw_voltage_sweep_final_lift_lcr_error_is_not_swallowed(self) -> None:
         class _Lcr:
-            def read_voltage_sweep_now(self, _voltages_v: list[float]) -> dict[str, object]:
+            def read_voltage_sweep_now(
+                self, _voltages_v: list[float]
+            ) -> dict[str, object]:
                 return {"points": []}
 
         def run_needles_action(action: str, _feedrate: float | None) -> None:
@@ -603,11 +634,11 @@ class MainMeterContactActionsTest(unittest.TestCase):
         stage = _Stage()
         window.stage_controller = stage
         window.lcr_controller = _Lcr()
-        window._api_route_meter_configuration = (
-            lambda _payload, voltages_v=None: RouteMeterConfiguration()
+        window._api_route_meter_configuration = lambda _payload, voltages_v=None: (
+            RouteMeterConfiguration()
         )
-        window._api_prepare_route_meter_controller = (
-            lambda _configuration, prefix="": None
+        window._api_prepare_route_meter_controller = lambda _configuration, prefix="": (
+            None
         )
         window._api_needle_feedrate = lambda _payload: 55.0
         window._api_timestamp_utc = lambda: "2026-06-26T12:00:00+00:00"
@@ -644,7 +675,9 @@ class MainMeterContactActionsTest(unittest.TestCase):
             run_external_needles_action=lambda action, feedrate: calls.append(
                 ("needles", action, feedrate)
             ),
-            run_external_move_to_xy=lambda x_mm, y_mm: calls.append(("move", x_mm, y_mm)),
+            run_external_move_to_xy=lambda x_mm, y_mm: calls.append(
+                ("move", x_mm, y_mm)
+            ),
         )
         window._api_contact_context = lambda _contact_number: {
             "accepted": True,
@@ -652,9 +685,13 @@ class MainMeterContactActionsTest(unittest.TestCase):
             "contact": contact,
         }
         window._api_route_adjusted_stage_xy = lambda selected_point: (
-            1.25,
-            2.5,
-        ) if selected_point is point else (0.0, 0.0)
+            (
+                1.25,
+                2.5,
+            )
+            if selected_point is point
+            else (0.0, 0.0)
+        )
         window._api_needle_feedrate = lambda _payload: 75.0
         window._api_timestamp_utc = lambda: "2026-06-26T12:10:00+00:00"
         window._api_route_offset_xy = (0.5, -0.25)
@@ -729,7 +766,9 @@ class MainMeterContactActionsTest(unittest.TestCase):
 
         self.assertIs(response, rejection)
 
-    def test_api_move_to_contact_with_lift_after_false_leaves_needles_down(self) -> None:
+    def test_api_move_to_contact_with_lift_after_false_leaves_needles_down(
+        self,
+    ) -> None:
         calls: list[tuple[object, ...]] = []
         point = object()
 
@@ -739,7 +778,9 @@ class MainMeterContactActionsTest(unittest.TestCase):
             run_external_needles_action=lambda action, feedrate: calls.append(
                 ("needles", action, feedrate)
             ),
-            run_external_move_to_xy=lambda x_mm, y_mm: calls.append(("move", x_mm, y_mm)),
+            run_external_move_to_xy=lambda x_mm, y_mm: calls.append(
+                ("move", x_mm, y_mm)
+            ),
         )
         window._api_contact_context = lambda _contact_number: {
             "accepted": True,
@@ -779,14 +820,16 @@ class MainMeterContactActionsTest(unittest.TestCase):
             ],
         )
 
-    def test_api_move_to_contact_stage_error_keeps_contact_and_finishes_task(self) -> None:
+    def test_api_move_to_contact_stage_error_keeps_contact_and_finishes_task(
+        self,
+    ) -> None:
         calls: list[tuple[object, ...]] = []
         point = object()
         contact = {"contact_number": 7, "label": "Pad 7"}
 
         def run_move(_x_mm: float, _y_mm: float) -> None:
             calls.append(("move", 1.25, 2.5))
-            raise main_module.StageControllerError("Stage is busy.")
+            raise api_stage_contact_owner.StageControllerError("Stage is busy.")
 
         window = Main.__new__(Main)
         window.stage_controller = types.SimpleNamespace(
@@ -831,13 +874,15 @@ class MainMeterContactActionsTest(unittest.TestCase):
         def run_needles_action(action: str, feedrate: float | None) -> None:
             calls.append(("needles", action, feedrate))
             if action == "lift":
-                raise main_module.StageControllerError("lift failed")
+                raise api_stage_contact_owner.StageControllerError("lift failed")
 
         window = Main.__new__(Main)
         window.stage_controller = types.SimpleNamespace(
             reserve_external_task=lambda label: _stage_lease(label, calls),
             run_external_needles_action=run_needles_action,
-            run_external_move_to_xy=lambda x_mm, y_mm: calls.append(("move", x_mm, y_mm)),
+            run_external_move_to_xy=lambda x_mm, y_mm: calls.append(
+                ("move", x_mm, y_mm)
+            ),
         )
         window._api_contact_context = lambda _contact_number: {
             "accepted": True,
@@ -1073,13 +1118,14 @@ class MainMeterContactActionsTest(unittest.TestCase):
         contact = {"contact_number": 7, "label": "Pad 107"}
         context_calls: list[int] = []
         window = Main.__new__(Main)
-        window._api_contact_context = lambda contact_number: context_calls.append(
-            int(contact_number)
-        ) or {
-            "accepted": True,
-            "point": point,
-            "contact": contact,
-        }
+        window._api_contact_context = lambda contact_number: (
+            context_calls.append(int(contact_number))
+            or {
+                "accepted": True,
+                "point": point,
+                "contact": contact,
+            }
+        )
         window._api_ensure_measurement_instrument_connected = lambda: None
 
         response = Main._api_check_contact(
@@ -1117,12 +1163,8 @@ class MainMeterContactActionsTest(unittest.TestCase):
             AUTO_CONTACT_SEEK_MAX_TOTAL_MM = (
                 RouteMeasurementRunner.AUTO_CONTACT_SEEK_MAX_TOTAL_MM
             )
-            AUTO_CONTACT_SEEK_STEP_MM = (
-                RouteMeasurementRunner.AUTO_CONTACT_SEEK_STEP_MM
-            )
-            DEFAULT_CONTACT_SETTLE_S = (
-                RouteMeasurementRunner.DEFAULT_CONTACT_SETTLE_S
-            )
+            AUTO_CONTACT_SEEK_STEP_MM = RouteMeasurementRunner.AUTO_CONTACT_SEEK_STEP_MM
+            DEFAULT_CONTACT_SETTLE_S = RouteMeasurementRunner.DEFAULT_CONTACT_SETTLE_S
 
             def __init__(self, **kwargs) -> None:
                 created.append(dict(kwargs))
@@ -1186,7 +1228,9 @@ class MainMeterContactActionsTest(unittest.TestCase):
         window = Main.__new__(Main)
         window.stage_controller = object()
         window.lcr_controller = object()
-        window.route_measurement_status = types.SimpleNamespace(emit=lambda _message: None)
+        window.route_measurement_status = types.SimpleNamespace(
+            emit=lambda _message: None
+        )
         window._api_contact_context = lambda _contact: {
             "accepted": True,
             "point": point,
@@ -1197,8 +1241,8 @@ class MainMeterContactActionsTest(unittest.TestCase):
         window._api_timestamp_utc = lambda: "2026-06-26T10:00:00+00:00"
         contact_callback = object()
         window._snapshot_active_route_design_frame = lambda: "frame-snapshot"
-        window._design_contact_success_callback = (
-            lambda snapshot: contact_callback if snapshot == "frame-snapshot" else None
+        window._design_contact_success_callback = lambda snapshot: (
+            contact_callback if snapshot == "frame-snapshot" else None
         )
         window._telegram_runtime = _telegram_runtime_stub()
 
@@ -1260,7 +1304,9 @@ class MainMeterContactActionsTest(unittest.TestCase):
         self.assertTrue(seek_response["accepted"])
         self.assertTrue(seek_response["contact_found"])
 
-    def test_api_contact_seek_failed_seek_sends_route_attention_alert_once(self) -> None:
+    def test_api_contact_seek_failed_seek_sends_route_attention_alert_once(
+        self,
+    ) -> None:
         point = RouteMeasurementPoint(
             index=7,
             point_id="p007",
@@ -1278,12 +1324,8 @@ class MainMeterContactActionsTest(unittest.TestCase):
             AUTO_CONTACT_SEEK_MAX_TOTAL_MM = (
                 RouteMeasurementRunner.AUTO_CONTACT_SEEK_MAX_TOTAL_MM
             )
-            AUTO_CONTACT_SEEK_STEP_MM = (
-                RouteMeasurementRunner.AUTO_CONTACT_SEEK_STEP_MM
-            )
-            DEFAULT_CONTACT_SETTLE_S = (
-                RouteMeasurementRunner.DEFAULT_CONTACT_SETTLE_S
-            )
+            AUTO_CONTACT_SEEK_STEP_MM = RouteMeasurementRunner.AUTO_CONTACT_SEEK_STEP_MM
+            DEFAULT_CONTACT_SETTLE_S = RouteMeasurementRunner.DEFAULT_CONTACT_SETTLE_S
 
             def __init__(self, **_kwargs) -> None:
                 pass
@@ -1323,7 +1365,9 @@ class MainMeterContactActionsTest(unittest.TestCase):
         window = Main.__new__(Main)
         window.stage_controller = object()
         window.lcr_controller = object()
-        window.route_measurement_status = types.SimpleNamespace(emit=lambda _message: None)
+        window.route_measurement_status = types.SimpleNamespace(
+            emit=lambda _message: None
+        )
         window._api_contact_context = lambda _contact: {
             "accepted": True,
             "point": point,
@@ -1334,8 +1378,8 @@ class MainMeterContactActionsTest(unittest.TestCase):
         window._api_timestamp_utc = lambda: "2026-06-26T10:05:00+00:00"
         window._snapshot_active_route_design_frame = lambda: "frame-snapshot"
         window._telegram_runtime = _telegram_runtime_stub(
-            send_alert=lambda key, text, *, attach_photo=False, reply_markup=None: alerts.append(
-                (key, text, bool(attach_photo), reply_markup)
+            send_alert=lambda key, text, *, attach_photo=False, reply_markup=None: (
+                alerts.append((key, text, bool(attach_photo), reply_markup))
             ),
             route_actions_markup="actions",
         )

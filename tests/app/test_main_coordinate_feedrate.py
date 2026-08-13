@@ -8,6 +8,7 @@ import unittest
 from unittest import mock
 from pathlib import Path
 
+from probe_station_gui.route.measurement import RouteMeasurementPoint
 from probe_station_gui.route.point_execution import PointPhotoSettings
 from tests.app.main_coordinate_feedrate_support import (
     Main,
@@ -16,7 +17,6 @@ from tests.app.main_coordinate_feedrate_support import (
     RouteContactHeightRecord,
     RouteContactQuality,
     RouteContactSeekResult,
-    RouteMeasurementPoint,
     RouteMeasurementRecord,
     RoutePhotoRecord,
     Settings,
@@ -25,10 +25,10 @@ from tests.app.main_coordinate_feedrate_support import (
     _FakeRouteMeasurementRunner,
     _FakeThread,
     _telegram_runtime_stub,
-    _telegram_test_photo_bytes,
     main_module,
     request_route_measurement_for_point,
 )
+from tests.app.main_route_session_support import _telegram_test_photo_bytes
 from probe_station_gui.views import (
     main_window_needle_calibration as needle_calibration_ui,
 )
@@ -144,8 +144,8 @@ assert image.height() == 4
             route_photos=types.SimpleNamespace(
                 take_pending_contact_photos=lambda: (before, after)
             ),
-            send_bot_message=lambda message, *, photo=None, reply_markup=None: sent.append(
-                (message, photo, reply_markup)
+            send_bot_message=lambda message, *, photo=None, reply_markup=None: (
+                sent.append((message, photo, reply_markup))
             ),
         )
         Main._on_route_measurement_result(
@@ -211,9 +211,7 @@ assert image.height() == 4
         route_photos._last_contact_failure_photo = after
         window._telegram_runtime = _telegram_runtime_stub(
             route_photos=route_photos,
-            send_alert=lambda key, text, **kwargs: alerts.append(
-                (key, text, kwargs)
-            ),
+            send_alert=lambda key, text, **kwargs: alerts.append((key, text, kwargs)),
             route_actions_markup="actions",
         )
         window.design_navigator_panel = None

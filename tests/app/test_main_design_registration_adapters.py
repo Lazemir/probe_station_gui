@@ -9,7 +9,7 @@ import pytest
 from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtWidgets import QApplication
 
-from probe_station_gui.application import api_meter_visa, api_route_scan
+from probe_station_gui.application import api_meter_visa, api_route_scan, design_markup
 from probe_station_gui.application.alignment import _ManualAlignmentCaptureContext
 from probe_station_gui.coordinates.coordinator_model import (
     AutofocusResult,
@@ -107,7 +107,7 @@ def test_design_unload_closes_coordinate_owner_before_workspace_adoption(
         return plan
 
     monkeypatch.setattr(
-        main_module.route_editing,
+        design_markup.route_editing,
         "unload_design_document",
         unload_candidate,
     )

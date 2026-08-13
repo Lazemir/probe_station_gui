@@ -121,12 +121,13 @@ Each owner is a private class in `probe_station_gui/application/`. Ranges refer 
 - Create: the final seven owner files from `route_launch_setup.py` through `scan_sample_meter.py`.
 - Modify: `main.py` and canonical route/registration/stage/scan tests.
 
-- [ ] Run the full route safety baseline: Pause request/Ack, pending-Pause Interrupt path, checkpoint propagation, autofocus safe-Z restore, photo/contact/external-measurement stop, shutdown and optical session cleanup.
-- [ ] Extract route owners vertically in launch/capture/control/result order. Run the safety selection after every owner, not only at the end.
-- [ ] Extract registration, stage/design position, and scan/sample/meter owners; preserve BlockingQueuedConnection and QueuedConnection edges.
-- [ ] Keep `closeEvent` in `Main` and preserve the existing ordered shutdown adapter.
-- [ ] Verify exact mapped method count, all descriptor identities, no duplicates/facades, and MI > 0 without comment/docstring bonus.
-- [ ] Commit `refactor: separate main route and runtime domains` after independent task review C0/I0/M0.
+- [x] Run the full route safety baseline: Pause request/Ack, pending-Pause Interrupt path, checkpoint propagation, autofocus safe-Z restore, photo/contact/external-measurement stop, shutdown and optical session cleanup. Baseline and final selection: 156 passed plus 5 subtests.
+- [x] Extract route owners vertically in launch/capture/control/result order. The 156-test safety selection plus 5 subtests passed after every owner.
+- [x] Extract registration, stage/design position, and scan/sample/meter owners; preserved the existing `BlockingQueuedConnection` and `QueuedConnection` wiring in AST-exact `Main.__init__`.
+- [x] Keep `closeEvent` in `Main` and preserve the existing ordered shutdown adapter. Shutdown tests passed in the safety and proportional gates.
+- [x] Verify exact mapped method count, all descriptor identities, no duplicates/facades, and MI > 0 without comment/docstring bonus. All 157 moved methods and the support DTO are exact modulo owner qualification; `main.py` is 13.73 normal / 9.19 stripped MI and the tracked-plus-new scan has zero MI-nonpositive files.
+- [x] Resolve Task 5 review feedback by splitting the cohesive route/session support suffix into `tests/app/main_route_session_support.py`; the original support improved from 6.22 / 0.00 to positive normal/stripped MI, and the new support is positive in both modes without aliases or re-exports.
+- [x] Commit `refactor: separate main route and runtime domains` after independent task review C0/I0/M0 (READY after the stripped-MI support split closed the review Important).
 
 ## Task 6: Global acceptance and final review
 

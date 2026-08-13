@@ -7,7 +7,12 @@ from pathlib import Path
 from unittest import mock
 
 import probe_station_gui.application.api_route_scan as api_route_scan_owner
+import probe_station_gui.application.design_edit_dialog as design_edit_dialog_owner
+import probe_station_gui.application.route_launch_setup as route_launch_owner
 from probe_station_gui.design.session import DesignSession
+from probe_station_gui.instruments.meters.lcr_session_backend import LCRMeterError
+from probe_station_gui.route.measurement import RouteExternalMeasurementSessionRunner
+from probe_station_gui.route.session_start import snapshot_route_design_frame
 from probe_station_gui.route.operation_modes import (
     ROUTE_OPERATION_MEASURE,
     ROUTE_OPERATION_PHOTO,
@@ -16,24 +21,26 @@ from probe_station_gui.route.operation_modes import (
 from tests.app.main_coordinate_feedrate_support import (
     Main,
     RouteMeasurementPointRequestCallbacks,
-    RouteContactQualityLimits,
-    RouteMeasurementPoint,
-    RouteMeasurementRunConfiguration,
     RouteMeasurementRunner,
     RouteMeasurementSettingsStore,
-    RouteMeterConfiguration,
     _FakeAliveThread,
     _FakeRouteDialogOpenState,
     _FakeRouteMeasurementRunner,
     _FakeThread,
+    _telegram_runtime_stub,
+    main_module,
+    request_route_measurement_for_point,
+)
+from tests.app.main_route_session_support import (
+    RouteContactQualityLimits,
+    RouteMeasurementPoint,
+    RouteMeasurementRunConfiguration,
+    RouteMeterConfiguration,
     _RouteStartLcr,
     _make_route_start_main,
     _route_start_configuration,
     _route_start_point,
-    _telegram_runtime_stub,
     _telegram_test_photo_bytes,
-    main_module,
-    request_route_measurement_for_point,
 )
 
 
@@ -44,7 +51,7 @@ def _install_usable_design_frame(window: Main) -> object:
         frame_id="design-a",
         frame_version=4,
     )
-    route_frame = main_module.snapshot_route_design_frame(
+    route_frame = snapshot_route_design_frame(
         frame_id="design-a",
         frame_version=4,
     )
@@ -95,7 +102,7 @@ class MainRouteMeasurementSessionTest(unittest.TestCase):
 
         with (
             mock.patch.object(
-                main_module.route_editing,
+                design_edit_dialog_owner.route_editing,
                 "load_measurement_route",
                 side_effect=load_route,
             ),
@@ -345,7 +352,7 @@ class MainRouteMeasurementSessionTest(unittest.TestCase):
                 )
                 window._route_measurement_current_point = 1
                 window._snapshot_active_route_design_frame = lambda: (
-                    main_module.snapshot_route_design_frame(
+                    snapshot_route_design_frame(
                         frame_id="design-a",
                         frame_version=4,
                     )
@@ -626,8 +633,8 @@ class MainRouteMeasurementSessionTest(unittest.TestCase):
         window._api_structure_number_for_measurement_point = lambda _point: 17
         window._telegram_runtime = _telegram_runtime_stub(
             route_photos=route_telegram,
-            send_bot_message=lambda message, *, photo=None, reply_markup=None: sent.append(
-                (message, photo, reply_markup)
+            send_bot_message=lambda message, *, photo=None, reply_markup=None: (
+                sent.append((message, photo, reply_markup))
             ),
         )
 
@@ -1022,7 +1029,7 @@ class MainRouteMeasurementSessionTest(unittest.TestCase):
             needle_2_design=(99.0, 199.0),
         )
         stage = types.SimpleNamespace()
-        old_runner = main_module.RouteMeasurementRunner(
+        old_runner = RouteMeasurementRunner(
             points=[point],
             csv_path="NUL",
             stage_controller=stage,
@@ -1095,9 +1102,7 @@ class MainRouteMeasurementSessionTest(unittest.TestCase):
 
         self.assertTrue(response["accepted"], response)
         self.assertTrue(old_thread.joined)
-        self.assertIsInstance(
-            new_runner, main_module.RouteExternalMeasurementSessionRunner
-        )
+        self.assertIsInstance(new_runner, RouteExternalMeasurementSessionRunner)
         self.assertEqual(new_runner.route_offset_xy(), (0.125, -0.25))
         self.assertEqual(lcr.configurations, [RouteMeterConfiguration()])
         self.assertEqual(response["state"], "waiting_paused")
@@ -1124,7 +1129,7 @@ class MainRouteMeasurementSessionTest(unittest.TestCase):
             "current_contact": {"label": "P004"},
         }
 
-        class _FakeExternalRunner(main_module.RouteExternalMeasurementSessionRunner):
+        class _FakeExternalRunner(RouteExternalMeasurementSessionRunner):
             def __init__(self) -> None:
                 pass
 
@@ -1156,7 +1161,7 @@ class MainRouteMeasurementSessionTest(unittest.TestCase):
             "current_contact": {"label": "P004"},
         }
 
-        class _FakeExternalRunner(main_module.RouteExternalMeasurementSessionRunner):
+        class _FakeExternalRunner(RouteExternalMeasurementSessionRunner):
             def __init__(self) -> None:
                 pass
 
@@ -1182,7 +1187,7 @@ class MainRouteMeasurementSessionTest(unittest.TestCase):
         self,
     ) -> None:
         point = _route_start_point()
-        runner = main_module.RouteMeasurementRunner(
+        runner = RouteMeasurementRunner(
             points=[point],
             csv_path="NUL",
             stage_controller=types.SimpleNamespace(),
@@ -1288,7 +1293,7 @@ class MainRouteMeasurementSessionTest(unittest.TestCase):
                 "RouteExternalMeasurementSessionRunner",
                 _FakeExternalRunner,
             ),
-            mock.patch.object(main_module.threading, "Thread", _FakeApiThread),
+            mock.patch.object(api_route_scan_owner.threading, "Thread", _FakeApiThread),
         ):
             response = Main._api_start_route_session(window, {})
 
@@ -1425,13 +1430,13 @@ class MainRouteMeasurementSessionTest(unittest.TestCase):
         configuration = _route_start_configuration(
             operation_mode=ROUTE_OPERATION_PHOTO,
         )
-        original_thread = main_module.threading.Thread
+        original_thread = route_launch_owner.threading.Thread
         _FakeThread.instances = []
-        main_module.threading.Thread = _FakeThread
+        route_launch_owner.threading.Thread = _FakeThread
         try:
             Main._start_route_measurement(window, configuration)
         finally:
-            main_module.threading.Thread = original_thread
+            route_launch_owner.threading.Thread = original_thread
 
         self.assertEqual(lcr.configurations, [])
         self.assertEqual(lcr.runtime_configurations, [])
@@ -1445,11 +1450,11 @@ class MainRouteMeasurementSessionTest(unittest.TestCase):
         window, _statuses, _telegrams, _dialog, _lcr, _camera_calls = (
             _make_route_start_main()
         )
-        start_frame = main_module.snapshot_route_design_frame(
+        start_frame = snapshot_route_design_frame(
             frame_id="design-a",
             frame_version=4,
         )
-        switched_frame = main_module.snapshot_route_design_frame(
+        switched_frame = snapshot_route_design_frame(
             frame_id="design-b",
             frame_version=9,
         )
@@ -1470,7 +1475,7 @@ class MainRouteMeasurementSessionTest(unittest.TestCase):
         self.assertIs(captured[0].design_frame_snapshot, start_frame)
 
     def test_route_start_meter_setup_failure_clears_dialog_running_state(self) -> None:
-        lcr = _RouteStartLcr(error=main_module.LCRMeterError("meter offline"))
+        lcr = _RouteStartLcr(error=LCRMeterError("meter offline"))
         window, statuses, _telegrams, dialog, _lcr, _camera_calls = (
             _make_route_start_main(lcr_controller=lcr)
         )
@@ -1579,9 +1584,9 @@ class MainRouteMeasurementSessionTest(unittest.TestCase):
                 max_relative_p95_abs_step=0.12,
             ),
         )
-        original_thread = main_module.threading.Thread
+        original_thread = route_launch_owner.threading.Thread
         _FakeThread.instances = []
-        main_module.threading.Thread = _FakeThread
+        route_launch_owner.threading.Thread = _FakeThread
         try:
             Main._start_route_measurement(
                 window,
@@ -1589,7 +1594,7 @@ class MainRouteMeasurementSessionTest(unittest.TestCase):
                 wait_before_first_point=True,
             )
         finally:
-            main_module.threading.Thread = original_thread
+            route_launch_owner.threading.Thread = original_thread
 
         self.assertEqual(camera_calls, [])
         self.assertEqual(telegrams, [])
@@ -1740,7 +1745,7 @@ class MainRouteMeasurementSessionTest(unittest.TestCase):
                 self.runtime_settings = dict(kwargs)
 
             def apply_meter_configuration(self, _configuration) -> None:
-                raise main_module.LCRMeterError("meter offline")
+                raise LCRMeterError("meter offline")
 
             def submit_confirmation(self, action: str) -> bool:
                 self.confirmations.append(str(action))

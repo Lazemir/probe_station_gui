@@ -11,11 +11,13 @@ from tests.app.main_coordinate_feedrate_support import (
     _FakeStageController,
     _FakeStagePositionPanel,
     _coordinate_target_state,
-    _make_cancel_main,
     _make_main,
-    _make_stage_position_display_main,
     api_move_feedrate,
     main_module,
+)
+from tests.app.main_route_session_support import (
+    _make_cancel_main,
+    _make_stage_position_display_main,
 )
 from probe_station_gui.stage import move_lifecycle as stage_move_lifecycle
 from probe_station_gui.settings.axis_calibration_config import (
@@ -28,7 +30,9 @@ from probe_station_gui.coordinates.coordinator_model import (
 )
 from probe_station_gui.stage.exact_step import ExactStepAccumulator
 from probe_station_gui.views import main_window_homing as homing_ui
-from probe_station_gui.views import main_window_needle_calibration as needle_calibration_ui
+from probe_station_gui.views import (
+    main_window_needle_calibration as needle_calibration_ui,
+)
 from probe_station_gui.views import (
     main_window_stage_position_panel as stage_position_panel_adapter,
 )
@@ -64,12 +68,10 @@ class MainStageCoordinateControlsTest(unittest.TestCase):
         window._exact_step_accumulator = ExactStepAccumulator(Main.STAGE_AXIS_NAMES)
         window._exact_step_pending_axes = set()
         window._exact_step_window_elapsed = False
-        timer = self._ExactStepTimer(
-            lambda: Main._on_exact_step_window_elapsed(window)
-        )
+        timer = self._ExactStepTimer(lambda: Main._on_exact_step_window_elapsed(window))
         window._exact_step_timer = timer
-        window._raw_target_from_display_value = (
-            lambda _axis, display_target: float(display_target)
+        window._raw_target_from_display_value = lambda _axis, display_target: float(
+            display_target
         )
         return timer
 
@@ -150,12 +152,12 @@ class MainStageCoordinateControlsTest(unittest.TestCase):
             "X coordinate. Enter targets and press Apply. Move feedrate: 123.0 mm/min.",
         )
 
-    def test_unavailable_calibrated_coordinate_does_not_break_status_update(self) -> None:
+    def test_unavailable_calibrated_coordinate_does_not_break_status_update(
+        self,
+    ) -> None:
         window, stage_controller = _make_stage_position_display_main()
-        stage_controller.calibrated_axis_display_value = (
-            lambda axis, value: (_ for _ in ()).throw(
-                RuntimeError(f"{axis} unavailable at {value}")
-            )
+        stage_controller.calibrated_axis_display_value = lambda axis, value: (
+            (_ for _ in ()).throw(RuntimeError(f"{axis} unavailable at {value}"))
             if axis == "X"
             else value
         )
@@ -168,7 +170,9 @@ class MainStageCoordinateControlsTest(unittest.TestCase):
         self.assertNotIn("X", window._stage_axis_display_values)
         self.assertEqual(window._stage_axis_display_values["Y"], 2.0)
 
-    def test_stage_position_display_preserves_focused_pending_coordinate_edit(self) -> None:
+    def test_stage_position_display_preserves_focused_pending_coordinate_edit(
+        self,
+    ) -> None:
         window, _stage_controller = _make_stage_position_display_main()
         x_field = window._stage_axis_fields["X"]
         x_field.has_focus = True
@@ -270,7 +274,9 @@ class MainStageCoordinateControlsTest(unittest.TestCase):
 
         self.assertEqual(panel.pending_targets, {})
         self.assertEqual(panel.pending_only_clear_count, 1)
-        self.assertEqual(statuses, ["Cleared pending coordinate edits after input mode change.|2000"])
+        self.assertEqual(
+            statuses, ["Cleared pending coordinate edits after input mode change.|2000"]
+        )
         self.assertEqual(y_field.text(), "7.777")
         self.assertTrue(y_field.isModified())
 
@@ -324,7 +330,7 @@ class MainStageCoordinateControlsTest(unittest.TestCase):
             Main._on_manual_axis_move_requested(window, "X", 0.001, "G91", 120.0)
 
         self.assertEqual(render_events, ["raw", "selected"])
-        self.assertEqual(projection_calls, [(('X', 1.001),)])
+        self.assertEqual(projection_calls, [(("X", 1.001),)])
 
     def test_saving_needle_down_target_does_not_reapply_full_settings(self) -> None:
         window = Main.__new__(Main)
@@ -339,8 +345,8 @@ class MainStageCoordinateControlsTest(unittest.TestCase):
         window.settings_manager = settings_manager
         window.contact_calibration_window = None
         window._apply_settings = lambda: full_apply_called.append(True)
-        window._show_status = (
-            lambda message, _timeout_ms=None: statuses.append(str(message))
+        window._show_status = lambda message, _timeout_ms=None: statuses.append(
+            str(message)
         )
 
         needle_calibration_ui.save_needle_down_position_from_lowering(window, 2.885)
@@ -506,7 +512,11 @@ class MainStageCoordinateControlsTest(unittest.TestCase):
         window, _stage_controller, _joystick, _timer, _statuses = _make_main(77.0)
 
         self.assertEqual(
-            api_move_feedrate(None, current_feedrate=window._current_linear_feedrate(), min_feedrate=window.MIN_FEEDRATE_MM_MIN),
+            api_move_feedrate(
+                None,
+                current_feedrate=window._current_linear_feedrate(),
+                min_feedrate=window.MIN_FEEDRATE_MM_MIN,
+            ),
             77.0,
         )
 
@@ -1064,7 +1074,9 @@ class MainStageCoordinateControlsTest(unittest.TestCase):
         self.assertEqual(stage_controller.requests[0][1], 120.0)
         self.assertEqual(window._exact_step_accumulator.targets, {})
 
-    def test_step_press_during_motion_queues_one_followup_from_active_target(self) -> None:
+    def test_step_press_during_motion_queues_one_followup_from_active_target(
+        self,
+    ) -> None:
         window, stage_controller, _joystick, _timer, _statuses = _make_main(120.0)
         exact_timer = self._prepare_exact_step(window)
         window._stage_axis_display_values["X"] = 1.0
@@ -1094,7 +1106,9 @@ class MainStageCoordinateControlsTest(unittest.TestCase):
         self.assertEqual(len(stage_controller.requests), 2)
         self.assertAlmostEqual(stage_controller.requests[0][0]["X"], 1.001)
         self.assertAlmostEqual(stage_controller.requests[1][0]["X"], 1.003)
-        self.assertEqual([request[1] for request in stage_controller.requests], [120.0, 120.0])
+        self.assertEqual(
+            [request[1] for request in stage_controller.requests], [120.0, 120.0]
+        )
 
     def test_opposite_step_press_that_returns_to_reached_target_sends_no_followup(
         self,
@@ -1207,10 +1221,7 @@ class MainStageCoordinateControlsTest(unittest.TestCase):
         self.assertEqual(window._coordinate_targets.effective_feedrate, 180.0)
         self.assertTrue(advances)
         self.assertTrue(
-            any(
-                "Active coordinate move feedrate: F180.0." in item
-                for item in statuses
-            )
+            any("Active coordinate move feedrate: F180.0." in item for item in statuses)
         )
 
     def test_coordinate_move_feedrate_change_uses_active_axis_set(self) -> None:
@@ -1267,9 +1278,7 @@ class MainStageCoordinateControlsTest(unittest.TestCase):
         self.assertEqual(window._coordinate_targets.active_axis, "X")
         self.assertEqual(window._coordinate_targets.active_axes, {"X"})
         self.assertEqual(window._coordinate_targets.programmed_feedrate, 180.0)
-        self.assertFalse(
-            any("Operation cancelled." in item for item in statuses)
-        )
+        self.assertFalse(any("Operation cancelled." in item for item in statuses))
 
     def test_coordinate_move_feedrate_reissue_failure_keeps_tracking(self) -> None:
         window, stage_controller, _joystick, _timer, statuses = _make_main(120.0)
@@ -1282,8 +1291,8 @@ class MainStageCoordinateControlsTest(unittest.TestCase):
         stage_controller.next_absolute_jog_accept = False
         stage_controller.busy = True
         scheduled_delays: list[tuple[int, ...]] = []
-        window._schedule_status_refreshes = (
-            lambda delays: scheduled_delays.append(tuple(delays))
+        window._schedule_status_refreshes = lambda delays: scheduled_delays.append(
+            tuple(delays)
         )
         window._advance_coordinate_move_prediction = lambda: None
 
@@ -1341,7 +1350,9 @@ class MainStageCoordinateControlsTest(unittest.TestCase):
         self.assertEqual(paused, [True])
         self.assertEqual(published, [(1.0, 2.0, 3.0, 0.0, 0.0, 0.0)])
 
-    def test_manual_jog_stop_resumes_terminal_poll_and_schedules_refreshes(self) -> None:
+    def test_manual_jog_stop_resumes_terminal_poll_and_schedules_refreshes(
+        self,
+    ) -> None:
         window, stage_controller, _joystick, _timer, _statuses = _make_main(120.0)
         paused: list[bool] = []
         refreshes: list[tuple[int, ...]] = []
@@ -1359,14 +1370,18 @@ class MainStageCoordinateControlsTest(unittest.TestCase):
             0.0,
         )
         window._manual_jog_prediction.stage_xy = (1.0, 2.0)
-        window._schedule_status_refreshes = lambda delays: refreshes.append(tuple(delays))
+        window._schedule_status_refreshes = lambda delays: refreshes.append(
+            tuple(delays)
+        )
         stage_controller.last_status_time = 12.0
 
         def run_single_shot(delay: int, callback) -> None:
             single_shots.append(int(delay))
             callback()
 
-        with mock.patch.object(main_module.QTimer, "singleShot", side_effect=run_single_shot):
+        with mock.patch.object(
+            main_module.QTimer, "singleShot", side_effect=run_single_shot
+        ):
             Main._on_manual_jog_stopped(window)
 
         self.assertEqual(single_shots, [Main.TERMINAL_RESUME_AFTER_JOG_MS])
@@ -1451,7 +1466,9 @@ class MainStageCoordinateControlsTest(unittest.TestCase):
         self,
     ) -> None:
         window = Main.__new__(Main)
-        panel = _FakeStagePositionPanel({"X": _FakeLineEdit(enabled=True, modified=True)})
+        panel = _FakeStagePositionPanel(
+            {"X": _FakeLineEdit(enabled=True, modified=True)}
+        )
         panel.pending_targets["X"] = (5.0, 5.0)
         window._stage_position_panel = panel
         window._pending_stage_axis_targets = panel.pending_targets
@@ -1586,7 +1603,9 @@ class MainStageCoordinateControlsTest(unittest.TestCase):
 
         self.assertIsNone(window._coordinate_targets.active_axis)
 
-    def test_previous_micron_step_status_does_not_clear_coordinate_tracking(self) -> None:
+    def test_previous_micron_step_status_does_not_clear_coordinate_tracking(
+        self,
+    ) -> None:
         window, stage_controller, _joystick, _timer, _statuses = _make_main(120.0)
         Main._start_coordinate_targets_move(
             window,
@@ -1606,6 +1625,7 @@ class MainStageCoordinateControlsTest(unittest.TestCase):
         )
 
         self.assertEqual(window._coordinate_targets.active_axis, "A")
+
 
 if __name__ == "__main__":
     unittest.main()
