@@ -7,8 +7,8 @@ from types import SimpleNamespace
 
 import pytest
 
-import main as main_module
 from main import Main
+from probe_station_gui.application import objective_tools as objective_tools_module
 from probe_station_gui.camera.optical_calibration_adapters import (
     OpticalCalibrationEventAdapter,
     OpticalCalibrationRequestData,
@@ -218,7 +218,11 @@ def test_show_optical_calibration_wizard_reports_active_objective(
     window._flat_field_calibration_store = SimpleNamespace(
         current_manifest_path=lambda _objective: manifest,
     )
-    monkeypatch.setattr(main_module, "OpticalCalibrationWizard", _FakeWizard)
+    monkeypatch.setattr(
+        objective_tools_module,
+        "OpticalCalibrationWizard",
+        _FakeWizard,
+    )
 
     Main._show_optical_calibration_wizard(window)
 
@@ -563,7 +567,11 @@ def test_lens_dialog_calibrate_opens_lens_only_wizard(monkeypatch) -> None:
     window._refresh_lens_distortion_ui = lambda: None
     window._reset_lens_distortion_calibration = lambda: None
     window._show_optical_calibration_wizard = lambda mode=None: modes.append(mode)
-    monkeypatch.setattr(main_module, "LensDistortionDialog", _FakeLensDialog)
+    monkeypatch.setattr(
+        objective_tools_module,
+        "LensDistortionDialog",
+        _FakeLensDialog,
+    )
 
     Main._show_lens_distortion_dialog(window)
     window._lens_distortion_dialog.calibrate_requested.emit()
@@ -625,8 +633,16 @@ def test_lens_dialog_wizard_cancel_restores_controls_without_publishing(
     window._save_objective_distortion = lambda *_args, **_kwargs: pytest.fail(
         "cancelled calibration saved a correction"
     )
-    monkeypatch.setattr(main_module, "LensDistortionDialog", _FakeLensDialog)
-    monkeypatch.setattr(main_module, "OpticalCalibrationWizard", _FakeWizard)
+    monkeypatch.setattr(
+        objective_tools_module,
+        "LensDistortionDialog",
+        _FakeLensDialog,
+    )
+    monkeypatch.setattr(
+        objective_tools_module,
+        "OpticalCalibrationWizard",
+        _FakeWizard,
+    )
 
     Main._show_lens_distortion_dialog(window)
     dialog = window._lens_distortion_dialog

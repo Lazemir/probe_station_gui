@@ -6,6 +6,7 @@ import pytest
 
 import main as main_module
 from main import Main
+from probe_station_gui.application import camera_pipeline as camera_pipeline_module
 from probe_station_gui.settings.objective_config import (
     ObjectiveCalibrationSettings,
     ObjectivesSettings,
@@ -368,8 +369,16 @@ def test_camera_frame_distortion_correction_reuses_compiled_payload(
         applied.append(correction)
         return frame
 
-    monkeypatch.setattr(main_module, "correction_from_payload", compile_payload)
-    monkeypatch.setattr(main_module, "apply_distortion_correction", apply_correction)
+    monkeypatch.setattr(
+        camera_pipeline_module,
+        "correction_from_payload",
+        compile_payload,
+    )
+    monkeypatch.setattr(
+        camera_pipeline_module,
+        "apply_distortion_correction",
+        apply_correction,
+    )
 
     frame = object()
     assert Main._correct_camera_frame_for_active_objective(window, frame) is frame

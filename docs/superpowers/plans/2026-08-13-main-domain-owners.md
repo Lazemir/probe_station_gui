@@ -95,12 +95,12 @@ Each owner is a private class in `probe_station_gui/application/`. Ranges refer 
 - Create: `camera_pipeline.py`, `status_coordinate_ui.py`, `settings_apply.py`, `objective_tools.py`, `optical_calibration.py`.
 - Modify: `main.py` and only canonical camera/settings/objective tests.
 
-- [ ] Run focused camera frame/distortion, optical calibration, settings transaction, objective alignment, and stage-coordinate baseline.
-- [ ] Extract each mapped owner vertically, preserving queued signal wiring and GUI-thread-only widgets.
-- [ ] Keep `showEvent` in `Main`; status owner contains only its supporting private methods.
-- [ ] Verify no camera/GenICam read moved onto the GUI thread and no eager optional panel/network construction was introduced.
-- [ ] Verify every changed/new file has MI > 0 without comment/docstring bonus.
-- [ ] Commit `refactor: separate main imaging and settings domains` after independent task review C0/I0/M0.
+- [x] Run focused camera frame/distortion, optical calibration, settings transaction, objective alignment, and stage-coordinate baseline: 175 passed.
+- [x] Extract each mapped owner vertically, preserving queued signal wiring and GUI-thread-only widgets; the final focused App gate passed 201 tests.
+- [x] Keep `showEvent` in `Main`; status owner contains only its supporting private methods.
+- [x] Verify no camera/GenICam read moved onto the GUI thread and no eager optional panel/network construction was introduced; all 106 moved method ASTs are exact.
+- [x] Verify every changed/new non-`Main` Python file has MI > 0 without comment/docstring bonus; `main.py` strictly reduced to 6223 LOC / CC 1028 and remains the sole interim MI-zero file.
+- [x] Commit `refactor: separate main imaging and settings domains` after independent task review C0/I0/M0 (READY on the frozen Task 3 scope).
 
 ## Task 4: Alignment/motion/design owners
 

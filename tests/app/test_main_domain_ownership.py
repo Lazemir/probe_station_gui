@@ -1,4 +1,4 @@
-"""Ownership contracts for the first four ``Main`` application domains."""
+"""Ownership contracts for the first nine ``Main`` application domains."""
 
 from __future__ import annotations
 
@@ -127,6 +127,141 @@ OWNER_SPECS = {
             "_api_json_ready": "(value: 'object') -> 'Any'",
         },
     ),
+    "camera_pipeline": (
+        "_MainCameraPipelineMixin",
+        {
+            "_preload_design_layout_window": "(self) -> 'None'",
+            "_preload_lazy_dialog_modules": "(self) -> 'None'",
+            "_on_design_layout_module_ready": "(self, design_layout_window_class: 'object', error: 'object') -> 'None'",
+            "_stage_serial_ready": "(self) -> 'bool'",
+            "_on_absolute_xy_move_started": "(self, target_x_mm: 'float', target_y_mm: 'float', feedrate_mm_min: 'float') -> 'None'",
+            "on_error": "(self, message: 'str') -> 'None'",
+            "_on_camera_frame": "(self, qimg: 'QImage') -> 'None'",
+            "_on_live_camera_frame_processed": "(self, result: 'LiveCameraCorrectionResult') -> 'None'",
+            "_on_live_camera_frame_processing_error": "(self, message: 'str') -> 'None'",
+            "_on_camera_frame_gap_suppressed": "(self) -> 'None'",
+            "_correct_camera_frame_for_active_objective": "(self, qimg: 'QImage') -> 'QImage'",
+            "_distortion_correction_for_objective": "(self, objective: 'object', payload: 'object') -> 'DistortionCorrection'",
+            "_distortion_payload_signature": "(payload: 'object') -> 'str'",
+            "_clear_distortion_correction_cache": "(self) -> 'None'",
+            "_latest_camera_counter": "(self) -> 'int'",
+            "_latest_raw_camera_counter": "(self) -> 'int'",
+            "_wait_for_camera_frame": "(self, *, after_counter: 'int | None' = None, timeout_s: 'float' = 2.0) -> 'tuple[QImage | None, int]'",
+            "_wait_for_raw_camera_frame": "(self, *, after_counter: 'int | None' = None, timeout_s: 'float' = 2.0) -> 'tuple[QImage | None, int]'",
+            "_active_microscope_scale": "(self)",
+            "_active_objective_metadata": "(self) -> 'tuple[str, float | None]'",
+            "_capture_microscope_scan_launch_snapshot": "(self, *, scale: 'object', document: 'object | None', frame_usability_snapshot: 'DesignCoordinateLease | None' = None, registration: 'object | None' = None) -> '_MicroscopeScanLaunchSnapshot'",
+            "_stage_position_for_image_metadata": "(self, *, stage_xy: 'tuple[float, float] | None' = None) -> 'tuple[float, ...] | None'",
+            "_show_status": "(self, message: 'str', timeout_ms: 'int' = 0) -> 'None'",
+        },
+    ),
+    "status_coordinate_ui": (
+        "_MainStatusCoordinateUiMixin",
+        {
+            "_show_route_runtime_status": "(self, message: 'str', timeout_ms: 'int' = 0) -> 'None'",
+            "_show_route_dialog_status": "(self, message: 'str', timeout_ms: 'int' = 0) -> 'None'",
+            "_create_objective_widget": "(self) -> 'QWidget'",
+            "_objective_names": "(self) -> 'list[str]'",
+            "_active_objective_xy_offset": "(self) -> 'tuple[float, float]'",
+            "_camera_stage_xy_from_raw_stage_xy": "(self, raw_stage_xy: 'tuple[float, float]') -> 'tuple[float, float]'",
+            "_raw_stage_xy_from_camera_stage_xy": "(self, camera_stage_xy: 'tuple[float, float]') -> 'tuple[float, float]'",
+            "_rotation_geometry_snapshot": "(self) -> 'RotationGeometrySnapshot'",
+            "_design_navigation_xy_from_physical_machine_xy": "(self, machine_xy: 'tuple[float, float]') -> 'tuple[float, float]'",
+            "_design_xy_from_raw_stage_xy": "(self, raw_stage_xy: 'tuple[float, float]') -> 'tuple[float, float] | None'",
+            "_raw_stage_xy_from_design_xy": "(self, design_xy: 'tuple[float, float]') -> 'tuple[float, float] | None'",
+            "_project_gui_coordinate_motion": "(self, axis_values: 'tuple[tuple[str, float], ...]', *, mode: 'str', lease: 'CoordinateMotionLease | None' = None, allow_pose_rebase: 'bool' = False) -> 'CoordinateMotionProjection | None'",
+            "_project_gui_relative_motion": "(self, requested_distances: 'tuple[tuple[str, float], ...]', lease: 'object | None') -> 'CoordinateMotionProjection'",
+            "_on_stage_axis_escape_pressed": "(self, axis_name: 'str') -> 'None'",
+            "_on_stage_coordinate_mode_changed": "(self) -> 'None'",
+            "_on_software_coordinate_system_changed": "(self, frame_id: 'str') -> 'None'",
+            "_refresh_software_coordinate_display": "(self) -> 'None'",
+            "_surface_map_capture_running": "(self) -> 'bool'",
+            "_microscope_scan_running": "(self) -> 'bool'",
+            "_controller_reports_active_motion": "(self) -> 'bool'",
+            "_controller_latest_state_blocks_motion": "(self) -> 'bool'",
+            "_controller_latest_state_age_s": "(self) -> 'float | None'",
+            "_controller_latest_state_is_stale": "(self) -> 'bool'",
+            "_schedule_cancel_state_refresh": "(self) -> 'None'",
+            "_update_stage_coordinate_apply_state": "(self, _pending: 'bool | None' = None) -> 'None'",
+            "_clear_pending_stage_coordinate_targets": "(self) -> 'bool'",
+            "_append_status_log": "(self, message: 'str') -> 'None'",
+            "_open_status_log": "(self) -> 'None'",
+            "_prime_keyboard_focus": "(self) -> 'None'",
+        },
+    ),
+    "settings_apply": (
+        "_MainSettingsApplyMixin",
+        {
+            "_on_design_layout_point_selected": "(self, slot: 'int', x_value: 'float', y_value: 'float') -> 'None'",
+            "_start_fresh_design_frame_for_source_replacement": "(self) -> 'bool'",
+            "_on_alignment_draft_accepted": "(self, points: 'object') -> 'None'",
+            "_on_alignment_draft_discarded": "(self) -> 'None'",
+            "_apply_settings": "(self, *, apply_objective_runtime: 'bool' = True) -> 'None'",
+            "_apply_settings_from_dialog": "(self, new_settings: 'object') -> 'None'",
+            "_design_metadata_with_calibration_fingerprints": "(self, metadata: 'DesignFrameMetadata | None') -> 'DesignFrameMetadata | None'",
+            "_latest_camera_frame_photo": "(self) -> 'tuple[bytes, str] | None'",
+            "_qimage_telegram_photo": "(frame: 'QImage | None') -> 'tuple[bytes, str] | None'",
+            "_route_attention_status": "(message: 'str') -> 'bool'",
+            "_sync_objective_combo": "(self, objective_name: 'str') -> 'None'",
+            "_on_objective_combo_changed": "(self, _index: 'int') -> 'None'",
+            "_set_active_objective": "(self, objective_name: 'str', *, apply_motion: 'bool', allow_stage_task: 'bool' = False) -> 'None'",
+            "_objective_mutation_busy": "(self, *, allow_stage_task: 'bool' = False, optical_context: 'OpticalCalibrationOutcome | None' = None) -> 'bool'",
+            "_objective_profile_mutation_busy": "(self, objective_name: 'str', *, allow_stage_task: 'bool' = False, optical_context: 'OpticalCalibrationOutcome | None' = None) -> 'bool'",
+            "_apply_objective_change_offset": "(self, old_name: 'str', new_name: 'str') -> 'None'",
+            "_apply_objective_settings": "(self) -> 'None'",
+            "_show_plan_status": "(self, plan) -> 'None'",
+            "_persist_objective_plan": "(self, plan, *, show_status: 'bool' = True, apply_objective_runtime: 'bool' = True) -> 'bool'",
+        },
+    ),
+    "objective_tools": (
+        "_MainObjectiveToolsMixin",
+        {
+            "_show_click_calibration_dialog": "(self) -> 'None'",
+            "_show_optical_calibration_wizard": "(self, mode: 'OpticalCalibrationMode | None' = None) -> 'None'",
+            "_show_lens_distortion_dialog": "(self) -> 'None'",
+            "_add_objective_profile": "(self) -> 'None'",
+            "_delete_objective_profile": "(self, objective_name: 'str') -> 'None'",
+            "_set_objective_offset_reference": "(self) -> 'None'",
+            "_save_active_objective_offset": "(self) -> 'None'",
+            "_reset_active_objective_offset": "(self) -> 'None'",
+            "_refresh_click_calibration_ui": "(self) -> 'None'",
+            "_refresh_lens_distortion_ui": "(self) -> 'None'",
+            "_refresh_objective_calibration_ui": "(self) -> 'None'",
+        },
+    ),
+    "optical_calibration": (
+        "_MainOpticalCalibrationMixin",
+        {
+            "_start_flat_field_calibration_from_wizard": "(self) -> 'None'",
+            "_cancel_optical_calibration_wizard": "(self, _run_id: 'object' = None) -> 'None'",
+            "_stop_lens_distortion_dialog": "(self) -> 'None'",
+            "_start_lens_distortion_calibration_from_wizard": "(self) -> 'None'",
+            "_optical_calibration_objective_matches_wizard": "(self, wizard: 'OpticalCalibrationWizard') -> 'bool'",
+            "_start_flat_field_calibration": "(self, *, wizard_run_id: 'int | None' = None, full_wizard: 'bool' = False) -> 'bool'",
+            "_on_flat_field_calibration_progress": "(self, event: 'object', message: 'str') -> 'None'",
+            "_on_flat_field_calibration_finished": "(self, outcome: 'object', success: 'bool', message: 'str', _payload: 'object') -> 'None'",
+            "_start_lens_distortion_calibration": "(self, *, wizard_run_id: 'int | None' = None, parent_session_token: 'str | None' = None, full_wizard: 'bool' = False) -> 'dict[str, object]'",
+            "_optical_calibration_preflight": "(self, kind: 'str') -> 'str'",
+            "_lens_fit_limits": "(self) -> 'LensFitLimits'",
+            "_reset_lens_distortion_calibration": "(self) -> 'tuple[bool, str]'",
+            "_on_lens_distortion_calibration_progress": "(self, event: 'object', message: 'str') -> 'None'",
+            "_on_lens_distortion_calibration_finished": "(self, outcome: 'object', success: 'bool', message: 'str', artifact: 'object') -> 'None'",
+            "_save_active_objective_distortion": "(self, payload: 'object | None', *, optical_context: 'OpticalCalibrationOutcome | None' = None, allow_stage_task: 'bool' = False) -> 'None'",
+            "_save_objective_distortion": "(self, payload: 'object | None', objective_name: 'str', *, optical_context: 'OpticalCalibrationOutcome | None' = None, allow_stage_task: 'bool' = False) -> 'None'",
+            "_calibrated_pixels_to_mm_from_distortion_payload": "(payload: 'dict[str, object]') -> 'list[list[float]]'",
+            "_lens_distortion_payload_invalidates_click_calibration": "(payload: 'object') -> 'bool'",
+            "_append_click_recalibration_message": "(message: 'str') -> 'str'",
+            "_on_objective_calibration_updated": "(self, objective_name: 'str', pixels_to_mm: 'object', task_token: 'object') -> 'None'",
+            "_reject_objective_calibration_candidate": "(self, task_token: 'object') -> 'None'",
+            "_calibration_callback_token_is_current": "(self, task_token: 'object', *, expected_sources: 'set[str] | frozenset[str] | None' = None) -> 'bool'",
+            "_objective_pixels_to_mm_for_calibration_update": "(self, objective_name: 'str', pixels_to_mm: 'object') -> 'object'",
+            "_on_objective_mismatch_detected": "(self, suggested_name: 'str', message: 'str', task_token: 'object') -> 'None'",
+        },
+    ),
+}
+
+OWNER_SUPPORT_CLASSES = {
+    "camera_pipeline": {"_MicroscopeScanLaunchSnapshot"},
 }
 
 
@@ -164,6 +299,11 @@ def test_main_direct_base_order_is_exact() -> None:
         "_MainApiStageContactMixin",
         "_MainApiMeterVisaMixin",
         "_MainApiRouteScanMixin",
+        "_MainCameraPipelineMixin",
+        "_MainStatusCoordinateUiMixin",
+        "_MainSettingsApplyMixin",
+        "_MainObjectiveToolsMixin",
+        "_MainOpticalCalibrationMixin",
         "QMainWindow",
     )
     assert Main.__module__ == "main"
@@ -185,6 +325,26 @@ def test_api_route_scan_owner_is_direct_and_canonical() -> None:
     _assert_owner("api_route_scan")
 
 
+def test_camera_pipeline_owner_is_direct_and_canonical() -> None:
+    _assert_owner("camera_pipeline")
+
+
+def test_status_coordinate_ui_owner_is_direct_and_canonical() -> None:
+    _assert_owner("status_coordinate_ui")
+
+
+def test_settings_apply_owner_is_direct_and_canonical() -> None:
+    _assert_owner("settings_apply")
+
+
+def test_objective_tools_owner_is_direct_and_canonical() -> None:
+    _assert_owner("objective_tools")
+
+
+def test_optical_calibration_owner_is_direct_and_canonical() -> None:
+    _assert_owner("optical_calibration")
+
+
 def _assert_owner(module_name: str) -> None:
     from main import Main
 
@@ -194,7 +354,7 @@ def _assert_owner(module_name: str) -> None:
         node.name
         for node in ast.parse(inspect.getsource(module)).body
         if isinstance(node, ast.ClassDef)
-    } == {owner.__name__}
+    } == {owner.__name__, *OWNER_SUPPORT_CLASSES.get(module_name, set())}
     assert {
         name
         for name, value in owner.__dict__.items()
