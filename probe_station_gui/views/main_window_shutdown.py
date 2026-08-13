@@ -42,8 +42,8 @@ class MainWindowShutdownOwner(Protocol):
     _exposure_policy_adapter: Any
     _exposure_policy_controller: Any
     _route_measurement_dialog: Any
+    _telegram_runtime: Any
 
-    def _stop_telegram_bot_service(self) -> None: ...
     def _save_pending_linear_feedrate_default(self) -> None: ...
     def _stop_design_markup_store(self) -> None: ...
     def _stop_coordinate_frame_store(self) -> None: ...
@@ -102,7 +102,7 @@ def _persist_shutdown_state(
 def _stop_services_and_timers(owner: MainWindowShutdownOwner) -> None:
     if owner._api_server is not None:
         owner._api_server.stop()
-    owner._stop_telegram_bot_service()
+    owner._telegram_runtime.stop()
     owner._design_position_timer.stop()
     owner._manual_jog_timer.stop()
     owner._stage_motion_blink_timer.stop()

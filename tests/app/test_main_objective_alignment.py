@@ -48,6 +48,9 @@ class _SettingsManager:
     def objectives_configuration(self) -> ObjectivesSettings:
         return self.settings.objectives
 
+    def telegram_configuration(self) -> object:
+        return self.settings.telegram
+
 
 class _Stage:
     def __init__(self) -> None:
@@ -293,8 +296,10 @@ def test_settings_objective_change_is_rejected_for_alive_microscope_scan() -> No
     window._apply_settings = lambda *, apply_objective_runtime=True: (
         Main._apply_objective_settings(window) if apply_objective_runtime else None
     )
-    window._stop_telegram_bot_service = lambda: None
-    window._configure_telegram_bot_from_settings = lambda: None
+    window._telegram_runtime = types.SimpleNamespace(
+        stop=lambda: None,
+        configure=lambda _settings: None,
+    )
     window.grabber = None
     window._exposure_policy_adapter = None
     window._api_key_store = None

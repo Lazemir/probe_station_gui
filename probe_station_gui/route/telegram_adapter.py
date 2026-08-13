@@ -44,9 +44,7 @@ def route_start_telegram_text(
     api_session: bool = False,
 ) -> str:
     heading = (
-        "Probe route API session started:"
-        if api_session
-        else "Probe route started:"
+        "Probe route API session started:" if api_session else "Probe route started:"
     )
     text = f"{heading}\n{start_message}"
     if not api_session and csv_path:
@@ -102,10 +100,17 @@ def capture_route_photo(
     latest_camera_counter: Callable[[], int],
     wait_for_camera_frame: Callable[..., tuple[QImage | None, int]],
     timestamp_utc: Callable[[], str] = default_utc_timestamp,
-    active_objective_metadata: Callable[[], tuple[str, float | None]] = lambda: ("", None),
-    stage_position_for_image_metadata: Callable[..., tuple[float, ...] | None] = lambda **_kwargs: None,
+    active_objective_metadata: Callable[[], tuple[str, float | None]] = lambda: (
+        "",
+        None,
+    ),
+    stage_position_for_image_metadata: Callable[
+        ..., tuple[float, ...] | None
+    ] = lambda **_kwargs: None,
     save_image: Callable[..., object] = save_microscope_image,
-    route_photo_focus_payload: Callable[[object | None], dict[str, object] | None] = route_photo_focus_payload,
+    route_photo_focus_payload: Callable[
+        [object | None], dict[str, object] | None
+    ] = route_photo_focus_payload,
 ) -> str:
     scale = active_microscope_scale()
     if scale is None:
@@ -126,9 +131,7 @@ def capture_route_photo(
         captured_at=captured_at,
     )
     photo_stage_xy = (
-        point.photo_stage_xy
-        if point.photo_stage_xy is not None
-        else point.stage_xy
+        point.photo_stage_xy if point.photo_stage_xy is not None else point.stage_xy
     )
     stage_position = stage_position_for_image_metadata(stage_xy=photo_stage_xy)
     focus_data = route_photo_focus_payload(focus_result)
@@ -365,7 +368,9 @@ class RouteTelegramPhotoState:
             reply_markup=default_markup,
         )
 
-    def should_capture_pre_contact_photo(self, *, route_attention_enabled: bool) -> bool:
+    def should_capture_pre_contact_photo(
+        self, *, route_attention_enabled: bool
+    ) -> bool:
         with self._lock:
             return self._contact_photo_requested or bool(route_attention_enabled)
 
@@ -629,48 +634,10 @@ def _combined_route_contact_caption(before_caption: str, after_caption: str) -> 
         after_detail = str(after_caption or "").strip()
     if before_caption:
         prefix = (
-            "Route contact check:\n"
-            "Left: before needle press. Right: contact attempt."
+            "Route contact check:\nLeft: before needle press. Right: contact attempt."
         )
         return f"{prefix}\n{after_detail}" if after_detail else prefix
     return str(after_caption or "").strip()
-
-
-def route_telegram_state_from_legacy_owner(owner: object) -> RouteTelegramPhotoState:
-    state = RouteTelegramPhotoState(lock=getattr(owner, "_telegram_photo_lock", None))
-    if getattr(owner, "_telegram_route_photo_requested", False):
-        state.request_route_photo()
-    if getattr(owner, "_telegram_contact_photo_requested", False):
-        state.request_contact_photo()
-    state._pending_contact_before_photo = getattr(
-        owner,
-        "_telegram_pending_contact_before_photo",
-        None,
-    )
-    state._pending_contact_photo = getattr(
-        owner,
-        "_telegram_pending_contact_photo",
-        None,
-    )
-    state._last_pre_contact_photo = getattr(
-        owner,
-        "_last_route_pre_contact_photo",
-        None,
-    )
-    state._last_contact_failure_photo = getattr(
-        owner,
-        "_last_route_contact_failure_photo",
-        None,
-    )
-    state._last_contact_failure_before_photo = getattr(
-        owner,
-        "_last_route_contact_failure_before_photo",
-        None,
-    )
-    state._last_attention_message = str(
-        getattr(owner, "_last_telegram_attention_message", "") or ""
-    )
-    return state
 
 
 __all__ = [
@@ -686,6 +653,5 @@ __all__ = [
     "route_pre_contact_photo_caption",
     "route_requested_photo_caption",
     "route_start_telegram_text",
-    "route_telegram_state_from_legacy_owner",
     "telegram_contact_photo_payload",
 ]

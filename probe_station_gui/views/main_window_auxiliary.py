@@ -37,6 +37,7 @@ class MainWindowAuxiliaryOwner(Protocol):
     grabber: Any
     _api_key_store: Any
     _design_session: Any
+    _telegram_runtime: Any
 
     def _surface_map_stage_status(self) -> Any: ...
     def _surface_map_move_to_xy(self, *args: Any) -> Any: ...
@@ -48,9 +49,7 @@ class MainWindowAuxiliaryOwner(Protocol):
     def _on_manual_terminal_command(self, *args: Any) -> None: ...
     def _preload_design_layout_window(self) -> None: ...
     def _collapse_alignment_panel_if_ready(self) -> None: ...
-    def _stop_telegram_bot_service(self) -> None: ...
     def _apply_settings_from_dialog(self, *args: Any) -> None: ...
-    def _configure_telegram_bot_from_settings(self) -> None: ...
     def _load_design_document(self, *args: Any) -> None: ...
     def _unload_design_document(self, *args: Any) -> None: ...
     def _set_design_top_cell(self, *args: Any) -> None: ...
@@ -239,7 +238,7 @@ def open_settings_dialog(
         dialog_class = SettingsDialog
 
     tab_name = initial_tab if isinstance(initial_tab, str) else None
-    owner._stop_telegram_bot_service()
+    owner._telegram_runtime.stop()
     dialog = dialog_class(
         owner.settings_manager.settings,
         owner,
@@ -248,9 +247,13 @@ def open_settings_dialog(
         exposure_policy_source=getattr(owner, "_exposure_policy_adapter", None),
         axis_position_source=owner.stage_controller,
         api_key_store=owner._api_key_store,
-        physical_pose_source=lambda: getattr(owner, "_latest_physical_machine_pose", None),
+        physical_pose_source=lambda: getattr(
+            owner, "_latest_physical_machine_pose", None
+        ),
         stage_idle_source=lambda: not bool(owner.stage_controller.is_busy()),
-        stage_state_signal=getattr(owner.stage_controller, "stage_position_changed", None),
+        stage_state_signal=getattr(
+            owner.stage_controller, "stage_position_changed", None
+        ),
     )
 
     def apply_settings(new_settings: object) -> None:
@@ -263,7 +266,9 @@ def open_settings_dialog(
         if dialog.exec() != QDialog.Accepted and not dialog.was_applied():
             logger.debug("Settings dialog cancelled")
     finally:
-        owner._configure_telegram_bot_from_settings()
+        owner._telegram_runtime.configure(
+            owner.settings_manager.telegram_configuration()
+        )
 
 
 def show_connection_dialog(
@@ -470,28 +475,20 @@ def _connect_design_layout_window_signals(
         owner._on_alignment_draft_discarded
     )
     owner.design_layout_window.move_requested.connect(
-        lambda x_value, y_value: owner._move_to_design_window_point(
-            x_value, y_value
-        )
+        lambda x_value, y_value: owner._move_to_design_window_point(x_value, y_value)
     )
     owner.design_layout_window.route_point_requested.connect(
         owner._add_design_route_point
     )
-    owner.design_layout_window.point_requested.connect(
-        owner._add_design_route_point
-    )
-    owner.design_layout_window.guide_requested.connect(
-        owner._add_design_guide
-    )
+    owner.design_layout_window.point_requested.connect(owner._add_design_route_point)
+    owner.design_layout_window.guide_requested.connect(owner._add_design_guide)
     owner.design_layout_window.delete_selection_requested.connect(
         owner._delete_design_selection
     )
     owner.design_layout_window.guide_undo_requested.connect(
         owner._undo_last_design_guide
     )
-    owner.design_layout_window.guide_clear_requested.connect(
-        owner._clear_design_guides
-    )
+    owner.design_layout_window.guide_clear_requested.connect(owner._clear_design_guides)
     owner.design_layout_window.markup_visibility_changed.connect(
         owner._set_design_markup_visibility
     )

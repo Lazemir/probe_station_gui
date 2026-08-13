@@ -24,6 +24,7 @@ from tests.app.main_coordinate_feedrate_support import (
     _FakeFrame,
     _FakeRouteMeasurementRunner,
     _FakeThread,
+    _telegram_runtime_stub,
     _telegram_test_photo_bytes,
     main_module,
     request_route_measurement_for_point,
@@ -32,6 +33,9 @@ from probe_station_gui.views import (
     main_window_needle_calibration as needle_calibration_ui,
 )
 from probe_station_gui.views import main_window_shutdown as shutdown_ui
+from probe_station_gui.route.telegram_adapter import (
+    RouteTelegramPhotoState,
+)
 
 
 class _StageLease:
@@ -74,6 +78,7 @@ import struct
 import zlib
 from PySide6.QtGui import QImage
 from main import Main
+from probe_station_gui.route.telegram_adapter import combine_telegram_contact_photos
 
 def png_bytes(width, height, fill):
     def chunk(kind, data):
@@ -95,9 +100,10 @@ def png_bytes(width, height, fill):
         + chunk(b"IEND", b"")
     )
 
-combined = Main._combine_telegram_contact_photos(
+combined = combine_telegram_contact_photos(
     png_bytes(8, 4, 0x00FF0000),
     png_bytes(2, 4, 0x0000FF00),
+    encode_image=Main._qimage_telegram_photo,
 )
 assert combined is not None
 image = QImage()
@@ -133,20 +139,15 @@ assert image.height() == 4
         sent: list[tuple[str, tuple[bytes, str] | None, object | None]] = []
 
         window._route_measurement_dialog = None
-        window._take_pending_telegram_contact_photos = lambda: (before, after)
-        window._telegram_contact_photo_payload = lambda _before, _after: (
-            (b"combined", "route-contact-comparison.jpg"),
-            "Route contact check:\n"
-            "Left: before needle press. Right: contact attempt.\n"
-            "Point 1/2, structure 3, P003, status=bad_contact.",
-        )
-        window._send_telegram_bot_message = (
-            lambda message, *, photo=None, reply_markup=None: sent.append(
+        window._route_measurement_waiting = False
+        window._telegram_runtime = _telegram_runtime_stub(
+            route_photos=types.SimpleNamespace(
+                take_pending_contact_photos=lambda: (before, after)
+            ),
+            send_bot_message=lambda message, *, photo=None, reply_markup=None: sent.append(
                 (message, photo, reply_markup)
-            )
+            ),
         )
-        window._telegram_default_markup = lambda: "markup"
-
         Main._on_route_measurement_result(
             window,
             types.SimpleNamespace(),
@@ -202,21 +203,19 @@ assert image.height() == 4
             ),
         )
 
-        window._last_telegram_attention_message = ""
         window._last_route_measurement_result = (record, 1, 2, True)
         window._route_measurement_waiting = False
         window._pending_route_measure_point = None
-        window._latest_route_contact_failure_telegram_photos = lambda: (before, after)
-        window._telegram_contact_photo_payload = lambda _before, _after: (
-            (b"combined", "route-contact-comparison.jpg"),
-            "Route contact check:\n"
-            "Left: before needle press. Right: contact attempt.\n"
-            "Point 1/2, structure 3, P003, status=bad_contact.",
+        route_photos = RouteTelegramPhotoState()
+        route_photos._last_contact_failure_before_photo = before
+        route_photos._last_contact_failure_photo = after
+        window._telegram_runtime = _telegram_runtime_stub(
+            route_photos=route_photos,
+            send_alert=lambda key, text, **kwargs: alerts.append(
+                (key, text, kwargs)
+            ),
+            route_actions_markup="actions",
         )
-        window._send_telegram_alert = lambda key, text, **kwargs: alerts.append(
-            (key, text, kwargs)
-        )
-        window._telegram_route_actions_markup = lambda: "actions"
         window.design_navigator_panel = None
         window._route_measurement_dialog = None
 
@@ -354,6 +353,7 @@ assert image.height() == 4
 
     def test_record_route_photo_writes_focus_map_csv(self) -> None:
         window = Main.__new__(Main)
+        window._telegram_runtime = _telegram_runtime_stub()
         window._design_session = types.SimpleNamespace(
             route=types.SimpleNamespace(name="route-a")
         )
@@ -401,6 +401,7 @@ assert image.height() == 4
         self,
     ) -> None:
         window = Main.__new__(Main)
+        window._telegram_runtime = _telegram_runtime_stub()
         window._design_session = types.SimpleNamespace(
             route=types.SimpleNamespace(name=None)
         )

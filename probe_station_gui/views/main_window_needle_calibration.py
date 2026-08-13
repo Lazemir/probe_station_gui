@@ -7,7 +7,9 @@ import logging
 from probe_station_gui.route import contact_seek as manual_contact_seek
 from probe_station_gui.stage import calibration_positions, sample_handling
 from probe_station_gui.stage.controller import StageControllerError
-from probe_station_gui.views import main_window_stage_position_panel as stage_position_panel
+from probe_station_gui.views import (
+    main_window_stage_position_panel as stage_position_panel,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -224,15 +226,16 @@ def request_contact_seek(owner: object, *, thread_factory) -> None:
     route_thread = owner._route_measurement_thread
     decision = manual_contact_seek.contact_seek_start_decision(
         contact_seek_active=thread is not None and thread.is_alive(),
-        route_measurement_active=(
-            route_thread is not None and route_thread.is_alive()
-        ),
+        route_measurement_active=(route_thread is not None and route_thread.is_alive()),
         instrument_connected=owner.lcr_controller.is_connected(),
     )
     if not decision.accepted:
         owner._show_status(decision.status_message)
         contact_window = getattr(owner, "contact_calibration_window", None)
-        if contact_window is not None and decision.calibration_window_result is not None:
+        if (
+            contact_window is not None
+            and decision.calibration_window_result is not None
+        ):
             contact_window.set_contact_seek_result(decision.calibration_window_result)
         return
     owner._contact_seek_stop_requested.clear()
@@ -275,7 +278,7 @@ def on_contact_seek_finished(owner: object, success: bool, message: str) -> None
         contact_window.set_contact_seek_result(message)
     owner._show_status(message, 8000 if not success else 5000)
     if not success:
-        owner._send_telegram_alert(
+        owner._telegram_runtime.send_alert(
             "contact_seek_failed",
             f"Contact seek needs attention:\n{message}",
             attach_photo=True,
@@ -363,9 +366,7 @@ def confirm_and_save_contact_seek(
     confirm_quality = owner._contact_seek_measure_quality(confirm_count)
     if confirm_quality.good is not True:
         owner.contact_seek_status.emit(
-            manual_contact_seek.contact_seek_confirmation_failed_status(
-                confirm_quality
-            )
+            manual_contact_seek.contact_seek_confirmation_failed_status(confirm_quality)
         )
         return False
     lowering_mm = owner.stage_controller.latest_axis_a_lowering()

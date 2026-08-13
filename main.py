@@ -397,14 +397,12 @@ from probe_station_gui.route.finish_flow import (
     route_finish_signal_plan,
 )
 from probe_station_gui.route.telegram_adapter import (
-    RouteTelegramPhotoState,
     combine_telegram_contact_photos,
     capture_route_photo,
     route_finish_telegram_payload,
     route_photo_focus_payload,
     route_requested_photo_caption,
     route_start_telegram_text,
-    route_telegram_state_from_legacy_owner,
     telegram_contact_photo_payload,
 )
 from probe_station_gui.route.shift import route_shift_from_stage_xy
@@ -478,17 +476,12 @@ from probe_station_gui.settings.objective_config import (
     normalize_objective_name,
     parse_pixels_to_mm_matrix,
 )
-from probe_station_gui.notifications.telegram import (
-    TelegramBotCommandService,
-    TelegramBotRequest,
-    TelegramBotResponse,
-    resolved_bot_token,
-    send_telegram_alert_for_settings,
-    send_telegram_bot_message_for_settings,
-    telegram_route_attention_alert_enabled,
-    telegram_inline_keyboard,
-)
+from probe_station_gui.notifications.telegram import telegram_route_attention_alert_enabled
 from probe_station_gui.notifications import telegram_commands
+from probe_station_gui.notifications.telegram_runtime import (
+    TelegramCommandRuntime,
+    TelegramCommandSnapshot,
+)
 from probe_station_gui.views.alignment_panel import AlignmentPanel
 from probe_station_gui.views.contact_oscillation_window import (
     ContactOscillationWindow,
@@ -851,8 +844,6 @@ class Main(QMainWindow):
             )
         )
         self._api_settings_signature: tuple[bool, str, int] | None = None
-        self._telegram_bot_service: TelegramBotCommandService | None = None
-        self._telegram_bot_signature: tuple[str, str] | None = None
         self._latest_status_message = ""
         self.joystick_panel: JoystickWindow | None = None
         self.serial_terminal_panel: SerialTerminalWindow | None = None
@@ -1045,7 +1036,6 @@ class Main(QMainWindow):
         self._microscope_scan_stop_requested = threading.Event()
         self._sample_handling_thread: threading.Thread | None = None
         self._last_sample_focus_z_by_objective: dict[str, float] = {}
-        self._route_telegram = RouteTelegramPhotoState()
         self._contact_seek_thread: threading.Thread | None = None
         self._contact_seek_stop_requested = threading.Event()
         software_coordinates = self.settings_manager.settings.software_coordinates
@@ -1137,9 +1127,6 @@ class Main(QMainWindow):
         self.route_measurement_recorded.connect(self._on_route_measurement_recorded)
         self.route_measurement_finished.connect(self._on_route_measurement_finished)
         self.route_contact_move_finished.connect(self._on_route_contact_move_finished)
-        self.telegram_bot_request_received.connect(
-            self._on_telegram_bot_request_received
-        )
         self.microscope_scan_status.connect(self._on_microscope_scan_status)
         self.microscope_scan_finished.connect(self._on_microscope_scan_finished)
         self.flat_field_calibration_progress.connect(
@@ -1191,6 +1178,20 @@ class Main(QMainWindow):
         )
 
         self.stage_controller = self._create_stage_controller()
+        self._telegram_runtime = TelegramCommandRuntime(
+            request_publisher=self.telegram_bot_request_received.emit,
+            command_snapshot_provider=self._telegram_command_snapshot,
+            status_snapshot_provider=self._telegram_status_snapshot,
+            latest_camera_photo_provider=self._latest_camera_frame_photo,
+            route_action_submitter=self._submit_route_measurement_confirmation,
+            api_route_confirmation_provider=lambda: (
+                self._api_route_control_state_snapshot().accepts_route_confirmation
+            ),
+            settings_provider=self.settings_manager.telegram_configuration,
+        )
+        self.telegram_bot_request_received.connect(
+            self._telegram_runtime.handle_on_gui
+        )
         self._compose_optical_calibration_runtime()
         self.stage_controller.status_message.connect(self._show_status)
         self.stage_controller.movement_finished.connect(
@@ -1557,214 +1558,52 @@ class Main(QMainWindow):
             }
         return encode_camera_frame_png(frame, counter=counter, space=space)
 
-    def _configure_telegram_bot_from_settings(self) -> None:
-        telegram_settings = self.settings_manager.telegram_configuration()
-        bot_token = resolved_bot_token(telegram_settings)
-        chat_id = telegram_settings.chat_id.strip()
-        signature = (
-            bot_token,
-            chat_id,
+    def _telegram_command_snapshot(self) -> TelegramCommandSnapshot:
+        return TelegramCommandSnapshot(
+            route_active=telegram_commands.thread_alive(
+                getattr(self, "_route_measurement_thread", None)
+            ),
+            route_waiting=bool(getattr(self, "_route_measurement_waiting", False)),
+            runner_available=(
+                getattr(self, "_route_measurement_runner", None) is not None
+            ),
+            photo_enabled=bool(
+                getattr(self, "_route_measurement_photo_enabled", False)
+            ),
+            measure_enabled=bool(
+                getattr(self, "_route_measurement_measure_enabled", False)
+            ),
         )
-        should_run = bool(telegram_settings.enabled and bot_token and chat_id)
-        if (
-            should_run
-            and self._telegram_bot_service is not None
-            and self._telegram_bot_signature == signature
-        ):
-            if self._telegram_bot_service.is_running():
-                return
-            logger.warning("Telegram command bot thread is not running; restarting.")
-        if self._telegram_bot_service is not None:
-            self._stop_telegram_bot_service()
-        self._telegram_bot_signature = signature if should_run else None
-        if not should_run:
-            return
-        try:
-            service = TelegramBotCommandService(
-                bot_token=bot_token,
-                chat_id=chat_id,
-                request_handler=self._submit_telegram_bot_request,
-            )
-            service.start()
-        except Exception as exc:
-            logger.warning("Telegram command bot was not started: %s", exc)
-            self._telegram_bot_signature = None
-            return
-        self._telegram_bot_service = service
-        logger.info("Telegram command bot started for chat %s.", chat_id)
-
-    def _stop_telegram_bot_service(self) -> None:
-        if self._telegram_bot_service is None:
-            return
-        self._telegram_bot_service.stop()
-        self._telegram_bot_service = None
-        self._telegram_bot_signature = None
-
-    def _submit_telegram_bot_request(
-        self,
-        request: TelegramBotRequest,
-    ) -> TelegramBotResponse | None:
-        self.telegram_bot_request_received.emit(request)
-        response = request.wait_for_response(15.0)
-        if response is None:
-            return TelegramBotResponse(
-                "Telegram command timed out in the GUI thread.",
-                callback_answer="Command timed out.",
-            )
-        return response
-
-    def _on_telegram_bot_request_received(
-        self,
-        request: TelegramBotRequest,
-    ) -> None:
-        try:
-            response = self._handle_telegram_bot_request(request)
-        except Exception as exc:
-            logger.exception("Telegram command failed.")
-            response = TelegramBotResponse(
-                f"Telegram command failed: {exc}",
-                callback_answer="Command failed.",
-            )
-        request.set_response(response)
-
-    def _handle_telegram_bot_request(
-        self,
-        request: TelegramBotRequest,
-    ) -> TelegramBotResponse | None:
-        if request.kind == "callback":
-            return self._handle_telegram_callback(request.callback_data)
-        return self._telegram_response_for_command_route(
-            telegram_commands.route_message_command(request.text)
-        )
-
-    def _handle_telegram_callback(self, data: str) -> TelegramBotResponse:
-        return self._telegram_response_for_command_route(
-            telegram_commands.route_callback(data)
-        ) or TelegramBotResponse("", reply_markup=self._telegram_default_markup())
-
-    def _telegram_response_for_command_route(
-        self,
-        route: telegram_commands.TelegramCommandRoute | None,
-    ) -> TelegramBotResponse | None:
-        if route is None:
-            return None
-        handlers = {
-            "status": self._telegram_status_response,
-            "route_photo": self._telegram_request_next_route_photo_response,
-            "contact_photo": self._telegram_request_next_contact_photo_response,
-        }
-        if route.kind == "route_action":
-            return self._telegram_route_action_response(route.action)
-        handler = handlers.get(route.kind)
-        if handler is not None:
-            return handler()
-        return TelegramBotResponse(
-            route.text,
-            callback_answer=route.callback_answer,
-            reply_markup=self._telegram_default_markup(),
-        )
-
-    def _telegram_status_response(self) -> TelegramBotResponse:
-        photo = self._latest_camera_frame_photo()
-        return TelegramBotResponse(
-            self._telegram_status_text(),
-            photo_bytes=photo[0] if photo is not None else None,
-            photo_name=photo[1] if photo is not None else "microscope.jpg",
-            reply_markup=self._telegram_default_markup(),
-            callback_answer="Status sent.",
-        )
-
-    def _telegram_request_next_route_photo_response(self) -> TelegramBotResponse:
-        plan = telegram_commands.next_route_photo_response(
-            route_active=telegram_commands.thread_alive(self._route_measurement_thread),
-            structure_photos_enabled=self._route_measurement_photo_enabled,
-        )
-        if plan.request_photo:
-            self._route_telegram_adapter().request_route_photo()
-        return self._telegram_text_response(plan.text, plan.callback_answer)
-
-    def _telegram_request_next_contact_photo_response(self) -> TelegramBotResponse:
-        plan = telegram_commands.next_contact_photo_response(
-            route_active=telegram_commands.thread_alive(self._route_measurement_thread),
-            contact_measurement_enabled=self._route_measurement_measure_enabled,
-        )
-        if plan.request_photo:
-            self._route_telegram_adapter().request_contact_photo()
-        return self._telegram_text_response(plan.text, plan.callback_answer)
-
-    def _telegram_route_action_response(self, action: str) -> TelegramBotResponse:
-        runner = self._route_measurement_runner
-        api_accepts_confirmation = False
-        if (
-            runner is None
-            and self._route_measurement_waiting
-            and telegram_commands.is_route_action(action)
-        ):
-            api_accepts_confirmation = (
-                self._api_route_control_state_snapshot().accepts_route_confirmation
-            )
-        plan = telegram_commands.route_action_response(
-            action,
-            route_waiting=self._route_measurement_waiting,
-            runner_available=runner is not None,
-            api_route_control_accepts_confirmation=api_accepts_confirmation,
-        )
-        if plan.submit_action is not None:
-            self._submit_route_measurement_confirmation(plan.submit_action)
-        return self._telegram_text_response(plan.text, plan.callback_answer)
-
-    def _telegram_text_response(
-        self,
-        text: str,
-        callback_answer: str,
-    ) -> TelegramBotResponse:
-        return TelegramBotResponse(
-            text,
-            reply_markup=self._telegram_default_markup(),
-            callback_answer=callback_answer,
-        )
-
-    def _telegram_default_markup(self) -> object | None:
-        return telegram_inline_keyboard(
-            telegram_commands.default_markup_rows(self._route_measurement_waiting)
-        )
-
-    @staticmethod
-    def _telegram_route_actions_markup() -> object | None:
-        return telegram_inline_keyboard(telegram_commands.route_action_markup_rows())
-
-    def _route_telegram_adapter(self) -> RouteTelegramPhotoState:
-        adapter = getattr(self, "_route_telegram", None)
-        if adapter is not None:
-            return adapter
-        adapter = route_telegram_state_from_legacy_owner(self)
-        self._route_telegram = adapter
-        return adapter
-
-    def _telegram_status_text(self) -> str:
-        return telegram_commands.status_text(self._telegram_status_snapshot())
 
     def _telegram_status_snapshot(self) -> telegram_commands.TelegramStatusSnapshot:
         return telegram_commands.TelegramStatusSnapshot(
-            latest_status_message=self._latest_status_message,
-            route_thread_active=telegram_commands.thread_alive(
-                self._route_measurement_thread
+            latest_status_message=str(
+                getattr(self, "_latest_status_message", "") or ""
             ),
-            route_waiting=self._route_measurement_waiting,
-            route_session_active=self._route_measurement_session_active,
-            route_current_point=self._route_measurement_current_point,
+            route_thread_active=telegram_commands.thread_alive(
+                getattr(self, "_route_measurement_thread", None)
+            ),
+            route_waiting=bool(getattr(self, "_route_measurement_waiting", False)),
+            route_session_active=bool(
+                getattr(self, "_route_measurement_session_active", False)
+            ),
+            route_current_point=getattr(
+                self, "_route_measurement_current_point", None
+            ),
             api_route_control_status_text=(
                 self._api_route_control_state_snapshot().telegram_status_text()
             ),
             stage_status=self._api_stage_status(),
             microscope_scan_active=telegram_commands.thread_alive(
-                self._microscope_scan_thread
+                getattr(self, "_microscope_scan_thread", None)
             ),
             contact_seek_active=telegram_commands.thread_alive(
-                self._contact_seek_thread
+                getattr(self, "_contact_seek_thread", None)
             ),
-            camera_frame_available=self._latest_camera_frame_for_notifications
-            is not None,
+            camera_frame_available=(
+                getattr(self, "_latest_camera_frame_for_notifications", None)
+                is not None
+            ),
             stage_axis_names=self.STAGE_AXIS_NAMES,
         )
 
@@ -2708,10 +2547,10 @@ class Main(QMainWindow):
                 payload,
                 contact_number=contact_number,
                 result=result,
-                reply_markup=self._telegram_route_actions_markup(),
+                reply_markup=self._telegram_runtime.route_actions_markup(),
             )
             if alert is not None:
-                self._send_telegram_alert(
+                self._telegram_runtime.send_alert(
                     alert.channel,
                     alert.text,
                     attach_photo=alert.attach_photo,
@@ -3293,7 +3132,7 @@ class Main(QMainWindow):
         self._route_measurement_photo_enabled = launch_state.photo_enabled
         self._route_measurement_measure_enabled = launch_state.measure_enabled
         self._route_measurement_point_numbers = launch_state.point_numbers
-        self._route_telegram_adapter().reset_for_route_start()
+        self._telegram_runtime.route_photos.reset_for_route_start()
         self._route_measurement_thread = threading.Thread(
             target=self._run_route_measurement,
             args=(runner,),
@@ -3320,7 +3159,7 @@ class Main(QMainWindow):
             launch_state.selected_point_number,
             True,
         )
-        self._send_telegram_alert(
+        self._telegram_runtime.send_alert(
             "route_started",
             route_start_telegram_text(
                 launch_state.start_message,
@@ -3709,8 +3548,8 @@ class Main(QMainWindow):
             ),
             created_at_utc=self._api_timestamp_utc(),
         )
-        if self._route_telegram_adapter().consume_route_photo_request():
-            self._send_telegram_bot_message(
+        if self._telegram_runtime.route_photos.consume_route_photo_request():
+            self._telegram_runtime.send_bot_message(
                 route_requested_photo_caption(
                     position=int(position),
                     total=int(total),
@@ -3720,7 +3559,11 @@ class Main(QMainWindow):
                     label=point.label,
                 ),
                 photo=(photo_bytes, photo_name),
-                reply_markup=self._telegram_default_markup(),
+                reply_markup=self._telegram_runtime.default_markup(
+                    route_waiting=bool(
+                        getattr(self, "_route_measurement_waiting", False)
+                    )
+                ),
             )
         return artifact_id
 
@@ -3942,7 +3785,7 @@ class Main(QMainWindow):
 
     def on_error(self, message: str) -> None:
         logger.error("Camera error: %s", message)
-        self._send_telegram_alert(
+        self._telegram_runtime.send_alert(
             "camera_error",
             f"Probe station camera error:\n{message}",
             attach_photo=True,
@@ -4757,7 +4600,9 @@ class Main(QMainWindow):
             self._schedule_cancel_state_refresh()
         if self._api_bridge is not None:
             self._configure_api_server_from_settings(start_if_enabled=True)
-        self._configure_telegram_bot_from_settings()
+        self._telegram_runtime.configure(
+            self.settings_manager.telegram_configuration()
+        )
         self._update_coordinate_display(cursor_xy=None)
 
     def _apply_settings_from_dialog(self, new_settings: object) -> None:
@@ -4917,43 +4762,6 @@ class Main(QMainWindow):
         return replace(
             metadata,
             calibration_fingerprints=design_calibration_fingerprints(calibrations),
-        )
-
-    def _send_telegram_alert(
-        self,
-        alert_key: str,
-        message: str,
-        *,
-        attach_photo: bool = False,
-        photo: tuple[bytes, str] | None = None,
-        document_path: str | Path | None = None,
-        reply_markup: object | None = None,
-    ) -> None:
-        send_telegram_alert_for_settings(
-            self.settings_manager.telegram_configuration(),
-            alert_key,
-            message,
-            attach_photo=attach_photo,
-            photo=photo,
-            document_path=document_path,
-            reply_markup=reply_markup,
-            latest_camera_frame_photo=self._latest_camera_frame_photo,
-        )
-
-    def _send_telegram_bot_message(
-        self,
-        message: str,
-        *,
-        photo: tuple[bytes, str] | None = None,
-        document_path: str | Path | None = None,
-        reply_markup: object | None = None,
-    ) -> bool:
-        return send_telegram_bot_message_for_settings(
-            self.settings_manager.telegram_configuration(),
-            message,
-            photo=photo,
-            document_path=document_path,
-            reply_markup=reply_markup,
         )
 
     def _latest_camera_frame_photo(self) -> tuple[bytes, str] | None:
@@ -8192,7 +8000,7 @@ class Main(QMainWindow):
             return True
         self._show_status(preflight.message, preflight.timeout_ms)
         if preflight.telegram_failure_text:
-            self._send_telegram_alert(
+            self._telegram_runtime.send_alert(
                 "route_failed",
                 preflight.telegram_failure_text,
                 attach_photo=preflight.attach_failure_photo,
@@ -8296,7 +8104,7 @@ class Main(QMainWindow):
         self._route_measurement_measure_enabled = launch_state.measure_enabled
         presentation = launch_state.presentation
         self._route_measurement_point_numbers = presentation.point_numbers
-        self._route_telegram_adapter().reset_for_route_start()
+        self._telegram_runtime.route_photos.reset_for_route_start()
         self._set_route_measurement_pending(True)
         self._route_measurement_thread = threading.Thread(
             target=self._run_route_measurement,
@@ -8309,7 +8117,7 @@ class Main(QMainWindow):
         self._show_status(start_message)
         self._last_route_measurement_result = None
         if launch_state.send_start_telegram:
-            self._send_telegram_alert(
+            self._telegram_runtime.send_alert(
                 "route_started",
                 route_start_telegram_text(
                     start_message,
@@ -8564,14 +8372,16 @@ class Main(QMainWindow):
         position: int,
         total: int,
     ) -> None:
-        self._route_telegram_adapter().record_route_photo(
+        self._telegram_runtime.route_photos.record_route_photo(
             record,
             position,
             total,
             route_name=self._current_route_name(),
-            send_bot_message=self._send_telegram_bot_message,
+            send_bot_message=self._telegram_runtime.send_bot_message,
             default_markup=(
-                self._telegram_default_markup()
+                self._telegram_runtime.default_markup(
+                    route_waiting=self._route_measurement_waiting
+                )
                 if hasattr(self, "_route_measurement_waiting")
                 else None
             ),
@@ -8586,7 +8396,7 @@ class Main(QMainWindow):
         route_attention_enabled = telegram_route_attention_alert_enabled(
             self.settings_manager.telegram_configuration()
         )
-        self._route_telegram_adapter().capture_pre_contact_photo(
+        self._telegram_runtime.route_photos.capture_pre_contact_photo(
             point,
             position,
             total,
@@ -8610,7 +8420,7 @@ class Main(QMainWindow):
         route_attention_enabled = telegram_route_attention_alert_enabled(
             self.settings_manager.telegram_configuration()
         )
-        self._route_telegram_adapter().capture_contact_photo(
+        self._telegram_runtime.route_photos.capture_contact_photo(
             point,
             record,
             position,
@@ -8622,41 +8432,6 @@ class Main(QMainWindow):
             wait_for_camera_frame=self._wait_for_camera_frame,
             qimage_telegram_photo=self._qimage_telegram_photo,
             latest_camera_frame_photo=self._latest_camera_frame_photo,
-        )
-
-    def _take_pending_telegram_contact_photos(
-        self,
-    ) -> tuple[tuple[bytes, str, str] | None, tuple[bytes, str, str]] | None:
-        return self._route_telegram_adapter().take_pending_contact_photos()
-
-    def _latest_route_contact_failure_telegram_photos(
-        self,
-    ) -> tuple[tuple[bytes, str, str] | None, tuple[bytes, str, str]] | None:
-        return self._route_telegram_adapter().latest_contact_failure_photos()
-
-    def _telegram_contact_photo_payload(
-        self,
-        before_photo: tuple[bytes, str, str] | None,
-        after_photo: tuple[bytes, str, str],
-    ) -> tuple[tuple[bytes, str], str]:
-        photo, caption = telegram_contact_photo_payload(
-            before_photo,
-            after_photo,
-            combine_photos=self._combine_telegram_contact_photos,
-        )
-        if before_photo is not None and photo[1] != "route-contact-comparison.jpg":
-            logger.warning("Unable to combine route contact photos for Telegram.")
-        return photo, caption
-
-    @staticmethod
-    def _combine_telegram_contact_photos(
-        before_bytes: bytes,
-        after_bytes: bytes,
-    ) -> tuple[bytes, str] | None:
-        return combine_telegram_contact_photos(
-            before_bytes,
-            after_bytes,
-            encode_image=Main._qimage_telegram_photo,
         )
 
     def _record_route_contact_height(
@@ -9197,17 +8972,35 @@ class Main(QMainWindow):
             bool(saved),
         )
         self._route_runtime_presenter().set_result(record, position, total, saved)
-        pending_contact_photos = self._take_pending_telegram_contact_photos()
+        pending_contact_photos = (
+            self._telegram_runtime.route_photos.take_pending_contact_photos()
+        )
         if pending_contact_photos is not None:
             before_photo, after_photo = pending_contact_photos
-            photo, caption = self._telegram_contact_photo_payload(
+            photo, caption = telegram_contact_photo_payload(
                 before_photo,
                 after_photo,
+                combine_photos=lambda before_bytes, after_bytes: (
+                    combine_telegram_contact_photos(
+                        before_bytes,
+                        after_bytes,
+                        encode_image=Main._qimage_telegram_photo,
+                    )
+                ),
             )
-            self._send_telegram_bot_message(
+            if (
+                before_photo is not None
+                and photo[1] != "route-contact-comparison.jpg"
+            ):
+                logger.warning(
+                    "Unable to combine route contact photos for Telegram."
+                )
+            self._telegram_runtime.send_bot_message(
                 caption,
                 photo=photo,
-                reply_markup=self._telegram_default_markup(),
+                reply_markup=self._telegram_runtime.default_markup(
+                    route_waiting=self._route_measurement_waiting
+                ),
             )
         if not saved:
             message = self._format_route_measurement_record(
@@ -9249,17 +9042,41 @@ class Main(QMainWindow):
         *,
         include_contact_photos: bool = False,
     ) -> None:
-        self._route_telegram_adapter().send_route_attention_alert(
+        def build_contact_photo_payload(
+            before_photo: tuple[bytes, str, str] | None,
+            after_photo: tuple[bytes, str, str],
+        ) -> tuple[tuple[bytes, str], str]:
+            photo, caption = telegram_contact_photo_payload(
+                before_photo,
+                after_photo,
+                combine_photos=lambda before_bytes, after_bytes: (
+                    combine_telegram_contact_photos(
+                        before_bytes,
+                        after_bytes,
+                        encode_image=Main._qimage_telegram_photo,
+                    )
+                ),
+            )
+            if (
+                before_photo is not None
+                and photo[1] != "route-contact-comparison.jpg"
+            ):
+                logger.warning(
+                    "Unable to combine route contact photos for Telegram."
+                )
+            return photo, caption
+
+        self._telegram_runtime.route_photos.send_route_attention_alert(
             message,
             include_contact_photos=include_contact_photos,
             failure_photos=(
-                self._latest_route_contact_failure_telegram_photos()
+                self._telegram_runtime.route_photos.latest_contact_failure_photos()
                 if include_contact_photos
                 else None
             ),
-            contact_photo_payload=self._telegram_contact_photo_payload,
-            send_alert=self._send_telegram_alert,
-            route_actions_markup=self._telegram_route_actions_markup(),
+            contact_photo_payload=build_contact_photo_payload,
+            send_alert=self._telegram_runtime.send_alert,
+            route_actions_markup=self._telegram_runtime.route_actions_markup(),
         )
 
     def _on_route_measurement_recorded(
@@ -9377,7 +9194,7 @@ class Main(QMainWindow):
         )
         if telegram_payload is not None and finish_plan.telegram is not None:
             telegram_message, telegram_kwargs = telegram_payload
-            self._send_telegram_alert(
+            self._telegram_runtime.send_alert(
                 finish_plan.telegram.key,
                 telegram_message,
                 **telegram_kwargs,
@@ -9407,7 +9224,7 @@ class Main(QMainWindow):
         self._route_measurement_photo_enabled = False
         self._route_measurement_measure_enabled = False
         self._resume_resistance_standby_polling()
-        self._route_telegram_adapter().clear_for_route_finish()
+        self._telegram_runtime.route_photos.clear_for_route_finish()
 
     @staticmethod
     def _route_measurement_csv_record_count(csv_path: str | Path) -> int | None:

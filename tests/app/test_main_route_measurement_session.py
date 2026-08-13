@@ -29,6 +29,7 @@ from tests.app.main_coordinate_feedrate_support import (
     _make_route_start_main,
     _route_start_configuration,
     _route_start_point,
+    _telegram_runtime_stub,
     _telegram_test_photo_bytes,
     main_module,
     request_route_measurement_for_point,
@@ -448,16 +449,6 @@ class MainRouteMeasurementSessionTest(unittest.TestCase):
             window._route_measurement_measure_enabled = True
             window._route_measurement_point_numbers = [1, 2]
             window._route_measurement_current_point = 2
-            window._telegram_photo_lock = threading.Lock()
-            window._telegram_route_photo_requested = True
-            window._telegram_contact_photo_requested = True
-            window._telegram_pending_contact_before_photo = (
-                b"before",
-                "before.jpg",
-                "",
-            )
-            window._telegram_pending_contact_photo = (b"after", "after.jpg", "")
-            window._last_route_pre_contact_photo = (1, 2, b"pre", "pre.jpg", "")
             window.design_navigator_panel = None
             window._route_measurement_dialog = None
             window._update_stage_coordinate_apply_state = lambda: None
@@ -466,8 +457,10 @@ class MainRouteMeasurementSessionTest(unittest.TestCase):
             window._show_status = lambda message, _timeout_ms=None: statuses.append(
                 str(message)
             )
-            window._send_telegram_alert = lambda key, text, **kwargs: alerts.append(
-                (key, text, kwargs)
+            window._telegram_runtime = _telegram_runtime_stub(
+                send_alert=lambda key, text, **kwargs: alerts.append(
+                    (key, text, kwargs)
+                )
             )
 
             Main._on_route_measurement_finished(
@@ -507,19 +500,13 @@ class MainRouteMeasurementSessionTest(unittest.TestCase):
         window._route_measurement_context_close_requested = False
         window._route_measurement_point_numbers = [1]
         window._route_measurement_current_point = 1
-        window._telegram_photo_lock = threading.Lock()
-        window._telegram_route_photo_requested = False
-        window._telegram_contact_photo_requested = False
-        window._telegram_pending_contact_before_photo = None
-        window._telegram_pending_contact_photo = None
-        window._last_route_pre_contact_photo = None
         window.design_navigator_panel = None
         window._route_measurement_dialog = None
         window._resume_resistance_standby_polling = lambda: None
         window._update_stage_coordinate_apply_state = lambda: None
         window._set_route_measurement_pending = lambda _pending: None
         window._show_status = lambda *_args, **_kwargs: None
-        window._send_telegram_alert = lambda *_args, **_kwargs: None
+        window._telegram_runtime = _telegram_runtime_stub()
 
         Main._on_route_measurement_finished(
             window,
@@ -636,13 +623,12 @@ class MainRouteMeasurementSessionTest(unittest.TestCase):
         window._latest_camera_frame_photo = lambda: None
         window._api_timestamp_utc = lambda: "2026-06-26T20:00:00Z"
         window._api_structure_number_for_measurement_point = lambda _point: 17
-        window._route_telegram_adapter = lambda: route_telegram
-        window._send_telegram_bot_message = (
-            lambda message, *, photo=None, reply_markup=None: sent.append(
+        window._telegram_runtime = _telegram_runtime_stub(
+            route_photos=route_telegram,
+            send_bot_message=lambda message, *, photo=None, reply_markup=None: sent.append(
                 (message, photo, reply_markup)
-            )
+            ),
         )
-        window._telegram_default_markup = lambda: "markup"
 
         first_artifact = Main._capture_api_route_photo_artifact(
             window,
@@ -701,12 +687,6 @@ class MainRouteMeasurementSessionTest(unittest.TestCase):
         window._route_measurement_context_close_requested = True
         window._route_measurement_point_numbers = [1, 2]
         window._route_measurement_current_point = 2
-        window._telegram_photo_lock = threading.Lock()
-        window._telegram_route_photo_requested = False
-        window._telegram_contact_photo_requested = False
-        window._telegram_pending_contact_before_photo = None
-        window._telegram_pending_contact_photo = None
-        window._last_route_pre_contact_photo = None
         window.design_navigator_panel = None
         window._route_measurement_dialog = None
         window._resume_resistance_standby_polling = lambda: None
@@ -716,8 +696,8 @@ class MainRouteMeasurementSessionTest(unittest.TestCase):
         window._show_status = lambda message, _timeout_ms=None: statuses.append(
             str(message)
         )
-        window._send_telegram_alert = lambda *args, **_kwargs: alerts.append(
-            tuple(args)
+        window._telegram_runtime = _telegram_runtime_stub(
+            send_alert=lambda *args, **_kwargs: alerts.append(tuple(args))
         )
 
         Main._on_route_measurement_finished(
@@ -1065,12 +1045,6 @@ class MainRouteMeasurementSessionTest(unittest.TestCase):
         window._api_route_session_id = None
         window._api_route_artifacts = {}
         window._api_route_artifacts_lock = threading.Lock()
-        window._telegram_photo_lock = threading.Lock()
-        window._telegram_pending_contact_photo = None
-        window._telegram_pending_contact_before_photo = None
-        window._last_route_pre_contact_photo = None
-        window._last_route_contact_failure_photo = None
-        window._last_route_contact_failure_before_photo = None
         window._design_session = types.SimpleNamespace(
             route=types.SimpleNamespace(points=[object()], name="route"),
             registration=types.SimpleNamespace(valid=True),
@@ -1110,7 +1084,7 @@ class MainRouteMeasurementSessionTest(unittest.TestCase):
         )
         window._capture_route_contact_photo = lambda *args, **kwargs: None
         window._capture_route_pre_contact_photo = lambda *args, **kwargs: None
-        window._send_telegram_alert = lambda *args, **kwargs: None
+        window._telegram_runtime = _telegram_runtime_stub()
 
         response = Main._api_start_route_session(
             window,
@@ -1307,13 +1281,6 @@ class MainRouteMeasurementSessionTest(unittest.TestCase):
         )
         window._api_route_artifacts = {"old": object()}
         window._api_route_artifacts_lock = threading.Lock()
-        window._telegram_photo_lock = threading.Lock()
-        window._telegram_pending_contact_photo = object()
-        window._telegram_pending_contact_before_photo = object()
-        window._last_route_pre_contact_photo = object()
-        window._last_route_contact_failure_photo = object()
-        window._last_route_contact_failure_before_photo = object()
-
         with (
             mock.patch.object(
                 main_module,
@@ -1582,10 +1549,9 @@ class MainRouteMeasurementSessionTest(unittest.TestCase):
             set_status=lambda message: dialog_calls.append(("status", str(message))),
         )
         window._show_status = lambda message, *_args: statuses.append(str(message))
-        window._send_telegram_alert = lambda *args, **kwargs: telegrams.append(
-            tuple(args)
+        window._telegram_runtime = _telegram_runtime_stub(
+            send_alert=lambda *args, **kwargs: telegrams.append(tuple(args))
         )
-        window._telegram_photo_lock = threading.Lock()
         window._update_stage_coordinate_apply_state = lambda: None
 
         configuration = RouteMeasurementRunConfiguration(

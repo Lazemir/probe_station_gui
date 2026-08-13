@@ -1,7 +1,6 @@
 # ruff: noqa: E402
 
 import struct
-import threading
 import time
 import types
 import zlib
@@ -33,6 +32,7 @@ from probe_station_gui.route.measurement import (
 from probe_station_gui.route.measurement_settings import (
     RouteMeasurementSettingsStore,
 )
+from probe_station_gui.route.telegram_adapter import RouteTelegramPhotoState
 from probe_station_gui.route.dialog_adapter import (
     RouteMeasurementPointRequestCallbacks,
     request_route_measurement_for_point,
@@ -68,8 +68,31 @@ __all__ = (
     "StageControllerError",
     "api_move_feedrate",
     "api_route_adjusted_stage_xy",
+    "_telegram_runtime_stub",
     "request_route_measurement_for_point",
 )
+
+
+def _telegram_runtime_stub(
+    *,
+    route_photos: object | None = None,
+    send_alert=None,
+    send_bot_message=None,
+    configure=None,
+    stop=None,
+    default_markup: object | None = "markup",
+    route_actions_markup: object | None = "actions",
+) -> object:
+    return types.SimpleNamespace(
+        route_photos=route_photos or RouteTelegramPhotoState(),
+        configure=configure or (lambda _settings: None),
+        stop=stop or (lambda: None),
+        send_alert=send_alert or (lambda *_args, **_kwargs: None),
+        send_bot_message=send_bot_message
+        or (lambda *_args, **_kwargs: True),
+        default_markup=lambda *, route_waiting: default_markup,
+        route_actions_markup=lambda: route_actions_markup,
+    )
 
 
 class _FakeTimer:
@@ -873,10 +896,11 @@ def _make_route_start_main(
     window._show_status = lambda message, timeout_ms=None: statuses.append(
         (str(message), timeout_ms)
     )
-    window._send_telegram_alert = lambda key, *args, **kwargs: telegrams.append(
-        (str(key), args, dict(kwargs))
+    window._telegram_runtime = _telegram_runtime_stub(
+        send_alert=lambda key, *args, **kwargs: telegrams.append(
+            (str(key), args, dict(kwargs))
+        )
     )
-    window._telegram_photo_lock = threading.Lock()
     window._update_stage_coordinate_apply_state = lambda: None
     return window, statuses, telegrams, dialog, lcr, camera_calls
 

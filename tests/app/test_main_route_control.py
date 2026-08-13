@@ -12,7 +12,6 @@ from tests.app.main_coordinate_feedrate_support import (
     _FakeVisibleDialog,
     _make_main,
     api_route_adjusted_stage_xy,
-    main_module,
 )
 
 
@@ -1105,73 +1104,6 @@ class MainRouteControlTest(unittest.TestCase):
             statuses,
             ["Pause API route control before moving to a contact."],
         )
-
-    def test_telegram_measure_submits_waiting_route_action(self) -> None:
-        window = Main.__new__(Main)
-        runner = _FakeRouteMeasurementRunner()
-        statuses: list[str] = []
-
-        window._route_measurement_waiting = True
-        window._route_measurement_runner = runner
-        window._route_measurement_dialog = None
-        window.design_navigator_panel = None
-        window._telegram_default_markup = lambda: "markup"
-        window._show_status = lambda message, _timeout_ms=None: statuses.append(
-            str(message)
-        )
-
-        response = Main._telegram_route_action_response(window, "measure")
-
-        self.assertEqual(runner.confirmations, ["measure"])
-        self.assertEqual(response.callback_answer, "measure submitted.")
-        self.assertEqual(response.reply_markup, "markup")
-        self.assertEqual(statuses, ["Route measurement: measure."])
-
-    def test_telegram_remeasure_action_is_disabled(self) -> None:
-        window = Main.__new__(Main)
-        runner = _FakeRouteMeasurementRunner()
-
-        window._route_measurement_waiting = True
-        window._route_measurement_runner = runner
-        window._telegram_default_markup = lambda: "markup"
-
-        response = Main._telegram_route_action_response(window, "remeasure")
-
-        self.assertEqual(runner.confirmations, [])
-        self.assertEqual(response.callback_answer, "Unknown action.")
-        self.assertEqual(response.reply_markup, "markup")
-
-    def test_telegram_route_actions_markup_omits_remeasure(self) -> None:
-        original = main_module.telegram_inline_keyboard
-        main_module.telegram_inline_keyboard = lambda rows: rows
-        try:
-            markup = Main._telegram_route_actions_markup()
-        finally:
-            main_module.telegram_inline_keyboard = original
-
-        labels = [label for row in markup for label, _callback in row]
-        self.assertIn("Measure", labels)
-        self.assertIn("Skip", labels)
-        self.assertNotIn("Remeasure", labels)
-
-    def test_telegram_skip_submits_paused_api_route_control_action(self) -> None:
-        window = Main.__new__(Main)
-        actions: list[dict[str, object]] = []
-
-        window._route_measurement_waiting = True
-        window._route_measurement_runner = None
-        window._api_route_control_active = True
-        window._api_route_control_paused = True
-        window._telegram_default_markup = lambda: "markup"
-        window._api_route_control_action = lambda payload: actions.append(dict(payload))
-        window._show_status = lambda *_args: None
-
-        response = Main._telegram_route_action_response(window, "skip")
-
-        self.assertEqual(actions, [{"action": "skip"}])
-        self.assertEqual(response.callback_answer, "skip submitted.")
-        self.assertEqual(response.reply_markup, "markup")
-
 
 if __name__ == "__main__":
     unittest.main()

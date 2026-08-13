@@ -94,7 +94,9 @@ def test_save_needle_calibration_uses_serialized_settings_transaction() -> None:
                 (value, preserve_exposure_policy)
             )
         ),
-        stage_controller=SimpleNamespace(apply_needle_calibration=lambda **_kwargs: None),
+        stage_controller=SimpleNamespace(
+            apply_needle_calibration=lambda **_kwargs: None
+        ),
         joystick_panel=None,
         contact_calibration_window=None,
     )
@@ -145,8 +147,12 @@ def test_request_contact_seek_marks_window_running_and_starts_thread() -> None:
 def test_run_contact_seek_steps_until_good_contact_then_saves_calibration() -> None:
     qualities = iter(
         (
-            SimpleNamespace(good=False, status="bad", median_ohm=1e6, mad_sigma_ohm=0.0),
-            SimpleNamespace(good=True, status="good", median_ohm=12.5, mad_sigma_ohm=0.2),
+            SimpleNamespace(
+                good=False, status="bad", median_ohm=1e6, mad_sigma_ohm=0.0
+            ),
+            SimpleNamespace(
+                good=True, status="good", median_ohm=12.5, mad_sigma_ohm=0.2
+            ),
             SimpleNamespace(
                 good=True,
                 status="good",
@@ -172,15 +178,21 @@ def test_run_contact_seek_steps_until_good_contact_then_saves_calibration() -> N
     assert ("set_work", "A", 0.0) in owner.stage_controller.calls
     assert owner.contact_seek_calibration_found.emitted[0][0] == 1.25
     assert owner.contact_seek_finished.emitted[0][0] is True
-    assert "Contact seek found stable contact" in owner.contact_seek_finished.emitted[0][1]
+    assert (
+        "Contact seek found stable contact" in owner.contact_seek_finished.emitted[0][1]
+    )
 
 
 def test_run_contact_seek_uses_owner_tunable_constants() -> None:
     counts: list[int] = []
     qualities = iter(
         (
-            SimpleNamespace(good=False, status="bad", median_ohm=1e6, mad_sigma_ohm=0.0),
-            SimpleNamespace(good=True, status="good", median_ohm=12.5, mad_sigma_ohm=0.2),
+            SimpleNamespace(
+                good=False, status="bad", median_ohm=1e6, mad_sigma_ohm=0.0
+            ),
+            SimpleNamespace(
+                good=True, status="good", median_ohm=12.5, mad_sigma_ohm=0.2
+            ),
             SimpleNamespace(
                 good=True,
                 status="good",
@@ -225,7 +237,9 @@ def test_on_contact_seek_finished_clears_thread_and_sends_failure_alert() -> Non
         contact_calibration_window=_ContactWindow(),
         _resume_resistance_standby_polling=lambda: statuses.append(("resume", 0)),
         _show_status=lambda message, timeout: statuses.append((message, timeout)),
-        _send_telegram_alert=lambda *args, **kwargs: alerts.append((args, kwargs)),
+        _telegram_runtime=SimpleNamespace(
+            send_alert=lambda *args, **kwargs: alerts.append((args, kwargs))
+        ),
     )
 
     calibration_ui.on_contact_seek_finished(owner, False, "failed")

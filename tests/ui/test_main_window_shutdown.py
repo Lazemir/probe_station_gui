@@ -54,7 +54,7 @@ def test_service_shutdown_stops_coordinate_and_selection_stores() -> None:
     owner = SimpleNamespace(
         _api_bridge=None,
         _api_server=None,
-        _stop_telegram_bot_service=lambda: None,
+        _telegram_runtime=SimpleNamespace(stop=lambda: None),
         _design_position_timer=SimpleNamespace(stop=lambda: None),
         _manual_jog_timer=SimpleNamespace(stop=lambda: None),
         _stage_motion_blink_timer=SimpleNamespace(stop=lambda: None),
@@ -85,9 +85,7 @@ def test_shutdown_fails_closed_while_api_stage_worker_is_running() -> None:
     waits: list[float] = []
     owner = SimpleNamespace(
         _api_stage_command_runtime=SimpleNamespace(
-            wait_until_idle=lambda *, timeout_s: (
-                waits.append(timeout_s) or False
-            )
+            wait_until_idle=lambda *, timeout_s: waits.append(timeout_s) or False
         ),
     )
 
@@ -130,9 +128,7 @@ def test_shutdown_cancels_and_drains_manual_alignment_capture() -> None:
     events: list[object] = []
     context = SimpleNamespace(
         request_id="capture-shutdown",
-        cancelled=SimpleNamespace(
-            set=lambda: events.append(("cancel_context",))
-        )
+        cancelled=SimpleNamespace(set=lambda: events.append(("cancel_context",))),
     )
     owner = SimpleNamespace(
         _manual_alignment_capture_context=context,
@@ -251,17 +247,21 @@ def test_close_event_preserves_shutdown_order(monkeypatch) -> None:
         ),
         grabber=SimpleNamespace(stop=lambda: events.append(("grabber_stop",))),
         _live_camera_frame_processor=SimpleNamespace(
-            shutdown=lambda **kwargs: events.append(("frame_processor_shutdown", kwargs))
+            shutdown=lambda **kwargs: events.append(
+                ("frame_processor_shutdown", kwargs)
+            )
         ),
         thread=SimpleNamespace(
             quit=lambda: events.append(("camera_thread_quit",)),
             wait=lambda: events.append(("camera_thread_wait",)),
         ),
         joystick_panel=SimpleNamespace(
-            stop_jog=lambda: events.append(("stop_jog", "application shutdown", serial.is_open)),
+            stop_jog=lambda: events.append(
+                ("stop_jog", "application shutdown", serial.is_open)
+            ),
             set_serial=lambda serial_connection: events.append(
                 ("joystick_serial", serial_connection)
-            )
+            ),
         ),
         serial_terminal_panel=SimpleNamespace(
             set_serial=lambda serial_connection: events.append(
@@ -277,10 +277,10 @@ def test_close_event_preserves_shutdown_order(monkeypatch) -> None:
             request_stop_oscillation=lambda: events.append(("stop_oscillation",)),
             shutdown=lambda: events.append(("stage_shutdown",)),
         ),
-        _stop_telegram_bot_service=lambda: events.append(("telegram_stop",)),
-        _save_pending_linear_feedrate_default=lambda: events.append(
-            ("save_feedrate",)
+        _telegram_runtime=SimpleNamespace(
+            stop=lambda: events.append(("telegram_stop",))
         ),
+        _save_pending_linear_feedrate_default=lambda: events.append(("save_feedrate",)),
         _stop_design_markup_store=lambda: events.append(("markup_store_stop",)),
         _route_measurement_dialog=SimpleNamespace(
             close=lambda: events.append(("route_close",))
@@ -582,7 +582,9 @@ def test_exposure_shutdown_timeout_blocks_camera_teardown_and_close(
             )
         ),
         _live_camera_frame_processor=SimpleNamespace(
-            shutdown=lambda **kwargs: events.append(("frame_processor_shutdown", kwargs))
+            shutdown=lambda **kwargs: events.append(
+                ("frame_processor_shutdown", kwargs)
+            )
         ),
         grabber=SimpleNamespace(stop=lambda: events.append(("grabber_stop",))),
         thread=SimpleNamespace(

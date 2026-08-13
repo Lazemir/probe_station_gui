@@ -400,7 +400,7 @@ def test_curve_apply_keeps_estimated_position_authority_on_remapped_snapshot(
         )
         window._clear_exact_step_targets = lambda: None
         window._apply_objective_settings = lambda: None
-        window._configure_telegram_bot_from_settings = lambda: None
+        window._telegram_runtime = SimpleNamespace(configure=lambda _settings: None)
         window._update_coordinate_display = lambda **_kwargs: None
         window._can_display_design_position = lambda: False
         window._update_design_position = lambda _position: None
