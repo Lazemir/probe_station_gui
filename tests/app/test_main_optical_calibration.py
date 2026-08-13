@@ -151,7 +151,9 @@ class _StartFailThread:
 
 
 class _SessionLease:
-    def __init__(self, token: str, operation: str, events: list[tuple[object, ...]]) -> None:
+    def __init__(
+        self, token: str, operation: str, events: list[tuple[object, ...]]
+    ) -> None:
         self.token = token
         self.operation = operation
         self.events = events
@@ -184,7 +186,9 @@ class _ObjectiveSettingsManager:
         self.settings = settings
 
     def save(self) -> None:
-        raise AssertionError("Objective change must not be persisted while calibration runs.")
+        raise AssertionError(
+            "Objective change must not be persisted while calibration runs."
+        )
 
 
 def _objective_settings() -> ObjectivesSettings:
@@ -200,6 +204,7 @@ def _objective_settings() -> ObjectivesSettings:
             )
         },
     )
+
 
 def test_show_optical_calibration_wizard_reports_active_objective(
     monkeypatch,
@@ -316,7 +321,9 @@ def test_runtime_progress_survives_deleted_status_signal() -> None:
 
 
 @pytest.mark.parametrize("invalidated_by", ("new-run", "cancel", "scan"))
-def test_queued_flat_outcome_cannot_update_ui_after_invalidation(invalidated_by) -> None:
+def test_queued_flat_outcome_cannot_update_ui_after_invalidation(
+    invalidated_by,
+) -> None:
     class _DeferredThread:
         def __init__(self, *, target, **_kwargs) -> None:
             self.target = target
@@ -387,6 +394,7 @@ def test_queued_flat_outcome_cannot_update_ui_after_invalidation(invalidated_by)
         window, outcome, True, outcome.message, outcome.flat_payload
     )
 
+
 def test_show_optical_calibration_wizard_does_not_reprepare_retained_full_run(
     tmp_path: Path,
 ) -> None:
@@ -417,11 +425,18 @@ def test_show_optical_calibration_wizard_does_not_reprepare_retained_full_run(
     assert wizard.shown == wizard.raised == wizard.activated == 1
     assert statuses == [("Optical calibration is still active.", 5000)]
 
+
 def test_wizard_routes_run_identity_through_progress_and_completion() -> None:
     window = Main.__new__(Main)
     wizard = _FakeWizard()
     context = OpticalCalibrationOutcome(
-        "flat-17", 17, "flat", True, "saved", "X20", True,
+        "flat-17",
+        17,
+        "flat",
+        True,
+        "saved",
+        "X20",
+        True,
         flat_payload={},
     )
     window._optical_calibration_wizard = wizard
@@ -441,12 +456,19 @@ def test_wizard_routes_run_identity_through_progress_and_completion() -> None:
     assert wizard.progress == [("Flat field: capture 3/9.", 17)]
     assert wizard.results == [("flat", True, "saved", 17)]
 
+
 def test_failed_lens_wizard_stage_returns_matching_result() -> None:
     window = Main.__new__(Main)
     wizard = _FakeWizard()
     wizard.run_id = 23
     context = OpticalCalibrationOutcome(
-        "lens-23", 23, "lens", False, "fit failed", "X20", True,
+        "lens-23",
+        23,
+        "lens",
+        False,
+        "fit failed",
+        "X20",
+        True,
     )
     window._optical_calibration_wizard = wizard
     window._optical_calibration_runtime = SimpleNamespace(
@@ -465,6 +487,7 @@ def test_failed_lens_wizard_stage_returns_matching_result() -> None:
     )
 
     assert wizard.results == [("lens", False, "fit failed", 23)]
+
 
 def test_wizard_rejects_objective_change_before_start() -> None:
     window = Main.__new__(Main)
@@ -486,6 +509,7 @@ def test_wizard_rejects_objective_change_before_start() -> None:
         )
     ]
 
+
 def test_objective_change_is_blocked_while_calibration_context_is_active() -> None:
     window = Main.__new__(Main)
     manager = _ObjectiveSettingsManager()
@@ -497,7 +521,9 @@ def test_objective_change_is_blocked_while_calibration_context_is_active() -> No
     window._api_stage_command_runtime = SimpleNamespace(active=lambda: False)
     window._microscope_scan_running = lambda: False
     window._optical_calibration_runtime = SimpleNamespace(
-        state=lambda: SimpleNamespace(active_run_id="lens-pre-stage", parent_session_token=None)
+        state=lambda: SimpleNamespace(
+            active_run_id="lens-pre-stage", parent_session_token=None
+        )
     )
     window._sync_objective_combo = lambda name: restored.append(name)
     window._show_status = lambda message, _timeout=0: statuses.append(str(message))
@@ -509,6 +535,7 @@ def test_objective_change_is_blocked_while_calibration_context_is_active() -> No
     assert restored == ["X20"]
     assert statuses == ["Stage is busy; objective not changed."]
 
+
 def test_full_wizard_objective_mismatch_requests_outer_session_close() -> None:
     window = Main.__new__(Main)
     wizard = _FakeWizard()
@@ -518,7 +545,9 @@ def test_full_wizard_objective_mismatch_requests_outer_session_close() -> None:
     window._start_lens_distortion_calibration = lambda **_kwargs: pytest.fail(
         "mismatched objective must not launch lens calibration"
     )
-    window._cancel_optical_calibration_wizard = lambda run_id=None: closes.append(run_id)
+    window._cancel_optical_calibration_wizard = lambda run_id=None: closes.append(
+        run_id
+    )
 
     Main._start_lens_distortion_calibration_from_wizard(window)
 
@@ -531,6 +560,7 @@ def test_full_wizard_objective_mismatch_requests_outer_session_close() -> None:
             17,
         )
     ]
+
 
 def test_full_wizard_lens_launch_failure_requests_outer_session_close() -> None:
     window = Main.__new__(Main)
@@ -546,7 +576,9 @@ def test_full_wizard_lens_launch_failure_requests_outer_session_close() -> None:
         "status_code": 409,
         "message": "Lens distortion calibration did not start.",
     }
-    window._cancel_optical_calibration_wizard = lambda run_id=None: closes.append(run_id)
+    window._cancel_optical_calibration_wizard = lambda run_id=None: closes.append(
+        run_id
+    )
 
     Main._start_lens_distortion_calibration_from_wizard(window)
 
@@ -559,6 +591,7 @@ def test_full_wizard_lens_launch_failure_requests_outer_session_close() -> None:
             17,
         )
     ]
+
 
 def test_lens_dialog_calibrate_opens_lens_only_wizard(monkeypatch) -> None:
     window = Main.__new__(Main)

@@ -6,7 +6,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QItemSelectionModel
 from PySide6.QtWidgets import QAbstractItemView, QApplication
 
-import main as main_module
+import probe_station_gui.application.registration_focus as registration_focus_owner
 from main import Main
 from probe_station_gui.design.model import DesignDocument
 from probe_station_gui.design.selection_model import (
@@ -45,7 +45,7 @@ def test_minimap_single_click_handler_opens_design_window(monkeypatch) -> None:
     window = Main.__new__(Main)
     calls: list[bool] = []
     monkeypatch.setattr(
-        main_module,
+        registration_focus_owner,
         "toggle_design_layout_window",
         lambda _owner, show: calls.append(bool(show)),
     )
@@ -83,9 +83,7 @@ def test_route_array_request_uses_shared_selected_entity_ids() -> None:
         QItemSelectionModel.Select | QItemSelectionModel.Rows,
     )
     panel.set_selection(
-        SelectionModel(
-            frozenset({route_entity_id("p001"), route_entity_id("p003")})
-        )
+        SelectionModel(frozenset({route_entity_id("p001"), route_entity_id("p003")}))
     )
     emitted: list[MixedArrayRequest] = []
     panel.mixed_array_requested.connect(emitted.append)

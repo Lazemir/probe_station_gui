@@ -71,25 +71,31 @@ def test_main_has_no_telegram_policy_lifecycle_or_route_state_facades() -> None:
 
 def test_main_signal_and_shutdown_connect_directly_to_runtime() -> None:
     source = (ROOT / "main.py").read_text(encoding="utf-8-sig")
+    tree = ast.parse(source)
     shutdown = (ROOT / "probe_station_gui/views/main_window_shutdown.py").read_text(
         encoding="utf-8"
     )
 
     assert "telegram_bot_request_received: Signal = Signal(object)" in source
-    assert (
-        "self.telegram_bot_request_received.connect(\n            self._telegram_runtime.handle_on_gui\n        )"
-        in source
+    assert any(
+        isinstance(node, ast.Call)
+        and ast.unparse(node.func) == "self.telegram_bot_request_received.connect"
+        and [ast.unparse(argument) for argument in node.args]
+        == ["self._telegram_runtime.handle_on_gui"]
+        for node in ast.walk(tree)
     )
     assert "owner._telegram_runtime.stop()" in shutdown
     assert "_stop_telegram_bot_service" not in shutdown
 
 
 def test_route_callers_use_the_one_runtime_photo_state_directly() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8-sig")
+    paths = [ROOT / "main.py", *(ROOT / "probe_station_gui/application").glob("*.py")]
+    sources = [path.read_text(encoding="utf-8-sig") for path in paths]
+    combined_source = "\n".join(sources)
 
-    assert "_route_telegram_adapter" not in source
-    assert "_route_telegram" not in source
-    assert "self._telegram_runtime.route_photos" in source
+    assert "_route_telegram_adapter" not in combined_source
+    assert "_route_telegram" not in combined_source
+    assert "self._telegram_runtime.route_photos" in combined_source
 
 
 def test_runtime_public_surface_and_owner_dag_are_exact() -> None:

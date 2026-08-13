@@ -22,11 +22,11 @@
 
 ## Baseline and quantitative acceptance
 
-- [ ] Record clean HEAD and exact status.
-- [ ] Run the all-tracked scan over `git ls-files '*.py'`. Expected baseline: 677 files, exactly one MI-zero file, `main.py`.
-- [ ] Record `main.py`: LOC 10753, LLOC 5719, SLOC 10162, Radon complexity 1805, Halstead volume 39963.04, non-normalized MI -436.32.
-- [ ] Pin all existing tracked test blobs before the first production move.
-- [ ] Add a repository gate that fails while any tracked Python file has `mi_visit(source, multi=True) <= 0`.
+- [x] Record clean baseline HEAD `fe111ca` and exact status.
+- [x] Run the all-tracked baseline scan: 677 files, exactly one MI-zero file, `main.py`.
+- [x] Record baseline `main.py`: LOC 10753, LLOC 5719, SLOC 10162, Radon complexity 1805, Halstead volume 39963.04, non-normalized MI -436.32.
+- [x] Pin existing tracked test blobs before production moves and verify protected Git-filtered bytes during final acceptance.
+- [x] Add `tests/app/test_repository_maintainability.py`, a repository gate that fails while any tracked Python file has `mi_visit(source, multi=True) <= 0`.
 
 ## Owner map
 
@@ -71,7 +71,7 @@ Each owner is a private class in `probe_station_gui/application/`. Ranges refer 
 
 - [x] Add a vertical architecture contract: each delivered owner group extends the exact direct-base tuple and descriptor-identity map; the final group requires all 22 modules/classes, every mapped method absent from `Main.__dict__`, and exact owner descriptors.
 - [x] Assert baseline Main Signals/constants and all public signatures are unchanged for the delivered owner group.
-- [x] Assert no delivered owner imports `main`, another owner, FastAPI/server transport, or package re-export; assert no `__getattr__`, alias assignment, or one-line delegate.
+- [x] Assert no delivered owner imports `main` or another owner, re-exports an owner, uses `__getattr__`, assigns a method alias, adds a one-line delegate, or routes in-process behavior through localhost/FastAPI policy. The cohesive `bootstrap_api` composition owner may construct `ProbeStationApiServer` directly through its injected callbacks.
 - [x] Run the first architecture RED before production changes: 7 expected failures for the missing package, four owner modules, and base order.
 - [x] Build a deterministic AST/range extraction tool in `.scratch/`: preserve decorators and source text, generate explicit imports from the original import table, define a module logger locally, remove moved definitions from `Main`, and insert direct owner imports/bases.
 - [x] Pin the tool to the baseline `main.py` SHA-256 so it refuses unexpected input.
@@ -135,14 +135,14 @@ Each owner is a private class in `probe_station_gui/application/`. Ranges refer 
 - Modify: this plan with factual evidence.
 - Create ignored: `.scratch/main-domain-owners-report.md`.
 
-- [ ] Run the all-tracked MI gate. Required exact result: zero files with MI <= 0; report `main.py` and the minimum repository MI.
-- [ ] Run Radon raw/CC/MI and Lizard duplicate/warning gates for `main.py` plus all owners. Reject metric padding and new duplicate policy.
-- [ ] Run configured whole Ruff, scoped format, whole compileall, diff-check, import-order/DAG/root identity, descriptor/signature/Signal/constants, AST/deletion, and protected-byte gates.
-- [ ] Collect the exact suite count, then execute all top-level test directories in fresh QLocale.c()/offscreen/no-cache processes. Isolate only a baseline-proven native Qt order crash node and account for every collected node exactly once.
-- [ ] Do not run hardware, network, a visible GUI, push, merge, or a unified order-sensitive full process.
-- [ ] Freeze exact HEAD/scope/index/task-temp/hash evidence and obtain final independent review C0/I0/M0.
-- [ ] Stage only reviewed paths, run cached scope/diff checks, and commit `refactor: separate main application domains` if a final documentation-only commit is needed.
-- [ ] Verify clean status, empty index, zero task temp, and rerun the all-tracked MI gate after the final commit.
+- [x] Run the all-tracked MI gate: 702 tracked files plus the new gate before its commit, zero MI <= 0; `main.py` MI 13.729541 and repository minimum 0.368430 in `tests/design/test_klayout_workers.py`.
+- [x] Run Radon raw/CC/MI and Lizard gates: `main.py` 1089/781/1036 LOC/LLOC/SLOC, CC 34, stripped MI 9.186476; all 22 owners stripped-positive. Function/warning/max-CC counts stayed 506/6/24 and duplication improved 0.971987% to 0.256442%, without padding.
+- [x] Run configured whole Ruff, scoped format, whole compileall, diff-check, import-order/DAG/root identity, descriptor/signature/Signal/constants, AST/deletion, and Git-filtered protected-byte gates: all pass.
+- [x] Collect 3333 nodes after adding the permanent MI gate. The 3332-node all-directory matrix passes exactly once per node plus 16 subtests; the only new node passes in the final App 375+1 split. The baseline-proven protected App native crash node passes isolated; raw UI passes.
+- [x] Do not run hardware, network, a visible GUI, push, merge, or a unified order-sensitive full process; none were run.
+- [x] Freeze exact HEAD/scope/index/task-temp/hash evidence and obtain final independent review READY C0/I0/M0.
+- [x] Stage only the eight reviewed Git-visible paths, pass cached scope/diff checks, and create the final acceptance commit with subject `refactor: separate main application domains`.
+- [x] Verify clean status, empty index, zero Task 6 temp, rerun the permanent all-tracked MI gate (1 passed), collect exactly 3333 nodes, and pass whole Ruff/compileall/diff-check after the final commit.
 
 ## Protected behavior surfaces
 

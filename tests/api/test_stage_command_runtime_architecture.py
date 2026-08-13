@@ -6,9 +6,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 MAIN_PATH = ROOT / "main.py"
-BOOTSTRAP_OWNER_PATH = (
-    ROOT / "probe_station_gui" / "application" / "bootstrap_api.py"
-)
+BOOTSTRAP_OWNER_PATH = ROOT / "probe_station_gui" / "application" / "bootstrap_api.py"
+SETTINGS_OWNER_PATH = ROOT / "probe_station_gui" / "application" / "settings_apply.py"
 RUNTIME_PATH = ROOT / "probe_station_gui" / "api" / "stage_command_runtime.py"
 SHUTDOWN_PATH = ROOT / "probe_station_gui" / "views" / "main_window_shutdown.py"
 API_INIT_PATH = ROOT / "probe_station_gui" / "api" / "__init__.py"
@@ -50,6 +49,8 @@ def test_main_uses_only_the_canonical_stage_command_runtime_interface() -> None:
     main_class = _named_class(main_tree, "Main")
     bootstrap_tree = ast.parse(BOOTSTRAP_OWNER_PATH.read_text(encoding="utf-8"))
     bootstrap_owner = _named_class(bootstrap_tree, "_MainBootstrapApiMixin")
+    settings_tree = ast.parse(SETTINGS_OWNER_PATH.read_text(encoding="utf-8"))
+    settings_owner = _named_class(settings_tree, "_MainSettingsApplyMixin")
     main_methods = {
         node.name for node in main_class.body if isinstance(node, ast.FunctionDef)
     }
@@ -67,7 +68,7 @@ def test_main_uses_only_the_canonical_stage_command_runtime_interface() -> None:
     submit_source = ast.unparse(
         _named_method(bootstrap_owner, "_submit_api_command_request")
     )
-    busy_source = ast.unparse(_named_method(main_class, "_objective_mutation_busy"))
+    busy_source = ast.unparse(_named_method(settings_owner, "_objective_mutation_busy"))
     assert "ApiStageCommandRuntime(" in init_source
     assert "self._dispatch_api_command_request" in init_source
     assert "apply_route_control_guard=False" in init_source

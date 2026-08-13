@@ -13,10 +13,10 @@ from tests.app.main_coordinate_feedrate_support import (
     RouteMeasurementPoint,
     RouteMeasurementRecord,
     RouteMeasurementRunner,
-    RouteMeterConfiguration,
     _telegram_runtime_stub,
     main_module,
 )
+from tests.app.main_route_session_support import RouteMeterConfiguration
 
 
 class _StageLease:

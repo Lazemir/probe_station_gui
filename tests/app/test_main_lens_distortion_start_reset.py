@@ -61,10 +61,11 @@ def test_api_lens_reset_returns_conflict_during_active_operation(
         "message": "Lens correction cannot be reset while a scan or calibration is active.",
     }
     assert manager.saved_count == 0
-    assert manager.settings.objectives.objectives[
-        "X20"
-    ].distortion_correction == payload
+    assert (
+        manager.settings.objectives.objectives["X20"].distortion_correction == payload
+    )
     assert statuses == [response["message"]]
+
 
 def test_api_lens_start_returns_flat_field_conflict_instead_of_202() -> None:
     window = Main.__new__(Main)
@@ -95,6 +96,7 @@ def test_api_lens_start_returns_flat_field_conflict_instead_of_202() -> None:
         "message": "Flat-field calibration is already running.",
     }
     assert statuses == [response["message"]]
+
 
 def test_api_lens_start_returns_thread_failure_instead_of_202(monkeypatch) -> None:
     class _StartFailureThread:
@@ -135,6 +137,7 @@ def test_api_lens_start_returns_thread_failure_instead_of_202(monkeypatch) -> No
         "message": "Lens distortion calibration could not start: thread start failed",
     }
 
+
 def test_api_force_click_reset_returns_conflict_during_scan_startup() -> None:
     window = Main.__new__(Main)
     window._api_stage_command_runtime = SimpleNamespace(active=lambda: False)
@@ -170,6 +173,7 @@ def test_api_force_click_reset_returns_conflict_during_scan_startup() -> None:
     assert response["status_code"] == 409
     assert resets == []
     assert starts == []
+
 
 def test_click_to_move_start_is_rejected_during_scan_startup() -> None:
     from probe_station_gui.views.microscope_interaction import (
@@ -223,6 +227,7 @@ def test_click_to_move_start_is_rejected_during_scan_startup() -> None:
     assert interaction.pending_move is None
     assert interaction.target_rel is None
 
+
 def test_gui_click_reset_is_rejected_during_calibration_startup() -> None:
     window = Main.__new__(Main)
     window._api_stage_command_runtime = SimpleNamespace(active=lambda: False)
@@ -264,6 +269,7 @@ def test_gui_click_reset_is_rejected_during_calibration_startup() -> None:
         "Click-to-move calibration cannot be reset while a scan or calibration is active."
     ]
 
+
 def test_reset_lens_distortion_preserves_click_calibration() -> None:
     window = Main.__new__(Main)
     window._api_stage_command_runtime = SimpleNamespace(active=lambda: False)
@@ -301,6 +307,7 @@ def test_reset_lens_distortion_preserves_click_calibration() -> None:
     assert manager.saved_count == 1
     assert apply_calls == ["apply"]
     assert refresh_calls == ["refresh"]
+
 
 def test_api_click_to_move_calibration_force_resets_before_start() -> None:
     window = Main.__new__(Main)
@@ -341,6 +348,7 @@ def test_api_click_to_move_calibration_force_resets_before_start() -> None:
         ),
         ("start", 1.5, -2.0),
     ]
+
 
 def test_camera_frame_distortion_correction_reuses_compiled_payload(
     monkeypatch,
