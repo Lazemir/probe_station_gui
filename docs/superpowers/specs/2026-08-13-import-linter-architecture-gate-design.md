@@ -29,9 +29,10 @@ are already unambiguous and required by the project architecture.
 Store Import Linter configuration in `pyproject.toml` under
 `[tool.importlinter]` and `[[tool.importlinter.contracts]]`.
 
-Use `probe_station_gui` as the root package and exclude imports guarded only by
-`TYPE_CHECKING`. Give every contract a stable identifier so it can be run alone
-during diagnosis.
+Use `probe_station_gui` as the root package, include external import names so
+the top-level `main.py` module can be forbidden, and exclude imports guarded
+only by `TYPE_CHECKING`. Give every contract a stable identifier so it can be
+run alone during diagnosis.
 
 The initial contracts are:
 
