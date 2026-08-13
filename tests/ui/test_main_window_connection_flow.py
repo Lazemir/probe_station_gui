@@ -6,6 +6,9 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 from probe_station_gui.coordinates.coordinator import CoordinateSystemCoordinator
+from probe_station_gui.coordinates.design_calibration import (
+    design_calibration_fingerprints,
+)
 from probe_station_gui.coordinates.model import (
     AxisReadiness,
     CoordinateFrameRecord,
@@ -20,6 +23,7 @@ from probe_station_gui.coordinates.coordinator_model import (
     CoordinateSystemSnapshot,
     CoordinateTransition,
     CustomSystemsRequest,
+    DesignCalibrationObservation,
     DesignActivationRequest,
     FinishOperatorAlignmentUiEffect,
     LegacyDesignStateRewriteResult,
@@ -265,6 +269,13 @@ def test_coordinate_load_request_and_completion_delegate_to_coordinator(
             calls.append(("custom", request))
             return CoordinateTransition(loaded)
 
+        def observe_design_calibrations(
+            self,
+            observation: DesignCalibrationObservation,
+        ) -> CoordinateTransition:
+            calls.append(("reconcile", observation))
+            return CoordinateTransition(loaded)
+
     owner = SimpleNamespace(
         _coordinate_system_coordinator=_Coordinator(),
         _coordinate_frame_store=SimpleNamespace(
@@ -273,10 +284,12 @@ def test_coordinate_load_request_and_completion_delegate_to_coordinator(
             )
         ),
         settings_manager=SimpleNamespace(
-            settings=SimpleNamespace(software_coordinates=object())
+            settings=SimpleNamespace(
+                software_coordinates=object(),
+                axis_calibrations={},
+            )
         ),
         _current_machine_profile_id=lambda: "rig-8",
-        _reconcile_design_calibration_fingerprints=lambda: calls.append(("reconcile",)),
     )
     monkeypatch.setattr(
         coordinate_flow,
@@ -297,7 +310,10 @@ def test_coordinate_load_request_and_completion_delegate_to_coordinator(
             CustomSystemsRequest(owner.settings_manager.settings.software_coordinates),
         ),
         ("complete", CoordinateAdapterCompletion(8, result)),
-        ("reconcile",),
+        (
+            "reconcile",
+            DesignCalibrationObservation(design_calibration_fingerprints({})),
+        ),
         ("activate",),
     ]
 
@@ -326,7 +342,10 @@ def test_startup_custom_restore_is_materialized_before_selection_reconcile(
     owner = SimpleNamespace(
         _coordinate_system_coordinator=coordinator,
         settings_manager=SimpleNamespace(
-            settings=SimpleNamespace(software_coordinates=software_coordinates),
+            settings=SimpleNamespace(
+                software_coordinates=software_coordinates,
+                axis_calibrations={},
+            ),
             set_software_coordinate_selection=lambda selected: (
                 persisted.append(selected) or object()
             ),
@@ -334,7 +353,6 @@ def test_startup_custom_restore_is_materialized_before_selection_reconcile(
         _software_coordinate_selection_store=SimpleNamespace(
             publish=lambda _snapshot: None
         ),
-        _reconcile_design_calibration_fingerprints=lambda: None,
     )
     monkeypatch.setattr(
         coordinate_flow.stage_position_panel,

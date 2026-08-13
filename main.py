@@ -115,8 +115,6 @@ from probe_station_gui.coordinates.coordinator_model import (
     CoordinateAdapterCompletion,
     CoordinateMotionLease,
     CoordinateMotionProjection,
-    CustomSystemsRequest,
-    DesignCalibrationObservation,
     DesignCoordinateLease,
     FocusCandidateRequest,
     FocusMoveResult,
@@ -468,6 +466,10 @@ from probe_station_gui.settings.manager import (
     Settings,
     SettingsManager,
     ordered_objective_names,
+)
+from probe_station_gui.settings.dialog_transaction import (
+    SettingsDialogContext,
+    SettingsDialogTransaction,
 )
 from probe_station_gui.settings.software_coordinate_selection_store import (
     SoftwareCoordinateSelectionStoreWorker,
@@ -1045,6 +1047,17 @@ class Main(QMainWindow):
         self._coordinate_runtime = coordinate_runtime
         self._design_session = DesignSession()
         self._coordinate_system_coordinator = coordinate_runtime.coordinator
+        self._settings_dialog_transaction = SettingsDialogTransaction(
+            self.settings_manager,
+            self._coordinate_system_coordinator,
+            publish_notice=self._show_status,
+            publish_transition=lambda transition: (
+                coordinate_flow.apply_coordinate_transition(
+                    self,
+                    transition,
+                )
+            ),
+        )
         self._coordinate_frame_store = CoordinateFrameStoreWorker(
             self,
             path=self.settings_manager.coordinate_frames_path(),
@@ -4609,145 +4622,49 @@ class Main(QMainWindow):
         if not isinstance(new_settings, Settings):
             return
         stage_controller = getattr(self, "stage_controller", None)
-        if stage_controller is not None and stage_controller.is_busy():
-            self._show_status("Stage is busy; settings not changed.", 4000)
+        stage_busy = bool(
+            stage_controller is not None
+            and stage_controller.is_busy()
+        )
+        latest_snapshot = (
+            getattr(
+                stage_controller,
+                "latest_machine_coordinate_snapshot",
+                None,
+            )
+            if not stage_busy
+            else None
+        )
+        context = SettingsDialogContext(
+            stage_busy=stage_busy,
+            objective_mutation_busy=(
+                self._objective_mutation_busy()
+                if not stage_busy
+                else False
+            ),
+            machine_snapshot=(
+                latest_snapshot()
+                if callable(latest_snapshot)
+                else None
+            ),
+        )
+        outcome = self._settings_dialog_transaction.apply(
+            new_settings,
+            context,
+        )
+        if not outcome.accepted:
             return
-        settings_to_apply = new_settings.clone()
-        existing_coordinates = self.settings_manager.settings.software_coordinates
-        coordinates_changed = (
-            settings_to_apply.software_coordinates != existing_coordinates
-        )
-        custom_frames_changed = (
-            settings_to_apply.software_coordinates.custom_frames
-            != existing_coordinates.custom_frames
-        )
-        pivot_changed = (
-            settings_to_apply.software_coordinates.pivot != existing_coordinates.pivot
-        )
-        axis_calibrations_changed = (
-            settings_to_apply.axis_calibrations
-            != self.settings_manager.settings.axis_calibrations
-        )
-        custom_transition = None
-        if (
-            custom_frames_changed
-            and self._coordinate_system_coordinator.snapshot().frames_loaded
-        ):
-            try:
-                custom_transition = (
-                    self._coordinate_system_coordinator.synchronize_custom_systems(
-                        CustomSystemsRequest(settings_to_apply.software_coordinates)
-                    )
-                )
-            except (TypeError, ValueError) as exc:
-                settings_to_apply.software_coordinates = existing_coordinates.clone()
-                self._show_status(str(exc), 6000)
-                coordinates_changed = False
-        if pivot_changed:
-            coordinate_snapshot = self._coordinate_system_coordinator.snapshot()
-            frame_id = coordinate_snapshot.registration.active_frame_id
-            if frame_id is not None:
-                try:
-                    rotation_geometry_snapshot(settings_to_apply.software_coordinates)
-                    snapshot = stage_controller.latest_machine_coordinate_snapshot()
-                    if snapshot is None:
-                        raise DesignModelError(
-                            "A current Machine-coordinate snapshot is required "
-                            "to change the B-axis pivot."
-                        )
-                    snapshot.physical_machine_pose.require("B")
-                except (DesignModelError, TypeError, ValueError) as exc:
-                    settings_to_apply.software_coordinates.pivot = (
-                        existing_coordinates.pivot.clone()
-                    )
-                    pivot_changed = False
-                    coordinates_changed = (
-                        settings_to_apply.software_coordinates != existing_coordinates
-                    )
-                    self._show_status(str(exc), 6000)
-        current_objectives = self.settings_manager.objectives_configuration()
-        active_objective_update_rejected = False
-        objective_mutation_busy = self._objective_mutation_busy()
-        if objective_mutation_busy:
-            current_active_name = normalize_objective_name(
-                current_objectives.active_name
-            )
-            submitted_objectives = settings_to_apply.objectives
-            submitted_active_name = normalize_objective_name(
-                submitted_objectives.active_name
-            )
-            current_active_profile = current_objectives.objectives.get(
-                current_active_name
-            )
-            submitted_active_profile = submitted_objectives.objectives.get(
-                current_active_name
-            )
-            active_objective_update_rejected = (
-                submitted_active_name != current_active_name
-                or submitted_active_profile != current_active_profile
-            )
-            if active_objective_update_rejected:
-                submitted_objectives.active_name = current_active_name
-                if current_active_profile is None:
-                    submitted_objectives.objectives.pop(current_active_name, None)
-                else:
-                    submitted_objectives.objectives[current_active_name] = (
-                        current_active_profile.clone()
-                    )
-        submitted_objectives = settings_to_apply.objectives
-        current_active_name = normalize_objective_name(current_objectives.active_name)
-        submitted_active_name = normalize_objective_name(
-            submitted_objectives.active_name
-        )
-        objective_authority_changed = (
-            submitted_active_name != current_active_name
-            or submitted_objectives.objectives.get(submitted_active_name)
-            != current_objectives.objectives.get(current_active_name)
-        )
-        self.settings_manager.replace_and_save(
-            settings_to_apply,
-            preserve_exposure_policy=True,
-        )
-        if custom_transition is not None:
-            coordinate_flow.apply_coordinate_transition(self, custom_transition)
-        reconcile_calibrations = getattr(
-            self,
-            "_reconcile_design_calibration_fingerprints",
-            None,
-        )
-        calibration_records_changed = bool(
-            reconcile_calibrations() if callable(reconcile_calibrations) else False
-        )
-        if coordinates_changed or calibration_records_changed:
+        if outcome.refresh_coordinate_frame_display:
             stage_position_panel_adapter.refresh_coordinate_frame_display(self)
-        if objective_mutation_busy:
-            self._apply_settings(apply_objective_runtime=False)
-        else:
+        if outcome.apply_objective_runtime:
             self._apply_settings()
-        if pivot_changed or objective_authority_changed or axis_calibrations_changed:
+        else:
+            self._apply_settings(apply_objective_runtime=False)
+        if outcome.observe_coordinate_authority:
             coordinate_flow.observe_coordinate_authority(self)
-        if active_objective_update_rejected:
-            self._show_status(
-                "Stage is busy; active objective settings not changed.",
-                4000,
-            )
+        for notice in outcome.post_apply_notices:
+            self._show_status(notice.message, notice.timeout_ms)
         logger.info("Settings updated from dialog")
-
-    def _reconcile_design_calibration_fingerprints(self) -> bool:
-        """Fail closed when stored Design registration used different curves."""
-
-        coordinate_snapshot = self._coordinate_system_coordinator.snapshot()
-        if not coordinate_snapshot.frames_loaded:
-            return False
-        transition = self._coordinate_system_coordinator.observe_design_calibrations(
-            DesignCalibrationObservation(
-                design_calibration_fingerprints(
-                    self.settings_manager.settings.axis_calibrations
-                )
-            )
-        )
-        coordinate_flow.apply_coordinate_transition(self, transition)
-        return transition.view_changed
 
     def _design_metadata_with_calibration_fingerprints(
         self,

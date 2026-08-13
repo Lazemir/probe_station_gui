@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import threading
-from dataclasses import dataclass
 from types import SimpleNamespace
 
 from PySide6.QtCore import QByteArray
@@ -13,17 +12,7 @@ from tests.app.import_reset import restore_real_imports_for_main
 restore_real_imports_for_main()
 
 from main import Main
-from probe_station_gui.coordinates.coordinator_model import CoordinateSystemSnapshot
 from probe_station_gui.settings.sections import ExposurePolicySettings
-from probe_station_gui.settings.manager import Settings, SettingsManager
-
-
-@dataclass(frozen=True)
-class _StaticCoordinateSystemCoordinator:
-    current: CoordinateSystemSnapshot
-
-    def snapshot(self) -> CoordinateSystemSnapshot:
-        return self.current
 
 
 class _CameraBroker:
@@ -130,57 +119,6 @@ def test_main_policy_persists_and_public_exposure_write_uses_controller_guard() 
         assert result["accepted"] is True
     finally:
         _shutdown_policy_window(window)
-
-
-def test_settings_dialog_transaction_preserves_concurrent_exposure_policy(
-    tmp_path,
-    monkeypatch,
-) -> None:
-    monkeypatch.setenv("APPDATA", str(tmp_path / "appdata"))
-    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "localappdata"))
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg-config"))
-    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "xdg-state"))
-    monkeypatch.setattr(
-        "probe_station_gui.settings.manager.platform.system",
-        lambda: "Windows",
-    )
-    monkeypatch.setattr(
-        "probe_station_gui.settings.manager.configure_logging",
-        lambda *_args: None,
-    )
-    manager = SettingsManager()
-    manager.replace(
-        Settings(
-            exposure_policy=ExposurePolicySettings(
-                auto_enabled=False,
-                engine="camera",
-            )
-        )
-    )
-    stale_dialog_settings = Settings()
-    stale_dialog_settings.design_last_directory = "C:/dialog-selection"
-    window = Main.__new__(Main)
-    window._api_stage_command_runtime = SimpleNamespace(active=lambda: False)
-    window.settings_manager = manager
-    window._coordinate_system_coordinator = _StaticCoordinateSystemCoordinator(
-        CoordinateSystemSnapshot(False, (), None)
-    )
-    window._apply_settings = lambda: None
-    window._optical_calibration_runtime = SimpleNamespace(
-        state=lambda: SimpleNamespace(
-            active_run_id=None,
-            active_kind=None,
-            parent_session_token=None,
-        )
-    )
-
-    Main._apply_settings_from_dialog(window, stale_dialog_settings)
-
-    assert manager.settings.design_last_directory == "C:/dialog-selection"
-    assert manager.settings.exposure_policy.to_dict() == {
-        "auto_enabled": False,
-        "engine": "camera",
-    }
 
 
 def test_controller_owned_camera_writes_use_trusted_broker_path() -> None:

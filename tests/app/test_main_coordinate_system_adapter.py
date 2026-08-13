@@ -332,23 +332,6 @@ def test_objective_persistence_immediately_refreshes_coordinate_authority(
     assert events[-1] == ("authority", owner)
 
 
-def test_settings_dialog_refreshes_authority_after_runtime_objective_apply() -> None:
-    source = inspect.getsource(Main._apply_settings_from_dialog)
-
-    assert "objective_authority_changed" in source
-    assert source.index("self._apply_settings()") < source.index(
-        "coordinate_flow.observe_coordinate_authority(self)"
-    )
-    assert "pivot_changed" in source
-
-
-def test_settings_dialog_refreshes_authority_after_axis_curve_change() -> None:
-    source = inspect.getsource(Main._apply_settings_from_dialog)
-
-    assert "axis_calibrations_changed" in source
-    assert "or axis_calibrations_changed" in source
-
-
 def test_curve_apply_keeps_estimated_position_authority_on_remapped_snapshot(
     monkeypatch,
 ) -> None:

@@ -12,6 +12,9 @@ from probe_station_gui.coordinates.coordinator_model import (
 from probe_station_gui.design.objective_offsets import ObjectiveOffsetReference
 from probe_station_gui.design.session_registration import AlignmentPreparation
 from probe_station_gui.settings.manager import Settings
+from probe_station_gui.settings.dialog_transaction import (
+    SettingsDialogTransaction,
+)
 from probe_station_gui.settings.objective_config import (
     ObjectiveCalibrationSettings,
     ObjectivesSettings,
@@ -165,7 +168,6 @@ def _window() -> tuple[Main, _Stage, _SettingsManager, list[str]]:
             coordinate_snapshot
         ),
     )
-    window._reconcile_design_calibration_fingerprints = lambda: False
     window._manual_alignment_pick_slot = None
     window._manual_alignment_capture_context = None
     window._optical_calibration_runtime = types.SimpleNamespace(
@@ -187,6 +189,12 @@ def _window() -> tuple[Main, _Stage, _SettingsManager, list[str]]:
         getattr(window, "_calibration_refreshes", 0) + 1,
     )
     window._show_status = lambda message, _timeout_ms=0: statuses.append(str(message))
+    window._settings_dialog_transaction = SettingsDialogTransaction(
+        manager,
+        window._coordinate_system_coordinator,
+        publish_notice=window._show_status,
+        publish_transition=lambda _transition: None,
+    )
     return window, stage, manager, statuses
 
 

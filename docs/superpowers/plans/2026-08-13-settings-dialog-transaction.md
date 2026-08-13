@@ -92,3 +92,42 @@
 - [ ] Obtain independent read-only review. On any Critical/Important, add a strict RED, fix, refreeze, and re-review.
 - [ ] Stage only reviewed paths, audit cached scope/diff, and commit with subject: refactor: isolate settings dialog transaction.
 - [ ] Verify commit hash, path count, clean status, empty index, and no task temp. Do not push or merge.
+
+## Execution evidence (2026-08-13)
+
+- [x] Canonical owner RED/GREEN: absent module failed exactly; frozen interface,
+  invalid submission, Stage-busy rejection, exposure-safe save, custom-system
+  success/rollback, cache-only pivot validation/rollback, busy-objective
+  preservation, and calibration reconciliation are covered directly.
+- [x] Owner/architecture stress: five fresh processes each passed 16/16.
+  Final focused owner/architecture/App policy selection passed 60/60;
+  expanded settings/coordinates/App/UI selection passed 444/444.
+- [x] Main composition is direct and singular. The old 127-line policy and
+  reconcile helper are absent; the adapter gathers one cached snapshot and
+  preserves refresh -> runtime apply -> authority -> notice ordering.
+- [x] Exact collect-only count is 3307. Deterministic partitions executed all
+  3307/3307 items: App 349 + isolated 1 with 5 App subtests; API 146; camera
+  331; coordinates 201; design 381; instruments 149; notifications 49;
+  packaging 3; route 419; scripts 31; settings 179; shared 4; stage 490; UI
+  574. No failures occurred.
+- [x] Configured whole Ruff, scoped format, whole compileall, diff-check,
+  owner-first and manager/coordinator-first imports, AST/deletion/DAG, and
+  five-process stress pass. No hardware, network, visible GUI, unified
+  order-sensitive full run, push, or merge was used.
+- [x] Metrics: Main 10836/5775/10242, CC 1839/506, max 25, MI 0.00 -> current
+  10753/5719/10162, CC 1823/505, max 22, MI 0.00. New owner 246/137/223,
+  CC 36/13, max method 5, public apply CC 3, MI 31.33. All-tracked MI-zero
+  remains exactly one file (main.py).
+- [x] Independent review found one Important startup-load regression: deleting
+  the old Main reconciliation method left coordinate-frame load's dynamic
+  lookup inert. A strict real-path RED skipped calibration observation before
+  Design activation. The corrected coordinate-flow now owns that load-specific
+  observation directly, publishes its transition, and only then activates the
+  current Design; both stale test injections of the deleted Main method are
+  gone. RED 1 failed exactly; corrected nodes 2/2, the complete coordinate-flow
+  file 24/24, and transaction/architecture/affected App tests 50/50 passed.
+- [x] Corrected-snapshot independent review: READY, Critical 0 / Important 0 /
+  Minor 0. The reviewer explicitly closed the startup-load finding and freshly
+  passed 18 focused tests. Final pre-commit verification passed 84/84 plus
+  configured whole Ruff, scoped format, whole compileall, diff-check, exact
+  scope, empty index, and zero task basetemps.

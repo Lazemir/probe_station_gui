@@ -12,6 +12,7 @@ from probe_station_gui.coordinates.coordinator_model import (
     CoordinateAuthorityObservation,
     CoordinateTransition,
     CustomSystemsRequest,
+    DesignCalibrationObservation,
     DesignActivationRequest,
     DesignWorkspaceCheckpoint,
     FinishOperatorAlignmentUiEffect,
@@ -27,6 +28,9 @@ from probe_station_gui.coordinates.coordinator_model import (
     RewriteLegacyDesignStateIntent,
     RunAutofocusIntent,
     SaveCoordinateFramesIntent,
+)
+from probe_station_gui.coordinates.design_calibration import (
+    design_calibration_fingerprints,
 )
 from probe_station_gui.coordinates.model import PhysicalMachinePose
 from probe_station_gui.coordinates.persistence import CoordinateFrameStoreFailure
@@ -324,8 +328,6 @@ def _render_coordinate_ui_effects(
     for effect in reversed(workspace_rollbacks):
         design_workspace.restore_design_workspace(owner, effect)
 
-
-
 def _render_registration_snapshot(
     owner: object,
     transition: CoordinateTransition,
@@ -504,14 +506,21 @@ def handle_coordinate_frame_loaded(owner: object, result: object) -> None:
     if diagnostics:
         for diagnostic in diagnostics:
             logger.warning("Design coordinate frame unavailable: %s", diagnostic)
-    reconcile_calibrations = getattr(
-        owner,
-        "_reconcile_design_calibration_fingerprints",
-        None,
-    )
-    if callable(reconcile_calibrations):
-        reconcile_calibrations()
+    _observe_loaded_design_calibrations(owner)
     activate_current_design(owner)
+
+
+def _observe_loaded_design_calibrations(owner: object) -> None:
+    transition = owner._coordinate_system_coordinator.observe_design_calibrations(
+        DesignCalibrationObservation(
+            design_calibration_fingerprints(
+                owner.settings_manager.settings.axis_calibrations
+            )
+        )
+    )
+    apply_coordinate_transition(owner, transition)
+
+
 def handle_coordinate_frame_saved(owner: object, result: object) -> None:
     transition = owner._coordinate_system_coordinator.complete(
         CoordinateAdapterCompletion(
