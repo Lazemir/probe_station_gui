@@ -2,6 +2,8 @@ import types
 import unittest
 from unittest import mock
 
+import probe_station_gui.application.api_meter_visa as api_meter_visa_owner
+
 from tests.app.main_coordinate_feedrate_support import (
     LCRMeterError,
     Main,
@@ -1200,7 +1202,11 @@ class MainMeterContactActionsTest(unittest.TestCase):
         )
         window._telegram_runtime = _telegram_runtime_stub()
 
-        with mock.patch.object(main_module, "RouteMeasurementRunner", _FakeRunner):
+        with mock.patch.object(
+            api_meter_visa_owner,
+            "RouteMeasurementRunner",
+            _FakeRunner,
+        ):
             check_response = Main._api_check_contact(
                 window,
                 {
@@ -1334,7 +1340,11 @@ class MainMeterContactActionsTest(unittest.TestCase):
             route_actions_markup="actions",
         )
 
-        with mock.patch.object(main_module, "RouteMeasurementRunner", _FakeRunner):
+        with mock.patch.object(
+            api_meter_visa_owner,
+            "RouteMeasurementRunner",
+            _FakeRunner,
+        ):
             response = Main._api_contact_seek(
                 window,
                 {

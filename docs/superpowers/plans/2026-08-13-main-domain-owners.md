@@ -69,12 +69,12 @@ Each owner is a private class in `probe_station_gui/application/`. Ranges refer 
 - Consumes the owner map above.
 - Produces an exact direct-base order and descriptor identity contract.
 
-- [ ] Add an architecture RED asserting all 22 modules/classes exist, `Main.__bases__` is the exact 22-owner tuple followed by `QMainWindow`, every mapped method is absent from `Main.__dict__`, and `getattr(Main, name)` is the exact owner descriptor.
-- [ ] Assert baseline Main Signals/constants and all public signatures are unchanged.
-- [ ] Assert no owner imports `main`, another owner, FastAPI/server transport, or package re-export; assert no `__getattr__`, alias assignment, or one-line delegate.
-- [ ] Run the architecture file. Expected RED: missing owner modules/direct bases.
-- [ ] Build a deterministic AST/range extraction tool in `.scratch/`: preserve decorators and source text, generate explicit imports from the original import table, define a module logger locally, remove moved definitions from `Main`, and insert direct owner imports/bases.
-- [ ] The tool must refuse dirty unexpected input by checking the `main.py` SHA-256 pinned at task start.
+- [x] Add a vertical architecture contract: each delivered owner group extends the exact direct-base tuple and descriptor-identity map; the final group requires all 22 modules/classes, every mapped method absent from `Main.__dict__`, and exact owner descriptors.
+- [x] Assert baseline Main Signals/constants and all public signatures are unchanged for the delivered owner group.
+- [x] Assert no delivered owner imports `main`, another owner, FastAPI/server transport, or package re-export; assert no `__getattr__`, alias assignment, or one-line delegate.
+- [x] Run the first architecture RED before production changes: 7 expected failures for the missing package, four owner modules, and base order.
+- [x] Build a deterministic AST/range extraction tool in `.scratch/`: preserve decorators and source text, generate explicit imports from the original import table, define a module logger locally, remove moved definitions from `Main`, and insert direct owner imports/bases.
+- [x] Pin the tool to the baseline `main.py` SHA-256 so it refuses unexpected input.
 
 ## Task 2: External/API owners
 
@@ -83,11 +83,11 @@ Each owner is a private class in `probe_station_gui/application/`. Ranges refer 
 - Modify: `main.py`.
 - Modify canonical API/App tests only to import the direct descriptor owner when they inspect `__globals__`.
 
-- [ ] Run the focused baseline covering camera API, route control, meter/contact actions, route session, and API request bridge.
-- [ ] Extract one owner at a time in table order; after each move run architecture subset plus its focused tests.
-- [ ] Replace the six existing `Main._static_method` qualifications with the owning class only when their target moves; do not otherwise normalize bodies.
-- [ ] Verify all four owner files have MI > 0 with comments/docstrings stripped and `main.py` LOC/CC decrease monotonically.
-- [ ] Commit `refactor: separate main external control domains` after independent task review C0/I0/M0.
+- [x] Run the focused baseline covering camera API, route control, meter/contact actions, route session, and API request bridge: 141 passed plus 5 subtests.
+- [x] Extract one owner at a time in table order; every vertical architecture/focused gate passed, ending at 162 passed plus 5 subtests.
+- [x] Replace only canonical descriptor/mock targets whose globals moved to an owner; retained method bodies, decorators, signatures, `Main.__init__`, Signals, and constants remain AST-exact.
+- [x] Verify all four owner files have positive normal and comment/docstring-stripped MI; `main.py` LOC fell 10753 to 8325 and aggregate Radon CC fell 1823 to 1472. The repository still has exactly one interim MI-zero file: `main.py`.
+- [x] Commit `refactor: separate main external control domains` after independent task review C0/I0/M0 (READY on the frozen Task 2 scope).
 
 ## Task 3: Camera/settings/objective owners
 

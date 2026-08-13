@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import probe_station_gui.application.api_route_scan as api_route_scan_owner
 from probe_station_gui.design.session import DesignSession
 from probe_station_gui.route.operation_modes import (
     ROUTE_OPERATION_MEASURE,
@@ -1283,7 +1284,7 @@ class MainRouteMeasurementSessionTest(unittest.TestCase):
         window._api_route_artifacts_lock = threading.Lock()
         with (
             mock.patch.object(
-                main_module,
+                api_route_scan_owner,
                 "RouteExternalMeasurementSessionRunner",
                 _FakeExternalRunner,
             ),
