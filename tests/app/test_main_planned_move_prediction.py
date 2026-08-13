@@ -10,6 +10,7 @@ from tests.app.import_reset import restore_real_imports_for_main
 
 restore_real_imports_for_main()
 import main as main_module
+from probe_station_gui.application import design_load
 from main import Main
 from probe_station_gui.coordinates.coordinator_model import (
     CoordinateAuthorityObservation,
@@ -567,7 +568,7 @@ class MainPersistedDesignRestoreTest(unittest.TestCase):
             _make_design_restore_main((1.0, 2.0, 3.0, 4.0, 5.0))
         )
 
-        main_module.design_workspace.maybe_restore_persisted_design(
+        design_load.design_workspace.maybe_restore_persisted_design(
             window,
             (1.0, 2.0, 9.0, 0.0, 8.0),
         )
@@ -596,7 +597,7 @@ class MainPersistedDesignRestoreTest(unittest.TestCase):
         )
         stage_controller.homed_axes.remove("Z")
 
-        main_module.design_workspace.maybe_restore_persisted_design(
+        design_load.design_workspace.maybe_restore_persisted_design(
             window,
             (1.0, 2.0, 9.0, 4.0, 5.0),
         )
@@ -622,7 +623,7 @@ class MainPersistedDesignRestoreTest(unittest.TestCase):
             _make_design_restore_main((1.0, 2.0, 3.0, 4.0, 5.0))
         )
 
-        main_module.design_workspace.maybe_restore_persisted_design(
+        design_load.design_workspace.maybe_restore_persisted_design(
             window,
             (1.5, 2.5, 3.0, 4.0, 5.0),
         )

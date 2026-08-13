@@ -7,6 +7,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from probe_station_gui.application import design_load
+from probe_station_gui.application.design_load import _PendingDesignMarkupLoad
 from probe_station_gui.coordinates.coordinator import CoordinateSystemCoordinator
 from probe_station_gui.coordinates.coordinator_model import (
     CoordinateAdapterCompletion,
@@ -125,16 +127,16 @@ def _pending_markup_context(
     *,
     generation: int = 1,
     previous_markup: MarkupDocument | None = None,
-) -> main_module._PendingDesignMarkupLoad:
+) -> _PendingDesignMarkupLoad:
     candidate_session = DesignSession()
-    plan = main_module.design_navigation.design_document_loaded_plan(
+    plan = design_load.design_navigation.design_document_loaded_plan(
         candidate_session,
         document,
         None,
         None,
     )
     assert plan.accepted
-    return main_module._PendingDesignMarkupLoad(
+    return _PendingDesignMarkupLoad(
         generation=generation,
         session=candidate_session,
         plan=plan,
@@ -552,12 +554,12 @@ def test_newer_design_load_invalidates_older_markup_response(
         set_design_load_pending=lambda _pending: None,
     )
     monkeypatch.setattr(
-        main_module,
+        design_load,
         "toggle_design_layout_window",
         lambda *_args: None,
     )
     monkeypatch.setattr(
-        main_module.threading,
+        design_load.threading,
         "Thread",
         lambda **_kwargs: types.SimpleNamespace(start=lambda: None),
     )
@@ -655,7 +657,7 @@ def test_markup_read_failure_commits_the_already_visible_design(
         _activate_candidate_success,
     )
     monkeypatch.setattr(
-        main_module,
+        design_load,
         "toggle_design_layout_window",
         lambda *_args: None,
     )

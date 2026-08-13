@@ -1,4 +1,4 @@
-"""Ownership contracts for the first nine ``Main`` application domains."""
+"""Ownership contracts for the first fifteen ``Main`` application domains."""
 
 from __future__ import annotations
 
@@ -258,10 +258,168 @@ OWNER_SPECS = {
             "_on_objective_mismatch_detected": "(self, suggested_name: 'str', message: 'str', task_token: 'object') -> 'None'",
         },
     ),
+    "alignment": (
+        "_MainAlignmentMixin",
+        {
+            "_design_backed_alignment_active": "(self) -> 'bool'",
+            "_alignment_capture_slot_count": "(self) -> 'int'",
+            "_design_window_is_open": "(self) -> 'bool'",
+            "_collapse_alignment_panel_if_ready": "(self) -> 'None'",
+            "_collapse_alignment_panel_if_design_open": "(self) -> 'None'",
+            "_set_alignment_panel_expanded": "(self) -> 'None'",
+            "_arm_manual_alignment_pick": "(self, slot: 'int') -> 'None'",
+            "_cancel_manual_alignment_pick": "(self) -> 'None'",
+            "_reset_manual_alignment": "(self, *, cancel_pick: 'bool' = True) -> 'None'",
+            "_reset_alignment_capture_points": "(self) -> 'None'",
+            "_capture_manual_alignment_center_shortcut": "(self) -> 'None'",
+            "_resolve_alignment_capture_stage_position": "(self) -> 'tuple[float, float] | None'",
+            "_capture_manual_alignment_center": "(self, slot: 'int') -> 'None'",
+            "_request_alignment_capture": "(self, slot: 'int', mode: 'str') -> 'None'",
+            "_zero_b_axis": "(self) -> 'None'",
+            "_reset_click_calibration": "(self) -> 'tuple[bool, str]'",
+            "_capture_manual_alignment_clicked": "(self, dx_pixels: 'float' = 0.0, dy_pixels: 'float' = 0.0) -> 'None'",
+            "_on_manual_alignment_point_resolved": "(self, request_id: 'object', success: 'bool', center_xy: 'object', captured_xy: 'object', message: 'str') -> 'None'",
+            "_capture_manual_alignment_point": "(self, slot: 'int', captured: 'tuple[float, float]', *, source: 'str') -> 'None'",
+            "_request_operator_alignment_machine_capture": "(self, slot: 'int', *, configured_target_xy: 'tuple[float, float] | None', source: 'str') -> 'None'",
+            "_apply_alignment_capture_plan": "(self, plan) -> 'None'",
+            "_on_alignment_b_rotation_started": "(self) -> 'None'",
+            "_finish_alignment_draft": "(self) -> 'None'",
+            "_refresh_manual_alignment_ui": "(self) -> 'None'",
+            "_update_coordinate_display": "(self, *, center_xy: 'tuple[float, float] | None' = None, cursor_xy: 'tuple[float, float] | None' = None) -> 'None'",
+            "_can_display_design_position": "(self) -> 'bool'",
+            "_format_coordinate_label": "(self, prefix: 'str', fluidnc_xy: 'tuple[float, float] | None') -> 'str'",
+            "_format_active_coordinate_label": "(self, prefix: 'str', fluidnc_xy: 'tuple[float, float] | None') -> 'str'",
+            "_resolve_coordinate_systems": "(self, fluidnc_xy: 'tuple[float, float]') -> 'dict[str, tuple[float, float]]'",
+            "_resolve_chip_coordinates": "(self, fluidnc_xy: 'tuple[float, float]') -> 'tuple[float, float] | None'",
+            "_resolve_design_coordinates": "(self, fluidnc_xy: 'tuple[float, float]') -> 'tuple[float, float] | None'",
+        },
+    ),
+    "manual_jog": (
+        "_MainManualJogMixin",
+        {
+            "show_joystick_window": "(self) -> 'None'",
+            "show_serial_terminal_window": "(self) -> 'None'",
+            "_on_manual_motion_axis": "(self, axis: 'str') -> 'None'",
+            "_on_manual_jog_command_changed": "(self, commanded_distances: 'object', feedrate: 'float') -> 'None'",
+            "_on_manual_jog_stopped": "(self) -> 'None'",
+            "_save_manual_axis_jog_settings": "(self, axis: 'str', distance_mm: 'float', mode: 'str', feedrate_mm_min: 'float') -> 'None'",
+            "_save_jog_control_mode": "(self, mode: 'str') -> 'None'",
+            "_save_jog_feedrate_setting": "(self, key: 'str', feedrate_mm_min: 'float') -> 'None'",
+            "_on_step_feedrate_changed": "(self, feedrate_mm_min: 'float') -> 'None'",
+            "_on_focus_feedrate_changed": "(self, feedrate_mm_min: 'float') -> 'None'",
+            "_on_focus_step_feedrate_changed": "(self, feedrate_mm_min: 'float') -> 'None'",
+            "_on_turntable_feedrate_changed": "(self, feedrate_mm_min: 'float') -> 'None'",
+            "_on_turntable_step_feedrate_changed": "(self, feedrate_mm_min: 'float') -> 'None'",
+            "_on_manual_axis_move_requested": "(self, axis: 'str', value_mm: 'float', mode: 'str', feedrate_mm_min: 'float') -> 'None'",
+            "_on_exact_step_window_elapsed": "(self) -> 'None'",
+            "_dispatch_exact_step_targets": "(self) -> 'bool'",
+            "_on_coordinate_move_finished": "(self, success: 'bool', finished_display_targets: 'dict[str, float]', finished_display_basis: 'object | None') -> 'None'",
+            "_clear_exact_step_targets": "(self) -> 'None'",
+            "_schedule_linear_feedrate_save": "(self, feedrate_mm_min: 'float') -> 'None'",
+            "_on_linear_feedrate_changed": "(self, feedrate_mm_min: 'float') -> 'None'",
+            "_on_needle_feedrate_changed": "(self, feedrate_mm_min: 'float') -> 'None'",
+            "_on_needle_step_feedrate_changed": "(self, feedrate_mm_min: 'float') -> 'None'",
+            "_save_pending_linear_feedrate_default": "(self) -> 'None'",
+            "_current_linear_feedrate": "(self) -> 'float'",
+            "_coordinate_feedrate_for_axes": "(self, axes: 'object') -> 'float'",
+            "_current_needle_feedrate": "(self) -> 'float'",
+        },
+    ),
+    "motion_prediction": (
+        "_MainMotionPredictionMixin",
+        {
+            "_advance_motion_prediction": "(self) -> 'None'",
+            "_advance_manual_jog_prediction": "(self) -> 'None'",
+            "_advance_coordinate_move_prediction": "(self) -> 'None'",
+            "_advance_planned_move_prediction": "(self) -> 'None'",
+            "_clear_planned_move_prediction": "(self, *, clear_wait_state: 'bool') -> 'None'",
+            "_start_planned_move_prediction": "(self, target_stage_xy: 'tuple[float, float]', *, source_label: 'str', feedrate_mm_min: 'float | None' = None) -> 'None'",
+            "_schedule_status_refreshes": "(self, delays_ms: 'tuple[int, ...]') -> 'None'",
+            "_on_manual_terminal_command": "(self, command: 'str') -> 'None'",
+            "_on_stage_task_started": "(self) -> 'None'",
+            "on_autofocus_finished": "(self, success: 'bool', message: 'str') -> 'None'",
+            "on_calibration_changed": "(self, mm_per_pixel_x: 'float', mm_per_pixel_y: 'float') -> 'None'",
+            "_on_measure_action_toggled": "(self, checked: 'bool') -> 'None'",
+            "_on_measure_mode_exited": "(self) -> 'None'",
+        },
+    ),
+    "design_load": (
+        "_MainDesignLoadMixin",
+        {
+            "_load_design_document": "(self, design_path: 'str') -> 'None'",
+            "_start_design_document_load": "(self, design_path: 'str', *, restore_state: 'dict[str, object] | None', show_window: 'bool') -> 'None'",
+            "_on_design_document_loaded": "(self, generation: 'int', document: 'object', error: 'object') -> 'None'",
+            "_snapshot_design_session": "(self) -> 'DesignSession'",
+            "_apply_design_load_success_plan": "(self, plan: 'design_navigation.DesignLoadResultPlan', show_window: 'bool') -> 'None'",
+            "_apply_design_load_failure_plan": "(self, plan: 'design_navigation.DesignLoadResultPlan', show_window: 'bool') -> 'None'",
+            "_ensure_design_markup_store": "(self) -> 'MarkupStoreWorker'",
+            "_next_design_markup_request_id": "(self) -> 'int'",
+            "_begin_design_markup_load": "(self, document: 'DesignDocument', *, generation: 'int', candidate_session: 'DesignSession', plan: 'design_navigation.DesignLoadResultPlan', show_window: 'bool', previous_markup: 'MarkupDocument | None', frame_metadata: 'DesignFrameMetadata | None' = None) -> 'None'",
+            "_commit_pending_design_load": "(self, context: '_PendingDesignMarkupLoad', markup: 'MarkupDocument') -> 'None'",
+            "_set_design_load_pending_ui": "(self, pending: 'bool') -> 'None'",
+        },
+    ),
+    "design_markup": (
+        "_MainDesignMarkupMixin",
+        {
+            "_finish_design_markup_load_ui": "(self, document: 'DesignDocument | None', *, show_window: 'bool') -> 'None'",
+            "_invalidate_pending_design_markup_load": "(self) -> 'None'",
+            "_on_design_markup_loaded": "(self, result: 'object') -> 'None'",
+            "_prompt_changed_markup_choice": "(self, source_path: 'Path') -> 'MarkupLoadChoice'",
+            "_on_design_markup_store_failed": "(self, failure: 'object') -> 'None'",
+            "_refresh_design_markup_ui": "(self) -> 'None'",
+            "_prune_design_guide_undo_stack": "(self) -> 'list[str]'",
+            "_publish_design_markup": "(self) -> 'None'",
+            "_delete_persisted_design_markup": "(self, source_path: 'str | Path') -> 'None'",
+            "_stop_design_markup_store": "(self) -> 'None'",
+            "_stop_coordinate_frame_store": "(self) -> 'None'",
+            "_stop_software_coordinate_selection_store": "(self) -> 'None'",
+            "_on_software_coordinate_selection_store_failed": "(self, failure: 'object') -> 'None'",
+            "_on_coordinate_frame_document_loaded": "(self, result: 'object') -> 'None'",
+            "_on_coordinate_frame_document_saved": "(self, result: 'object') -> 'None'",
+            "_on_coordinate_frame_store_failed": "(self, failure: 'object') -> 'None'",
+            "_show_navigation_status": "(self, plan: 'object') -> 'None'",
+            "_apply_route_edit_plan": "(self, plan: 'route_editing.RouteEditPlan', *, empty_selection: 'bool' = False, update_selection: 'bool' = True) -> 'bool'",
+            "_unload_design_document": "(self) -> 'None'",
+            "_set_design_top_cell": "(self, top_cell_name: 'str') -> 'None'",
+            "_set_design_layer_visibility": "(self, layer: 'int', datatype: 'int', visible: 'bool') -> 'None'",
+            "_rotate_design_document": "(self, quarter_turn_delta: 'int') -> 'None'",
+        },
+    ),
+    "design_edit_dialog": (
+        "_MainDesignEditDialogMixin",
+        {
+            "_create_measurement_route": "(self) -> 'None'",
+            "_load_measurement_route": "(self, route_path: 'str') -> 'None'",
+            "_save_measurement_route": "(self) -> 'None'",
+            "_save_measurement_route_as": "(self, route_path: 'str') -> 'None'",
+            "_add_design_route_point": "(self, x_value: 'float', y_value: 'float') -> 'None'",
+            "_design_edit_safe": "(self) -> 'bool'",
+            "_design_mutation_ready": "(self) -> 'bool'",
+            "_markup_mutation_ready": "(self) -> 'bool'",
+            "_add_design_guide": "(self, start: 'object', end: 'object') -> 'None'",
+            "_set_design_markup_visibility": "(self, visible: 'bool') -> 'None'",
+            "_undo_last_design_guide": "(self) -> 'None'",
+            "_clear_design_guides": "(self) -> 'None'",
+            "_delete_design_selection": "(self) -> 'None'",
+            "_apply_mixed_design_array": "(self, request: 'object') -> 'None'",
+            "_commit_mixed_design_edit": "(self, plan: 'object', *, selection_after: 'SelectionModel') -> 'None'",
+            "_add_current_design_route_point": "(self) -> 'None'",
+            "_add_route_array_points": "(self, origin_x: 'float', origin_y: 'float', step_x_dx: 'float', step_x_dy: 'float', count_x: 'int', step_y_dx: 'float', step_y_dy: 'float', count_y: 'int', serpentine: 'bool', replace_existing: 'bool', selected_indices: 'object' = None) -> 'None'",
+            "_remove_selected_route_point": "(self) -> 'None'",
+            "_clear_measurement_route_points": "(self) -> 'None'",
+            "_open_route_measurement_dialog": "(self, *, start_context: 'bool' = True) -> 'None'",
+            "_restore_route_measurement_state_after_design_load": "(self) -> 'None'",
+            "_route_measurement_settings_store": "(self) -> 'RouteMeasurementSettingsStore'",
+            "_clear_route_measurement_dialog": "(self) -> 'None'",
+        },
+    ),
 }
 
 OWNER_SUPPORT_CLASSES = {
     "camera_pipeline": {"_MicroscopeScanLaunchSnapshot"},
+    "alignment": {"_ManualAlignmentCaptureContext"},
+    "design_load": {"_LoadedDesignDocument", "_PendingDesignMarkupLoad"},
 }
 
 
@@ -304,6 +462,12 @@ def test_main_direct_base_order_is_exact() -> None:
         "_MainSettingsApplyMixin",
         "_MainObjectiveToolsMixin",
         "_MainOpticalCalibrationMixin",
+        "_MainAlignmentMixin",
+        "_MainManualJogMixin",
+        "_MainMotionPredictionMixin",
+        "_MainDesignLoadMixin",
+        "_MainDesignMarkupMixin",
+        "_MainDesignEditDialogMixin",
         "QMainWindow",
     )
     assert Main.__module__ == "main"
@@ -343,6 +507,30 @@ def test_objective_tools_owner_is_direct_and_canonical() -> None:
 
 def test_optical_calibration_owner_is_direct_and_canonical() -> None:
     _assert_owner("optical_calibration")
+
+
+def test_alignment_owner_is_direct_and_canonical() -> None:
+    _assert_owner("alignment")
+
+
+def test_manual_jog_owner_is_direct_and_canonical() -> None:
+    _assert_owner("manual_jog")
+
+
+def test_motion_prediction_owner_is_direct_and_canonical() -> None:
+    _assert_owner("motion_prediction")
+
+
+def test_design_load_owner_is_direct_and_canonical() -> None:
+    _assert_owner("design_load")
+
+
+def test_design_markup_owner_is_direct_and_canonical() -> None:
+    _assert_owner("design_markup")
+
+
+def test_design_edit_dialog_owner_is_direct_and_canonical() -> None:
+    _assert_owner("design_edit_dialog")
 
 
 def _assert_owner(module_name: str) -> None:

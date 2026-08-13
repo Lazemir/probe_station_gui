@@ -17,6 +17,11 @@ restore_real_imports_for_main()
 
 import main as main_module
 from main import Main
+from probe_station_gui.application import design_load
+from probe_station_gui.application.design_load import (
+    _LoadedDesignDocument,
+    _PendingDesignMarkupLoad,
+)
 from probe_station_gui.coordinates.coordinator_model import (
     CoordinateSystemSnapshot,
     CoordinateTransition,
@@ -33,7 +38,7 @@ from probe_station_gui.stage.axis_calibration import StageAxisCalibrationMapper
 from probe_station_gui.stage.machine_coordinates import MachineCoordinateSnapshot
 from probe_station_gui.stage.types import _Status
 
-DesignDocument = main_module.DesignDocument
+DesignDocument = design_load.DesignDocument
 
 
 class _FakeStageController:
@@ -168,7 +173,7 @@ def _make_window() -> tuple[Main, _FakeStageController, list[str]]:
         previous_markup: MarkupDocument | None,
     ) -> None:
         del previous_markup
-        context = main_module._PendingDesignMarkupLoad(
+        context = _PendingDesignMarkupLoad(
             generation=generation,
             session=candidate_session,
             plan=plan,
@@ -199,7 +204,7 @@ def _activate_candidate_success(
 ) -> CoordinateTransition:
     assert session_state is not None
     if workspace_after is not None:
-        main_module.design_workspace.apply_design_workspace_checkpoint(
+        design_load.design_workspace.apply_design_workspace_checkpoint(
             owner,
             workspace_after,
         )
@@ -211,7 +216,7 @@ def test_maybe_restore_persisted_design_clears_design_and_unhomes_xy_when_xy_cha
 ) -> None:
     window, stage_controller, statuses = _make_window()
     monkeypatch.setattr(
-        main_module.design_workspace,
+        design_load.design_workspace,
         "save_controller_state_without_design",
         lambda _owner: statuses.append("saved_without_design"),
     )
@@ -220,7 +225,7 @@ def test_maybe_restore_persisted_design_clears_design_and_unhomes_xy_when_xy_cha
     }
     window._pending_persisted_design_position = (1.0, 2.0, 3.0)
 
-    main_module.design_workspace.maybe_restore_persisted_design(
+    design_load.design_workspace.maybe_restore_persisted_design(
         window,
         (1.25, 2.5, 3.0),
     )
@@ -236,7 +241,7 @@ def test_on_design_document_loaded_error_saves_controller_state_without_design_w
 ) -> None:
     window, _stage_controller, statuses = _make_window()
     monkeypatch.setattr(
-        main_module.design_workspace,
+        design_load.design_workspace,
         "save_controller_state_without_design",
         lambda _owner: statuses.append("saved_without_design"),
     )
@@ -326,7 +331,7 @@ def test_design_load_worker_carries_precomputed_frame_metadata(
         emit=lambda *args: emitted.append(args)
     )
     monkeypatch.setattr(
-        main_module.DesignDocument,
+        design_load.DesignDocument,
         "load",
         lambda _path: document,
     )
@@ -336,12 +341,12 @@ def test_design_load_worker_carries_precomputed_frame_metadata(
         lambda _document: metadata,
     )
     monkeypatch.setattr(
-        main_module.threading,
+        design_load.threading,
         "Thread",
         lambda **kwargs: types.SimpleNamespace(start=kwargs["target"]),
     )
     monkeypatch.setattr(
-        main_module,
+        design_load,
         "toggle_design_layout_window",
         lambda *_args: None,
     )
@@ -395,7 +400,7 @@ def test_restored_top_cell_reconciles_worker_frame_metadata(tmp_path: Path) -> N
     Main._on_design_document_loaded(
         window,
         1,
-        main_module._LoadedDesignDocument(
+        _LoadedDesignDocument(
             alt_document,
             worker_metadata,
             prepare_persisted_session_restore(alt_document, restore_state),

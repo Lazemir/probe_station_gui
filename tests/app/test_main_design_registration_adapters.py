@@ -9,6 +9,8 @@ import pytest
 from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtWidgets import QApplication
 
+from probe_station_gui.application import api_meter_visa, api_route_scan
+from probe_station_gui.application.alignment import _ManualAlignmentCaptureContext
 from probe_station_gui.coordinates.coordinator_model import (
     AutofocusResult,
     CoordinateAdapterCompletion,
@@ -128,12 +130,10 @@ def test_resolved_image_alignment_capture_submits_typed_request(monkeypatch) -> 
     window._alignment_design_draft = [(0.0, 0.0), (1.0, 0.0)]
     window._manual_alignment_pick_slot = 0
     window._manual_alignment_pick_generation = 4
-    window._manual_alignment_capture_context = (
-        main_module._ManualAlignmentCaptureContext(
-            request_id="image-1",
-            slot=0,
-            cancelled=main_module.threading.Event(),
-        )
+    window._manual_alignment_capture_context = _ManualAlignmentCaptureContext(
+        request_id="image-1",
+        slot=0,
+        cancelled=main_module.threading.Event(),
     )
     window._rotation_geometry_snapshot = lambda: types.SimpleNamespace(
         pivot_machine_xy=(3.0, 5.0)
@@ -614,16 +614,16 @@ def test_api_contact_callback_arms_and_completes_only_on_creator_thread(
 
     class _CurrentContactRunner:
         SHORT_CHECK_SAMPLE_COUNT = (
-            main_module.RouteMeasurementRunner.SHORT_CHECK_SAMPLE_COUNT
+            api_meter_visa.RouteMeasurementRunner.SHORT_CHECK_SAMPLE_COUNT
         )
         AUTO_CONTACT_SEEK_MAX_TOTAL_MM = (
-            main_module.RouteMeasurementRunner.AUTO_CONTACT_SEEK_MAX_TOTAL_MM
+            api_meter_visa.RouteMeasurementRunner.AUTO_CONTACT_SEEK_MAX_TOTAL_MM
         )
         AUTO_CONTACT_SEEK_STEP_MM = (
-            main_module.RouteMeasurementRunner.AUTO_CONTACT_SEEK_STEP_MM
+            api_meter_visa.RouteMeasurementRunner.AUTO_CONTACT_SEEK_STEP_MM
         )
         DEFAULT_CONTACT_SETTLE_S = (
-            main_module.RouteMeasurementRunner.DEFAULT_CONTACT_SETTLE_S
+            api_meter_visa.RouteMeasurementRunner.DEFAULT_CONTACT_SETTLE_S
         )
 
         def __init__(self, **kwargs: object) -> None:
@@ -645,9 +645,13 @@ def test_api_contact_callback_arms_and_completes_only_on_creator_thread(
         )
         api_finished.set()
 
-    monkeypatch.setattr(main_module, "RouteMeasurementRunner", _CurrentContactRunner)
     monkeypatch.setattr(
-        main_module,
+        api_meter_visa,
+        "RouteMeasurementRunner",
+        _CurrentContactRunner,
+    )
+    monkeypatch.setattr(
+        api_meter_visa,
         "api_current_contact_response",
         lambda *_args, **_kwargs: {"accepted": True},
     )
@@ -683,7 +687,7 @@ def test_api_contact_callback_arms_and_completes_only_on_creator_thread(
             created_route.append(dict(kwargs))
 
     monkeypatch.setattr(
-        main_module,
+        api_route_scan,
         "RouteExternalMeasurementSessionRunner",
         _RouteSessionRunner,
     )

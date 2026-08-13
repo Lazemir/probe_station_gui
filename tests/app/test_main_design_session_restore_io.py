@@ -15,6 +15,8 @@ from tests.app.import_reset import restore_real_imports_for_main
 
 restore_real_imports_for_main()
 
+from probe_station_gui.application import design_load
+from probe_station_gui.application.design_load import _LoadedDesignDocument
 from probe_station_gui.coordinates.coordinator_model import (
     CoordinateSystemSnapshot,
     CoordinateTransition,
@@ -71,7 +73,7 @@ def test_persisted_design_file_and_route_io_run_on_document_load_thread(
         "apply_coordinate_transition",
         lambda *_args: None,
     )
-    monkeypatch.setattr(main_module.DesignDocument, "load", lambda _path: document)
+    monkeypatch.setattr(design_load.DesignDocument, "load", lambda _path: document)
 
     emitted = threading.Event()
     publications: list[tuple[object, ...]] = []
@@ -104,7 +106,7 @@ def test_persisted_design_file_and_route_io_run_on_document_load_thread(
     monkeypatch.setattr(MeasurementRoute, "load", classmethod(tracked_route_load))
     monkeypatch.setattr(RouteDesignBinding, "validate_document", tracked_validate)
 
-    main_module.design_workspace.maybe_restore_persisted_design(
+    design_load.design_workspace.maybe_restore_persisted_design(
         window,
         (1.0, 2.0, 3.0),
     )
@@ -151,12 +153,12 @@ def test_changed_or_missing_persisted_design_keeps_exact_clear_status(
         lambda *_args: None,
     )
     monkeypatch.setattr(
-        main_module.design_workspace,
+        design_load.design_workspace,
         "save_controller_state_without_design",
         lambda _owner: statuses.append("saved_without_design"),
     )
     monkeypatch.setattr(
-        main_module.DesignDocument,
+        design_load.DesignDocument,
         "load",
         lambda _path: pytest.fail("changed or missing design must not be parsed"),
     )
@@ -169,7 +171,7 @@ def test_changed_or_missing_persisted_design_keeps_exact_clear_status(
 
     window.design_document_loaded = types.SimpleNamespace(emit=record_publication)
 
-    main_module.design_workspace.maybe_restore_persisted_design(
+    design_load.design_workspace.maybe_restore_persisted_design(
         window,
         (1.0, 2.0, 3.0),
     )
@@ -190,7 +192,7 @@ def test_stale_generation_discards_prepared_session_restore(tmp_path: Path) -> N
     prepared = DesignSession(document=document)
     prepared.targets = []
     metadata = main_module.DesignFrameMetadata.from_document(document)
-    payload = main_module._LoadedDesignDocument(
+    payload = _LoadedDesignDocument(
         document,
         metadata,
         PreparedDesignSessionRestore(prepared.snapshot_state()),

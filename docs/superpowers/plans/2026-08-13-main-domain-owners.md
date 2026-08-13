@@ -108,12 +108,12 @@ Each owner is a private class in `probe_station_gui/application/`. Ranges refer 
 - Create: `alignment.py`, `manual_jog.py`, `motion_prediction.py`, `design_load.py`, `design_markup.py`, `design_edit_dialog.py`.
 - Modify: `main.py` and canonical alignment/motion/design tests.
 
-- [ ] Run focused alignment, planned move, coordinate, design load/markup/navigation/registration tests.
-- [ ] Extract owners one at a time. Preserve exact locks, timers, selection generations, rollback ordering, and coordinate-authority observations.
-- [ ] Migrate private `Main.__new__` tests to the canonical owner descriptor only when needed; preserve behavioral assertions exactly.
-- [ ] Verify descriptor-aware AST equality for every moved method and no duplicate definitions.
-- [ ] Verify every changed/new file has MI > 0 without comment/docstring bonus.
-- [ ] Commit `refactor: separate main motion and design domains` after independent task review C0/I0/M0.
+- [x] Run focused alignment, planned move, coordinate, design load/markup/navigation/registration tests: corrected baseline 173 passed; final App/ownership selection 191 passed; proportional Coordinates/Stage/UI selection 409 passed.
+- [x] Extract owners one at a time. All six vertical gates passed while preserving exact locks, timers, selection generations, rollback ordering, and coordinate-authority observations.
+- [x] Migrate private DTO/mock/global tests to canonical owners only when needed; behavioral assertions remain unchanged.
+- [x] Verify descriptor-aware AST equality for all 126 moved methods plus three support DTOs, 160 residual Main methods, and no duplicate definitions.
+- [x] Verify every changed/new non-`Main` Python file has positive normal and comment/docstring-stripped MI; `main.py` strictly reduced to 4065 LOC and remains the sole interim MI-zero file.
+- [x] Commit `refactor: separate main motion and design domains` after independent task review C0/I0/M0 (READY on the frozen Task 4 scope).
 
 ## Task 5: Route and remaining owners
 
