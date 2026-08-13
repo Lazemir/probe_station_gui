@@ -73,8 +73,8 @@ apply() owns these rules in this order:
    axis calibrations, and objectives.
 4. If custom frames changed while frames are loaded, synchronize them through
    the one coordinate coordinator. On TypeError or ValueError, restore the
-   previous custom frames, publish the existing validation message, and
-   recompute whether coordinates changed.
+   previous software-coordinate section, publish the existing validation
+   message, and recompute whether coordinates changed.
 5. If the B-axis pivot changed for an active Design frame, validate rotation
    geometry and require B from the supplied cached Machine snapshot. On
    DesignModelError, TypeError, or ValueError, restore only the previous pivot,
@@ -101,8 +101,9 @@ notices, and logs completion.
 ## Error and Ordering Guarantees
 
 - No settings are saved when the Stage is busy.
-- Invalid custom frames or pivot edits roll back only their own submitted
-  section; unrelated settings remain eligible for save.
+- Invalid custom frames restore the complete previous software-coordinate
+  section, exactly as today. An invalid pivot restores only the previous
+  pivot. Unrelated top-level settings remain eligible for save.
 - An active-objective mutation rejected for busy optical/Stage work does not
   discard inactive-profile or unrelated settings changes.
 - Concurrent exposure-policy state remains authoritative through
