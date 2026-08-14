@@ -172,8 +172,8 @@ def test_waiting_publication_derives_and_clears_reason() -> None:
     runner = _Runner(status={"waiting_reason": "  contact attention  "})
     slot.activate(runner, _Thread(alive=True), kind=kind_type.GUI)
 
-    waiting = slot.publish_waiting(True)
-    running = slot.publish_waiting(False)
+    waiting = slot.publish_waiting(True, expected_runner=runner)
+    running = slot.publish_waiting(False, expected_runner=runner)
 
     assert waiting.waiting is True
     assert waiting.waiting_reason == "contact attention"
@@ -190,20 +190,41 @@ def test_waiting_publication_uses_paused_fallback(
 ) -> None:
     slot_type, kind_type, _, _ = _owner_types()
     slot = slot_type()
-    slot.activate(_Runner(status=status), _Thread(alive=True), kind=kind_type.GUI)
+    runner = _Runner(status=status)
+    slot.activate(runner, _Thread(alive=True), kind=kind_type.GUI)
 
-    assert slot.publish_waiting(True).waiting_reason == "paused"
+    assert slot.publish_waiting(True, expected_runner=runner).waiting_reason == "paused"
 
 
 def test_stale_waiting_publication_after_release_cannot_reactivate_slot() -> None:
     slot, runner, _ = _activate(alive=False)
     slot.release(_release_request("FINISHED", runner, join_timeout_s=0.1))
 
-    snapshot = slot.publish_waiting(True)
+    snapshot = slot.publish_waiting(True, expected_runner=runner)
 
     assert snapshot.active is False
     assert snapshot.waiting is False
     assert snapshot.waiting_reason == ""
+
+
+def test_stale_waiting_publication_cannot_pause_a_replacement_run() -> None:
+    slot_type, kind_type, _, _ = _owner_types()
+    slot = slot_type()
+    runner_a = _Runner()
+    slot.activate(runner_a, _Thread(alive=False), kind=kind_type.GUI)
+    slot.release(_release_request("FINISHED", runner_a, join_timeout_s=0.1))
+    runner_b = _Runner()
+    slot.activate(runner_b, _Thread(alive=True), kind=kind_type.GUI)
+
+    snapshot = slot.publish_waiting(True, expected_runner=runner_a)
+    directive = slot.request_interrupt()
+
+    assert snapshot.runner is runner_b
+    assert snapshot.waiting is False
+    assert snapshot.waiting_reason == ""
+    assert directive.runner is runner_b
+    assert directive.cancel_stage is True
+    assert runner_b.calls == ["interrupt"]
 
 
 @pytest.mark.parametrize(
@@ -215,7 +236,7 @@ def test_interrupt_requests_runner_correction_and_routes_stage_cancel(
     cancel_stage: bool,
 ) -> None:
     slot, runner, _ = _activate()
-    slot.publish_waiting(waiting)
+    slot.publish_waiting(waiting, expected_runner=runner)
 
     directive = slot.request_interrupt()
 
@@ -241,7 +262,7 @@ def test_successful_gui_takeover_stops_then_joins_and_clears() -> None:
     runner = _Runner(calls=calls)
     thread = _Thread(alive=True, calls=calls)
     slot.activate(runner, thread, kind=kind_type.GUI)
-    slot.publish_waiting(True)
+    slot.publish_waiting(True, expected_runner=runner)
     prior = slot.snapshot()
 
     outcome = slot.release(_release_request("TAKEOVER", runner, join_timeout_s=2.0))
@@ -262,7 +283,7 @@ def test_timed_out_gui_takeover_retains_the_complete_snapshot() -> None:
     runner = _Runner(status={"waiting_reason": "contact attention"})
     thread = _Thread(alive=True, stops_after_join=False)
     slot.activate(runner, thread, kind=kind_type.GUI)
-    slot.publish_waiting(True)
+    slot.publish_waiting(True, expected_runner=runner)
     prior = slot.snapshot()
 
     outcome = slot.release(_release_request("TAKEOVER", runner, join_timeout_s=2.0))
@@ -284,7 +305,7 @@ def test_takeover_rejects_nonwaiting_or_non_gui_runs(
     waiting: bool,
 ) -> None:
     slot, runner, thread = _activate(kind_name=kind_name)
-    slot.publish_waiting(waiting)
+    slot.publish_waiting(waiting, expected_runner=runner)
     prior = slot.snapshot()
 
     outcome = slot.release(_release_request("TAKEOVER", runner, join_timeout_s=2.0))
@@ -351,7 +372,7 @@ def test_structural_callbacks_are_invoked_without_holding_the_slot_lock() -> Non
     slot.activate(runner, thread, kind=kind_type.GUI)
 
     assert slot.snapshot().thread_alive is True
-    slot.publish_waiting(True)
+    slot.publish_waiting(True, expected_runner=runner)
     slot.request_interrupt()
     outcome = slot.release(_release_request("TAKEOVER", runner, join_timeout_s=2.0))
 

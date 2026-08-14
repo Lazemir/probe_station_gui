@@ -109,11 +109,16 @@ class _RouteRunExecutionSlot:
             self._waiting_reason = ""
             return self._snapshot_unlocked()
 
-    def publish_waiting(self, waiting: bool) -> RouteRunSnapshot:
+    def publish_waiting(
+        self,
+        waiting: bool,
+        *,
+        expected_runner: object,
+    ) -> RouteRunSnapshot:
         waiting = bool(waiting)
         with self._lock:
             runner = self._runner
-            if runner is None:
+            if runner is None or runner is not expected_runner:
                 return self._snapshot_unlocked()
             if not waiting:
                 self._waiting = False
