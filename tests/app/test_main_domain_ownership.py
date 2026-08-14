@@ -520,7 +520,7 @@ OWNER_SPECS = {
 
 OWNER_SIGNATURE_SHA256 = {
     "route_launch_setup": "5f0e999f41d060f52f710c263a90fbfb23bba5bcf67a53ee7060504cdf47c502",
-    "route_capture_run": "797e1508c3ea0b37e4cc810e6beec0fd965265496c89e73b9f9cc1dc5995cd7e",
+    "route_capture_run": "881ba99c4c6fe0d55e21b88d0443ad7ee5f969e3e42891eefd487d680f2f6a6d",
     "route_control": "0dca50743dfaa361fcaf76645b7a0da216640bc1f8700081a9e0ad0c5b17aa5b",
     "route_results": "ec4552e53a60da60698f6cb03e28221150572bafaeec4da96301a82ffdbc82aa",
     "registration_focus": "e0be34f7f38da698f1fc768e7e93dd4a9f5ef8984bc7deae535757daaf4f207c",
