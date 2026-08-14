@@ -65,3 +65,72 @@ norecursedirs = [
     "build",
     "dist",
 ]
+
+[tool.importlinter]
+root_package = "probe_station_gui"
+include_external_packages = true
+exclude_type_checking_imports = true
+
+[[tool.importlinter.contracts]]
+id = "domain-no-application"
+name = "Domain packages do not import the application shell"
+type = "forbidden"
+source_modules = [
+    "probe_station_gui.api",
+    "probe_station_gui.camera",
+    "probe_station_gui.coordinates",
+    "probe_station_gui.design",
+    "probe_station_gui.dialogs",
+    "probe_station_gui.instruments",
+    "probe_station_gui.notifications",
+    "probe_station_gui.route",
+    "probe_station_gui.settings",
+    "probe_station_gui.shared",
+    "probe_station_gui.stage",
+    "probe_station_gui.views",
+]
+forbidden_modules = ["probe_station_gui.application"]
+
+[[tool.importlinter.contracts]]
+id = "shared-bottom"
+name = "Shared stays below application and domain packages"
+type = "forbidden"
+source_modules = ["probe_station_gui.shared"]
+forbidden_modules = [
+    "main",
+    "probe_station_gui.api",
+    "probe_station_gui.application",
+    "probe_station_gui.camera",
+    "probe_station_gui.coordinates",
+    "probe_station_gui.design",
+    "probe_station_gui.dialogs",
+    "probe_station_gui.instruments",
+    "probe_station_gui.notifications",
+    "probe_station_gui.route",
+    "probe_station_gui.settings",
+    "probe_station_gui.stage",
+    "probe_station_gui.views",
+]
+
+[[tool.importlinter.contracts]]
+id = "route-no-gui-composition"
+name = "Route stays independent of application and GUI composition"
+type = "forbidden"
+source_modules = ["probe_station_gui.route"]
+forbidden_modules = [
+    "main",
+    "probe_station_gui.application",
+    "probe_station_gui.views",
+]
+
+[[tool.importlinter.contracts]]
+id = "api-no-gui-composition"
+name = "API transport stays independent of application and GUI composition"
+type = "forbidden"
+source_modules = ["probe_station_gui.api"]
+forbidden_modules = [
+    "main",
+    "probe_station_gui.application",
+    "probe_station_gui.dialogs",
+    "probe_station_gui.views",
+]

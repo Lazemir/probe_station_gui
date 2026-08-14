@@ -159,7 +159,7 @@ git commit -m "test: characterize import architecture violations"
 - Consumes: `_run_import_linter(*, config: Path, cwd: Path) -> subprocess.CompletedProcess[str]` from Task 1.
 - Produces: four stable contract identifiers: `domain-no-application`, `shared-bottom`, `route-no-gui-composition`, and `api-no-gui-composition`.
 
-- [ ] **Step 1: Write the failing repository gate**
+- [x] **Step 1: Write the failing repository gate**
 
 Add this test after the disposable characterization:
 
@@ -171,7 +171,7 @@ def test_repository_import_contracts_pass() -> None:
     assert "Contracts: 4 kept, 0 broken." in result.stdout
 ```
 
-- [ ] **Step 2: Run the gate to verify RED**
+- [x] **Step 2: Run the gate to verify RED**
 
 Run:
 
@@ -181,7 +181,9 @@ C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m pytest tests/
 
 Expected: FAIL because `pyproject.toml` has no `[tool.importlinter]` configuration.
 
-- [ ] **Step 3: Add the four minimal contracts**
+Evidence: 2026-08-14 — failed as expected with `Could not read any configuration.` and `assert 1 == 0`.
+
+- [x] **Step 3: Add the four minimal contracts**
 
 Append this exact configuration to `pyproject.toml`:
 
@@ -256,7 +258,7 @@ forbidden_modules = [
 ]
 ```
 
-- [ ] **Step 4: Run the same gate to verify GREEN**
+- [x] **Step 4: Run the same gate to verify GREEN**
 
 Run:
 
@@ -266,7 +268,9 @@ C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m pytest tests/
 
 Expected: `1 passed` and captured Import Linter summary `Contracts: 4 kept, 0 broken.`
 
-- [ ] **Step 5: Run each contract directly by stable identifier**
+Evidence: 2026-08-14 — `1 passed in 0.41s`; assertion verified `Contracts: 4 kept, 0 broken.`.
+
+- [x] **Step 5: Run each contract directly by stable identifier**
 
 Run:
 
@@ -276,7 +280,9 @@ C:\Users\Public\code\probe_station_gui\.venv\Scripts\lint-imports.exe --no-cache
 
 Expected: `Contracts: 4 kept, 0 broken.`
 
-- [ ] **Step 6: Run the complete maintainability module**
+Evidence: 2026-08-14 — analyzed 411 files and 2593 dependencies; all four named contracts kept, 0 broken.
+
+- [x] **Step 6: Run the complete maintainability module**
 
 Run:
 
@@ -286,7 +292,9 @@ C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m pytest tests/
 
 Expected: `3 passed`: detector characterization, repository import contracts, and every tracked Python file MI above zero.
 
-- [ ] **Step 7: Run scoped static verification**
+Evidence: 2026-08-14 — `3 passed in 21.71s`.
+
+- [x] **Step 7: Run scoped static verification**
 
 Run:
 
@@ -299,7 +307,9 @@ git diff --check
 
 Expected: all commands exit `0`.
 
-- [ ] **Step 8: Remove exact task temporary directories and verify cache absence**
+Evidence: 2026-08-14 — Ruff check passed, formatter reported `1 file already formatted`, compileall and `git diff --check` exited 0.
+
+- [x] **Step 8: Remove exact task temporary directories and verify cache absence**
 
 Remove only these paths if pytest created them:
 
@@ -319,7 +329,9 @@ git status --short
 
 Expected: cache `False`; status contains only `pyproject.toml`, the maintainability test, and this plan's factual checkbox updates.
 
-- [ ] **Step 9: Commit the repository contracts**
+Evidence: 2026-08-14 — removed only the four named directories; `.import_linter_cache` was `False`; status scope matched the three Task 2 files.
+
+- [x] **Step 9: Commit the repository contracts**
 
 ```powershell
 git add pyproject.toml tests/app/test_repository_maintainability.py docs/superpowers/plans/2026-08-14-import-linter-architecture-gate.md
