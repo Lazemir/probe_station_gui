@@ -242,14 +242,14 @@ class _MainRouteCaptureRunMixin:
             return ""
         return route.name
 
-    def _run_route_measurement(self, runner: RouteMeasurementRunner) -> None:
+    def _run_route_measurement(
+        self,
+        runner: RouteMeasurementRunner,
+        run_kind: RouteRunKind,
+    ) -> None:
         success = False
         message = "Route measurement failed."
-        execution = self._route_run_execution.snapshot()
-        external_result_session = (
-            execution.runner is runner
-            and execution.kind is RouteRunKind.EXTERNAL_RESULT_SESSION
-        )
+        external_result_session = run_kind is RouteRunKind.EXTERNAL_RESULT_SESSION
         self._route_measurement_optical_session_token = None
         try:
             if runner.requires_optical_session():

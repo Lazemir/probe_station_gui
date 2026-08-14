@@ -275,7 +275,7 @@ class _MainRouteLaunchSetupMixin:
     ) -> None:
         thread = threading.Thread(
             target=self._run_route_measurement,
-            args=(runner,),
+            args=(runner, RouteRunKind.GUI),
             name="RouteMeasurement",
             daemon=True,
         )

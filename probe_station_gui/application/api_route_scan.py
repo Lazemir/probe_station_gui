@@ -286,7 +286,7 @@ class _MainApiRouteScanMixin:
         )
         thread = threading.Thread(
             target=self._run_route_measurement,
-            args=(runner,),
+            args=(runner, RouteRunKind.EXTERNAL_RESULT_SESSION),
             name="RouteApiExternalSession",
             daemon=True,
         )

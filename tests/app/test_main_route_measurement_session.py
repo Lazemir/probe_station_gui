@@ -175,7 +175,7 @@ class MainRouteMeasurementSessionTest(unittest.TestCase):
         runner = _Runner()
         activate_route_run(window, runner)
 
-        Main._run_route_measurement(window, runner)
+        Main._run_route_measurement(window, runner, RouteRunKind.GUI)
 
         self.assertEqual(
             events,
@@ -228,7 +228,7 @@ class MainRouteMeasurementSessionTest(unittest.TestCase):
         runner = _Runner()
         activate_route_run(window, runner)
 
-        Main._run_route_measurement(window, runner)
+        Main._run_route_measurement(window, runner, RouteRunKind.GUI)
 
         self.assertEqual(events[-1], ("exit", RuntimeError))
         self.assertIsNone(window._route_measurement_optical_session_token)
@@ -238,7 +238,7 @@ class MainRouteMeasurementSessionTest(unittest.TestCase):
             [(runner, False, "capture failed", "route.csv")],
         )
 
-    def test_external_route_run_keeps_result_kind_after_slot_release(self) -> None:
+    def test_delayed_external_worker_keeps_bound_kind_after_replacement(self) -> None:
         window = Main.__new__(Main)
         window._optical_session_manager = mock.MagicMock()
         window.route_measurement_status = types.SimpleNamespace(
@@ -254,26 +254,47 @@ class MainRouteMeasurementSessionTest(unittest.TestCase):
             def requires_optical_session() -> bool:
                 return False
 
-            def run(self) -> tuple[bool, str]:
-                window._route_run_execution.release(
-                    RouteRunReleaseRequest(
-                        cause=RouteRunReleaseCause.FAILED_START,
-                        expected_runner=self,
-                        join_timeout_s=0.0,
-                    )
-                )
+            @staticmethod
+            def run() -> tuple[bool, str]:
                 return False, "start failed"
 
         runner = _Runner()
-        activate_route_run(
+        slot = activate_route_run(
             window,
             runner,
             kind=RouteRunKind.EXTERNAL_RESULT_SESSION,
         )
 
-        Main._run_route_measurement(window, runner)
+        def delayed_worker_target() -> None:
+            Main._run_route_measurement(
+                window,
+                runner,
+                RouteRunKind.EXTERNAL_RESULT_SESSION,
+            )
 
+        release = slot.release(
+            RouteRunReleaseRequest(
+                cause=RouteRunReleaseCause.FAILED_START,
+                expected_runner=runner,
+                join_timeout_s=0.0,
+            )
+        )
+        replacement = object()
+        replacement_thread = types.SimpleNamespace(
+            is_alive=lambda: True,
+            join=lambda timeout=None: None,
+        )
+        slot.activate(
+            replacement,
+            replacement_thread,
+            kind=RouteRunKind.GUI,
+        )
+
+        delayed_worker_target()
+
+        self.assertTrue(release.released)
         self.assertEqual(emitted, [(runner, False, "start failed", "")])
+        self.assertIs(slot.snapshot().runner, replacement)
 
     def test_route_autofocus_uses_outer_optical_session(self) -> None:
         calls: list[dict[str, object]] = []

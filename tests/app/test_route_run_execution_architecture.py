@@ -140,6 +140,18 @@ def test_run_kind_is_explicit_without_capability_inference() -> None:
     assert 'hasattr(runner, "submit_external_result")' not in consumer_source
 
 
+def test_run_kind_is_bound_into_each_worker_before_thread_start() -> None:
+    gui_launch = _source(
+        ROOT / "probe_station_gui" / "application" / "route_launch_setup.py"
+    )
+    external_launch = _source(
+        ROOT / "probe_station_gui" / "application" / "api_route_scan.py"
+    )
+
+    assert "args=(runner, RouteRunKind.GUI)," in gui_launch
+    assert "args=(runner, RouteRunKind.EXTERNAL_RESULT_SESSION)," in external_launch
+
+
 def test_slot_has_no_reverse_import_or_package_reexport() -> None:
     slot_tree = ast.parse(_source(SLOT))
     imported = {
