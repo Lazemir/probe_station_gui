@@ -328,3 +328,57 @@ docs: record route run execution evidence
 ```
 
 Leave the worktree/index clean and hand off the next architecture candidate.
+
+## Execution evidence (2026-08-14)
+
+- [x] Task 1 added the canonical execution slot in `311b37b` and its
+  independent review exposed a stale waiting-publication identity race. The
+  strict queued-runner regression failed 1/1 before `9d526c1` required the
+  expected runner and ignored stale publication.
+- [x] Task 2 migrated application ownership atomically in `c841bfb`. Its
+  integration/deletion RED was 4 failed and 2 passed. A failed-start race was
+  reproduced with 1 failed and 1 passed before the worker captured explicit
+  run kind; independent review then found that capture still occurred after
+  `thread.start()`. The deterministic delayed-worker RED failed 1/1 before
+  `bd887b6` bound the immutable run kind in the thread arguments before start.
+- [x] The first Task 3 App split stopped on the permanent canonical-owner
+  signature mismatch after 1 failed, 406 passed, 1 deselected, and 5 subtests.
+  `2040589` updated only that ownership hash. Task 3 then restarted from a
+  clean corrected HEAD and reran the complete matrix from zero.
+- [x] Exact collect-only found 3364 nodes. Deterministic offscreen,
+  process-local-`QLocale.c()` directory partitions passed all 3364/3364 nodes
+  plus 16 subtests. The raw App diagnostic reproduced only the established
+  native `_schedule_retry` access violation; the counted App split passed 407
+  nodes with that exact protected node deselected, the node passed 1/1 in a
+  clean process, and 5 App subtests passed.
+- [x] Import Linter `--no-cache` analyzed 412 files and 2602 dependencies:
+  5 contracts kept, 0 broken. The permanent repository maintainability module
+  passed 3/3. Configured whole Ruff, changed-file format, whole compileall,
+  committed/working/staged diff checks, and both owner-first and reverse-import
+  smoke checks passed without a `QApplication` or Python thread start.
+- [x] All 707 tracked Python files have positive normal MI with zero
+  nonpositive files. All 35 changed Python files have positive normal and
+  AST comments/docstrings-stripped MI; the minima are 5.629341 normal and
+  1.538637 stripped. `main.py` is 13.831510 normal / 9.286497 stripped.
+- [x] Changed-scope Lizard duplicate blocks improved 52 -> 48 and duplicate
+  rate improved 6.293998% -> 5.958207%; warning count and maximum CCN remained
+  4 and 24. Eleven protected mailbox/coordinator/external-session/contact
+  production and safety-test files are byte-identical to the design baseline.
+- [x] The independent final reviewer freshly passed 212 nodes plus 5 subtests,
+  independently inspected the frozen implementation, and returned READY with
+  Critical 0 / Important 0 / Minor 0 on `2040589`.
+- [x] The ignored Task 3 report is
+  `.superpowers/sdd/route-slot-task-3-report.md`, SHA-256
+  `35d29b823777b4a2a93b83fbfbff68a7ca1453eaf3e70c837997cd3141a77c3d`.
+  It records the exact 36-path scope hashes and 11 protected hashes. The frozen
+  binary implementation diff from `6f341dc` through `2040589` has SHA-256
+  `00eb75af405e87840791939aae5c5c336ec2efe97c1bf86682ee1a5acd9752ed`.
+- [x] Before this factual plan update, HEAD was `2040589`, the tracked
+  worktree and index were empty, Task 3 basetemp count was zero, and the Import
+  Linter cache was absent. Every pytest command disabled its cache provider;
+  the retained `.pytest_cache` predates Task 3 with unchanged 2026-08-13 UTC
+  timestamps. Compileall changed no cache-path count (50 directories / 1095
+  files before and after), and unrelated pre-existing caches were not deleted.
+- [x] Task 3 acceptance is review-gated and complete: no hardware, network,
+  visible GUI, code/test edit, push, or merge was performed. The only tracked
+  Step 4 path is this factual plan.
