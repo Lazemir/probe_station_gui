@@ -37,7 +37,7 @@
 - Consumes: the `lint-imports` console script installed beside `sys.executable`.
 - Produces: `_run_import_linter(*, config: Path, cwd: Path) -> subprocess.CompletedProcess[str]`, used by Task 2.
 
-- [ ] **Step 1: Add the Import Linter development dependency**
+- [x] **Step 1: Add the Import Linter development dependency**
 
 Append this optional dependency group after the existing `lcr` group:
 
@@ -48,7 +48,7 @@ dev = [
 ]
 ```
 
-- [ ] **Step 2: Add the CLI runner and disposable broken-graph characterization**
+- [x] **Step 2: Add the CLI runner and disposable broken-graph characterization**
 
 Extend `tests/app/test_repository_maintainability.py` with these imports:
 
@@ -121,7 +121,7 @@ def test_import_linter_reports_a_forbidden_reverse_import(tmp_path: Path) -> Non
     assert "architecture_fixture.forbidden" in result.stdout
 ```
 
-- [ ] **Step 3: Run the characterization and observe the deliberate broken contract**
+- [x] **Step 3: Run the characterization and observe the deliberate broken contract**
 
 Run:
 
@@ -131,7 +131,9 @@ C:\Users\Public\code\probe_station_gui\.venv\Scripts\python.exe -m pytest tests/
 
 Expected: `1 passed`. The captured Import Linter process must return `1`, and the test must prove its output names the broken contract and both modules.
 
-- [ ] **Step 4: Verify metadata parses and no cache was created**
+Evidence: 2026-08-14 - `1 passed`; the captured process returned 1 and named the broken contract plus both fixture modules.
+
+- [x] **Step 4: Verify metadata parses and no cache was created**
 
 Run:
 
@@ -142,12 +144,16 @@ Test-Path .import_linter_cache
 
 Expected: `pyproject ok`, then `False`.
 
-- [ ] **Step 5: Commit the characterized tool seam**
+Evidence: 2026-08-14 - TOML parsed successfully and `.import_linter_cache` was absent.
+
+- [x] **Step 5: Commit the characterized tool seam**
 
 ```powershell
 git add pyproject.toml tests/app/test_repository_maintainability.py
 git commit -m "test: characterize import architecture violations"
 ```
+
+Evidence: committed as `8e756fe` (`test: characterize import architecture violations`); independent Task 1 review was clean.
 
 ### Task 2: Enforce the repository import contracts
 
@@ -347,7 +353,7 @@ git commit -m "build: enforce import architecture contracts"
 - Consumes: the two Task 1-2 commits and four stable Import Linter contracts.
 - Produces: a clean reviewed branch ready for the Route Measurement lifecycle design pass.
 
-- [ ] **Step 1: Review contract precision**
+- [x] **Step 1: Review contract precision**
 
 Use the requesting-code-review workflow. The reviewer must independently verify:
 
@@ -358,7 +364,9 @@ Use the requesting-code-review workflow. The reviewer must independently verify:
 - Python 3.9 and 3.10+ markers are mutually exclusive and exhaustive;
 - the test invokes the environment-local executable and prints actionable failure output.
 
-- [ ] **Step 2: Re-run the frozen gate after review fixes**
+Evidence: independent final review READY, C0/I0/M0. All declared internal modules were present in the 411-module graph; only intentional external `main` was absent. The four disposable injections camera-to-application, shared-to-stage, route-to-views, and api-to-dialogs each exited 1 with `0 kept, 1 broken`. Marker coverage, runtime dependency scope, executable selection, diagnostics, and weakening checks passed.
+
+- [x] **Step 2: Re-run the frozen gate after review fixes**
 
 Run:
 
@@ -370,7 +378,9 @@ git diff --check
 
 Expected: `3 passed`, `4 kept / 0 broken`, and clean diff check.
 
-- [ ] **Step 3: Record final evidence and commit review facts**
+Evidence: 2026-08-14 - `3 passed in 21.59s`; direct Import Linter analyzed 411 files and 2593 dependencies with `4 kept, 0 broken`; `git diff --check` passed.
+
+- [x] **Step 3: Record final evidence and commit review facts**
 
 Update this plan's checkboxes with exact counts, reviewer verdict, and commit IDs. Remove `.pytest-import-linter-final`, verify `.import_linter_cache` is absent, then commit only the factual plan update:
 
@@ -378,6 +388,8 @@ Update this plan's checkboxes with exact counts, reviewer verdict, and commit ID
 git add docs/superpowers/plans/2026-08-14-import-linter-architecture-gate.md
 git commit -m "docs: record import architecture gate evidence"
 ```
+
+Evidence: Task 1 commit `8e756fe`; Task 2 commit `db3a6b0fb0db4c5f0e77fa83b76c0348d6637ad2`. Removed only `.pytest-import-linter-final`; no Import Linter cache, task temp, or unintended worktree change remained before this factual commit.
 
 - [ ] **Step 4: Begin the next approved architecture candidate**
 
