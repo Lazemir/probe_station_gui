@@ -134,3 +134,21 @@ forbidden_modules = [
     "probe_station_gui.dialogs",
     "probe_station_gui.views",
 ]
+
+[[tool.importlinter.contracts]]
+id = "route-run-execution-slot-leaf"
+name = "Route run execution slot stays independent of callers and route policy"
+type = "forbidden"
+source_modules = ["probe_station_gui.application.route_run_execution"]
+forbidden_modules = [
+    "main",
+    "probe_station_gui.route",
+    "probe_station_gui.dialogs",
+    "probe_station_gui.views",
+    "probe_station_gui.application.route_launch_setup",
+    "probe_station_gui.application.route_capture_run",
+    "probe_station_gui.application.route_control",
+    "probe_station_gui.application.route_results",
+    "probe_station_gui.application.api_stage_contact",
+    "probe_station_gui.application.api_route_scan",
+]
