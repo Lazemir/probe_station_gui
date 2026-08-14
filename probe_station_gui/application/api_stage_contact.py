@@ -8,6 +8,11 @@ import time
 from pathlib import Path
 from typing import Any
 
+from probe_station_gui.application.route_run_execution import (
+    RouteRunKind,
+    RouteRunReleaseCause,
+    RouteRunReleaseRequest,
+)
 from probe_station_gui.design.contact_navigation import (
     api_contact_needles_plan,
     api_contact_needles_stage_error_response,
@@ -571,18 +576,26 @@ class _MainApiStageContactMixin:
     def _clear_waiting_route_runner_before_api_control(
         self,
     ) -> dict[str, Any] | None:
-        runner = getattr(self, "_route_measurement_runner", None)
-        thread = getattr(self, "_route_measurement_thread", None)
-        thread_alive = bool(thread is not None and thread.is_alive())
-        if runner is None and not thread_alive:
+        execution = self._route_run_execution.snapshot()
+        runner = execution.runner
+        if not execution.active:
             return None
-        if runner is not None and not thread_alive:
-            self._clear_waiting_route_measurement_state()
+        if not execution.thread_alive:
+            release = self._route_run_execution.release(
+                RouteRunReleaseRequest(
+                    cause=RouteRunReleaseCause.FINISHED,
+                    expected_runner=runner,
+                    join_timeout_s=0.1,
+                )
+            )
+            if release.released:
+                self._route_measurement_session_active = False
+                self._pending_route_measure_point = None
             return None
         can_clear_waiting_gui_route = (
             runner is not None
-            and bool(getattr(self, "_route_measurement_waiting", False))
-            and not hasattr(runner, "submit_external_result")
+            and execution.kind is RouteRunKind.GUI
+            and execution.waiting
         )
         if not can_clear_waiting_gui_route:
             return {
@@ -594,9 +607,13 @@ class _MainApiStageContactMixin:
                 ),
             }
         try:
-            runner.stop()
-            if thread is not None:
-                thread.join(timeout=2.0)
+            release = self._route_run_execution.release(
+                RouteRunReleaseRequest(
+                    cause=RouteRunReleaseCause.TAKEOVER,
+                    expected_runner=runner,
+                    join_timeout_s=2.0,
+                )
+            )
         except Exception as exc:
             logger.exception("Failed to clear waiting route measurement.")
             return {
@@ -604,7 +621,7 @@ class _MainApiStageContactMixin:
                 "status_code": 409,
                 "message": f"Failed to stop waiting route measurement: {exc}",
             }
-        if thread is not None and thread.is_alive():
+        if not release.released:
             return {
                 "accepted": False,
                 "status_code": 409,
@@ -613,16 +630,9 @@ class _MainApiStageContactMixin:
                     "control start."
                 ),
             }
-        self._clear_waiting_route_measurement_state()
-        return None
-
-    def _clear_waiting_route_measurement_state(self) -> None:
-        self._route_measurement_runner = None
-        self._route_measurement_thread = None
-        self._route_measurement_waiting = False
-        self._route_measurement_waiting_reason = ""
         self._route_measurement_session_active = False
         self._pending_route_measure_point = None
+        return None
 
     def _request_api_route_control_pause(self, message: str) -> dict[str, Any]:
         state, transition_message = (
@@ -689,8 +699,6 @@ class _MainApiStageContactMixin:
 
     def _update_api_route_control_ui(self, message: str) -> None:
         ui_state = self._api_route_control_state_snapshot().ui_state()
-        self._route_measurement_waiting = ui_state.waiting
-        self._route_measurement_waiting_reason = ui_state.waiting_reason
         self._route_runtime_presenter().apply_api_control_update(ui_state, message)
         self._show_status(message, 5000)
 

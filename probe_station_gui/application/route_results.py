@@ -7,6 +7,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from probe_station_gui.design import route_editing
+from probe_station_gui.application.route_run_execution import (
+    RouteRunReleaseCause,
+    RouteRunReleaseRequest,
+)
 from probe_station_gui.route.api_artifacts import final_api_route_session_status
 from probe_station_gui.route.finish_flow import (
     route_finish_outcome_plan,
@@ -71,7 +75,7 @@ class _MainRouteResultsMixin:
                 caption,
                 photo=photo,
                 reply_markup=self._telegram_runtime.default_markup(
-                    route_waiting=self._route_measurement_waiting
+                    route_waiting=self._route_run_execution.snapshot().waiting
                 ),
             )
         if not saved:
@@ -214,9 +218,10 @@ class _MainRouteResultsMixin:
         )
 
     def _on_route_measurement_finished(self, *args: object) -> None:
+        execution = self._route_run_execution.snapshot()
         finish_signal = route_finish_signal_plan(
             args,
-            current_runner=self._route_measurement_runner,
+            current_runner=execution.runner,
         )
         if finish_signal.ignored:
             return
@@ -237,9 +242,17 @@ class _MainRouteResultsMixin:
             current_point=self._route_measurement_current_point,
         )
         self._route_measurement_context_close_requested = False
-        self._join_finished_route_measurement_thread()
-        runner = self._route_measurement_runner
-        self._store_final_api_route_session_status(runner)
+        finished_runner = args[0] if len(args) == 4 else execution.runner
+        release = self._route_run_execution.release(
+            RouteRunReleaseRequest(
+                cause=RouteRunReleaseCause.FINISHED,
+                expected_runner=finished_runner,
+                join_timeout_s=0.1,
+            )
+        )
+        if not release.released:
+            return
+        self._store_final_api_route_session_status(release.prior.runner)
         self._clear_finished_route_measurement_state()
         self._update_stage_coordinate_apply_state()
         self._route_runtime_presenter().finished_ui(success, message)
@@ -267,12 +280,6 @@ class _MainRouteResultsMixin:
                 **telegram_kwargs,
             )
 
-    def _join_finished_route_measurement_thread(self) -> None:
-        thread = self._route_measurement_thread
-        if thread is not None and not thread.is_alive():
-            thread.join(timeout=0.1)
-        self._route_measurement_thread = None
-
     def _store_final_api_route_session_status(self, runner: object | None) -> None:
         status = final_api_route_session_status(
             getattr(self, "_api_route_session_id", None), runner, logger=logger
@@ -281,11 +288,8 @@ class _MainRouteResultsMixin:
             self._api_route_last_status = status
 
     def _clear_finished_route_measurement_state(self) -> None:
-        self._route_measurement_runner = None
         self._api_route_lcr_controller = None
         self._route_measurement_runtime_configuration = None
-        self._route_measurement_waiting = False
-        self._route_measurement_waiting_reason = ""
         self._last_route_measurement_result = None
         self._pending_route_measure_point = None
         self._route_measurement_photo_enabled = False

@@ -92,17 +92,23 @@ def route_dialog_handlers(owner: object) -> RouteDialogHandlers:
         measure_current_requested=lambda: submit_confirmation("measure"),
         skip_requested=lambda: submit_confirmation("skip"),
         save_shift_requested=getattr(owner, "_save_route_measurement_shift"),
-        interrupt_requested=getattr(owner, "_request_route_measurement_point_correction"),
+        interrupt_requested=getattr(
+            owner, "_request_route_measurement_point_correction"
+        ),
         pause_requested=getattr(owner, "_request_pause_route_measurement"),
         stop_requested=getattr(owner, "_request_stop_route_measurement"),
         jump_requested=getattr(owner, "_submit_route_measurement_jump"),
         move_requested=getattr(owner, "_request_route_contact_move"),
-        current_point_changed=getattr(owner, "_on_route_measurement_current_point_changed"),
+        current_point_changed=getattr(
+            owner, "_on_route_measurement_current_point_changed"
+        ),
         finished=lambda _result: getattr(owner, "_clear_route_measurement_dialog")(),
     )
 
 
-def route_dialog_defaults(route: object, document: object | None) -> RouteDialogDefaults:
+def route_dialog_defaults(
+    route: object, document: object | None
+) -> RouteDialogDefaults:
     route_path = getattr(route, "path", None)
     if route_path is not None:
         path = Path(route_path)
@@ -323,7 +329,8 @@ def route_measurement_setup_changed(previous: object | None, current: object) ->
     if previous is None:
         return False
     return (
-        getattr(previous, "operation_mode", None) != getattr(current, "operation_mode", None)
+        getattr(previous, "operation_mode", None)
+        != getattr(current, "operation_mode", None)
         or bool(getattr(previous, "previous_ok_only", False))
         != bool(getattr(current, "previous_ok_only", False))
         or str(getattr(previous, "previous_csv_path", "")).strip()
@@ -372,17 +379,18 @@ def route_measurement_point_request_handler(
     return handler
 
 
-def route_measurement_point_request_handler_for_owner(owner: object) -> Callable[[int], None]:
+def route_measurement_point_request_handler_for_owner(
+    owner: object,
+) -> Callable[[int], None]:
     return route_measurement_point_request_handler(
-        thread_active=lambda: (
-            getattr(owner, "_route_measurement_thread", None) is not None
-            and owner._route_measurement_thread.is_alive()
-        ),
-        waiting=lambda: bool(getattr(owner, "_route_measurement_waiting", False)),
+        thread_active=lambda: owner._route_run_execution.snapshot().thread_alive,
+        waiting=lambda: owner._route_run_execution.snapshot().waiting,
         callbacks=RouteMeasurementPointRequestCallbacks(
             open_dialog=getattr(owner, "_open_route_measurement_dialog"),
             current_dialog=lambda: getattr(owner, "_route_measurement_dialog", None),
-            submit_confirmation=getattr(owner, "_submit_route_measurement_confirmation"),
+            submit_confirmation=getattr(
+                owner, "_submit_route_measurement_confirmation"
+            ),
             request_point_correction=getattr(
                 owner, "_request_route_measurement_point_correction"
             ),
@@ -395,41 +403,6 @@ def route_measurement_point_request_handler_for_owner(owner: object) -> Callable
             ),
         ),
     )
-
-
-def restart_waiting_route_measurement(
-    *,
-    configuration: object,
-    route_offset_xy: tuple[float, float],
-    old_runner: object | None,
-    old_thread: object | None,
-    clear_waiting_state: Callable[[], None],
-    start_measurement: Callable[[object], None],
-    current_runner: Callable[[], object | None],
-    current_thread: Callable[[], object | None],
-    show_status: Callable[[str, int], None],
-) -> bool:
-    if old_runner is not None:
-        old_runner.stop()
-    if old_thread is not None and old_thread.is_alive():
-        old_thread.join(timeout=2.0)
-        if old_thread.is_alive():
-            show_status("Waiting route measurement did not stop.", 8000)
-            return False
-    clear_waiting_state()
-    start_measurement(configuration, wait_before_first_point=True)
-    new_runner = current_runner()
-    if new_runner is None or not hasattr(new_runner, "set_route_offset_xy"):
-        return False
-    new_runner.set_route_offset_xy(route_offset_xy)
-    if new_runner.wait_until_waiting(timeout_s=10.0):
-        return True
-    new_runner.stop()
-    thread = current_thread()
-    if thread is not None and thread.is_alive():
-        thread.join(timeout=2.0)
-    show_status("Route measurement did not reach waiting state.", 8000)
-    return False
 
 
 __all__ = [
@@ -446,7 +419,6 @@ __all__ = [
     "route_dialog_handlers",
     "route_measurement_point_request_handler",
     "route_measurement_point_request_handler_for_owner",
-    "restart_waiting_route_measurement",
     "route_dialog_defaults",
     "route_dialog_open_state",
     "route_dialog_restore_plan",

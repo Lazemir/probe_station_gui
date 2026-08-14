@@ -43,6 +43,7 @@ from probe_station_gui.stage.manual_jog_prediction import (
     ManualJogPredictionConfig,
     ManualJogPredictionState,
 )
+from tests.app.route_run_execution_support import install_route_run_execution
 from probe_station_gui.views.stage_position_panel import format_stage_axis_value
 
 
@@ -655,6 +656,7 @@ def _make_main(
     list[str],
 ]:
     window = Main.__new__(Main)
+    install_route_run_execution(window)
     stage_controller = _FakeStageController()
     joystick = _FakeJoystick(current_feedrate)
     timer = _FakeTimer()

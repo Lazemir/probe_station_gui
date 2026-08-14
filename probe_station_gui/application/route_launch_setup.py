@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 from PySide6.QtCore import QThread
 from PySide6.QtWidgets import QApplication
 
+from probe_station_gui.application.route_run_execution import RouteRunKind
 from probe_station_gui.coordinates.coordinator_model import (
     CoordinateAdapterCompletion,
     DesignCoordinateLease,
@@ -59,14 +60,14 @@ class _DesignContactArmDispatch:
 
 class _MainRouteLaunchSetupMixin:
     def _start_route_measurement_session(self) -> None:
-        thread = self._route_measurement_thread
+        execution = self._route_run_execution.snapshot()
         configuration = (
             self._route_measurement_dialog.current_configuration()
             if self._route_measurement_dialog is not None
             else None
         )
         plan = route_measurement_session_start_plan(
-            thread_active=bool(thread is not None and thread.is_alive()),
+            thread_active=execution.thread_alive,
             dialog_configuration=configuration,
             current_point=self._route_measurement_current_point,
         )
@@ -80,9 +81,9 @@ class _MainRouteLaunchSetupMixin:
         self._show_route_dialog_status(plan.status_message, plan.status_timeout_ms)
 
     def _cancel_route_measurement_session(self) -> None:
-        thread = self._route_measurement_thread
+        execution = self._route_run_execution.snapshot()
         plan = route_measurement_session_cancel_plan(
-            thread_active=bool(thread is not None and thread.is_alive())
+            thread_active=execution.thread_alive
         )
         if not plan.accepted:
             self._show_status(plan.status_message, plan.status_timeout_ms)
@@ -99,9 +100,9 @@ class _MainRouteLaunchSetupMixin:
         *,
         wait_before_first_point: bool = False,
     ) -> None:
-        thread = self._route_measurement_thread
+        execution = self._route_run_execution.snapshot()
         availability = gui_route_start_availability(
-            route_thread_active=thread is not None and thread.is_alive(),
+            route_thread_active=execution.thread_alive,
             serial_connected=self._stage_serial_ready(),
         )
         if not self._apply_gui_route_start_preflight(availability):
@@ -212,6 +213,12 @@ class _MainRouteLaunchSetupMixin:
         wait_before_first_point: bool,
         design_frame_snapshot: object | None = None,
     ) -> RouteMeasurementRunner:
+        runner: RouteMeasurementRunner | None = None
+
+        def publish_waiting(waiting: bool) -> None:
+            if runner is not None:
+                self.route_measurement_waiting_changed.emit(runner, waiting)
+
         callbacks = GuiRouteEventBindings(
             status=self.route_measurement_status.emit,
             progress=self.route_measurement_progress.emit,
@@ -223,9 +230,9 @@ class _MainRouteLaunchSetupMixin:
             contact_photo=self._capture_route_contact_photo,
             pre_contact_photo=self._capture_route_pre_contact_photo,
             result=self.route_measurement_result.emit,
-            waiting=self.route_measurement_waiting_changed.emit,
+            waiting=publish_waiting,
         ).events()
-        return RouteMeasurementRunner(
+        runner = RouteMeasurementRunner(
             points=points,
             csv_path=configuration.csv_path,
             stage_controller=self.stage_controller,
@@ -256,6 +263,7 @@ class _MainRouteLaunchSetupMixin:
                 design_frame_snapshot
             ),
         )
+        return runner
 
     def _start_route_measurement_runner(
         self,
@@ -265,8 +273,17 @@ class _MainRouteLaunchSetupMixin:
         configuration: RouteMeasurementRunConfiguration,
         point_count: int,
     ) -> None:
-        self._route_measurement_runner = runner
-        self._route_measurement_waiting = False
+        thread = threading.Thread(
+            target=self._run_route_measurement,
+            args=(runner,),
+            name="RouteMeasurement",
+            daemon=True,
+        )
+        self._route_run_execution.activate(
+            runner,
+            thread,
+            kind=RouteRunKind.GUI,
+        )
         self._pending_route_measure_point = None
         self._route_measurement_photo_enabled = launch_state.photo_enabled
         self._route_measurement_measure_enabled = launch_state.measure_enabled
@@ -274,12 +291,6 @@ class _MainRouteLaunchSetupMixin:
         self._route_measurement_point_numbers = presentation.point_numbers
         self._telegram_runtime.route_photos.reset_for_route_start()
         self._set_route_measurement_pending(True)
-        self._route_measurement_thread = threading.Thread(
-            target=self._run_route_measurement,
-            args=(runner,),
-            name="RouteMeasurement",
-            daemon=True,
-        )
         start_message = presentation.message
         self._route_runtime_presenter().route_runner_started(start_message, point_count)
         self._show_status(start_message)
@@ -292,7 +303,7 @@ class _MainRouteLaunchSetupMixin:
                     str(configuration.csv_path),
                 ),
             )
-        self._route_measurement_thread.start()
+        thread.start()
         self._update_stage_coordinate_apply_state()
 
     def _route_measurement_start_plan(

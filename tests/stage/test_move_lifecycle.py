@@ -12,6 +12,10 @@ from probe_station_gui.stage.coordinate_targets import (
     CoordinateTargetConfig,
     CoordinateTargetMoveState,
 )
+from tests.app.route_run_execution_support import (
+    activate_route_run,
+    install_route_run_execution,
+)
 
 
 AXES = ("X", "Y", "Z", "A", "B", "C")
@@ -68,7 +72,6 @@ class _View:
 
     def setFocus(self, reason: object) -> None:  # noqa: N802 - Qt naming
         self.focus_reasons.append(reason)
-
 
 
 class _MicroscopeInteraction:
@@ -168,9 +171,8 @@ class _Owner:
         self._pending_quick_alignment_rotation = False
         self._pending_homing_axes: list[str] = []
         self._homing_active_key = None
-        self._route_measurement_runner = None
+        install_route_run_execution(self)
         self._route_contact_move_thread = None
-        self._route_measurement_thread = None
         self.surface_map_window = None
         self.microscope_scan_dialog = None
         self._surface_map_running = False
@@ -188,16 +190,14 @@ class _Owner:
         self._pending_stage_axis_targets: dict[str, tuple[float, float]] = {}
         self._design_session = types.SimpleNamespace(
             applied=[],
-            apply_prepared_alignment=lambda preparation: self._design_session.applied.append(
-                preparation
+            apply_prepared_alignment=lambda preparation: (
+                self._design_session.applied.append(preparation)
             ),
         )
         self._coordinate_system_coordinator = types.SimpleNamespace(
             apply_registration_alignment=lambda request: (
                 self._design_session.applied.append(request.preparation)
-                or CoordinateTransition(
-                    CoordinateSystemSnapshot(False, (), None)
-                )
+                or CoordinateTransition(CoordinateSystemSnapshot(False, (), None))
             )
         )
         self.design_navigator_panel = None
@@ -351,7 +351,7 @@ def test_route_cancel_runs_before_active_coordinate_move_early_return() -> None:
     owner = _Owner()
     runner = _Runner()
     design_panel = _DesignNavigatorPanel()
-    owner._route_measurement_runner = runner
+    activate_route_run(owner, runner)
     owner.design_navigator_panel = design_panel
     owner._coordinate_targets.active_axis = "X"
     owner._coordinate_targets.active_axes = {"X"}
@@ -440,7 +440,9 @@ def test_move_finish_failure_clears_planned_move_prediction() -> None:
     assert owner.planned_prediction_clears == [True]
 
 
-def test_move_finish_alignment_preparation_returns_before_normal_finish_cleanup() -> None:
+def test_move_finish_alignment_preparation_returns_before_normal_finish_cleanup() -> (
+    None
+):
     owner = _Owner()
     preparation = _Preparation()
     owner._pending_alignment_preparation = preparation
@@ -465,7 +467,9 @@ def test_move_finish_alignment_preparation_returns_before_normal_finish_cleanup(
     ]
 
 
-def test_clear_coordinate_move_tracking_applies_pending_override_and_ui_cleanup() -> None:
+def test_clear_coordinate_move_tracking_applies_pending_override_and_ui_cleanup() -> (
+    None
+):
     owner = _Owner()
     owner._coordinate_targets.active_axis = "Z"
     owner._pending_stage_axis_targets["Z"] = (3.0, 3.0)
@@ -485,7 +489,9 @@ def test_clear_coordinate_move_tracking_applies_pending_override_and_ui_cleanup(
     assert owner.apply_state_refreshes == 1
 
 
-def test_move_finish_feedrate_reissue_cancel_keeps_tracking_and_suppresses_status() -> None:
+def test_move_finish_feedrate_reissue_cancel_keeps_tracking_and_suppresses_status() -> (
+    None
+):
     owner = _Owner()
     owner._coordinate_targets.active_axis = "X"
     owner._coordinate_targets.active_axes = {"X"}
@@ -500,7 +506,9 @@ def test_move_finish_feedrate_reissue_cancel_keeps_tracking_and_suppresses_statu
     assert owner.cancel_refreshes == 1
 
 
-def test_move_finish_normal_failure_clears_tracking_and_cross_then_reports_status() -> None:
+def test_move_finish_normal_failure_clears_tracking_and_cross_then_reports_status() -> (
+    None
+):
     owner = _Owner()
     owner._coordinate_targets.active_axis = "X"
     owner._coordinate_targets.display_targets = {"X": 12.0}

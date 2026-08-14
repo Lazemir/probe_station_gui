@@ -288,14 +288,12 @@ class _MainBootstrapApiMixin:
         return encode_camera_frame_png(frame, counter=counter, space=space)
 
     def _telegram_command_snapshot(self) -> TelegramCommandSnapshot:
+        execution = self._route_run_execution.snapshot()
+        api_ui = self._api_route_control_state_snapshot().ui_state()
         return TelegramCommandSnapshot(
-            route_active=telegram_commands.thread_alive(
-                getattr(self, "_route_measurement_thread", None)
-            ),
-            route_waiting=bool(getattr(self, "_route_measurement_waiting", False)),
-            runner_available=(
-                getattr(self, "_route_measurement_runner", None) is not None
-            ),
+            route_active=execution.thread_alive,
+            route_waiting=execution.waiting or api_ui.waiting,
+            runner_available=execution.active,
             photo_enabled=bool(
                 getattr(self, "_route_measurement_photo_enabled", False)
             ),
@@ -305,14 +303,14 @@ class _MainBootstrapApiMixin:
         )
 
     def _telegram_status_snapshot(self) -> telegram_commands.TelegramStatusSnapshot:
+        execution = self._route_run_execution.snapshot()
+        api_ui = self._api_route_control_state_snapshot().ui_state()
         return telegram_commands.TelegramStatusSnapshot(
             latest_status_message=str(
                 getattr(self, "_latest_status_message", "") or ""
             ),
-            route_thread_active=telegram_commands.thread_alive(
-                getattr(self, "_route_measurement_thread", None)
-            ),
-            route_waiting=bool(getattr(self, "_route_measurement_waiting", False)),
+            route_thread_active=execution.thread_alive,
+            route_waiting=execution.waiting or api_ui.waiting,
             route_session_active=bool(
                 getattr(self, "_route_measurement_session_active", False)
             ),

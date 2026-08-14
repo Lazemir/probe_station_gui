@@ -26,12 +26,15 @@ from probe_station_gui.route.confirmation_flow import (
     route_confirmation_submission_plan,
 )
 from probe_station_gui.route.dialog_adapter import (
-    restart_waiting_route_measurement,
     route_measurement_setup_changed,
+)
+from probe_station_gui.application.route_run_execution import (
+    RouteRunKind,
+    RouteRunReleaseCause,
+    RouteRunReleaseRequest,
 )
 from probe_station_gui.route.measurement import (
     RouteContactHeightRecord,
-    RouteExternalMeasurementSessionRunner,
     RouteMeasurementPoint,
     RouteMeasurementRecord,
     RouteMeasurementRunner,
@@ -149,10 +152,8 @@ class _MainRouteCaptureRunMixin:
             send_bot_message=self._telegram_runtime.send_bot_message,
             default_markup=(
                 self._telegram_runtime.default_markup(
-                    route_waiting=self._route_measurement_waiting
+                    route_waiting=self._route_run_execution.snapshot().waiting
                 )
-                if hasattr(self, "_route_measurement_waiting")
-                else None
             ),
         )
 
@@ -244,6 +245,11 @@ class _MainRouteCaptureRunMixin:
     def _run_route_measurement(self, runner: RouteMeasurementRunner) -> None:
         success = False
         message = "Route measurement failed."
+        execution = self._route_run_execution.snapshot()
+        external_result_session = (
+            execution.runner is runner
+            and execution.kind is RouteRunKind.EXTERNAL_RESULT_SESSION
+        )
         self._route_measurement_optical_session_token = None
         try:
             if runner.requires_optical_session():
@@ -261,11 +267,7 @@ class _MainRouteCaptureRunMixin:
             self.route_measurement_status.emit(f"Route measurement failed: {message}")
         finally:
             self._route_measurement_optical_session_token = None
-        csv_path = (
-            ""
-            if isinstance(runner, RouteExternalMeasurementSessionRunner)
-            else str(runner.csv_path)
-        )
+        csv_path = "" if external_result_session else str(runner.csv_path)
         self.route_measurement_finished.emit(runner, success, message, csv_path)
 
     def _on_route_measurement_started(
@@ -280,10 +282,12 @@ class _MainRouteCaptureRunMixin:
         if open_controls:
             self._show_route_measurement_dialog_for_api_session()
         total_points = max(0, int(total))
-        waiting = bool(getattr(self, "_route_measurement_waiting", False))
-        waiting_reason = self._current_route_measurement_waiting_reason(waiting)
+        execution = self._route_run_execution.snapshot()
         self._route_runtime_presenter().route_started(
-            message, total_points, waiting=waiting, waiting_reason=waiting_reason
+            message,
+            total_points,
+            waiting=execution.waiting,
+            waiting_reason=execution.waiting_reason,
         )
         self._show_status(message)
         self._update_stage_coordinate_apply_state()
@@ -292,7 +296,7 @@ class _MainRouteCaptureRunMixin:
         if self._api_route_control_state_snapshot().active:
             self._api_route_control_action({"action": "stop"})
             return
-        runner = self._route_measurement_runner
+        runner = self._route_run_execution.snapshot().runner
         if runner is None:
             self._show_status("No route measurement is running.", 3000)
             return
@@ -310,15 +314,15 @@ class _MainRouteCaptureRunMixin:
                 "API route control interrupt requested."
             )
             return
-        runner = self._route_measurement_runner
+        runner = self._route_run_execution.snapshot().runner
         if runner is None:
             self._show_status("No route measurement is running.", 3000)
             return
         if pending_point_number is None:
             self._pending_route_measure_point = None
         self._interrupt_route_measurement_runner(
-            runner,
             reason="Route measurement interrupt requested.",
+            expected_runner=runner,
         )
         if pending_point_number is None:
             message = "Stopping contact measurement."
@@ -330,14 +334,15 @@ class _MainRouteCaptureRunMixin:
         self._show_route_runtime_status(message, 5000)
 
     def _submit_route_measurement_confirmation(self, action: str) -> None:
-        runner = self._route_measurement_runner
+        execution = self._route_run_execution.snapshot()
+        runner = execution.runner
         move_thread = getattr(self, "_route_contact_move_thread", None)
         confirmation_plan = route_confirmation_submission_plan(
             action,
             api_route_control=self._api_route_control_state_snapshot(),
             runner_available=runner is not None,
             contact_move_active=move_thread is not None and move_thread.is_alive(),
-            waiting=getattr(self, "_route_measurement_waiting", False),
+            waiting=execution.waiting,
             pending_point_number=getattr(self, "_pending_route_measure_point", None),
         )
         if confirmation_plan.api_action is not None:
@@ -368,14 +373,15 @@ class _MainRouteCaptureRunMixin:
         if self._route_measurement_dialog is None:
             return runner
         configuration = self._route_measurement_dialog.current_configuration()
-        external_session = isinstance(
-            runner,
-            RouteExternalMeasurementSessionRunner,
+        execution = self._route_run_execution.snapshot()
+        external_session = (
+            execution.runner is runner
+            and execution.kind is RouteRunKind.EXTERNAL_RESULT_SESSION
         )
         runtime_plan = route_confirmation_runtime_plan(
             configuration,
             external_session=external_session,
-            waiting=self._route_measurement_waiting,
+            waiting=execution.waiting,
             setup_changed=route_measurement_setup_changed(
                 self._route_measurement_runtime_configuration,
                 configuration,
@@ -387,23 +393,44 @@ class _MainRouteCaptureRunMixin:
                 if hasattr(runner, "route_offset_xy")
                 else (0.0, 0.0)
             )
-            if not restart_waiting_route_measurement(
-                configuration=configuration,
-                old_runner=self._route_measurement_runner,
-                old_thread=self._route_measurement_thread,
-                route_offset_xy=route_offset_xy,
-                clear_waiting_state=self._clear_waiting_route_measurement_state,
-                start_measurement=self._start_route_measurement,
-                current_runner=lambda: self._route_measurement_runner,
-                current_thread=lambda: self._route_measurement_thread,
-                show_status=lambda message, timeout_ms=5000: (
-                    self._show_status(message, timeout_ms),
-                    self._route_runtime_presenter().set_status(message),
-                ),
-            ):
+            release = self._route_run_execution.release(
+                RouteRunReleaseRequest(
+                    cause=RouteRunReleaseCause.TAKEOVER,
+                    expected_runner=runner,
+                    join_timeout_s=2.0,
+                )
+            )
+            if not release.released:
+                message = "Waiting route measurement did not stop."
+                self._show_status(message, 8000)
+                self._route_runtime_presenter().set_status(message)
                 return None
-            runner = self._route_measurement_runner
+            self._route_measurement_session_active = False
+            self._pending_route_measure_point = None
+            self._start_route_measurement(
+                configuration,
+                wait_before_first_point=True,
+            )
+            restarted = self._route_run_execution.snapshot()
+            runner = restarted.runner
             if runner is None:
+                return None
+            if not hasattr(runner, "set_route_offset_xy"):
+                return None
+            runner.set_route_offset_xy(route_offset_xy)
+            if runner.wait_until_waiting(timeout_s=10.0):
+                self._route_run_execution.publish_waiting(
+                    True,
+                    expected_runner=runner,
+                )
+            else:
+                runner.stop()
+                thread = restarted.thread
+                if thread is not None and thread.is_alive():
+                    thread.join(timeout=2.0)
+                message = "Route measurement did not reach waiting state."
+                self._show_status(message, 8000)
+                self._route_runtime_presenter().set_status(message)
                 return None
         self._route_measurement_runtime_configuration = configuration
         self._save_route_measurement_session_metadata(configuration)
@@ -423,11 +450,11 @@ class _MainRouteCaptureRunMixin:
 
     def _request_route_contact_move(self, point_number: int) -> None:
         move_thread = getattr(self, "_route_contact_move_thread", None)
-        route_thread = self._route_measurement_thread
+        execution = self._route_run_execution.snapshot()
         move_plan = route_contact_move_plan(
             contact_move_active=move_thread is not None and move_thread.is_alive(),
-            route_active=route_thread is not None and route_thread.is_alive(),
-            route_waiting=getattr(self, "_route_measurement_waiting", False),
+            route_active=execution.thread_alive,
+            route_waiting=execution.waiting,
             api_route_control=self._api_route_control_state_snapshot(),
         )
         if move_plan.message:
@@ -443,7 +470,7 @@ class _MainRouteCaptureRunMixin:
         point = context_result["point"]
         if move_plan.set_resume_point:
             self._set_route_measurement_resume_point(int(point.index))
-            runner = self._route_measurement_runner
+            runner = execution.runner
             if runner is not None and move_plan.set_adjustment_point:
                 self._pending_route_measure_point = int(point.index)
                 if hasattr(runner, "set_current_adjustment_point"):

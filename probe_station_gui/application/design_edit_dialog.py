@@ -85,8 +85,7 @@ class _MainDesignEditDialogMixin:
             return False
         if bool(getattr(self, "_design_load_pending", False)):
             return False
-        route_thread = getattr(self, "_route_measurement_thread", None)
-        return not bool(route_thread is not None and route_thread.is_alive())
+        return not self._route_run_execution.snapshot().thread_alive
 
     def _design_mutation_ready(self) -> bool:
         if not bool(getattr(self, "_design_load_pending", False)):
@@ -302,7 +301,7 @@ class _MainDesignEditDialogMixin:
         if route is None or not route.points:
             self._show_status("Create or load a probe route before measuring.", 5000)
             return
-        thread = self._route_measurement_thread
+        execution = self._route_run_execution.snapshot()
         self._route_measurement_dialog = open_or_update_route_measurement_dialog(
             dialog=self._route_measurement_dialog,
             route=route,
@@ -315,12 +314,12 @@ class _MainDesignEditDialogMixin:
             parent=self,
             session_active=self._route_measurement_session_active,
             current_point=self._route_measurement_current_point,
-            thread_active=bool(thread is not None and thread.is_alive()),
-            waiting=self._route_measurement_waiting,
+            thread_active=execution.thread_alive,
+            waiting=execution.waiting,
             handlers=route_dialog_handlers(self),
         )
         dialog = self._route_measurement_dialog
-        if start_context and (thread is None or not thread.is_alive()):
+        if start_context and not execution.thread_alive:
             configuration = dialog.current_configuration()
             self._start_route_measurement(
                 configuration,
@@ -360,8 +359,8 @@ class _MainDesignEditDialogMixin:
 
     def _clear_route_measurement_dialog(self) -> None:
         self._route_measurement_dialog = None
-        thread = self._route_measurement_thread
-        runner = self._route_measurement_runner
-        if runner is not None and thread is not None and thread.is_alive():
+        execution = self._route_run_execution.snapshot()
+        runner = execution.runner
+        if runner is not None and execution.thread_alive:
             self._route_measurement_context_close_requested = True
             runner.stop()

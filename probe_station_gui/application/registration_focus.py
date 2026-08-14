@@ -600,13 +600,12 @@ class _MainRegistrationFocusMixin:
         self._observe_design_focus_context()
         panel = self.design_navigator_panel
         self._connect_design_focus_signals()
-        route_measurement_thread = getattr(self, "_route_measurement_thread", None)
+        route_execution = self._route_run_execution.snapshot()
         coordinate_snapshot = self._coordinate_system_coordinator.snapshot()
         p = navigation_targeting.design_panel_presentation(
             self._design_session,
             coordinate_snapshot.registration,
-            route_running=route_measurement_thread is not None
-            and route_measurement_thread.is_alive(),
+            route_running=route_execution.thread_alive,
             pending_alignment_preparation=self._pending_alignment_preparation
             is not None,
             design_snap_enabled=self._design_snap_enabled,

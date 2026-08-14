@@ -70,7 +70,6 @@ OWNER_SPECS = {
             "_api_route_control_operation_adapters": "(self) -> 'ApiRouteControlOperationAdapters'",
             "_api_route_control_action": "(self, payload: 'dict[str, Any]') -> 'dict[str, Any]'",
             "_clear_waiting_route_runner_before_api_control": "(self) -> 'dict[str, Any] | None'",
-            "_clear_waiting_route_measurement_state": "(self) -> 'None'",
             "_request_api_route_control_pause": "(self, message: 'str') -> 'dict[str, Any]'",
             "_ack_api_route_control_pause": "(self, message: 'str') -> 'dict[str, Any]'",
             "_interrupt_api_route_controlled_operation": "(self, reason: 'str', *, planned_state: 'ApiRouteControlState | None' = None, planned_message: 'str' = '') -> 'dict[str, Any]'",
@@ -447,8 +446,7 @@ OWNER_SPECS = {
         _apply_route_shift_save_status _interrupt_route_measurement_runner
         _on_route_measurement_status _on_route_measurement_progress
         _on_route_measurement_current_point_changed
-        _on_route_measurement_waiting_changed
-        _current_route_measurement_waiting_reason""".split(),
+        _on_route_measurement_waiting_changed""".split(),
     ),
     "route_results": (
         "_MainRouteResultsMixin",
@@ -456,7 +454,7 @@ OWNER_SPECS = {
         _send_route_waiting_attention_from_last_result _send_route_attention_alert
         _on_route_measurement_recorded _format_route_measurement_record
         _format_route_contact_diagnostics _on_route_measurement_finished
-        _join_finished_route_measurement_thread _store_final_api_route_session_status
+        _store_final_api_route_session_status
         _clear_finished_route_measurement_state _route_measurement_csv_record_count
         _route_measurement_next_point_number _set_route_measurement_resume_point
         _select_route_point_for_measurement _save_route_measurement_current_point
@@ -523,8 +521,8 @@ OWNER_SPECS = {
 OWNER_SIGNATURE_SHA256 = {
     "route_launch_setup": "5f0e999f41d060f52f710c263a90fbfb23bba5bcf67a53ee7060504cdf47c502",
     "route_capture_run": "797e1508c3ea0b37e4cc810e6beec0fd965265496c89e73b9f9cc1dc5995cd7e",
-    "route_control": "b9362026cbe754a9837e9b6e746183939e006439332f84d821345c328e73c14d",
-    "route_results": "801f4c3ccba2cf9d04b181add711847839446de5ee3b81c10436ab47c9035389",
+    "route_control": "0dca50743dfaa361fcaf76645b7a0da216640bc1f8700081a9e0ad0c5b17aa5b",
+    "route_results": "ec4552e53a60da60698f6cb03e28221150572bafaeec4da96301a82ffdbc82aa",
     "registration_focus": "e0be34f7f38da698f1fc768e7e93dd4a9f5ef8984bc7deae535757daaf4f207c",
     "stage_design_position": "ee80cb6ae2acb7e6fe0178537e654461b4f2cb088ccdd048c6f619584809c575",
     "scan_sample_meter": "4981a0c643979b59f0391a315cc6083810d6418f72f150355a38a29edb619f89",

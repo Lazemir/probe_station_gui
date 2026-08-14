@@ -31,8 +31,7 @@ class MainWindowShutdownOwner(Protocol):
     _manual_jog_timer: Any
     _stage_motion_blink_timer: Any
     _linear_feedrate_save_timer: Any
-    _route_measurement_runner: Any
-    _route_measurement_thread: Any
+    _route_run_execution: Any
     _microscope_scan_thread: Any
     _microscope_scan_stop_requested: Any
     _manual_alignment_capture_context: Any
@@ -144,13 +143,11 @@ def _retire_focus_structure_worker(owner: MainWindowShutdownOwner) -> None:
 
 
 def _stop_route_worker(owner: MainWindowShutdownOwner) -> None:
-    if owner._route_measurement_runner is not None:
-        owner._route_measurement_runner.stop()
-    if (
-        owner._route_measurement_thread is not None
-        and owner._route_measurement_thread.is_alive()
-    ):
-        owner._route_measurement_thread.join(timeout=2.0)
+    execution = owner._route_run_execution.snapshot()
+    if execution.runner is not None:
+        execution.runner.stop()
+    if execution.thread_alive:
+        execution.thread.join(timeout=2.0)
 
 
 def _stop_microscope_scan(owner: MainWindowShutdownOwner) -> None:

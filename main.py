@@ -130,6 +130,9 @@ from probe_station_gui.application.route_launch_setup import (
     _MainRouteLaunchSetupMixin,
 )
 from probe_station_gui.application.route_results import _MainRouteResultsMixin
+from probe_station_gui.application.route_run_execution import (
+    _RouteRunExecutionSlot,
+)
 from probe_station_gui.application.scan_sample_meter import (
     _MainScanSampleMeterMixin,
 )
@@ -195,7 +198,6 @@ from probe_station_gui.route.control_state import (
 )
 from probe_station_gui.route.measurement import (
     RouteMeasurementRecord,
-    RouteMeasurementRunner,
 )
 from probe_station_gui.route.meter_config import (
     ROUTE_METER_GWINSTEK,  # noqa: F401 - imported for callers/tests
@@ -337,7 +339,7 @@ class Main(
     route_measurement_started: Signal = Signal(str, int, int, bool)
     route_measurement_status: Signal = Signal(str)
     route_measurement_progress: Signal = Signal(int, int, int)
-    route_measurement_waiting_changed: Signal = Signal(bool)
+    route_measurement_waiting_changed: Signal = Signal(object, bool)
     route_measurement_result: Signal = Signal(object, int, int, bool)
     route_measurement_recorded: Signal = Signal(object, int, int)
     route_measurement_finished: Signal = Signal(object, bool, str, str)
@@ -670,15 +672,12 @@ class Main(
         self._pending_homing_axes: list[str] = []
         self._controller_state_persistence_suspended = False
         self._controller_reboot_recovery_scheduled = False
-        self._route_measurement_runner: RouteMeasurementRunner | None = None
-        self._route_measurement_thread: threading.Thread | None = None
+        self._route_run_execution = _RouteRunExecutionSlot()
         self._route_contact_move_thread: threading.Thread | None = None
         self._route_measurement_dialog: RouteMeasurementDialog | None = None
         self._route_measurement_runtime_configuration: (
             RouteMeasurementRunConfiguration | None
         ) = None
-        self._route_measurement_waiting = False
-        self._route_measurement_waiting_reason = ""
         self._route_measurement_photo_enabled = False
         self._route_measurement_measure_enabled = False
         self._route_measurement_optical_session_token: str | None = None

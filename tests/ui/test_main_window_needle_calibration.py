@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+from probe_station_gui.application.route_run_execution import _RouteRunExecutionSlot
 from probe_station_gui.views import main_window_needle_calibration as calibration_ui
 
 
@@ -110,7 +111,7 @@ def test_request_contact_seek_rejects_disconnected_instrument_without_thread() -
     statuses: list[str] = []
     owner = SimpleNamespace(
         _contact_seek_thread=None,
-        _route_measurement_thread=None,
+        _route_run_execution=_RouteRunExecutionSlot(),
         lcr_controller=SimpleNamespace(is_connected=lambda: False),
         contact_calibration_window=_ContactWindow(),
         _show_status=lambda message: statuses.append(message),
@@ -128,7 +129,7 @@ def test_request_contact_seek_rejects_disconnected_instrument_without_thread() -
 def test_request_contact_seek_marks_window_running_and_starts_thread() -> None:
     owner = SimpleNamespace(
         _contact_seek_thread=None,
-        _route_measurement_thread=None,
+        _route_run_execution=_RouteRunExecutionSlot(),
         _contact_seek_stop_requested=_StopFlag(),
         _run_contact_seek=lambda: None,
         lcr_controller=SimpleNamespace(is_connected=lambda: True),

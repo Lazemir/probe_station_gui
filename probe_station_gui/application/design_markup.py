@@ -382,8 +382,7 @@ class _MainDesignMarkupMixin:
                 5000,
             )
             return
-        route_measurement_thread = getattr(self, "_route_measurement_thread", None)
-        if route_measurement_thread is not None and route_measurement_thread.is_alive():
+        if self._route_run_execution.snapshot().thread_alive:
             self._show_status(
                 "Stop route measurement before rotating the design.", 5000
             )

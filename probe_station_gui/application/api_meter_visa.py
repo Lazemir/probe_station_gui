@@ -475,7 +475,7 @@ class _MainApiMeterVisaMixin:
 
     def _api_visa_controller(self) -> object:
         if (
-            self._route_measurement_runner is not None
+            self._route_run_execution.snapshot().active
             and self._api_route_lcr_controller is not None
         ):
             return self._api_route_lcr_controller

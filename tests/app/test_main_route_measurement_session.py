@@ -9,6 +9,11 @@ from unittest import mock
 import probe_station_gui.application.api_route_scan as api_route_scan_owner
 import probe_station_gui.application.design_edit_dialog as design_edit_dialog_owner
 import probe_station_gui.application.route_launch_setup as route_launch_owner
+from probe_station_gui.application.route_run_execution import (
+    RouteRunKind,
+    RouteRunReleaseCause,
+    RouteRunReleaseRequest,
+)
 from probe_station_gui.design.session import DesignSession
 from probe_station_gui.instruments.meters.lcr_session_backend import LCRMeterError
 from probe_station_gui.route.measurement import RouteExternalMeasurementSessionRunner
@@ -41,6 +46,10 @@ from tests.app.main_route_session_support import (
     _route_start_configuration,
     _route_start_point,
     _telegram_test_photo_bytes,
+)
+from tests.app.route_run_execution_support import (
+    activate_route_run,
+    install_route_run_execution,
 )
 
 
@@ -164,6 +173,7 @@ class MainRouteMeasurementSessionTest(unittest.TestCase):
                 return True, "complete"
 
         runner = _Runner()
+        activate_route_run(window, runner)
 
         Main._run_route_measurement(window, runner)
 
@@ -216,6 +226,7 @@ class MainRouteMeasurementSessionTest(unittest.TestCase):
                 raise RuntimeError("capture failed")
 
         runner = _Runner()
+        activate_route_run(window, runner)
 
         Main._run_route_measurement(window, runner)
 
@@ -226,6 +237,43 @@ class MainRouteMeasurementSessionTest(unittest.TestCase):
             emitted,
             [(runner, False, "capture failed", "route.csv")],
         )
+
+    def test_external_route_run_keeps_result_kind_after_slot_release(self) -> None:
+        window = Main.__new__(Main)
+        window._optical_session_manager = mock.MagicMock()
+        window.route_measurement_status = types.SimpleNamespace(
+            emit=lambda _message: None
+        )
+        emitted: list[tuple[object, ...]] = []
+        window.route_measurement_finished = types.SimpleNamespace(
+            emit=lambda *args: emitted.append(args)
+        )
+
+        class _Runner:
+            @staticmethod
+            def requires_optical_session() -> bool:
+                return False
+
+            def run(self) -> tuple[bool, str]:
+                window._route_run_execution.release(
+                    RouteRunReleaseRequest(
+                        cause=RouteRunReleaseCause.FAILED_START,
+                        expected_runner=self,
+                        join_timeout_s=0.0,
+                    )
+                )
+                return False, "start failed"
+
+        runner = _Runner()
+        activate_route_run(
+            window,
+            runner,
+            kind=RouteRunKind.EXTERNAL_RESULT_SESSION,
+        )
+
+        Main._run_route_measurement(window, runner)
+
+        self.assertEqual(emitted, [(runner, False, "start failed", "")])
 
     def test_route_autofocus_uses_outer_optical_session(self) -> None:
         calls: list[dict[str, object]] = []
@@ -305,9 +353,7 @@ class MainRouteMeasurementSessionTest(unittest.TestCase):
             needle_2_design=(99.0, 199.0),
         )
         window = Main.__new__(Main)
-        window._route_measurement_thread = None
-        window._route_measurement_runner = None
-        window._route_measurement_waiting = False
+        install_route_run_execution(window)
         window._last_route_measurement_result = None
         window._route_measurement_current_point = 12
         window.serial_connection = types.SimpleNamespace(is_open=True)
@@ -450,9 +496,7 @@ class MainRouteMeasurementSessionTest(unittest.TestCase):
                 handle.write("2026-05-31T20:00:00+03:00,1,ok\n")
                 handle.write("2026-05-31T20:01:00+03:00,2,ok\n")
 
-            window._route_measurement_thread = None
-            window._route_measurement_runner = object()
-            window._route_measurement_waiting = True
+            activate_route_run(window, object(), waiting=True)
             window._route_measurement_photo_enabled = False
             window._route_measurement_measure_enabled = True
             window._route_measurement_point_numbers = [1, 2]
@@ -493,14 +537,16 @@ class MainRouteMeasurementSessionTest(unittest.TestCase):
 
         runner = _Runner()
         window = Main.__new__(Main)
-        window._route_measurement_thread = None
-        window._route_measurement_runner = runner
+        activate_route_run(
+            window,
+            runner,
+            kind=RouteRunKind.EXTERNAL_RESULT_SESSION,
+            waiting=True,
+        )
         window._api_route_session_id = "session-1"
         window._api_route_last_status = None
         window._api_route_lcr_controller = object()
         window._route_measurement_runtime_configuration = object()
-        window._route_measurement_waiting = True
-        window._route_measurement_waiting_reason = "external"
         window._last_route_measurement_result = object()
         window._pending_route_measure_point = object()
         window._route_measurement_photo_enabled = True
@@ -535,7 +581,11 @@ class MainRouteMeasurementSessionTest(unittest.TestCase):
                 return {"accepted": True, "state": "running"}
 
         window = Main.__new__(Main)
-        window._route_measurement_runner = _Runner()
+        activate_route_run(
+            window,
+            _Runner(),
+            kind=RouteRunKind.EXTERNAL_RESULT_SESSION,
+        )
         window._api_route_last_status = None
         window._api_route_artifacts = {
             "artifact-1": {
@@ -617,6 +667,7 @@ class MainRouteMeasurementSessionTest(unittest.TestCase):
             needle_2_design=(0.0, 0.0),
         )
         window = Main.__new__(Main)
+        install_route_run_execution(window)
         window._api_route_artifacts = {}
         window._api_route_artifacts_lock = threading.Lock()
         window._latest_camera_counter = lambda: 4
@@ -681,13 +732,10 @@ class MainRouteMeasurementSessionTest(unittest.TestCase):
         resumed: list[int] = []
         statuses: list[str] = []
 
-        window._route_measurement_thread = None
-        window._route_measurement_runner = object()
+        activate_route_run(window, object(), waiting=True)
         window._api_route_session_id = None
         window._api_route_lcr_controller = None
         window._route_measurement_runtime_configuration = None
-        window._route_measurement_waiting = True
-        window._route_measurement_waiting_reason = "external"
         window._last_route_measurement_result = object()
         window._pending_route_measure_point = object()
         window._route_measurement_photo_enabled = True
@@ -730,8 +778,7 @@ class MainRouteMeasurementSessionTest(unittest.TestCase):
             route_point = types.SimpleNamespace(camera_center=(10.0, 20.0))
             route = types.SimpleNamespace(points=[route_point])
 
-            window._route_measurement_thread = None
-            window._route_measurement_runner = None
+            install_route_run_execution(window)
             window._route_measurement_dialog = None
             window._route_measurement_session_active = True
             window._route_measurement_current_point = 5
@@ -768,8 +815,7 @@ class MainRouteMeasurementSessionTest(unittest.TestCase):
         statuses: list[tuple[str, int | None]] = []
         panel_statuses: list[str] = []
 
-        window._route_measurement_thread = None
-        window._route_measurement_runner = None
+        install_route_run_execution(window)
         window._route_measurement_dialog = dialog
         window.design_navigator_panel = types.SimpleNamespace(
             set_route_measurement_status=lambda message: panel_statuses.append(
@@ -799,8 +845,7 @@ class MainRouteMeasurementSessionTest(unittest.TestCase):
         statuses: list[tuple[str, int | None]] = []
         panel_statuses: list[str] = []
 
-        window._route_measurement_thread = None
-        window._route_measurement_runner = None
+        install_route_run_execution(window)
         window._route_measurement_dialog = dialog
         window.design_navigator_panel = types.SimpleNamespace(
             set_route_measurement_status=lambda message: panel_statuses.append(
@@ -856,8 +901,7 @@ class MainRouteMeasurementSessionTest(unittest.TestCase):
         window._route_measurement_dialog = dialog
         window._route_measurement_session_active = True
         window._route_measurement_current_point = 6
-        window._route_measurement_thread = None
-        window._route_measurement_waiting = False
+        install_route_run_execution(window)
         window.lcr_controller = types.SimpleNamespace(meter_type=lambda: "keysight")
         window.settings_manager = types.SimpleNamespace(
             config_dir=lambda: Path("C:/config")
@@ -887,8 +931,7 @@ class MainRouteMeasurementSessionTest(unittest.TestCase):
         window._route_measurement_dialog = dialog
         window._route_measurement_session_active = False
         window._route_measurement_current_point = None
-        window._route_measurement_thread = None
-        window._route_measurement_waiting = False
+        install_route_run_execution(window)
         window.lcr_controller = types.SimpleNamespace(meter_type=lambda: "keysight")
         window.settings_manager = types.SimpleNamespace(
             config_dir=lambda: Path("C:/config")
@@ -910,8 +953,7 @@ class MainRouteMeasurementSessionTest(unittest.TestCase):
         runner = _FakeRouteMeasurementRunner()
 
         window._route_measurement_dialog = _FakeRouteDialogOpenState()
-        window._route_measurement_thread = _FakeAliveThread()
-        window._route_measurement_runner = runner
+        activate_route_run(window, runner, _FakeAliveThread())
         window._route_measurement_context_close_requested = False
 
         Main._clear_route_measurement_dialog(window)
@@ -925,9 +967,7 @@ class MainRouteMeasurementSessionTest(unittest.TestCase):
         runner = _FakeRouteMeasurementRunner()
         statuses: list[str] = []
 
-        window._route_measurement_thread = _FakeAliveThread()
-        window._route_measurement_runner = runner
-        window._route_measurement_waiting = True
+        activate_route_run(window, runner, _FakeAliveThread(), waiting=True)
         window._route_measurement_current_point = 38
         window._pending_route_measure_point = 123
         window._route_measurement_dialog = None
@@ -967,8 +1007,7 @@ class MainRouteMeasurementSessionTest(unittest.TestCase):
         resumed: list[int] = []
         statuses: list[str] = []
 
-        window._route_measurement_runner = runner
-        window._route_measurement_waiting = True
+        activate_route_run(window, runner, waiting=True)
         window._pending_route_measure_point = None
         window._route_contact_move_thread = None
         window._route_measurement_dialog = None
@@ -1041,9 +1080,7 @@ class MainRouteMeasurementSessionTest(unittest.TestCase):
         old_thread = _FakeAliveThread()
         lcr = _FakeConnectedLcr()
         window = Main.__new__(Main)
-        window._route_measurement_thread = old_thread
-        window._route_measurement_runner = old_runner
-        window._route_measurement_waiting = True
+        activate_route_run(window, old_runner, old_thread, waiting=True)
         window._last_route_measurement_result = None
         window._route_measurement_current_point = 1
         window._route_measurement_session_active = True
@@ -1098,7 +1135,8 @@ class MainRouteMeasurementSessionTest(unittest.TestCase):
             window,
             {},
         )
-        new_runner = window._route_measurement_runner
+        new_runner = window._route_run_execution.snapshot().runner
+        window._route_measurement_context_close_requested = True
 
         self.assertTrue(response["accepted"], response)
         self.assertTrue(old_thread.joined)
@@ -1114,10 +1152,11 @@ class MainRouteMeasurementSessionTest(unittest.TestCase):
             "Old route stopped.",
             "",
         )
-        self.assertIs(window._route_measurement_runner, new_runner)
+        self.assertIs(window._route_run_execution.snapshot().runner, new_runner)
+        self.assertTrue(window._route_measurement_context_close_requested)
 
         new_runner.stop()
-        window._route_measurement_thread.join(timeout=2.0)
+        window._route_run_execution.snapshot().thread.join(timeout=2.0)
 
     def test_api_route_start_attaches_existing_external_session(self) -> None:
         active_status = {
@@ -1139,8 +1178,12 @@ class MainRouteMeasurementSessionTest(unittest.TestCase):
         for alias in ("attach_existing_session", "attach_existing", "resume_existing"):
             with self.subTest(alias=alias):
                 window = Main.__new__(Main)
-                window._route_measurement_thread = _FakeAliveThread()
-                window._route_measurement_runner = _FakeExternalRunner()
+                activate_route_run(
+                    window,
+                    _FakeExternalRunner(),
+                    _FakeAliveThread(),
+                    kind=RouteRunKind.EXTERNAL_RESULT_SESSION,
+                )
 
                 response = Main._api_start_route_session(
                     window,
@@ -1169,8 +1212,12 @@ class MainRouteMeasurementSessionTest(unittest.TestCase):
                 return dict(active_status)
 
         window = Main.__new__(Main)
-        window._route_measurement_thread = _FakeAliveThread()
-        window._route_measurement_runner = _FakeExternalRunner()
+        activate_route_run(
+            window,
+            _FakeExternalRunner(),
+            _FakeAliveThread(),
+            kind=RouteRunKind.EXTERNAL_RESULT_SESSION,
+        )
 
         response = Main._api_start_route_session(window, {})
 
@@ -1208,9 +1255,7 @@ class MainRouteMeasurementSessionTest(unittest.TestCase):
 
         thread = _NeverStopsThread()
         window = Main.__new__(Main)
-        window._route_measurement_thread = thread
-        window._route_measurement_runner = runner
-        window._route_measurement_waiting = True
+        activate_route_run(window, runner, thread, waiting=True)
         window._last_route_measurement_result = None
         window._route_measurement_session_active = True
 
@@ -1222,8 +1267,8 @@ class MainRouteMeasurementSessionTest(unittest.TestCase):
             response["message"], "Waiting GUI route measurement did not stop."
         )
         self.assertEqual(thread.join_calls, [2.0])
-        self.assertIs(window._route_measurement_runner, runner)
-        self.assertTrue(window._route_measurement_waiting)
+        self.assertIs(window._route_run_execution.snapshot().runner, runner)
+        self.assertTrue(window._route_run_execution.snapshot().waiting)
         self.assertTrue(window._route_measurement_session_active)
 
     def test_api_route_start_initial_pause_timeout_cleans_up_session_state(
@@ -1308,10 +1353,9 @@ class MainRouteMeasurementSessionTest(unittest.TestCase):
                 "message": "Initial pause timed out.",
             },
         )
-        self.assertIsNone(window._route_measurement_thread)
-        self.assertIsNone(window._route_measurement_runner)
+        self.assertFalse(window._route_run_execution.snapshot().active)
         self.assertIsNone(window._api_route_lcr_controller)
-        self.assertFalse(window._route_measurement_waiting)
+        self.assertFalse(window._route_run_execution.snapshot().waiting)
         self.assertFalse(window._route_measurement_session_active)
         self.assertEqual(telegrams, [])
         self.assertEqual(lcr.configurations, [RouteMeterConfiguration()])
@@ -1327,7 +1371,10 @@ class MainRouteMeasurementSessionTest(unittest.TestCase):
 
         self.assertEqual(statuses, [("Route measurement is already active.", 4000)])
         self.assertEqual(lcr.configurations, [])
-        self.assertIsInstance(window._route_measurement_thread, _FakeAliveThread)
+        self.assertIsInstance(
+            window._route_run_execution.snapshot().thread,
+            _FakeAliveThread,
+        )
 
     def test_route_start_rejects_disconnected_serial_with_existing_status_timeout(
         self,
@@ -1343,7 +1390,7 @@ class MainRouteMeasurementSessionTest(unittest.TestCase):
             [("Connect the stage controller before measuring a route.", 5000)],
         )
         self.assertEqual(lcr.configurations, [])
-        self.assertIsNone(window._route_measurement_thread)
+        self.assertFalse(window._route_run_execution.snapshot().active)
 
     def test_photo_route_without_objective_scale_does_not_configure_meter_or_start(
         self,
@@ -1365,7 +1412,7 @@ class MainRouteMeasurementSessionTest(unittest.TestCase):
         self.assertEqual(dialog.statuses, [message])
         self.assertEqual(camera_calls, [])
         self.assertEqual(lcr.configurations, [])
-        self.assertIsNone(window._route_measurement_thread)
+        self.assertFalse(window._route_run_execution.snapshot().active)
 
     def test_immediate_photo_route_without_camera_frame_reports_telegram_failure(
         self,
@@ -1394,7 +1441,7 @@ class MainRouteMeasurementSessionTest(unittest.TestCase):
             ],
         )
         self.assertEqual(lcr.configurations, [])
-        self.assertIsNone(window._route_measurement_thread)
+        self.assertFalse(window._route_run_execution.snapshot().active)
 
     def test_immediate_autofocus_route_without_camera_frame_reports_failure(
         self,
@@ -1421,7 +1468,7 @@ class MainRouteMeasurementSessionTest(unittest.TestCase):
             ],
         )
         self.assertEqual(lcr.configurations, [])
-        self.assertIsNone(window._route_measurement_thread)
+        self.assertFalse(window._route_run_execution.snapshot().active)
 
     def test_photo_only_route_uses_dummy_lcr_without_meter_configuration(self) -> None:
         window, _statuses, _telegrams, _dialog, lcr, _camera_calls = (
@@ -1440,7 +1487,10 @@ class MainRouteMeasurementSessionTest(unittest.TestCase):
 
         self.assertEqual(lcr.configurations, [])
         self.assertEqual(lcr.runtime_configurations, [])
-        self.assertIsNot(window._route_measurement_runner._lcr_controller, lcr)
+        self.assertIsNot(
+            window._route_run_execution.snapshot().runner._lcr_controller,
+            lcr,
+        )
         self.assertEqual(len(_FakeThread.instances), 1)
         self.assertTrue(_FakeThread.instances[0].started)
 
@@ -1487,7 +1537,7 @@ class MainRouteMeasurementSessionTest(unittest.TestCase):
         self.assertEqual(dialog.running, [False])
         self.assertEqual(dialog.statuses, [message])
         self.assertEqual(lcr.configurations, [])
-        self.assertIsNone(window._route_measurement_thread)
+        self.assertFalse(window._route_run_execution.snapshot().active)
 
     def test_prestart_route_measurement_defers_camera_frame_check(self) -> None:
         class _FakeEmit:
@@ -1518,7 +1568,7 @@ class MainRouteMeasurementSessionTest(unittest.TestCase):
         telegrams: list[tuple[object, ...]] = []
         camera_calls: list[float] = []
         dialog_calls: list[tuple[str, object]] = []
-        window._route_measurement_thread = None
+        install_route_run_execution(window)
         window.serial_connection = types.SimpleNamespace(is_open=True)
         window._design_session = types.SimpleNamespace(
             route=types.SimpleNamespace(points=[object()], name="route"),
@@ -1600,9 +1650,11 @@ class MainRouteMeasurementSessionTest(unittest.TestCase):
         self.assertEqual(telegrams, [])
         self.assertEqual(len(_FakeThread.instances), 1)
         self.assertTrue(_FakeThread.instances[0].started)
-        self.assertIsNotNone(window._route_measurement_runner)
+        self.assertIsNotNone(window._route_run_execution.snapshot().runner)
         self.assertEqual(
-            window._route_measurement_runner.contact_quality_limits().as_dict(),
+            window._route_run_execution.snapshot()
+            .runner.contact_quality_limits()
+            .as_dict(),
             {
                 "max_mad_sigma_ohm": 1_500.0,
                 "max_p95_abs_step_ohm": 2_500.0,
@@ -1691,9 +1743,7 @@ class MainRouteMeasurementSessionTest(unittest.TestCase):
         new_runner = _FakeRunner()
         restart_calls: list[tuple[RouteMeasurementRunConfiguration, bool]] = []
         window = Main.__new__(Main)
-        window._route_measurement_runner = old_runner
-        window._route_measurement_thread = None
-        window._route_measurement_waiting = True
+        activate_route_run(window, old_runner, waiting=True)
         window._route_measurement_runtime_configuration = previous
         window._route_measurement_dialog = types.SimpleNamespace(
             current_configuration=lambda: current,
@@ -1711,10 +1761,9 @@ class MainRouteMeasurementSessionTest(unittest.TestCase):
             wait_before_first_point: bool,
         ) -> None:
             restart_calls.append((config, bool(wait_before_first_point)))
-            window._route_measurement_runner = new_runner
+            activate_route_run(window, new_runner, waiting=True)
 
         window._start_route_measurement = restart
-        window._clear_waiting_route_measurement_state = lambda: None
 
         Main._submit_route_measurement_confirmation(window, "next")
 
@@ -1779,8 +1828,7 @@ class MainRouteMeasurementSessionTest(unittest.TestCase):
         statuses: list[str] = []
         dialog_statuses: list[str] = []
         window = Main.__new__(Main)
-        window._route_measurement_runner = runner
-        window._route_measurement_waiting = True
+        activate_route_run(window, runner, waiting=True)
         window._route_measurement_runtime_configuration = configuration
         window._route_measurement_dialog = types.SimpleNamespace(
             current_configuration=lambda: configuration,

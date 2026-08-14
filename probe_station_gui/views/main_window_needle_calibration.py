@@ -223,10 +223,10 @@ def move_to_surface_position(owner: object, target: str) -> None:
 
 def request_contact_seek(owner: object, *, thread_factory) -> None:
     thread = owner._contact_seek_thread
-    route_thread = owner._route_measurement_thread
+    route_execution = owner._route_run_execution.snapshot()
     decision = manual_contact_seek.contact_seek_start_decision(
         contact_seek_active=thread is not None and thread.is_alive(),
-        route_measurement_active=(route_thread is not None and route_thread.is_alive()),
+        route_measurement_active=route_execution.thread_alive,
         instrument_connected=owner.lcr_controller.is_connected(),
     )
     if not decision.accepted:

@@ -29,6 +29,10 @@ from tests.app.main_coordinate_feedrate_support import (
     request_route_measurement_for_point,
 )
 from tests.app.main_route_session_support import _telegram_test_photo_bytes
+from tests.app.route_run_execution_support import (
+    activate_route_run,
+    install_route_run_execution,
+)
 from probe_station_gui.views import (
     main_window_needle_calibration as needle_calibration_ui,
 )
@@ -125,6 +129,7 @@ assert image.height() == 4
 
     def test_route_contact_result_sends_one_combined_telegram_photo(self) -> None:
         window = Main.__new__(Main)
+        install_route_run_execution(window)
         before = (
             _telegram_test_photo_bytes(8, 4, 0x00FF0000),
             "before.jpg",
@@ -139,7 +144,6 @@ assert image.height() == 4
         sent: list[tuple[str, tuple[bytes, str] | None, object | None]] = []
 
         window._route_measurement_dialog = None
-        window._route_measurement_waiting = False
         window._telegram_runtime = _telegram_runtime_stub(
             route_photos=types.SimpleNamespace(
                 take_pending_contact_photos=lambda: (before, after)
@@ -167,6 +171,10 @@ assert image.height() == 4
 
     def test_route_waiting_bad_contact_sends_one_combined_contact_photo(self) -> None:
         window = Main.__new__(Main)
+        runner = types.SimpleNamespace(
+            status_payload=lambda: {"waiting_reason": "contact_attention"}
+        )
+        activate_route_run(window, runner)
         before = (
             _telegram_test_photo_bytes(8, 4, 0x00FF0000),
             "before.jpg",
@@ -204,7 +212,6 @@ assert image.height() == 4
         )
 
         window._last_route_measurement_result = (record, 1, 2, True)
-        window._route_measurement_waiting = False
         window._pending_route_measure_point = None
         route_photos = RouteTelegramPhotoState()
         route_photos._last_contact_failure_before_photo = before
@@ -217,7 +224,7 @@ assert image.height() == 4
         window.design_navigator_panel = None
         window._route_measurement_dialog = None
 
-        Main._on_route_measurement_waiting_changed(window, True)
+        Main._on_route_measurement_waiting_changed(window, runner, True)
 
         self.assertEqual(len(alerts), 1)
         key, text, kwargs = alerts[0]
@@ -351,6 +358,7 @@ assert image.height() == 4
 
     def test_record_route_photo_writes_focus_map_csv(self) -> None:
         window = Main.__new__(Main)
+        install_route_run_execution(window)
         window._telegram_runtime = _telegram_runtime_stub()
         window._design_session = types.SimpleNamespace(
             route=types.SimpleNamespace(name="route-a")
@@ -399,6 +407,7 @@ assert image.height() == 4
         self,
     ) -> None:
         window = Main.__new__(Main)
+        install_route_run_execution(window)
         window._telegram_runtime = _telegram_runtime_stub()
         window._design_session = types.SimpleNamespace(
             route=types.SimpleNamespace(name=None)
@@ -792,9 +801,7 @@ assert image.height() == 4
         runner = _FakeRouteMeasurementRunner()
         statuses: list[str] = []
 
-        window._route_measurement_thread = _FakeAliveThread()
-        window._route_measurement_runner = runner
-        window._route_measurement_waiting = False
+        activate_route_run(window, runner, _FakeAliveThread())
         window._pending_route_measure_point = None
         window._route_measurement_dialog = None
         window.design_navigator_panel = None

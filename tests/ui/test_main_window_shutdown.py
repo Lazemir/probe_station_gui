@@ -6,6 +6,10 @@ from types import SimpleNamespace
 import pytest
 
 from probe_station_gui.api.stage_command_runtime import ApiStageCommandRuntime
+from probe_station_gui.application.route_run_execution import (
+    RouteRunKind,
+    _RouteRunExecutionSlot,
+)
 from probe_station_gui.views import main_window_shutdown as shutdown_ui
 
 
@@ -193,6 +197,13 @@ def test_close_event_preserves_shutdown_order(monkeypatch) -> None:
     )
     serial = _Serial(events)
     route_thread = _AliveThread(events, "route_thread")
+    route_runner = SimpleNamespace(stop=lambda: events.append(("route_runner_stop",)))
+    route_execution = _RouteRunExecutionSlot()
+    route_execution.activate(
+        route_runner,
+        route_thread,
+        kind=RouteRunKind.GUI,
+    )
     scan_thread = _AliveThread(events, "scan_thread")
     api_bridge = SimpleNamespace(
         stop_accepting=lambda: events.append(("bridge_stop_accepting",)),
@@ -222,10 +233,7 @@ def test_close_event_preserves_shutdown_order(monkeypatch) -> None:
             isActive=lambda: True,
             stop=lambda: events.append(("feedrate_timer_stop",)),
         ),
-        _route_measurement_runner=SimpleNamespace(
-            stop=lambda: events.append(("route_runner_stop",))
-        ),
-        _route_measurement_thread=route_thread,
+        _route_run_execution=route_execution,
         _microscope_scan_thread=scan_thread,
         _microscope_scan_stop_requested=SimpleNamespace(
             set=lambda: events.append(("scan_stop_requested",))

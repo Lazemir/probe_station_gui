@@ -27,6 +27,10 @@ from tests.app.main_coordinate_feedrate_support import (
     _coordinate_target_state,
     _telegram_runtime_stub,
 )
+from tests.app.route_run_execution_support import (
+    activate_route_run,
+    install_route_run_execution,
+)
 
 
 class _RouteStartEmit:
@@ -135,7 +139,10 @@ def _make_route_start_main(
     dialog = _FakeVisibleDialog()
     lcr = lcr_controller or _RouteStartLcr()
 
-    window._route_measurement_thread = thread
+    if thread is None:
+        install_route_run_execution(window)
+    else:
+        activate_route_run(window, object(), thread)
     window.serial_connection = types.SimpleNamespace(is_open=serial_open)
     window._design_session = types.SimpleNamespace(
         route=types.SimpleNamespace(points=[object()], name="route"),
@@ -210,7 +217,7 @@ def _make_cancel_main() -> tuple[Main, _FakeStageController, _FakeButton, list[s
     window._stage_axis_return_commits = set()
     window._stage_axis_base_styles = {}
     window._coordinate_targets = _coordinate_target_state()
-    window._route_measurement_runner = None
+    install_route_run_execution(window)
     window.surface_map_window = None
     window._manual_alignment_pick_slot = None
     window._microscope_interaction = _FakeMicroscopeInteraction()

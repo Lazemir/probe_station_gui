@@ -7,6 +7,7 @@ from tests.app.main_coordinate_feedrate_support import (
     RouteMeasurementRunner,
     _make_main,
 )
+from tests.app.route_run_execution_support import activate_route_run
 
 
 def _ordinary_runner(tmpdir: str, stage_controller: object) -> RouteMeasurementRunner:
@@ -22,18 +23,18 @@ def _ordinary_runner(tmpdir: str, stage_controller: object) -> RouteMeasurementR
 def test_waiting_ordinary_route_interrupt_does_not_cancel_stage() -> None:
     window, stage_controller, _joystick, _timer, _statuses = _make_main()
     refreshes: list[tuple[int, ...]] = []
-    window._route_measurement_waiting = True
     window._stage_motion_axes = {"X"}
     window._schedule_status_refreshes = lambda delays: refreshes.append(tuple(delays))
 
     with tempfile.TemporaryDirectory() as tmpdir:
         runner = _ordinary_runner(tmpdir, stage_controller)
         runner._run_control.set_waiting(True)
+        activate_route_run(window, runner, waiting=True)
 
         Main._interrupt_route_measurement_runner(
             window,
-            runner,
             reason="Route measurement interrupt requested.",
+            expected_runner=runner,
         )
 
     assert runner.current_point_correction_requested() is True
@@ -45,17 +46,17 @@ def test_waiting_ordinary_route_interrupt_does_not_cancel_stage() -> None:
 def test_active_ordinary_route_interrupt_cancels_stage() -> None:
     window, stage_controller, _joystick, _timer, _statuses = _make_main()
     refreshes: list[tuple[int, ...]] = []
-    window._route_measurement_waiting = False
     window._stage_motion_axes = {"X"}
     window._schedule_status_refreshes = lambda delays: refreshes.append(tuple(delays))
 
     with tempfile.TemporaryDirectory() as tmpdir:
         runner = _ordinary_runner(tmpdir, stage_controller)
+        activate_route_run(window, runner)
 
         Main._interrupt_route_measurement_runner(
             window,
-            runner,
             reason="Route measurement interrupt requested.",
+            expected_runner=runner,
         )
 
     assert runner.current_point_correction_requested() is True
@@ -70,7 +71,6 @@ def test_external_waiting_payload_prevents_stage_cancel() -> None:
     window, stage_controller, _joystick, _timer, _statuses = _make_main()
     corrections: list[bool] = []
     refreshes: list[tuple[int, ...]] = []
-    window._route_measurement_waiting = False
     window._stage_motion_axes = {"X"}
     window._schedule_status_refreshes = lambda delays: refreshes.append(tuple(delays))
     runner = types.SimpleNamespace(
@@ -81,11 +81,12 @@ def test_external_waiting_payload_prevents_stage_cancel() -> None:
         },
         request_current_point_correction=lambda: corrections.append(True),
     )
+    activate_route_run(window, runner, waiting=True)
 
     Main._interrupt_route_measurement_runner(
         window,
-        runner,
         reason="Route measurement interrupt requested.",
+        expected_runner=runner,
     )
 
     assert corrections == [True]

@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import logging
-
 from probe_station_gui.route.adjustment_flow import (
     RouteShiftSavePlan,
     RouteShiftSaveStatusPlan,
@@ -20,8 +18,6 @@ from probe_station_gui.views import (
     main_window_stage_position_panel as stage_position_panel_adapter,
 )
 
-logger = logging.getLogger("main")
-
 
 class _MainRouteControlMixin:
     def _request_pause_route_measurement(self) -> None:
@@ -38,7 +34,7 @@ class _MainRouteControlMixin:
             else:
                 self._api_route_control_action({"action": "pause"})
             return
-        runner = self._route_measurement_runner
+        runner = self._route_run_execution.snapshot().runner
         if runner is None:
             self._show_status("No route measurement is running.", 3000)
             return
@@ -48,7 +44,7 @@ class _MainRouteControlMixin:
         self._route_runtime_presenter().pause_requested(message)
 
     def _save_route_measurement_shift(self, point_number: int | None = None) -> None:
-        runner = self._route_measurement_runner
+        runner = self._route_run_execution.snapshot().runner
         shift_plan = self._route_shift_save_plan(runner, point_number)
         if shift_plan.message:
             self._show_route_runtime_status(shift_plan.message, shift_plan.timeout_ms)
@@ -79,9 +75,9 @@ class _MainRouteControlMixin:
     def _route_shift_save_plan(
         self, runner: object | None, point_number: int | None
     ) -> RouteShiftSavePlan:
-        thread = self._route_measurement_thread
-        route_active = thread is not None and thread.is_alive()
-        route_waiting = getattr(self, "_route_measurement_waiting", False)
+        execution = self._route_run_execution.snapshot()
+        route_active = execution.thread_alive
+        route_waiting = execution.waiting
         api_route_control = self._api_route_control_state_snapshot()
         guard_plan = route_shift_save_guard_plan(
             runner_available=runner is not None,
@@ -178,19 +174,16 @@ class _MainRouteControlMixin:
         )
 
     def _interrupt_route_measurement_runner(
-        self, runner: object, *, reason: str
+        self,
+        *,
+        reason: str,
+        expected_runner: object | None = None,
     ) -> None:
-        try:
-            waiting = bool(
-                runner.status_payload().get("waiting")
-                if hasattr(runner, "status_payload")
-                else self._route_measurement_waiting
-            )
-        except Exception:
-            waiting = bool(self._route_measurement_waiting)
-        if hasattr(runner, "request_current_point_correction"):
-            runner.request_current_point_correction()
-        if not waiting:
+        execution = self._route_run_execution.snapshot()
+        if expected_runner is not None and execution.runner is not expected_runner:
+            return
+        directive = self._route_run_execution.request_interrupt()
+        if directive.cancel_stage:
             self.stage_controller.cancel_active_task(reason)
             stage_position_panel_adapter.clear_stage_motion_axes(self)
             self._schedule_status_refreshes(self.MANUAL_JOG_SETTLE_POLL_DELAYS_MS)
@@ -212,18 +205,29 @@ class _MainRouteControlMixin:
 
     def _on_route_measurement_current_point_changed(self, point_number: int) -> None:
         self._set_route_measurement_resume_point(point_number)
-        runner = self._route_measurement_runner
-        if runner is not None and self._route_measurement_waiting:
+        execution = self._route_run_execution.snapshot()
+        runner = execution.runner
+        if runner is not None and execution.waiting:
             self._pending_route_measure_point = int(point_number)
             if hasattr(runner, "set_current_adjustment_point"):
                 runner.set_current_adjustment_point(point_number)
 
-    def _on_route_measurement_waiting_changed(self, waiting: bool) -> None:
-        self._route_measurement_waiting = bool(waiting)
-        waiting_reason = self._current_route_measurement_waiting_reason(waiting)
-        self._route_measurement_waiting_reason = waiting_reason
-        self._route_runtime_presenter().waiting_changed(waiting, waiting_reason)
-        if not self._route_measurement_waiting:
+    def _on_route_measurement_waiting_changed(
+        self,
+        runner: object,
+        waiting: bool,
+    ) -> None:
+        execution = self._route_run_execution.publish_waiting(
+            waiting,
+            expected_runner=runner,
+        )
+        if execution.runner is not runner:
+            return
+        self._route_runtime_presenter().waiting_changed(
+            execution.waiting,
+            execution.waiting_reason,
+        )
+        if not execution.waiting:
             return
         pending_point_number = self._pending_route_measure_point
         if pending_point_number is None:
@@ -231,18 +235,3 @@ class _MainRouteControlMixin:
             return
         self._pending_route_measure_point = None
         self._submit_route_measurement_confirmation(f"jump:{int(pending_point_number)}")
-
-    def _current_route_measurement_waiting_reason(self, waiting: bool) -> str:
-        if not waiting:
-            return ""
-        runner = getattr(self, "_route_measurement_runner", None)
-        if runner is not None and hasattr(runner, "status_payload"):
-            try:
-                status = runner.status_payload()
-            except Exception:
-                logger.exception("Failed to read route waiting reason.")
-            else:
-                reason = str(status.get("waiting_reason") or "").strip()
-                if reason:
-                    return reason
-        return "paused"

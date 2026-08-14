@@ -42,6 +42,10 @@ from tests.app.test_main_design_navigation import (
     _make_window,
     main_module,
 )
+from tests.app.route_run_execution_support import (
+    activate_route_run,
+    install_route_run_execution,
+)
 
 
 class _LayoutStateAdapter:
@@ -103,7 +107,7 @@ def _make_mixed_edit_window(tmp_path: Path) -> tuple[Main, list[str]]:
     )
     window._design_markup = markup
     window._design_markup_direct_guide_ids = ["guide-1"]
-    window._route_measurement_thread = None
+    install_route_run_execution(window)
     selection = SelectionModel(
         frozenset(
             {
@@ -235,7 +239,11 @@ def test_route_running_blocks_even_markup_only_delete(tmp_path: Path) -> None:
     window.design_layout_window.selection = SelectionModel(
         frozenset({markup_entity_id("guide-1")})
     )
-    window._route_measurement_thread = types.SimpleNamespace(is_alive=lambda: True)
+    activate_route_run(
+        window,
+        object(),
+        types.SimpleNamespace(is_alive=lambda: True),
+    )
 
     Main._delete_design_selection(window)
 

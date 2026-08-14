@@ -13,6 +13,11 @@ from types import SimpleNamespace
 from typing import Any
 
 from probe_station_gui.camera import microscope_scan
+from probe_station_gui.application.route_run_execution import (
+    RouteRunKind,
+    RouteRunReleaseCause,
+    RouteRunReleaseRequest,
+)
 from probe_station_gui.camera.microscope_scan_runtime_adapters import (
     MicroscopeAreaScanRequest,
 )
@@ -60,11 +65,19 @@ class _MainApiRouteScanMixin:
         self,
         payload: dict[str, Any],
     ) -> tuple[dict[str, Any] | None, tuple[float, float]]:
-        thread = self._route_measurement_thread
-        if thread is None or not thread.is_alive():
+        execution = self._route_run_execution.snapshot()
+        if not execution.thread_alive:
+            if execution.active:
+                self._route_run_execution.release(
+                    RouteRunReleaseRequest(
+                        cause=RouteRunReleaseCause.FINISHED,
+                        expected_runner=execution.runner,
+                        join_timeout_s=0.1,
+                    )
+                )
             return None, (0.0, 0.0)
-        runner = self._route_measurement_runner
-        if isinstance(runner, RouteExternalMeasurementSessionRunner):
+        runner = execution.runner
+        if execution.kind is RouteRunKind.EXTERNAL_RESULT_SESSION:
             return (
                 api_route_existing_session_response(
                     payload=payload,
@@ -73,8 +86,8 @@ class _MainApiRouteScanMixin:
                 (0.0, 0.0),
             )
         can_take_over_waiting_gui_runner = (
-            isinstance(runner, RouteMeasurementRunner)
-            and self._route_measurement_waiting
+            execution.kind is RouteRunKind.GUI
+            and execution.waiting
             and self._last_route_measurement_result is None
         )
         if not can_take_over_waiting_gui_runner:
@@ -84,17 +97,19 @@ class _MainApiRouteScanMixin:
                 "message": "Route measurement is already active.",
             }, (0.0, 0.0)
         route_offset_xy = runner.route_offset_xy()
-        runner.stop()
-        thread.join(timeout=2.0)
-        if thread.is_alive():
+        release = self._route_run_execution.release(
+            RouteRunReleaseRequest(
+                cause=RouteRunReleaseCause.TAKEOVER,
+                expected_runner=runner,
+                join_timeout_s=2.0,
+            )
+        )
+        if not release.released:
             return {
                 "accepted": False,
                 "status_code": 409,
                 "message": "Waiting GUI route measurement did not stop.",
             }, route_offset_xy
-        self._route_measurement_thread = None
-        self._route_measurement_runner = None
-        self._route_measurement_waiting = False
         self._route_measurement_session_active = False
         return None, route_offset_xy
 
@@ -109,7 +124,13 @@ class _MainApiRouteScanMixin:
         needle_feedrate: float | None,
         design_frame_snapshot: object | None = None,
     ) -> RouteExternalMeasurementSessionRunner:
-        return RouteExternalMeasurementSessionRunner(
+        runner: RouteExternalMeasurementSessionRunner | None = None
+
+        def publish_waiting(waiting: bool) -> None:
+            if runner is not None:
+                self.route_measurement_waiting_changed.emit(runner, waiting)
+
+        runner = RouteExternalMeasurementSessionRunner(
             session_id=session_id,
             points=points,
             stage_controller=self.stage_controller,
@@ -139,7 +160,7 @@ class _MainApiRouteScanMixin:
             contact_photo_callback=self._capture_route_contact_photo,
             pre_contact_photo_callback=self._capture_route_pre_contact_photo,
             result_callback=self.route_measurement_result.emit,
-            waiting_callback=self.route_measurement_waiting_changed.emit,
+            waiting_callback=publish_waiting,
             photo_enabled=start_settings.photo_enabled,
             photo_focus_enabled=start_settings.photo_focus_enabled,
             photo_settle_s=start_settings.photo_settle_s,
@@ -149,20 +170,21 @@ class _MainApiRouteScanMixin:
                 design_frame_snapshot
             ),
         )
+        return runner
 
     def _cleanup_failed_api_route_session_start(
         self,
         runner: RouteExternalMeasurementSessionRunner,
     ) -> dict[str, Any]:
         status = runner.status_payload()
-        thread = self._route_measurement_thread
-        if thread is not None and thread.is_alive():
-            runner.stop()
-            thread.join(timeout=2.0)
-        self._route_measurement_thread = None
-        self._route_measurement_runner = None
+        self._route_run_execution.release(
+            RouteRunReleaseRequest(
+                cause=RouteRunReleaseCause.FAILED_START,
+                expected_runner=runner,
+                join_timeout_s=2.0,
+            )
+        )
         self._api_route_lcr_controller = None
-        self._route_measurement_waiting = False
         self._route_measurement_session_active = False
         return status
 
@@ -262,23 +284,25 @@ class _MainApiRouteScanMixin:
             selected_point=selected_point,
             photo_enabled=start_settings.photo_enabled,
         )
-        self._route_measurement_runner = runner
-        self._route_measurement_waiting = False
-        self._route_measurement_waiting_reason = ""
+        thread = threading.Thread(
+            target=self._run_route_measurement,
+            args=(runner,),
+            name="RouteApiExternalSession",
+            daemon=True,
+        )
+        self._route_run_execution.activate(
+            runner,
+            thread,
+            kind=RouteRunKind.EXTERNAL_RESULT_SESSION,
+        )
         self._pending_route_measure_point = None
         self._route_measurement_session_active = True
         self._route_measurement_photo_enabled = launch_state.photo_enabled
         self._route_measurement_measure_enabled = launch_state.measure_enabled
         self._route_measurement_point_numbers = launch_state.point_numbers
         self._telegram_runtime.route_photos.reset_for_route_start()
-        self._route_measurement_thread = threading.Thread(
-            target=self._run_route_measurement,
-            args=(runner,),
-            name="RouteApiExternalSession",
-            daemon=True,
-        )
         self._last_route_measurement_result = None
-        self._route_measurement_thread.start()
+        thread.start()
         if not runner.wait_until_initial_pause(timeout_s=10.0):
             status = self._cleanup_failed_api_route_session_start(runner)
             return {
@@ -290,7 +314,7 @@ class _MainApiRouteScanMixin:
                 ),
                 "status": status,
             }
-        self._route_measurement_waiting = True
+        self._route_run_execution.publish_waiting(True, expected_runner=runner)
         self.route_measurement_started.emit(
             launch_state.start_message,
             len(points),
@@ -317,28 +341,38 @@ class _MainApiRouteScanMixin:
         return self._route_control_window_is_open()
 
     def _api_route_session_status(self) -> dict[str, Any]:
+        execution = self._route_run_execution.snapshot()
         return api_route_session_status_response(
-            getattr(self, "_route_measurement_runner", None),
+            execution.runner,
             self._api_route_last_status,
             self._api_route_artifacts_payload(),
         )
 
     def _api_route_session_action(self, payload: dict[str, Any]) -> dict[str, Any]:
+        execution = self._route_run_execution.snapshot()
         return api_route_session_action_response(
             payload,
-            runner=getattr(self, "_route_measurement_runner", None),
-            interrupt_runner=self._interrupt_route_measurement_runner,
+            runner=execution.runner,
+            interrupt_runner=lambda runner, *, reason: (
+                self._interrupt_route_measurement_runner(
+                    reason=reason,
+                    expected_runner=runner,
+                )
+            ),
         )
 
     def _api_route_session_result(self, payload: dict[str, Any]) -> dict[str, Any]:
+        execution = self._route_run_execution.snapshot()
         return api_route_session_result_response(
             payload,
-            runner=self._route_measurement_runner,
+            runner=execution.runner,
             timestamp_utc=self._api_timestamp_utc(),
         )
 
     def _api_route_session_seek(self) -> dict[str, Any]:
-        return api_route_session_seek_response(self._route_measurement_runner)
+        return api_route_session_seek_response(
+            self._route_run_execution.snapshot().runner
+        )
 
     def _api_route_session_artifact(self, payload: dict[str, Any]) -> dict[str, Any]:
         return self._api_route_artifacts_store().artifact_response(payload)
@@ -698,9 +732,7 @@ class _MainApiRouteScanMixin:
                 ),
                 photo=(photo_bytes, photo_name),
                 reply_markup=self._telegram_runtime.default_markup(
-                    route_waiting=bool(
-                        getattr(self, "_route_measurement_waiting", False)
-                    )
+                    route_waiting=self._route_run_execution.snapshot().waiting
                 ),
             )
         return artifact_id

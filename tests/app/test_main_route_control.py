@@ -13,6 +13,11 @@ from tests.app.main_coordinate_feedrate_support import (
     _make_main,
     api_route_adjusted_stage_xy,
 )
+from probe_station_gui.application.route_run_execution import RouteRunKind
+from tests.app.route_run_execution_support import (
+    activate_route_run,
+    install_route_run_execution,
+)
 
 
 class MainRouteControlTest(unittest.TestCase):
@@ -96,7 +101,7 @@ class MainRouteControlTest(unittest.TestCase):
             reset_progress=lambda value: calls.append(("dialog_progress", value)),
             set_status=lambda value: calls.append(("dialog_status", value)),
         )
-        window._route_measurement_waiting = False
+        install_route_run_execution(window)
         window.design_navigator_panel = panel
         window._route_measurement_dialog = dialog
         window._set_route_measurement_resume_point = lambda value: calls.append(
@@ -145,7 +150,11 @@ class MainRouteControlTest(unittest.TestCase):
             reset_progress=lambda value: calls.append(("dialog_progress", value)),
             set_status=lambda value: calls.append(("dialog_status", value)),
         )
-        window._route_measurement_waiting = True
+        activate_route_run(
+            window,
+            types.SimpleNamespace(status_payload=lambda: {"waiting_reason": "paused"}),
+            waiting=True,
+        )
         window.design_navigator_panel = panel
         window._route_measurement_dialog = dialog
         window._set_route_measurement_resume_point = lambda value: calls.append(
@@ -180,8 +189,7 @@ class MainRouteControlTest(unittest.TestCase):
             needle_1_design=(11.0, 21.0),
             needle_2_design=(9.0, 19.0),
         )
-        window._route_measurement_runner = None
-        window._route_measurement_thread = None
+        install_route_run_execution(window)
         window._route_measurement_dialog = None
         window.design_navigator_panel = None
         window._api_route_control_active = True
@@ -218,8 +226,7 @@ class MainRouteControlTest(unittest.TestCase):
         window, stage_controller, _joystick, _timer, statuses = _make_main()
         aborts: list[str] = []
 
-        window._route_measurement_runner = None
-        window._route_measurement_waiting = False
+        install_route_run_execution(window)
         window._route_measurement_dialog = None
         window.design_navigator_panel = None
         window._pending_route_measure_point = 91
@@ -259,7 +266,7 @@ class MainRouteControlTest(unittest.TestCase):
         window = Main.__new__(Main)
         actions: list[dict[str, object]] = []
 
-        window._route_measurement_runner = None
+        install_route_run_execution(window)
         window._api_route_control_active = True
         window._api_route_control_paused = True
         window._api_route_control_action = lambda payload: actions.append(dict(payload))
@@ -307,10 +314,7 @@ class MainRouteControlTest(unittest.TestCase):
         runner = _FakeRouteMeasurementRunner()
         thread = _FakeJoinableThread()
 
-        window._route_measurement_runner = runner
-        window._route_measurement_thread = thread
-        window._route_measurement_waiting = True
-        window._route_measurement_waiting_reason = "paused"
+        activate_route_run(window, runner, thread, waiting=True)
         window._route_measurement_session_active = True
         window._pending_route_measure_point = 33
         window._api_route_control_active = False
@@ -342,9 +346,8 @@ class MainRouteControlTest(unittest.TestCase):
         self.assertTrue(response["accepted"])
         self.assertTrue(runner.stop_requested)
         self.assertEqual(thread.join_calls, [2.0])
-        self.assertIsNone(window._route_measurement_runner)
-        self.assertIsNone(window._route_measurement_thread)
-        self.assertFalse(window._route_measurement_waiting)
+        self.assertFalse(window._route_run_execution.snapshot().active)
+        self.assertFalse(window._route_run_execution.snapshot().waiting)
         self.assertFalse(window._route_measurement_session_active)
         self.assertIsNone(window._pending_route_measure_point)
         self.assertTrue(window._api_route_control_active)
@@ -356,8 +359,7 @@ class MainRouteControlTest(unittest.TestCase):
         statuses: list[str] = []
         opened: list[bool] = []
 
-        window._route_measurement_runner = None
-        window._route_measurement_thread = None
+        install_route_run_execution(window)
         window._api_route_control_active = False
         window._api_route_control_pause_requested = False
         window._api_route_control_paused = False
@@ -389,9 +391,11 @@ class MainRouteControlTest(unittest.TestCase):
     def test_api_route_control_start_rejects_busy_route_runner(self) -> None:
         window = Main.__new__(Main)
 
-        window._route_measurement_runner = _FakeRouteMeasurementRunner()
-        window._route_measurement_thread = _FakeJoinableThread()
-        window._route_measurement_waiting = False
+        activate_route_run(
+            window,
+            _FakeRouteMeasurementRunner(),
+            _FakeJoinableThread(),
+        )
         window._api_route_control_active = False
 
         response = Main._api_route_control_action(
@@ -411,9 +415,13 @@ class MainRouteControlTest(unittest.TestCase):
             submit_external_result=lambda _result: True,
         )
 
-        window._route_measurement_runner = runner
-        window._route_measurement_thread = _FakeJoinableThread()
-        window._route_measurement_waiting = True
+        activate_route_run(
+            window,
+            runner,
+            _FakeJoinableThread(),
+            kind=RouteRunKind.EXTERNAL_RESULT_SESSION,
+            waiting=True,
+        )
         window._api_route_control_active = False
 
         response = Main._api_route_control_action(
@@ -543,6 +551,7 @@ class MainRouteControlTest(unittest.TestCase):
 
     def test_api_route_control_pause_request_waits_for_ack_before_resume(self) -> None:
         window = Main.__new__(Main)
+        install_route_run_execution(window)
         calls: list[tuple[str, object]] = []
         statuses: list[str] = []
 
@@ -578,7 +587,7 @@ class MainRouteControlTest(unittest.TestCase):
         self.assertFalse(pause["paused"])
         self.assertTrue(window._api_route_control_pause_requested)
         self.assertFalse(window._api_route_control_paused)
-        self.assertFalse(window._route_measurement_waiting)
+        self.assertFalse(window._route_run_execution.snapshot().waiting)
         self.assertIn(("pending", True), calls)
         self.assertIn(("waiting", False, "paused"), calls)
 
@@ -588,14 +597,14 @@ class MainRouteControlTest(unittest.TestCase):
         self.assertTrue(paused["paused"])
         self.assertFalse(window._api_route_control_pause_requested)
         self.assertTrue(window._api_route_control_paused)
-        self.assertTrue(window._route_measurement_waiting)
+        self.assertFalse(window._route_run_execution.snapshot().waiting)
         self.assertIn(("pending", False), calls)
 
     def test_api_route_control_pending_pause_click_interrupts(self) -> None:
         window = Main.__new__(Main)
         interrupts: list[str] = []
 
-        window._route_measurement_runner = None
+        install_route_run_execution(window)
         window._api_route_control_active = True
         window._api_route_control_pause_requested = True
         window._api_route_control_paused = False
@@ -619,7 +628,7 @@ class MainRouteControlTest(unittest.TestCase):
             )
         )
 
-        window._route_measurement_runner = runner
+        activate_route_run(window, runner)
         window._api_route_control_active = True
         window._api_route_control_pause_requested = False
         window._api_route_control_paused = False
@@ -637,7 +646,7 @@ class MainRouteControlTest(unittest.TestCase):
         interrupts: list[str] = []
         runner = _FakeRouteMeasurementRunner()
 
-        window._route_measurement_runner = runner
+        activate_route_run(window, runner)
         window._api_route_control_active = True
         window._api_route_control_pause_requested = True
         window._api_route_control_paused = False
@@ -658,7 +667,7 @@ class MainRouteControlTest(unittest.TestCase):
         actions: list[dict[str, object]] = []
         runner = _FakeRouteMeasurementRunner()
 
-        window._route_measurement_runner = runner
+        activate_route_run(window, runner)
         window._api_route_control_active = True
         window._api_route_control_paused = True
         window._api_route_control_action = lambda payload: actions.append(dict(payload))
@@ -693,8 +702,7 @@ class MainRouteControlTest(unittest.TestCase):
             ),
         )
 
-        window._route_measurement_runner = runner
-        window._route_measurement_thread = _FakeAliveThread()
+        activate_route_run(window, runner, _FakeAliveThread())
         window._route_measurement_dialog = None
         window.design_navigator_panel = None
         window._api_route_control_active = True
@@ -732,8 +740,7 @@ class MainRouteControlTest(unittest.TestCase):
                 dialog_calls.append("current_configuration")
                 return types.SimpleNamespace(current_point=7)
 
-        window._route_measurement_runner = None
-        window._route_measurement_thread = None
+        install_route_run_execution(window)
         window._route_measurement_dialog = _Dialog()
         window._route_measurement_current_point = None
         window._api_route_control_active = True
@@ -764,9 +771,7 @@ class MainRouteControlTest(unittest.TestCase):
                 runner_calls.append(("save", stage_xy)) or (True, "saved by runner")
             ),
         )
-        window._route_measurement_runner = runner
-        window._route_measurement_thread = _FakeAliveThread()
-        window._route_measurement_waiting = True
+        activate_route_run(window, runner, _FakeAliveThread(), waiting=True)
         window._route_measurement_current_point = None
         window._route_measurement_dialog = types.SimpleNamespace(
             set_status=lambda message: dialog_statuses.append(str(message))
@@ -807,9 +812,7 @@ class MainRouteControlTest(unittest.TestCase):
                 runner_calls.append(("save", stage_xy)) or (True, "saved by runner")
             ),
         )
-        window._route_measurement_runner = runner
-        window._route_measurement_thread = _FakeAliveThread()
-        window._route_measurement_waiting = True
+        activate_route_run(window, runner, _FakeAliveThread(), waiting=True)
         window._route_measurement_current_point = None
         window._route_measurement_dialog = None
         window.design_navigator_panel = None
@@ -846,9 +849,7 @@ class MainRouteControlTest(unittest.TestCase):
             ),
             route_offset_xy=lambda: (0.5, -0.25),
         )
-        window._route_measurement_runner = runner
-        window._route_measurement_thread = _FakeAliveThread()
-        window._route_measurement_waiting = True
+        activate_route_run(window, runner, _FakeAliveThread(), waiting=True)
         window._route_measurement_current_point = None
         window._route_measurement_dialog = None
         window.design_navigator_panel = None
@@ -885,9 +886,7 @@ class MainRouteControlTest(unittest.TestCase):
                 runner_calls.append(("save", stage_xy)) or (True, "saved by runner")
             ),
         )
-        window._route_measurement_runner = runner
-        window._route_measurement_thread = _FakeAliveThread()
-        window._route_measurement_waiting = True
+        activate_route_run(window, runner, _FakeAliveThread(), waiting=True)
         window._route_measurement_current_point = None
         window._route_measurement_dialog = types.SimpleNamespace(
             set_status=lambda message: dialog_statuses.append(str(message))
@@ -927,9 +926,7 @@ class MainRouteControlTest(unittest.TestCase):
             ),
             route_offset_xy=lambda: ("bad", -0.25),
         )
-        window._route_measurement_runner = runner
-        window._route_measurement_thread = _FakeAliveThread()
-        window._route_measurement_waiting = True
+        activate_route_run(window, runner, _FakeAliveThread(), waiting=True)
         window._route_measurement_current_point = None
         window._route_measurement_dialog = None
         window.design_navigator_panel = None
@@ -967,9 +964,7 @@ class MainRouteControlTest(unittest.TestCase):
             ),
             route_offset_xy=route_offset_xy,
         )
-        window._route_measurement_runner = runner
-        window._route_measurement_thread = _FakeAliveThread()
-        window._route_measurement_waiting = True
+        activate_route_run(window, runner, _FakeAliveThread(), waiting=True)
         window._route_measurement_current_point = None
         window._route_measurement_dialog = None
         window.design_navigator_panel = None
@@ -1006,9 +1001,7 @@ class MainRouteControlTest(unittest.TestCase):
             ),
             route_offset_xy=lambda: (0.5, -0.25),
         )
-        window._route_measurement_runner = runner
-        window._route_measurement_thread = _FakeAliveThread()
-        window._route_measurement_waiting = True
+        activate_route_run(window, runner, _FakeAliveThread(), waiting=True)
         window._route_measurement_current_point = None
         window._route_measurement_dialog = types.SimpleNamespace(
             set_interrupt_request_pending=lambda value: dialog_calls.append(
@@ -1059,8 +1052,7 @@ class MainRouteControlTest(unittest.TestCase):
             needle_2_design=(9.0, 19.0),
         )
 
-        window._route_measurement_runner = None
-        window._route_measurement_thread = None
+        install_route_run_execution(window)
         window._route_measurement_dialog = None
         window.design_navigator_panel = None
         window._api_route_control_active = True
@@ -1091,7 +1083,7 @@ class MainRouteControlTest(unittest.TestCase):
         statuses: list[str] = []
 
         window._route_contact_move_thread = None
-        window._route_measurement_thread = None
+        install_route_run_execution(window)
         window._api_route_control_active = True
         window._api_route_control_paused = False
         window._show_status = lambda message, _timeout_ms=None: statuses.append(
@@ -1104,6 +1096,7 @@ class MainRouteControlTest(unittest.TestCase):
             statuses,
             ["Pause API route control before moving to a contact."],
         )
+
 
 if __name__ == "__main__":
     unittest.main()

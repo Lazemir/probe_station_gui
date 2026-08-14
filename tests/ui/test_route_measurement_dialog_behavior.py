@@ -9,6 +9,7 @@ from collections import Counter
 from pathlib import Path
 
 import pytest
+from tests.app.route_run_execution_support import activate_route_run
 
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -354,11 +355,11 @@ def test_loaded_profile_point_reaches_main_through_real_dialog_adapter(
     resume_points: list[int] = []
     adjustment_points: list[int] = []
     window = Main.__new__(Main)
-    window._route_measurement_waiting = True
     window._pending_route_measure_point = None
-    window._route_measurement_runner = types.SimpleNamespace(
+    runner = types.SimpleNamespace(
         set_current_adjustment_point=lambda point: adjustment_points.append(int(point))
     )
+    activate_route_run(window, runner, waiting=True)
     window._set_route_measurement_resume_point = lambda point: resume_points.append(
         int(point)
     )
@@ -400,11 +401,11 @@ def test_route_point_clamp_reaches_main_through_real_dialog_adapter(
     resume_points: list[int] = []
     adjustment_points: list[int] = []
     window = Main.__new__(Main)
-    window._route_measurement_waiting = True
     window._pending_route_measure_point = None
-    window._route_measurement_runner = types.SimpleNamespace(
+    runner = types.SimpleNamespace(
         set_current_adjustment_point=lambda point: adjustment_points.append(int(point))
     )
+    activate_route_run(window, runner, waiting=True)
     window._set_route_measurement_resume_point = lambda point: resume_points.append(
         int(point)
     )

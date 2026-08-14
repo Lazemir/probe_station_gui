@@ -9,7 +9,9 @@ from probe_station_gui.coordinates.coordinator_model import (
     RegistrationAlignmentRequest,
 )
 from probe_station_gui.views import main_window_homing as homing_ui
-from probe_station_gui.views import main_window_stage_position_panel as stage_position_panel
+from probe_station_gui.views import (
+    main_window_stage_position_panel as stage_position_panel,
+)
 
 
 logger = logging.getLogger("main")
@@ -33,7 +35,7 @@ class StageMoveLifecycleOwner(Protocol):
     _pending_quick_alignment_rotation: bool
     _pending_homing_axes: Any
     _homing_active_key: Any
-    _route_measurement_runner: Any
+    _route_run_execution: Any
     _microscope_scan_stop_requested: Any
     _pending_planned_move_target_xy: tuple[float, float] | None
     _pending_planned_move_source_label: str | None
@@ -104,7 +106,7 @@ def _stage_motion_cancelable(owner: StageMoveLifecycleOwner) -> bool:
 def _threaded_operation_active(owner: StageMoveLifecycleOwner) -> bool:
     return (
         _thread_is_alive(getattr(owner, "_route_contact_move_thread", None))
-        or _thread_is_alive(getattr(owner, "_route_measurement_thread", None))
+        or owner._route_run_execution.snapshot().thread_alive
     )
 
 
@@ -261,7 +263,7 @@ def _cancel_pending_ui_intents(owner: StageMoveLifecycleOwner) -> bool:
 
 
 def _cancel_route_measurement(owner: StageMoveLifecycleOwner) -> bool:
-    runner = owner._route_measurement_runner
+    runner = owner._route_run_execution.snapshot().runner
     if runner is None:
         return False
     runner.stop()
@@ -284,9 +286,7 @@ def _cancel_background_captures(owner: StageMoveLifecycleOwner) -> bool:
     if owner._microscope_scan_running():
         owner._microscope_scan_stop_requested.set()
         if owner.microscope_scan_dialog is not None:
-            owner.microscope_scan_dialog.set_status(
-                "Microscope scan stop requested."
-            )
+            owner.microscope_scan_dialog.set_status("Microscope scan stop requested.")
         cancelled_any = True
     return cancelled_any
 

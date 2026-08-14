@@ -4,6 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+from probe_station_gui.application.route_run_execution import _RouteRunExecutionSlot
 from probe_station_gui.views import main_window_auxiliary as auxiliary_ui
 from probe_station_gui.views.main_window_auxiliary import (
     create_design_layout_window,
@@ -76,14 +77,18 @@ class _SurfaceMapOwner:
     def _surface_map_stage_status(self) -> str:
         return "idle"
 
-    def _surface_map_move_to_xy(self, x_value: float, y_value: float) -> tuple[float, float]:
+    def _surface_map_move_to_xy(
+        self, x_value: float, y_value: float
+    ) -> tuple[float, float]:
         return (float(x_value), float(y_value))
 
     def _update_stage_coordinate_apply_state(self) -> None:
         self.coordinate_apply_updates += 1
 
 
-def test_show_surface_map_window_creates_once_and_keeps_lazy_wiring(tmp_path: Path) -> None:
+def test_show_surface_map_window_creates_once_and_keeps_lazy_wiring(
+    tmp_path: Path,
+) -> None:
     _FakeSurfaceMapWindow.instances.clear()
     owner = _SurfaceMapOwner(tmp_path)
 
@@ -298,7 +303,9 @@ def test_toggle_contact_calibration_window_preserves_raise_lowering_and_sync() -
     assert owner._contact_calibration_window_action.checked_values == [True]
 
 
-def test_toggle_contact_calibration_window_requests_status_when_lowering_unknown() -> None:
+def test_toggle_contact_calibration_window_requests_status_when_lowering_unknown() -> (
+    None
+):
     owner = _ToggleContactOwner(None)
     owner.serial_connection = type("Serial", (), {"is_open": True})()
 
@@ -558,6 +565,7 @@ class _DesignOwner:
 
     def __init__(self, settings_path: Path) -> None:
         self.settings_manager = _FakeSettingsManager(settings_path)
+        self._route_run_execution = _RouteRunExecutionSlot()
         self.design_layout_window = None
         self.design_navigator_panel = None
         self._design_layout_window_class = None
