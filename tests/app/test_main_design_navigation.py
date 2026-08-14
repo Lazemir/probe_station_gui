@@ -46,6 +46,7 @@ class _FakeStageController:
         self.homed_axes = {"X", "Y", "Z"}
         self.unhomed_requests: list[set[str]] = []
         self.move_requests: list[tuple[float, float]] = []
+        self.move_accepted = True
         self.busy = False
 
     def mark_axes_unhomed(self, axes: set[str]) -> set[str]:
@@ -58,8 +59,9 @@ class _FakeStageController:
     def is_busy(self) -> bool:
         return self.busy
 
-    def request_move_to_xy(self, x_value: float, y_value: float) -> None:
+    def request_move_to_xy(self, x_value: float, y_value: float) -> bool:
         self.move_requests.append((float(x_value), float(y_value)))
+        return self.move_accepted
 
 
 class _FakeSettingsManager:

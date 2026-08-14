@@ -21,14 +21,14 @@ def test_click_move_resolves_pixel_delta_to_absolute_xy_target() -> None:
     controller._pixels_to_mm = np.eye(2)
     controller._ensure_calibration = lambda **_kwargs: (False, None)
     controller._get_frame_snapshot = lambda **_kwargs: (object(), 17)
-    controller._query_current_status_with_required_coordinates = (
-        lambda **_kwargs: SimpleNamespace(
+    controller._query_current_status_with_required_coordinates = lambda **_kwargs: (
+        SimpleNamespace(
             display_position=(10.0, 20.0, 0.0),
         )
     )
     moves: list[tuple[dict[str, float], dict[str, object]]] = []
-    controller._execute_precision_axis_targets_locked = (
-        lambda targets, **kwargs: moves.append((dict(targets), dict(kwargs)))
+    controller._execute_precision_axis_targets_locked = lambda targets, **kwargs: (
+        moves.append((dict(targets), dict(kwargs)))
     )
     controller._send_relative_move = lambda *_args, **_kwargs: (_ for _ in ()).throw(
         AssertionError("click-to-move used a relative command")
@@ -51,16 +51,14 @@ def test_click_target_after_calibration_uses_absolute_precision_target() -> None
     controller = StageController()
     controller._pixels_to_mm = np.eye(2)
     controller._frame_counter = 8
-    controller._query_current_status_with_required_coordinates = (
-        lambda **_kwargs: SimpleNamespace(display_position=(9.0, 19.0, 0.0))
+    controller._query_current_status_with_required_coordinates = lambda **_kwargs: (
+        SimpleNamespace(display_position=(9.0, 19.0, 0.0))
     )
-    controller._position_for_configured_mode = (
-        lambda status: status.display_position
-    )
+    controller._position_for_configured_mode = lambda status: status.display_position
     controller._require_homed_axes = lambda *_args, **_kwargs: None
     moves: list[dict[str, float]] = []
-    controller._execute_precision_axis_targets_locked = (
-        lambda targets, **_kwargs: moves.append(dict(targets))
+    controller._execute_precision_axis_targets_locked = lambda targets, **_kwargs: (
+        moves.append(dict(targets))
     )
     controller._send_relative_move = lambda *_args, **_kwargs: (_ for _ in ()).throw(
         AssertionError("calibrated click target used a relative command")
@@ -88,13 +86,13 @@ def test_move_to_xy_uses_shared_precision_executor() -> None:
     )
     controller._query_synced_status_for_absolute_motion = lambda **_kwargs: status
     controller._require_homed_axes = lambda *_args, **_kwargs: None
-    controller._require_position_for_absolute_motion = (
-        lambda *_args, **_kwargs: status.display_position
+    controller._require_position_for_absolute_motion = lambda *_args, **_kwargs: (
+        status.display_position
     )
     controller._status_matches_axis_targets = lambda *_args, **_kwargs: False
     moves: list[tuple[dict[str, float], dict[str, object]]] = []
-    controller._execute_precision_axis_targets_locked = (
-        lambda targets, **kwargs: moves.append((dict(targets), dict(kwargs)))
+    controller._execute_precision_axis_targets_locked = lambda targets, **kwargs: (
+        moves.append((dict(targets), dict(kwargs)))
     )
     controller.absolute_xy_move_started = SimpleNamespace(emit=lambda *_args: None)
     controller.status_message = SimpleNamespace(emit=lambda _message: None)
@@ -109,6 +107,26 @@ def test_move_to_xy_uses_shared_precision_executor() -> None:
     ]
     assert "Arrived" in message
     controller.shutdown()
+
+
+def test_request_move_to_xy_reports_rejected_background_start() -> None:
+    controller = StageController()
+    submitted: dict[str, object] = {}
+
+    def reject_start(**kwargs: object) -> bool:
+        submitted.update(kwargs)
+        return False
+
+    controller._start_background_task = reject_start
+
+    try:
+        accepted = controller.request_move_to_xy(4.0, 5.0)
+
+        assert accepted is False
+        assert submitted["target"] == controller._run_move_to_xy
+        assert submitted["args"] == (4.0, 5.0)
+    finally:
+        controller.shutdown()
 
 
 def test_token_bound_xy_move_reports_only_its_own_target_and_result() -> None:
@@ -156,13 +174,13 @@ def test_external_route_move_at_target_executes_approximate_precision_axis() -> 
     )
     controller._query_synced_status_for_absolute_motion = lambda **_kwargs: status
     controller._require_homed_axes = lambda *_args, **_kwargs: None
-    controller._require_position_for_absolute_motion = (
-        lambda *_args, **_kwargs: status.display_position
+    controller._require_position_for_absolute_motion = lambda *_args, **_kwargs: (
+        status.display_position
     )
     controller._status_matches_axis_targets = lambda *_args, **_kwargs: True
     moves: list[dict[str, float]] = []
-    controller._execute_precision_axis_targets_locked = (
-        lambda targets, **_kwargs: moves.append(dict(targets))
+    controller._execute_precision_axis_targets_locked = lambda targets, **_kwargs: (
+        moves.append(dict(targets))
     )
     controller.absolute_xy_move_started = SimpleNamespace(emit=lambda *_args: None)
     controller.movement_started = SimpleNamespace(emit=lambda: None)
@@ -187,16 +205,16 @@ def test_saved_xyz_uses_precision_for_xy_and_final_z_but_not_safe_transit() -> N
     )
     controller._query_synced_status_for_absolute_motion = lambda **_kwargs: status
     controller._require_homed_axes = lambda *_args, **_kwargs: None
-    controller._require_position_for_absolute_motion = (
-        lambda *_args, **_kwargs: status.display_position
+    controller._require_position_for_absolute_motion = lambda *_args, **_kwargs: (
+        status.display_position
     )
     transit: list[dict[str, float]] = []
     precise: list[dict[str, float]] = []
-    controller._send_absolute_axis_targets_move = (
-        lambda targets, **_kwargs: transit.append(dict(targets))
+    controller._send_absolute_axis_targets_move = lambda targets, **_kwargs: (
+        transit.append(dict(targets))
     )
-    controller._execute_precision_axis_targets_locked = (
-        lambda targets, **_kwargs: precise.append(dict(targets))
+    controller._execute_precision_axis_targets_locked = lambda targets, **_kwargs: (
+        precise.append(dict(targets))
     )
     controller._wait_for_idle = lambda *_args, **_kwargs: None
     controller._query_current_status = lambda: None
@@ -226,16 +244,16 @@ def test_saved_xyz_without_separate_transit_still_finishes_z_precisely() -> None
     )
     controller._query_synced_status_for_absolute_motion = lambda **_kwargs: status
     controller._require_homed_axes = lambda *_args, **_kwargs: None
-    controller._require_position_for_absolute_motion = (
-        lambda *_args, **_kwargs: status.display_position
+    controller._require_position_for_absolute_motion = lambda *_args, **_kwargs: (
+        status.display_position
     )
     transit: list[dict[str, float]] = []
     precise: list[dict[str, float]] = []
-    controller._send_absolute_axis_targets_move = (
-        lambda targets, **_kwargs: transit.append(dict(targets))
+    controller._send_absolute_axis_targets_move = lambda targets, **_kwargs: (
+        transit.append(dict(targets))
     )
-    controller._execute_precision_axis_targets_locked = (
-        lambda targets, **_kwargs: precise.append(dict(targets))
+    controller._execute_precision_axis_targets_locked = lambda targets, **_kwargs: (
+        precise.append(dict(targets))
     )
     controller._wait_for_idle = lambda *_args, **_kwargs: None
     controller._query_current_status = lambda: None
@@ -268,12 +286,12 @@ def test_saved_xyz_at_target_executes_approximate_xy_precision() -> None:
     )
     controller._query_synced_status_for_absolute_motion = lambda **_kwargs: status
     controller._require_homed_axes = lambda *_args, **_kwargs: None
-    controller._require_position_for_absolute_motion = (
-        lambda *_args, **_kwargs: status.display_position
+    controller._require_position_for_absolute_motion = lambda *_args, **_kwargs: (
+        status.display_position
     )
     precise: list[dict[str, float]] = []
-    controller._execute_precision_axis_targets_locked = (
-        lambda targets, **_kwargs: precise.append(dict(targets))
+    controller._execute_precision_axis_targets_locked = lambda targets, **_kwargs: (
+        precise.append(dict(targets))
     )
     controller._wait_for_idle = lambda *_args, **_kwargs: None
     controller._query_current_status = lambda: None
@@ -304,12 +322,12 @@ def test_saved_xyz_zero_backlash_profile_preserves_at_target_noop() -> None:
     )
     controller._query_synced_status_for_absolute_motion = lambda **_kwargs: status
     controller._require_homed_axes = lambda *_args, **_kwargs: None
-    controller._require_position_for_absolute_motion = (
-        lambda *_args, **_kwargs: status.display_position
+    controller._require_position_for_absolute_motion = lambda *_args, **_kwargs: (
+        status.display_position
     )
     precise: list[dict[str, float]] = []
-    controller._execute_precision_axis_targets_locked = (
-        lambda targets, **_kwargs: precise.append(dict(targets))
+    controller._execute_precision_axis_targets_locked = lambda targets, **_kwargs: (
+        precise.append(dict(targets))
     )
     controller._wait_for_idle = lambda *_args, **_kwargs: None
     controller._query_current_status = lambda: None
@@ -347,12 +365,12 @@ def test_saved_xyz_exact_precision_z_preserves_at_target_noop() -> None:
     )
     controller._query_synced_status_for_absolute_motion = lambda **_kwargs: status
     controller._require_homed_axes = lambda *_args, **_kwargs: None
-    controller._require_position_for_absolute_motion = (
-        lambda *_args, **_kwargs: status.display_position
+    controller._require_position_for_absolute_motion = lambda *_args, **_kwargs: (
+        status.display_position
     )
     precise: list[dict[str, float]] = []
-    controller._execute_precision_axis_targets_locked = (
-        lambda targets, **_kwargs: precise.append(dict(targets))
+    controller._execute_precision_axis_targets_locked = lambda targets, **_kwargs: (
+        precise.append(dict(targets))
     )
     controller._wait_for_idle = lambda *_args, **_kwargs: None
     controller._query_current_status = lambda: None

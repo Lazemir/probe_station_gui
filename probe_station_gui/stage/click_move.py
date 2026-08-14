@@ -50,10 +50,10 @@ class StageControllerClickMoveMixin(_StageControllerClickCalibrationMixin):
             busy_message="Stage is busy. Ignoring the new click.",
         )
 
-    def request_move_to_xy(self, target_x_mm: float, target_y_mm: float) -> None:
+    def request_move_to_xy(self, target_x_mm: float, target_y_mm: float) -> bool:
         """Move to an absolute X/Y coordinate in the configured report mode."""
 
-        self._start_background_task(
+        return self._start_background_task(
             target=self._run_move_to_xy,
             args=(float(target_x_mm), float(target_y_mm)),
             busy_message="Stage is busy. Ignoring absolute move request.",

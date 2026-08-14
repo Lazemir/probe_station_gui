@@ -46,6 +46,7 @@ from tests.app.route_run_execution_support import (
     activate_route_run,
     install_route_run_execution,
 )
+from tests.stage.controller_test_support import StageController as RealStageController
 
 
 class _LayoutStateAdapter:
@@ -830,3 +831,38 @@ def test_move_to_design_coordinate_reports_busy_race_rejection() -> None:
     assert accepted is False
     assert window._pending_planned_move_target_xy is None
     assert window._pending_planned_move_source_label is None
+
+
+def test_move_to_design_coordinate_reports_real_controller_rejection() -> None:
+    window, _stage_controller, _statuses = _make_window()
+    stage_controller = RealStageController()
+    stage_controller._start_background_task = lambda **_kwargs: False
+    window.stage_controller = stage_controller
+    session_navigation.load_document(
+        window._design_session,
+        DesignDocument(
+            path=Path("C:/designs/sample.gds"),
+            library=object(),
+            top_cell=object(),
+            top_cell_name="TOP",
+            cell_names=("TOP",),
+            dbu=1e-6,
+            user_unit=1e-9,
+            bounds=(0.0, 0.0, 1.0, 1.0),
+            polygons_by_layer={(1, 0): (np.asarray([[0.0, 0.0], [1.0, 0.0]]),)},
+            visible_layers=frozenset({(1, 0)}),
+        ),
+    )
+
+    try:
+        accepted = Main._move_to_design_coordinate(
+            window,
+            (100.0, 200.0),
+            source_label="focus reference",
+        )
+
+        assert accepted is False
+        assert window._pending_planned_move_target_xy is None
+        assert window._pending_planned_move_source_label is None
+    finally:
+        stage_controller.shutdown()
