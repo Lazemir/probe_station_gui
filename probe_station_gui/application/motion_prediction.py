@@ -2,52 +2,14 @@ from __future__ import annotations
 
 import logging
 import re
-import time
 from PySide6.QtCore import QTimer
-from probe_station_gui.stage import position_update as stage_position_update
+from probe_station_gui.stage.exact_step import ExactStepClearReason
+from probe_station_gui.views import main_window_coordinate_step as coordinate_step
 
 logger = logging.getLogger("main")
 
 
 class _MainMotionPredictionMixin:
-    def _advance_motion_prediction(self) -> None:
-        if self._manual_jog_prediction.prediction_active():
-            self._advance_manual_jog_prediction()
-            return
-        self._manual_jog_timer.stop()
-
-    def _advance_manual_jog_prediction(self) -> None:
-        now = time.monotonic()
-        result = self._manual_jog_prediction.advance(
-            now=now,
-            coordinate_move_stage_position=(
-                self._stage_motion.snapshot().coordinate_stage_position
-            ),
-            latest_stage_position=self.stage_controller.latest_stage_position(),
-            current_design_stage_xy=self._current_design_stage_xy,
-        )
-        if result.log_tick:
-            design_stage_xy = (
-                self._design_xy_from_raw_stage_xy(self._manual_jog_prediction.stage_xy)
-                if self._manual_jog_prediction.stage_xy is not None
-                else None
-            )
-            logger.debug(
-                "MOTION PREDICTION tick stage=%s design=%s dt=%.4f velocity=(%.4f, %.4f)",
-                self._format_optional_point(self._manual_jog_prediction.stage_xy),
-                self._format_optional_point(design_stage_xy),
-                result.dt,
-                result.velocity_xy[0],
-                result.velocity_xy[1],
-            )
-        if result.publish_position is not None:
-            stage_position_update.publish_stage_position_estimate(
-                self,
-                result.publish_position,
-            )
-        if result.stop_timer:
-            self._manual_jog_timer.stop()
-
     def _schedule_status_refreshes(self, delays_ms: tuple[int, ...]) -> None:
         for delay_ms in delays_ms:
             QTimer.singleShot(delay_ms, self.stage_controller.request_status_refresh)
@@ -56,7 +18,10 @@ class _MainMotionPredictionMixin:
         stripped = command.strip().upper()
         if not stripped:
             return
-        self._clear_exact_step_targets()
+        coordinate_step.clear_exact_steps(
+            self,
+            ExactStepClearReason.MANUAL_TERMINAL_COMMAND,
+        )
         self.stage_controller.invalidate_needles_state()
         self.stage_controller.invalidate_coordinate_confidence(
             "Manual controller command."

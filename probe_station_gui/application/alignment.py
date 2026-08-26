@@ -12,7 +12,9 @@ from probe_station_gui.coordinates.coordinator_model import (
 from probe_station_gui.design.model import DesignModelError
 from probe_station_gui.design import objective_alignment as alignment
 from probe_station_gui.settings.objective_config import normalize_objective_name
+from probe_station_gui.stage.exact_step import ExactStepClearReason
 from probe_station_gui.views import main_window_coordinate_flow as coordinate_flow
+from probe_station_gui.views import main_window_coordinate_step as coordinate_step
 
 logger = logging.getLogger("main")
 
@@ -166,7 +168,10 @@ class _MainAlignmentMixin:
 
     def _zero_b_axis(self) -> None:
         try:
-            self._clear_exact_step_targets()
+            coordinate_step.clear_exact_steps(
+                self,
+                ExactStepClearReason.ALIGNMENT_CHANGED,
+            )
             self._invalidate_design_registration(
                 "Design registration cleared after B-axis zeroing."
             )

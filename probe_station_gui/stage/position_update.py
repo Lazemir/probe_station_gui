@@ -87,13 +87,20 @@ def position_with_stage_xy(
 def seed_motion_prediction_position(
     owner: StagePositionUpdateOwner,
 ) -> tuple[float, ...] | None:
-    return owner._manual_jog_prediction.seed_position(
-        coordinate_move_stage_position=(
-            owner._stage_motion.snapshot().coordinate_stage_position
-        ),
-        latest_stage_position=owner.stage_controller.latest_stage_position(),
-        current_design_stage_xy=owner._current_design_stage_xy,
-    )
+    motion = owner._stage_motion.snapshot()
+    for candidate in (
+        motion.coordinate_stage_position,
+        motion.presented_position,
+        owner.stage_controller.latest_stage_position(),
+    ):
+        if isinstance(candidate, (tuple, list)) and len(candidate) >= 2:
+            try:
+                return tuple(float(value) for value in candidate)
+            except (TypeError, ValueError):
+                continue
+    if owner._current_design_stage_xy is not None:
+        return position_with_stage_xy(owner, owner._current_design_stage_xy)
+    return None
 
 
 def publish_stage_position_estimate(
@@ -124,22 +131,13 @@ def publish_stage_position_estimate(
 def preferred_design_stage_xy(
     owner: StagePositionUpdateOwner,
 ) -> tuple[float, float] | None:
-    coordinate_position = owner._stage_motion.snapshot().coordinate_stage_position
+    motion = owner._stage_motion.snapshot()
+    coordinate_position = motion.coordinate_stage_position
     if coordinate_position is not None:
         stage_xy = stage_xy_from_position(coordinate_position)
         if stage_xy is not None:
             return stage_xy
-    stage_xy = owner._manual_jog_prediction.predicted_stage_xy(time.monotonic())
-    if stage_xy is not None:
-        return stage_xy
-    stage_xy = owner._manual_jog_prediction.resolve_waiting_stage_xy(
-        now=time.monotonic(),
-        latest_state=owner.stage_controller.latest_stage_state(),
-        last_status_timestamp=owner.stage_controller.last_status_timestamp(),
-    )
-    if stage_xy is not None:
-        return stage_xy
-    presented_stage_xy = owner._stage_motion.snapshot().presented_stage_xy
+    presented_stage_xy = motion.presented_stage_xy
     if presented_stage_xy is not None:
         return presented_stage_xy
     latest = owner.stage_controller.latest_stage_position()

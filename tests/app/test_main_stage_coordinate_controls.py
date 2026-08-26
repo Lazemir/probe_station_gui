@@ -28,16 +28,12 @@ from probe_station_gui.stage.controller import StageController
 from probe_station_gui.coordinates.coordinator_model import (
     CoordinateSystemSnapshot,
 )
-from probe_station_gui.stage.exact_step import ExactStepAccumulator
 from probe_station_gui.stage.coordinate_targets import (
     CoordinateTargetCommonFeedratePlan,
 )
-from probe_station_gui.stage.coordinate_targets import (
-    CoordinateMoveCompletion,
-    CoordinateMoveDisposition,
-)
 from probe_station_gui.views import main_window_homing as homing_ui
 from probe_station_gui.views import (
+    main_window_coordinate_step as coordinate_step,
     main_window_coordinate_entry as coordinate_entry,
     main_window_needle_calibration as needle_calibration_ui,
 )
@@ -52,37 +48,6 @@ from probe_station_gui.views.microscope_interaction import (
 
 
 class MainStageCoordinateControlsTest(unittest.TestCase):
-    class _ExactStepTimer:
-        def __init__(self, callback) -> None:
-            self.callback = callback
-            self.active = False
-            self.start_count = 0
-
-        def isActive(self) -> bool:
-            return self.active
-
-        def start(self) -> None:
-            self.active = True
-            self.start_count += 1
-
-        def stop(self) -> None:
-            self.active = False
-
-        def fire(self) -> None:
-            self.active = False
-            self.callback()
-
-    def _prepare_exact_step(self, window: Main) -> "_ExactStepTimer":
-        window._exact_step_accumulator = ExactStepAccumulator(Main.STAGE_AXIS_NAMES)
-        window._exact_step_pending_axes = set()
-        window._exact_step_window_elapsed = False
-        timer = self._ExactStepTimer(lambda: Main._on_exact_step_window_elapsed(window))
-        window._exact_step_timer = timer
-        window._raw_target_from_display_value = lambda _axis, display_target: float(
-            display_target
-        )
-        return timer
-
     @staticmethod
     def _apply_curve(
         controller: StageController,
@@ -113,9 +78,11 @@ class MainStageCoordinateControlsTest(unittest.TestCase):
             ),
         )
 
-        Main._on_manual_terminal_command(window, "G1 X1")
+        with mock.patch.object(coordinate_step, "clear_exact_steps") as clear_exact:
+            Main._on_manual_terminal_command(window, "G1 X1")
 
         self.assertEqual([event[0] for event in events], ["needles", "coordinates"])
+        clear_exact.assert_called_once()
 
     @staticmethod
     def _select_gui_coordinate_system(window: Main, frame_id: str) -> object:
@@ -230,7 +197,12 @@ class MainStageCoordinateControlsTest(unittest.TestCase):
         panel.pending_targets["X"] = (1.0, 1.5)
         window._stage_position_panel = panel
         window._stage_axis_return_commits = panel.return_commits
+        window._stage_motion_axes = set()
+        window._stage_motion_blink_dimmed = False
         window._stage_motion = mock.Mock()
+        window._stage_motion.snapshot.return_value = types.SimpleNamespace(
+            exact_step_display_targets=()
+        )
         window._stage_motion.clear_pending_coordinate_edits.return_value = True
         window._stage_axis_display_values = {"X": 9.0}
         window.stage_controller = types.SimpleNamespace(
@@ -296,7 +268,6 @@ class MainStageCoordinateControlsTest(unittest.TestCase):
     def test_mode_change_restores_selected_system_before_relative_step(self) -> None:
         frame_id = "11111111-1111-4111-8111-111111111111"
         window, _controller, _joystick, _timer, _statuses = _make_main(120.0)
-        self._prepare_exact_step(window)
         motion_lease = self._select_gui_coordinate_system(window, frame_id)
         window._stage_axis_display_values["X"] = 1.0
         window._stage_motion.upsert_pending_coordinate_edit(
@@ -343,7 +314,9 @@ class MainStageCoordinateControlsTest(unittest.TestCase):
             ),
         ):
             Main._on_stage_coordinate_mode_changed(window)
-            Main._on_manual_axis_move_requested(window, "X", 0.001, "G91", 120.0)
+            coordinate_step.on_manual_axis_move_requested(
+                window, "X", 0.001, "G91", 120.0
+            )
 
         self.assertEqual(render_events, ["raw", "selected"])
         self.assertEqual(projection_calls, [(("X", 1.001),)])
@@ -832,7 +805,6 @@ class MainStageCoordinateControlsTest(unittest.TestCase):
     ) -> None:
         frame_id = "22222222-2222-4222-8222-222222222222"
         window, stage_controller, _joystick, _timer, _statuses = _make_main(120.0)
-        exact_timer = self._prepare_exact_step(window)
         motion_lease = self._select_gui_coordinate_system(window, frame_id)
         projection_calls: list[tuple[tuple[tuple[str, float], ...], str, object]] = []
 
@@ -851,33 +823,25 @@ class MainStageCoordinateControlsTest(unittest.TestCase):
         window._project_gui_coordinate_motion = project
         window._stage_axis_display_values["X"] = 1.0
 
-        Main._on_manual_axis_move_requested(window, "X", 0.001, "G91", 120.0)
-        with mock.patch.object(
-            stage_position_update,
-            "publish_stage_position_estimate",
-        ):
-            exact_timer.fire()
+        coordinate_step.on_manual_axis_move_requested(window, "X", 0.001, "G91", 120.0)
 
-        self.assertEqual(len(projection_calls), 2)
+        self.assertEqual(len(projection_calls), 1)
         self.assertEqual(
             [call[:2] for call in projection_calls],
-            [
-                ((("X", 1.001),), "G90"),
-                ((("X", 1.001),), "G90"),
-            ],
+            [((("X", 1.001),), "G90")],
         )
         self.assertTrue(all(call[2] is motion_lease for call in projection_calls))
         self.assertEqual(
-            stage_controller.requests,
-            [({"X": 10.001, "Y": 20.0}, 120.0)],
+            window._stage_motion.exact_requests[-1].move_request.targets,
+            (("X", 10.001, 1.001), ("Y", 20.0, 2.0)),
         )
+        self.assertEqual(stage_controller.requests, [])
 
     def test_api_machine_target_is_not_reused_as_selected_design_step_baseline(
         self,
     ) -> None:
         frame_id = "33333333-3333-4333-8333-333333333333"
         window, _stage_controller, _joystick, _timer, _statuses = _make_main(120.0)
-        self._prepare_exact_step(window)
         window._stage_motion.coordinate_active = True
         window._stage_motion.active_axes = frozenset({"X"})
         window._stage_motion.coordinate_display_targets = (("X", 50.0),)
@@ -904,135 +868,15 @@ class MainStageCoordinateControlsTest(unittest.TestCase):
 
         window._project_gui_coordinate_motion = project
 
-        Main._on_manual_axis_move_requested(window, "X", 0.001, "G91", 120.0)
+        coordinate_step.on_manual_axis_move_requested(window, "X", 0.001, "G91", 120.0)
 
         self.assertEqual(projection_calls, [(("X", 1.001),)])
 
-    def test_api_machine_completion_does_not_consume_equal_design_step_target(
+    def test_non_machine_step_builds_frozen_lease_then_allows_pose_rebase(
         self,
     ) -> None:
         frame_id = "33333333-3333-4333-8333-333333333333"
-        window, stage_controller, _joystick, _timer, _statuses = _make_main(120.0)
-        exact_timer = self._prepare_exact_step(window)
-        window._stage_motion.coordinate_active = True
-        window._stage_motion.active_axes = frozenset({"X"})
-        window._stage_motion.coordinate_display_targets = (("X", 50.0),)
-        stage_controller.requests.append(({"X": 50.0}, 120.0))
-        motion_lease = self._select_gui_coordinate_system(window, frame_id)
-        window._stage_axis_display_values["X"] = 49.999
-        projection_calls: list[tuple[tuple[str, float], ...]] = []
-
-        def project(axis_values, *, mode, lease, allow_pose_rebase=False):
-            self.assertEqual(mode, "G90")
-            self.assertIs(lease, motion_lease)
-            self.assertTrue(allow_pose_rebase)
-            projection_calls.append(tuple(axis_values))
-            return types.SimpleNamespace(
-                accepted=True,
-                lease=motion_lease,
-                raw_targets=(("X", 10.0),),
-                raw_distances=(("X", 0.001),),
-                display_targets=(("X", 50.0),),
-                machine_targets=(("X", 10.0),),
-                reason="",
-            )
-
-        window._project_gui_coordinate_motion = project
-        Main._on_manual_axis_move_requested(window, "X", 0.001, "G91", 120.0)
-        exact_timer.fire()
-
-        self.assertEqual(window._exact_step_accumulator.targets, {"X": 50.0})
-        self.assertEqual(len(stage_controller.requests), 1)
-
-        stage_controller.busy = False
-        stage_controller.latest_state = "Idle"
-        window._stage_motion.coordinate_active = False
-        window._stage_motion.active_axes = frozenset()
-        with mock.patch.object(
-            stage_position_update,
-            "publish_stage_position_estimate",
-        ):
-            Main._on_coordinate_move_finished(
-                window,
-                CoordinateMoveCompletion(
-                    success=True,
-                    disposition=CoordinateMoveDisposition.COMPLETED,
-                    message="",
-                    display_targets=(("X", 50.0),),
-                    display_basis=None,
-                    stage_position=(50.0, 0.0, 0.0, 0.0, 0.0, 0.0),
-                ),
-            )
-
-        self.assertEqual(projection_calls, [(("X", 50.0),), (("X", 50.0),)])
-        self.assertEqual(
-            stage_controller.requests,
-            [({"X": 50.0}, 120.0), ({"X": 10.0}, 120.0)],
-        )
-
-    def test_api_limit_failure_clears_design_step_before_stale_basis_dispatch(
-        self,
-    ) -> None:
-        frame_id = "33333333-3333-4333-8333-333333333333"
-        window, stage_controller, _joystick, _timer, _statuses = _make_main(120.0)
-        exact_timer = self._prepare_exact_step(window)
-        window._stage_motion.coordinate_active = True
-        window._stage_motion.active_axes = frozenset({"X"})
-        stage_controller.requests.append(({"X": 50.0}, 120.0))
-        motion_lease = self._select_gui_coordinate_system(window, frame_id)
-        window._stage_axis_display_values["X"] = 49.999
-        projection_calls: list[object] = []
-
-        def project(axis_values, *, mode, lease, allow_pose_rebase=False):
-            projection_calls.append(lease)
-            return types.SimpleNamespace(
-                accepted=True,
-                lease=motion_lease,
-                raw_targets=(("X", 10.0),),
-                raw_distances=(("X", 0.001),),
-                display_targets=(("X", 50.0),),
-                machine_targets=(("X", 10.0),),
-                reason="",
-            )
-
-        window._project_gui_coordinate_motion = project
-        Main._on_manual_axis_move_requested(window, "X", 0.001, "G91", 120.0)
-        exact_timer.fire()
-        changed_pivot_lease = types.SimpleNamespace(
-            basis_fingerprint=(frame_id, "changed-pivot")
-        )
-        window._coordinate_system_coordinator.snapshot = lambda: types.SimpleNamespace(
-            selected_frame_id=frame_id,
-            display_plan=types.SimpleNamespace(selection_available=True),
-            motion_lease=changed_pivot_lease,
-        )
-        stage_controller.busy = False
-
-        window._stage_motion.coordinate_active = False
-        Main._on_coordinate_move_finished(
-            window,
-            CoordinateMoveCompletion(
-                success=False,
-                disposition=CoordinateMoveDisposition.FAILED,
-                message="Limit reached.",
-                display_targets=(("X", 50.0),),
-                display_basis=None,
-                stage_position=None,
-            ),
-        )
-
-        self.assertEqual(projection_calls, [motion_lease])
-        self.assertEqual(stage_controller.requests, [({"X": 50.0}, 120.0)])
-        self.assertEqual(window._exact_step_accumulator.targets, {})
-        self.assertEqual(window._stage_motion.pending_coordinate_edits().targets, ())
-        self.assertFalse(exact_timer.isActive())
-
-    def test_non_machine_step_followup_rebases_pose_on_same_coordinate_basis(
-        self,
-    ) -> None:
-        frame_id = "33333333-3333-4333-8333-333333333333"
-        window, stage_controller, _joystick, _timer, _statuses = _make_main(120.0)
-        exact_timer = self._prepare_exact_step(window)
+        window, _controller, _joystick, _timer, _statuses = _make_main(120.0)
         start_lease = self._select_gui_coordinate_system(window, frame_id)
         current_lease = {"value": start_lease}
         window._coordinate_system_coordinator.snapshot = lambda: types.SimpleNamespace(
@@ -1040,327 +884,72 @@ class MainStageCoordinateControlsTest(unittest.TestCase):
             display_plan=types.SimpleNamespace(selection_available=True),
             motion_lease=current_lease["value"],
         )
-        calls: list[tuple[object, bool, tuple[tuple[str, float], ...]]] = []
+        calls: list[tuple[object, bool]] = []
 
-        def project(
-            axis_values,
-            *,
-            mode,
-            lease,
-            allow_pose_rebase=False,
-        ):
-            values = tuple(axis_values)
-            calls.append((lease, bool(allow_pose_rebase), values))
-            if lease is not current_lease["value"] and not allow_pose_rebase:
-                return types.SimpleNamespace(
-                    accepted=False,
-                    lease=current_lease["value"],
-                    raw_targets=(),
-                    raw_distances=(),
-                    display_targets=(),
-                    machine_targets=(),
-                    reason="Coordinate System authority changed before movement.",
-                )
-            display_x = dict(values)["X"]
+        def project(axis_values, *, mode, lease, allow_pose_rebase=False):
+            calls.append((lease, bool(allow_pose_rebase)))
+            display_x = dict(axis_values)["X"]
             return types.SimpleNamespace(
                 accepted=True,
                 lease=current_lease["value"],
-                raw_targets=(("X", display_x + 9.0), ("Y", 20.0)),
+                raw_targets=(("X", display_x + 9.0),),
                 raw_distances=(("X", 0.001),),
-                display_targets=(("X", display_x), ("Y", 2.0)),
-                machine_targets=(("X", display_x), ("Y", 2.0)),
+                display_targets=(("X", display_x),),
+                machine_targets=(("X", display_x),),
                 reason="",
             )
 
         window._project_gui_coordinate_motion = project
-        window._stage_axis_display_values.update({"X": 1.0, "Y": 2.0})
-        Main._on_manual_axis_move_requested(window, "X", 0.001, "G91", 120.0)
-        with mock.patch.object(
-            stage_position_update,
-            "publish_stage_position_estimate",
-        ):
-            exact_timer.fire()
+        window._stage_axis_display_values["X"] = 1.0
+        coordinate_step.on_manual_axis_move_requested(window, "X", 0.001, "G91", 120.0)
         next_lease = types.SimpleNamespace(basis_fingerprint=(frame_id,))
         current_lease["value"] = next_lease
-        stage_controller.busy = True
-        stage_controller.latest_state = "Jog"
+        window._stage_motion.coordinate_active = True
+        coordinate_step.on_manual_axis_move_requested(window, "X", 0.001, "G91", 120.0)
 
-        Main._on_manual_axis_move_requested(window, "X", 0.001, "G91", 120.0)
-        exact_timer.fire()
+        self.assertEqual(calls, [(start_lease, False), (start_lease, True)])
+        self.assertIs(window._stage_motion.exact_step_motion_lease, next_lease)
 
-        self.assertEqual(len(stage_controller.requests), 1)
-        stage_controller.busy = False
-        stage_controller.latest_state = "Idle"
-        window._stage_motion.coordinate_active = False
-        window._stage_motion.active_axes = frozenset()
-        with mock.patch.object(
-            stage_position_update,
-            "publish_stage_position_estimate",
-        ):
-            Main._on_coordinate_move_finished(
-                window,
-                CoordinateMoveCompletion(
-                    success=True,
-                    disposition=CoordinateMoveDisposition.COMPLETED,
-                    message="",
-                    display_targets=(("X", 1.001), ("Y", 2.0)),
-                    display_basis=(frame_id,),
-                    stage_position=(10.001, 20.0, 0.0, 0.0, 0.0, 0.0),
-                ),
-            )
-
-        self.assertEqual(len(stage_controller.requests), 2)
-        self.assertEqual([call[1] for call in calls], [False, False, True, True])
-        self.assertIs(calls[2][0], start_lease)
-        self.assertIs(calls[3][0], next_lease)
-
-    def test_step_presses_accumulate_during_one_fixed_window(self) -> None:
-        window, stage_controller, _joystick, _timer, _statuses = _make_main(120.0)
-        exact_timer = self._prepare_exact_step(window)
-        window._stage_axis_display_values["X"] = 1.0
-
-        Main._on_manual_axis_move_requested(window, "X", 0.001, "G91", 120.0)
-        Main._on_manual_axis_move_requested(window, "X", 0.001, "G91", 120.0)
-
-        self.assertEqual(exact_timer.start_count, 1)
-        self.assertEqual(stage_controller.requests, [])
-        pending = dict(
-            (axis, display)
-            for axis, _raw, display in (
-                window._stage_motion.pending_coordinate_edits().targets
-            )
-        )
-        self.assertAlmostEqual(pending["X"], 1.002)
-
-        exact_timer.fire()
-
-        self.assertEqual(len(stage_controller.requests), 1)
-        self.assertAlmostEqual(stage_controller.requests[0][0]["X"], 1.002)
-        self.assertEqual(stage_controller.requests[0][1], 120.0)
-        self.assertEqual(window._exact_step_accumulator.targets, {})
-
-    def test_step_press_during_motion_queues_one_followup_from_active_target(
-        self,
-    ) -> None:
-        window, stage_controller, _joystick, _timer, _statuses = _make_main(120.0)
-        exact_timer = self._prepare_exact_step(window)
-        window._stage_axis_display_values["X"] = 1.0
-
-        Main._on_manual_axis_move_requested(window, "X", 0.001, "G91", 120.0)
-        exact_timer.fire()
-        stage_controller.busy = True
-        stage_controller.latest_state = "Run"
-
-        Main._on_manual_axis_move_requested(window, "X", 0.001, "G91", 120.0)
-        Main._on_manual_axis_move_requested(window, "X", 0.001, "G91", 120.0)
-        exact_timer.fire()
-
-        self.assertEqual(stage_controller.requests, [({"X": 1.001}, 120.0)])
-
-        stage_controller.busy = False
-        stage_controller.latest_state = "Idle"
-        window._stage_motion.coordinate_active = False
-        window._stage_motion.active_axes = frozenset()
-        Main._on_coordinate_move_finished(
-            window,
-            CoordinateMoveCompletion(
-                success=True,
-                disposition=CoordinateMoveDisposition.COMPLETED,
-                message="",
-                display_targets=(("X", 1.001),),
-                display_basis=None,
-                stage_position=(1.001, 0.0, 0.0, 0.0, 0.0, 0.0),
-            ),
-        )
-
-        self.assertEqual(len(stage_controller.requests), 2)
-        self.assertAlmostEqual(stage_controller.requests[0][0]["X"], 1.001)
-        self.assertAlmostEqual(stage_controller.requests[1][0]["X"], 1.003)
-        self.assertEqual(
-            [request[1] for request in stage_controller.requests], [120.0, 120.0]
-        )
-
-    def test_opposite_step_press_that_returns_to_reached_target_sends_no_followup(
-        self,
-    ) -> None:
-        window, stage_controller, _joystick, _timer, _statuses = _make_main(120.0)
-        exact_timer = self._prepare_exact_step(window)
-        window._stage_axis_display_values["X"] = 1.0
-
-        Main._on_manual_axis_move_requested(window, "X", 0.001, "G91", 120.0)
-        exact_timer.fire()
-        stage_controller.busy = True
-        stage_controller.latest_state = "Run"
-        Main._on_manual_axis_move_requested(window, "X", 0.001, "G91", 120.0)
-        Main._on_manual_axis_move_requested(window, "X", -0.001, "G91", 120.0)
-        exact_timer.fire()
-
-        stage_controller.busy = False
-        stage_controller.latest_state = "Idle"
-        window._stage_motion.coordinate_active = False
-        window._stage_motion.active_axes = frozenset()
-        Main._on_coordinate_move_finished(
-            window,
-            CoordinateMoveCompletion(
-                success=True,
-                disposition=CoordinateMoveDisposition.COMPLETED,
-                message="",
-                display_targets=(("X", 1.001),),
-                display_basis=None,
-                stage_position=(1.001, 0.0, 0.0, 0.0, 0.0, 0.0),
-            ),
-        )
-
-        self.assertEqual(stage_controller.requests, [({"X": 1.001}, 120.0)])
-
-    def test_rejected_step_does_not_destroy_previous_valid_accumulation(self) -> None:
-        window, stage_controller, _joystick, _timer, statuses = _make_main(120.0)
-        exact_timer = self._prepare_exact_step(window)
+    def test_rejected_step_preserves_previous_valid_projected_request(self) -> None:
+        window, _controller, _joystick, _timer, statuses = _make_main(120.0)
         window._stage_axis_display_values["X"] = 1.0
         window._stage_axis_target_limit_error = lambda _axis, target: (
             "outside" if float(target) > 1.0015 else None
         )
 
-        Main._on_manual_axis_move_requested(window, "X", 0.001, "G91", 120.0)
-        Main._on_manual_axis_move_requested(window, "X", 0.001, "G91", 120.0)
-        exact_timer.fire()
+        coordinate_step.on_manual_axis_move_requested(window, "X", 0.001, "G91", 120.0)
+        coordinate_step.on_manual_axis_move_requested(window, "X", 0.001, "G91", 120.0)
 
-        self.assertEqual(stage_controller.requests, [({"X": 1.001}, 120.0)])
+        self.assertEqual(len(window._stage_motion.exact_requests), 1)
+        self.assertEqual(
+            window._stage_motion.exact_requests[0].pending_targets,
+            (("X", 1.001, 1.001),),
+        )
         self.assertIn("outside", statuses)
 
-    def test_step_window_coalesces_multiple_axes_into_one_move(self) -> None:
-        window, stage_controller, _joystick, _timer, _statuses = _make_main(120.0)
-        exact_timer = self._prepare_exact_step(window)
+    def test_step_adapter_coalesces_multiple_axes_in_resolved_request(self) -> None:
+        window, _controller, _joystick, _timer, _statuses = _make_main(120.0)
         window._stage_axis_display_values.update({"X": 1.0, "Y": 2.0})
 
-        Main._on_manual_axis_move_requested(window, "X", 0.001, "G91", 120.0)
-        Main._on_manual_axis_move_requested(window, "Y", -0.002, "G91", 120.0)
-        exact_timer.fire()
+        coordinate_step.on_manual_axis_move_requested(window, "X", 0.001, "G91", 120.0)
+        coordinate_step.on_manual_axis_move_requested(window, "Y", -0.002, "G91", 120.0)
 
-        self.assertEqual(len(stage_controller.requests), 1)
-        targets, feedrate = stage_controller.requests[0]
-        self.assertAlmostEqual(targets["X"], 1.001)
-        self.assertAlmostEqual(targets["Y"], 1.998)
-        self.assertEqual(feedrate, 120.0)
-
-    def test_failed_exact_move_clears_deferred_followup(self) -> None:
-        window, stage_controller, _joystick, _timer, _statuses = _make_main(120.0)
-        exact_timer = self._prepare_exact_step(window)
-        window._stage_axis_display_values["X"] = 1.0
-        Main._on_manual_axis_move_requested(window, "X", 0.001, "G91", 120.0)
-        exact_timer.fire()
-        stage_controller.busy = True
-        Main._on_manual_axis_move_requested(window, "X", 0.001, "G91", 120.0)
-
-        window._stage_motion.coordinate_active = False
-        Main._on_coordinate_move_finished(
-            window,
-            CoordinateMoveCompletion(
-                success=False,
-                disposition=CoordinateMoveDisposition.FAILED,
-                message="Move failed.",
-                display_targets=(("X", 1.001),),
-                display_basis=None,
-                stage_position=None,
-            ),
+        self.assertEqual(
+            window._stage_motion.exact_requests[-1].move_request.targets,
+            (("X", 1.001, 1.001), ("Y", 1.998, 1.998)),
         )
 
-        self.assertEqual(window._exact_step_accumulator.targets, {})
-        self.assertEqual(window._stage_motion.pending_coordinate_edits().targets, ())
-        self.assertFalse(exact_timer.isActive())
-
-    def test_leaving_step_mode_clears_accumulated_target(self) -> None:
-        window, stage_controller, _joystick, _timer, _statuses = _make_main(120.0)
+    def test_leaving_step_mode_calls_semantic_session_clear(self) -> None:
+        window, _controller, _joystick, _timer, _statuses = _make_main(120.0)
         window.settings_manager = _FakeSettingsManager()
         window.settings_manager.settings.jog.mode = "step"
-        exact_timer = self._prepare_exact_step(window)
         window._stage_axis_display_values["X"] = 1.0
-        Main._on_manual_axis_move_requested(window, "X", 0.001, "G91", 120.0)
+        coordinate_step.on_manual_axis_move_requested(window, "X", 0.001, "G91", 120.0)
 
         Main._save_jog_control_mode(window, "jog")
-        exact_timer.fire()
 
-        self.assertEqual(stage_controller.requests, [])
+        self.assertEqual(window._stage_motion.snapshot().exact_step_display_targets, ())
         self.assertEqual(window._stage_motion.pending_coordinate_edits().targets, ())
-
-    def test_manual_jog_clears_active_coordinate_move_tracking(self) -> None:
-        window, _stage_controller, _joystick, _timer, _statuses = _make_main(120.0)
-        window._stage_motion.coordinate_active = True
-        window._stage_motion.active_axes = frozenset({"X", "Z"})
-        window._stage_motion.coordinate_stage_position = (
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-        )
-
-        Main._on_manual_jog_command_changed(window, (("X", -250.0),), 60.0)
-
-        self.assertFalse(window._stage_motion.snapshot().coordinate_active)
-        self.assertEqual(window._stage_motion_axes, {"X"})
-
-    def test_manual_jog_start_pauses_terminal_poll_and_publishes_seeded_position(
-        self,
-    ) -> None:
-        window, stage_controller, _joystick, _timer, _statuses = _make_main(120.0)
-        paused: list[bool] = []
-        published: list[tuple[float, ...]] = []
-        window.serial_terminal_panel = types.SimpleNamespace(
-            set_live_poll_paused=lambda paused_state: paused.append(bool(paused_state))
-        )
-        stage_controller.latest_position = (1.0, 2.0, 3.0, 0.0, 0.0, 0.0)
-
-        with mock.patch.object(
-            stage_position_update,
-            "publish_stage_position_estimate",
-            side_effect=lambda _owner, position: published.append(
-                tuple(float(value) for value in position)
-            ),
-        ):
-            Main._on_manual_jog_command_changed(window, (("X", 2.0),), 60.0)
-
-        self.assertEqual(paused, [True])
-        self.assertEqual(published, [(1.0, 2.0, 3.0, 0.0, 0.0, 0.0)])
-
-    def test_manual_jog_stop_resumes_terminal_poll_and_schedules_refreshes(
-        self,
-    ) -> None:
-        window, stage_controller, _joystick, _timer, _statuses = _make_main(120.0)
-        paused: list[bool] = []
-        refreshes: list[tuple[int, ...]] = []
-        single_shots: list[int] = []
-        window.serial_terminal_panel = types.SimpleNamespace(
-            set_live_poll_paused=lambda paused_state: paused.append(bool(paused_state))
-        )
-        window._manual_jog_prediction.axis_velocities = {"X": 1.0}
-        window._manual_jog_prediction.stage_position = (
-            1.0,
-            2.0,
-            3.0,
-            0.0,
-            0.0,
-            0.0,
-        )
-        window._manual_jog_prediction.stage_xy = (1.0, 2.0)
-        window._schedule_status_refreshes = lambda delays: refreshes.append(
-            tuple(delays)
-        )
-        stage_controller.last_status_time = 12.0
-
-        def run_single_shot(delay: int, callback) -> None:
-            single_shots.append(int(delay))
-            callback()
-
-        with mock.patch.object(
-            main_module.QTimer, "singleShot", side_effect=run_single_shot
-        ):
-            Main._on_manual_jog_stopped(window)
-
-        self.assertEqual(single_shots, [Main.TERMINAL_RESUME_AFTER_JOG_MS])
-        self.assertEqual(paused, [False])
-        self.assertEqual(refreshes, [tuple(Main.MANUAL_JOG_SETTLE_POLL_DELAYS_MS)])
 
     def test_cancel_button_is_enabled_for_generic_busy_stage_task(self) -> None:
         window, stage_controller, cancel_button, _statuses = _make_cancel_main()

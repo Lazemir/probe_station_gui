@@ -408,7 +408,7 @@ def test_identical_newer_controller_status_releases_planned_wait_without_idle_re
         controller._update_cached_positions(status)
         application.processEvents()
 
-        assert session._last_observation.status_timestamp == 12.0
+        assert session._position.last_observation.status_timestamp == 12.0
         assert len(presentations) == presentation_count + 1
         assert presentations[-1].material_change is False
     finally:

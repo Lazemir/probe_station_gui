@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Protocol
 
+from probe_station_gui.stage.types import StageMotionResetReason
 from probe_station_gui.views import main_window_connection_flow as connection_flow
 
 
@@ -27,8 +28,8 @@ class MainWindowShutdownOwner(Protocol):
     _api_server: Any
     _api_bridge: Any
     _api_stage_command_runtime: Any
+    _stage_motion: Any
     _design_position_timer: Any
-    _manual_jog_timer: Any
     _stage_motion_blink_timer: Any
     _linear_feedrate_save_timer: Any
     _route_run_execution: Any
@@ -103,7 +104,7 @@ def _stop_services_and_timers(owner: MainWindowShutdownOwner) -> None:
         owner._api_server.stop()
     owner._telegram_runtime.stop()
     owner._design_position_timer.stop()
-    owner._manual_jog_timer.stop()
+    owner._stage_motion.reset(StageMotionResetReason.APPLICATION_CLOSED)
     owner._stage_motion_blink_timer.stop()
     if owner._linear_feedrate_save_timer.isActive():
         owner._linear_feedrate_save_timer.stop()

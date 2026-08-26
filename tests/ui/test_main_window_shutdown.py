@@ -10,6 +10,7 @@ from probe_station_gui.application.route_run_execution import (
     RouteRunKind,
     _RouteRunExecutionSlot,
 )
+from probe_station_gui.stage.types import StageMotionResetReason
 from probe_station_gui.views import main_window_shutdown as shutdown_ui
 
 
@@ -60,7 +61,9 @@ def test_service_shutdown_stops_coordinate_and_selection_stores() -> None:
         _api_server=None,
         _telegram_runtime=SimpleNamespace(stop=lambda: None),
         _design_position_timer=SimpleNamespace(stop=lambda: None),
-        _manual_jog_timer=SimpleNamespace(stop=lambda: None),
+        _stage_motion=SimpleNamespace(
+            reset=lambda reason: events.append(("stage_motion_reset", reason))
+        ),
         _stage_motion_blink_timer=SimpleNamespace(stop=lambda: None),
         _linear_feedrate_save_timer=SimpleNamespace(isActive=lambda: False),
         _save_pending_linear_feedrate_default=lambda: None,
@@ -73,7 +76,12 @@ def test_service_shutdown_stops_coordinate_and_selection_stores() -> None:
 
     shutdown_ui._stop_services_and_timers(owner)
 
-    assert events == [("markup_stop",), ("frame_stop",), ("selection_stop",)]
+    assert events == [
+        ("stage_motion_reset", StageMotionResetReason.APPLICATION_CLOSED),
+        ("markup_stop",),
+        ("frame_stop",),
+        ("selection_stop",),
+    ]
 
 
 def test_shutdown_fails_closed_when_runtime_does_not_drain() -> None:
@@ -223,8 +231,8 @@ def test_close_event_preserves_shutdown_order(monkeypatch) -> None:
         _design_position_timer=SimpleNamespace(
             stop=lambda: events.append(("design_timer_stop",))
         ),
-        _manual_jog_timer=SimpleNamespace(
-            stop=lambda: events.append(("manual_timer_stop",))
+        _stage_motion=SimpleNamespace(
+            reset=lambda reason: events.append(("stage_motion_reset", reason))
         ),
         _stage_motion_blink_timer=SimpleNamespace(
             stop=lambda: events.append(("blink_timer_stop",))
@@ -332,7 +340,7 @@ def test_close_event_preserves_shutdown_order(monkeypatch) -> None:
         ("api_stop",),
         ("telegram_stop",),
         ("design_timer_stop",),
-        ("manual_timer_stop",),
+        ("stage_motion_reset", StageMotionResetReason.APPLICATION_CLOSED),
         ("blink_timer_stop",),
         ("feedrate_timer_stop",),
         ("save_feedrate",),

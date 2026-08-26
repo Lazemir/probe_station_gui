@@ -697,6 +697,7 @@ def _make_main(
     window._current_linear_feedrate = lambda: current_feedrate
     window._stage_axis_target_limit_error = lambda _axis, _target: None
     window._machine_axis_target_limit_error = lambda _axis, _target: None
+    window._raw_target_from_display_value = lambda _axis, target: float(target)
     window.view = _FakeView()
 
     def position_with_axis_values(

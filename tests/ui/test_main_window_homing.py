@@ -35,23 +35,33 @@ class _StageController:
 
 def _owner(events: list[object]) -> SimpleNamespace:
     stage_controller = _StageController(events)
+    motion_state = SimpleNamespace(
+        presented_position=None,
+        manual_prediction_available=False,
+        planned_stage_xy=None,
+        planned_prediction_active=False,
+        planned_waiting_for_fresh_status=False,
+        coordinate_active=False,
+        coordinate_stage_position=None,
+        exact_step_display_targets=(),
+    )
+    motion_state.snapshot = lambda: SimpleNamespace(
+        presented_position=motion_state.presented_position,
+        manual_prediction_available=motion_state.manual_prediction_available,
+        planned_stage_xy=motion_state.planned_stage_xy,
+        planned_prediction_active=motion_state.planned_prediction_active,
+        planned_waiting_for_fresh_status=motion_state.planned_waiting_for_fresh_status,
+        coordinate_active=motion_state.coordinate_active,
+        coordinate_stage_position=motion_state.coordinate_stage_position,
+        exact_step_display_targets=motion_state.exact_step_display_targets,
+    )
+    motion_state.clear_exact_steps = lambda reason: events.append(
+        ("clear_exact_step", reason)
+    )
     owner = SimpleNamespace(
         STAGE_AXIS_NAMES=("X", "Y", "Z", "A", "B"),
         _stage_limit_axes=set(),
-        _manual_jog_prediction=SimpleNamespace(
-            prediction_available=lambda _now: False,
-            stage_position=None,
-        ),
-        _stage_motion=SimpleNamespace(
-            snapshot=lambda: SimpleNamespace(
-                presented_position=None,
-                planned_stage_xy=None,
-                planned_prediction_active=False,
-                planned_waiting_for_fresh_status=False,
-                coordinate_active=False,
-                coordinate_stage_position=None,
-            )
-        ),
+        _stage_motion=motion_state,
         _pending_homing_axes=[],
         _homing_active_key=None,
         _stage_motion_axes=set(),
@@ -117,17 +127,17 @@ def test_axis_home_request_normalizes_axis_before_queue(monkeypatch) -> None:
     homing_ui.request_home_axis_from_ui(owner, " x ")
     homing_ui.request_home_axis_from_ui(owner, "bad")
 
-    assert events == [("queue", ["X"])]
+    assert ("queue", ["X"]) in events
+    assert events[0][0] == "clear_exact_step"
 
 
 def test_home_request_clears_deferred_exact_step() -> None:
     events: list[object] = []
     owner = _owner(events)
-    owner._clear_exact_step_targets = lambda: events.append(("clear_exact_step",))
 
     homing_ui.request_home_axis_from_ui(owner, "X")
 
-    assert events[0] == ("clear_exact_step",)
+    assert events[0][0] == "clear_exact_step"
     assert ("home_axis", "X") in events
 
 
@@ -236,10 +246,8 @@ def test_limit_axis_update_normalizes_axes_and_preserves_manual_jog_prediction(
 ) -> None:
     events: list[object] = []
     owner = _owner(events)
-    owner._manual_jog_prediction = SimpleNamespace(
-        prediction_available=lambda _now: True,
-        stage_position=(9.0, 8.0, 7.0),
-    )
+    owner._stage_motion.manual_prediction_available = True
+    owner._stage_motion.presented_position = (9.0, 8.0, 7.0)
     monkeypatch.setattr(
         homing_ui.stage_position_panel,
         "update_stage_position_display",

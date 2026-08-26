@@ -26,7 +26,6 @@ def serial_baud_rate(serial_port: object) -> int:
 
 
 def on_serial_connected(owner: object, serial_port: object) -> None:
-    _clear_exact_step_targets(owner)
     if owner.serial_connection and owner.serial_connection.is_open:
         owner.serial_connection.close()
     owner.serial_connection = serial_port
@@ -68,7 +67,6 @@ def on_serial_disconnected(owner: object) -> None:
         stop_jog_before_serial_close,
     )
 
-    _clear_exact_step_targets(owner)
     stop_jog_before_serial_close(owner, "serial disconnect")
     if owner.serial_connection and owner.serial_connection.is_open:
         owner.serial_connection.close()
@@ -76,8 +74,6 @@ def on_serial_disconnected(owner: object) -> None:
     persist_serial_connection_state(owner, False)
     owner._stage_unhomed_display_origins.clear()
     owner._stage_motion.reset(StageMotionResetReason.CONNECTION_CHANGED)
-    owner._manual_jog_timer.stop()
-    owner._manual_jog_prediction.reset_tracking()
     owner._controller_reboot_recovery_scheduled = False
     homing_ui.clear_pending_homing_queue(owner)
     stage_position_panel.clear_stage_motion_axes(owner)
@@ -210,17 +206,10 @@ def apply_joystick_feedrate_preferences(owner: object) -> None:
 
 def on_controller_reboot_detected(owner: object) -> None:
     owner._stage_motion.reset(StageMotionResetReason.CONNECTION_CHANGED)
-    _clear_exact_step_targets(owner)
     owner._stage_unhomed_display_origins.clear()
     owner._pending_persisted_design_state = None
     owner._pending_persisted_design_position = None
     coordinate_flow.activate_current_design(owner)
-
-
-def _clear_exact_step_targets(owner: object) -> None:
-    callback = getattr(owner, "_clear_exact_step_targets", None)
-    if callable(callback):
-        callback()
 
 
 def on_controller_reboot_ready(owner: object) -> None:

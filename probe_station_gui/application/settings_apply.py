@@ -24,8 +24,10 @@ from probe_station_gui.design.frame_registration import DesignFrameMetadata
 from probe_station_gui.settings.dialog_transaction import SettingsDialogContext
 from probe_station_gui.settings.manager import Settings
 from probe_station_gui.settings.objective_config import normalize_objective_name
+from probe_station_gui.stage.exact_step import ExactStepClearReason
 from probe_station_gui.views import main_window_connection_flow as connection_flow
 from probe_station_gui.views import main_window_coordinate_flow as coordinate_flow
+from probe_station_gui.views import main_window_coordinate_step as coordinate_step
 from probe_station_gui.views import (
     main_window_needle_calibration as needle_calibration_ui,
 )
@@ -141,7 +143,7 @@ class _MainSettingsApplyMixin:
         self._show_status("Align draft discarded.", 2500)
 
     def _apply_settings(self, *, apply_objective_runtime: bool = True) -> None:
-        self._clear_exact_step_targets()
+        coordinate_step.clear_exact_steps(self, ExactStepClearReason.SETTINGS_CHANGED)
         connection_flow.apply_axis_feedrate_limits(
             self,
             self.stage_controller.axis_max_feedrates(),

@@ -365,6 +365,7 @@ class _FakeTerminalWindow:
         self.title = ""
         self.size: tuple[int, int] | None = None
         self.calls: list[str] = []
+        self.live_poll_states: list[bool] = []
         self.__class__.created.append(self)
 
     def setWindowFlag(self, flag: object, enabled: bool) -> None:  # noqa: N802
@@ -381,6 +382,9 @@ class _FakeTerminalWindow:
 
     def set_serial(self, serial_connection: object) -> None:
         self.serial_connection = serial_connection
+
+    def set_live_poll_paused(self, paused: bool) -> None:
+        self.live_poll_states.append(bool(paused))
 
     def show(self) -> None:
         self.calls.append("show")
@@ -402,6 +406,10 @@ def test_show_serial_terminal_window_creates_standalone_window_lazily_once() -> 
     owner.stage_controller = object()
     owner.serial_connection = object()
     owner._on_manual_terminal_command = lambda _command: None
+    live_poll_signal = _Signal()
+    owner._stage_motion = SimpleNamespace(
+        terminal_live_poll_paused_changed=live_poll_signal
+    )
 
     auxiliary_ui.show_serial_terminal_window(
         owner,
@@ -432,6 +440,8 @@ def test_show_serial_terminal_window_creates_standalone_window_lazily_once() -> 
     assert terminal.manual_command_sent.connections == [
         owner._on_manual_terminal_command
     ]
+    live_poll_signal.emit(True)
+    assert terminal.live_poll_states == [True]
 
 
 class _FakeNavigatorPanel:

@@ -308,6 +308,9 @@ def show_serial_terminal_window(
         terminal.set_stage_controller(owner.stage_controller)
         terminal.set_serial(owner.serial_connection)
         terminal.manual_command_sent.connect(owner._on_manual_terminal_command)
+        owner._stage_motion.terminal_live_poll_paused_changed.connect(
+            terminal.set_live_poll_paused
+        )
         owner.serial_terminal_panel = terminal
 
     owner.serial_terminal_panel.show()

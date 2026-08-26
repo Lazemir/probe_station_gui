@@ -24,6 +24,8 @@ class StageMotionConfig:
     manual_jog: ManualJogPredictionConfig
     coordinate_target: CoordinateTargetConfig
     settle_status_poll_delays_ms: tuple[int, ...] = ()
+    exact_step_accumulation_ms: int = 80
+    terminal_resume_after_jog_ms: int = 180
 
 
 @dataclass(frozen=True)
@@ -49,12 +51,16 @@ class StageMotionSnapshot:
     coordinate_common_feedrate: CoordinateTargetCommonFeedratePlan
     pending_edit_axes: frozenset[str]
     manual_prediction_active: bool
+    manual_prediction_available: bool
     planned_pending_target_xy: tuple[float, float] | None
     planned_pending_source_label: str | None
     planned_stage_xy: tuple[float, float] | None
     planned_prediction_active: bool
     planned_waiting_for_fresh_status: bool
     last_reported_b_position: float | None
+    exact_step_display_targets: tuple[tuple[str, float], ...]
+    exact_step_motion_lease: object | None
+    exact_step_pose_rebase_allowed: bool
 
 
 @dataclass(frozen=True)

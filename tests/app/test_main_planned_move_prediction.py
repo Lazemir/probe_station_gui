@@ -1,4 +1,3 @@
-import time
 import types
 import unittest
 from collections.abc import Callable
@@ -20,11 +19,6 @@ from probe_station_gui.coordinates.coordinator_model import (
     RegistrationWorkflowSnapshot,
 )
 from probe_station_gui.coordinates.model import PhysicalMachinePose
-from probe_station_gui.stage.manual_jog_prediction import (
-    ManualJogPredictionConfig,
-    ManualJogPredictionState,
-)
-from probe_station_gui.stage import position_update
 
 
 class _IdentityAxisCalibrationMapper:
@@ -150,51 +144,23 @@ def _make_main(
         physical_machine_pose=PhysicalMachinePose.from_mapping({}),
         coordinate_active=False,
         coordinate_stage_position=None,
+        presented_position=window.stage_controller.position,
         presented_stage_xy=None,
     )
     motion_state.snapshot = lambda: types.SimpleNamespace(
         physical_machine_pose=motion_state.physical_machine_pose,
         coordinate_active=motion_state.coordinate_active,
         coordinate_stage_position=motion_state.coordinate_stage_position,
+        presented_position=motion_state.presented_position,
         presented_stage_xy=motion_state.presented_stage_xy,
     )
     motion_state.pending_coordinate_edits = lambda: CoordinatePendingEdits((), None)
     window._stage_motion = motion_state
-    window._manual_jog_prediction = ManualJogPredictionState(
-        ManualJogPredictionConfig(
-            axis_names=Main.STAGE_AXIS_NAMES,
-            ignore_idle_after_command_s=Main.MANUAL_JOG_IGNORE_IDLE_AFTER_COMMAND_S,
-            reconcile_smooth_threshold_mm=Main.MANUAL_JOG_RECONCILE_SMOOTH_THRESHOLD_MM,
-            reconcile_smooth_alpha=Main.MANUAL_JOG_RECONCILE_SMOOTH_ALPHA,
-            status_settle_hold_s=Main.MANUAL_JOG_STATUS_SETTLE_HOLD_S,
-            default_stop_tail_s=Main.MANUAL_JOG_DEFAULT_STOP_TAIL_S,
-            stop_tail_min_s=Main.MANUAL_JOG_STOP_TAIL_MIN_S,
-            stop_tail_max_s=Main.MANUAL_JOG_STOP_TAIL_MAX_S,
-            stop_tail_learn_alpha=Main.MANUAL_JOG_STOP_TAIL_LEARN_ALPHA,
-        )
-    )
-
     window._pending_persisted_design_state = None
     window._pending_persisted_design_position = None
     window._log_design_position_reconcile = lambda predicted, actual: reconciles.append(
         (predicted, actual)
     )
-    original_smooth = window._manual_jog_prediction.smooth_actual_stage_xy
-
-    def smooth(
-        predicted: tuple[float, float],
-        actual: tuple[float, float],
-        *,
-        latest_state: str,
-    ) -> tuple[float, float]:
-        smooth_calls.append((predicted, actual))
-        return original_smooth(
-            predicted,
-            actual,
-            latest_state=latest_state,
-        )
-
-    window._manual_jog_prediction.smooth_actual_stage_xy = smooth
     window._stage_axis_fields = {}
     window._stage_unhomed_display_origins = {}
     window._stage_axis_raw_values = {}
@@ -264,12 +230,14 @@ def _prepare_design_refresh(
     window._pending_design_stage_xy = None
     motion_state = types.SimpleNamespace(
         presented_stage_xy=session_xy,
+        presented_position=(session_xy[0], session_xy[1], 0.0),
         physical_machine_pose=PhysicalMachinePose.from_mapping({}),
         coordinate_active=False,
         coordinate_stage_position=None,
     )
     motion_state.snapshot = lambda: types.SimpleNamespace(
         presented_stage_xy=motion_state.presented_stage_xy,
+        presented_position=motion_state.presented_position,
         physical_machine_pose=motion_state.physical_machine_pose,
         coordinate_active=motion_state.coordinate_active,
         coordinate_stage_position=motion_state.coordinate_stage_position,
@@ -298,9 +266,8 @@ class MainPlannedMovePredictionTest(unittest.TestCase):
     def test_design_refresh_keeps_active_manual_prediction_precedence(self) -> None:
         window, published, _reconciles, _smooth_calls = _make_main()
         _prepare_design_refresh(window)
-        window._manual_jog_prediction.stage_position = (6.0, 7.0, 4.0, 0.0, 0.0)
-        window._manual_jog_prediction.stage_xy = (6.0, 7.0)
-        window._manual_jog_prediction.axis_velocities = {"X": 1.0}
+        window._stage_motion.presented_position = (6.0, 7.0, 4.0, 0.0, 0.0)
+        window._stage_motion.presented_stage_xy = (6.0, 7.0)
 
         Main._refresh_design_position(window)
 
@@ -319,134 +286,6 @@ class MainPlannedMovePredictionTest(unittest.TestCase):
 
         set_motion_axes.assert_called_once_with(window, {"B"})
         self.assertEqual(invalidations, [])
-
-    def test_invalid_stage_position_only_updates_display(self) -> None:
-        window, published, _reconciles, _smooth_calls = _make_main(state="idle")
-        display_updates: list[object] = []
-        finished: list[object] = []
-        cleared: list[str] = []
-
-        window._clear_stage_motion_axes = lambda: cleared.append("clear")
-
-        with mock.patch.object(
-            position_update.stage_position_panel,
-            "update_stage_position_display",
-            side_effect=lambda _owner, position: display_updates.append(position),
-        ):
-            position_update.on_stage_position_changed(window, ["not", "a", "tuple"])
-
-        self.assertEqual(display_updates, [["not", "a", "tuple"]])
-        self.assertEqual(published, [])
-        self.assertEqual(finished, [])
-        self.assertEqual(cleared, [])
-
-    def test_idle_status_learns_manual_stop_tail_and_clears_waiting(self) -> None:
-        window, published, _reconciles, _smooth_calls = _make_main(state="idle")
-        prediction = window._manual_jog_prediction
-        prediction.stage_position = (5.0, 5.0, 4.0, 0.0, 0.0)
-        prediction.stage_xy = (5.0, 5.0)
-        prediction.waiting_for_fresh_status = True
-        prediction.stop_tail_position = (5.0, 5.0, 4.0, 0.0, 0.0)
-        prediction.stop_axis_velocities = {"X": 1.0}
-        prediction.stop_tail_s = 0.1
-
-        position_update.on_stage_position_changed(window, (6.0, 7.0, 4.0, 0.0, 0.0))
-
-        self.assertFalse(prediction.waiting_for_fresh_status)
-        self.assertIsNone(prediction.stop_status_timestamp)
-        self.assertEqual(prediction.stop_axis_velocities, {})
-        self.assertEqual(published[-1][:2], (6.0, 7.0))
-
-    def test_fresh_idle_manual_jog_sample_is_ignored_but_stale_idle_reconciles(
-        self,
-    ) -> None:
-        window, published, reconciles, _smooth_calls = _make_main(state="idle")
-        now = time.monotonic()
-        prediction = window._manual_jog_prediction
-        prediction.stage_position = (5.0, 5.0, 4.0, 0.0, 0.0)
-        prediction.stage_xy = (5.0, 5.0)
-        prediction.axis_velocities = {"X": 1.0}
-        prediction.command_started_at = now - 0.01
-        window.stage_controller.last_jog_write_time = now - 0.01
-
-        position_update.on_stage_position_changed(window, (0.0, 0.0, 4.0, 0.0, 0.0))
-
-        self.assertEqual(published, [])
-        self.assertEqual(reconciles, [])
-        self.assertEqual(prediction.stage_xy, (5.0, 5.0))
-
-        prediction.command_started_at = now - (
-            Main.MANUAL_JOG_IGNORE_IDLE_AFTER_COMMAND_S + 0.1
-        )
-        window.stage_controller.last_jog_write_time = now - (
-            Main.MANUAL_JOG_IGNORE_IDLE_AFTER_COMMAND_S + 0.1
-        )
-
-        position_update.on_stage_position_changed(window, (0.0, 0.0, 4.0, 0.0, 0.0))
-
-        self.assertEqual(reconciles, [((5.0, 5.0), (0.0, 0.0))])
-        self.assertEqual(published[-1][:2], (0.0, 0.0))
-
-    def test_unhomed_xy_without_manual_prediction_clears_prediction_and_finishes_when_idle(
-        self,
-    ) -> None:
-        window, published, _reconciles, _smooth_calls = _make_main(state="idle")
-        coordinate_updates: list[tuple[float, float] | None] = []
-        design_updates: list[tuple[float, float] | None] = []
-        cleared: list[str] = []
-        displayed: list[tuple[float, ...]] = []
-
-        window.stage_controller.axes_are_homed = lambda axes: False
-        window._manual_jog_prediction.stage_position = (9.0, 9.0, 9.0)
-        window._manual_jog_prediction.stage_xy = (9.0, 9.0)
-        window._update_coordinate_display = lambda *, center_xy=None, cursor_xy=None: (
-            coordinate_updates.append(center_xy)
-        )
-        window._update_design_position = lambda stage_xy: design_updates.append(
-            stage_xy
-        )
-        window._can_display_design_position = lambda: True
-        window._stage_motion_axes = {"X"}
-        window._stage_position_panel = types.SimpleNamespace(
-            refresh_axis_styles=lambda _axes, _dimmed: cleared.append("clear")
-        )
-
-        with mock.patch.object(
-            position_update.stage_position_panel,
-            "update_stage_position_display",
-            side_effect=lambda _owner, position: displayed.append(position),
-        ):
-            position_update.on_stage_position_changed(window, (1.0, 2.0, 3.0))
-
-        self.assertEqual(displayed, [(1.0, 2.0, 3.0)])
-        self.assertIsNone(window._manual_jog_prediction.stage_position)
-        self.assertIsNone(window._manual_jog_prediction.stage_xy)
-        self.assertEqual(coordinate_updates, [None])
-        self.assertEqual(design_updates, [(1.0, 2.0)])
-        self.assertEqual(cleared, ["clear"])
-        self.assertEqual(published, [])
-
-    def test_publish_happens_before_motion_clear(self) -> None:
-        window, _published, _reconciles, _smooth_calls = _make_main(state="idle")
-        calls: list[str] = []
-        window._stage_motion_axes = {"X"}
-        window._stage_position_panel = types.SimpleNamespace(
-            refresh_axis_styles=lambda _axes, _dimmed: calls.append("clear")
-        )
-
-        with mock.patch.object(
-            position_update,
-            "publish_stage_position_estimate",
-            side_effect=lambda _owner, position, **_kwargs: calls.append(
-                f"publish:{position[:2]}"
-            ),
-        ):
-            position_update.on_stage_position_changed(window, (1.0, 2.0, 3.0))
-
-        self.assertEqual(
-            calls,
-            ["publish:(1.0, 2.0)", "clear"],
-        )
 
 
 class MainPersistedDesignRestoreTest(unittest.TestCase):

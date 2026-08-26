@@ -1,13 +1,9 @@
 from __future__ import annotations
 
 import logging
-import math
-import time
-from PySide6.QtCore import QTimer, Qt
-from probe_station_gui.stage.coordinate_targets import CoordinateMoveCompletion
-from probe_station_gui.stage import position_update as stage_position_update
+from PySide6.QtCore import Qt
+from probe_station_gui.stage.exact_step import ExactStepClearReason
 from probe_station_gui.views import (
-    main_window_coordinate_motion as coordinate_motion,
     main_window_coordinate_step as coordinate_step,
     main_window_stage_position_panel as stage_position_panel_adapter,
 )
@@ -35,102 +31,6 @@ class _MainManualJogMixin:
     def _on_manual_motion_axis(self, axis: str) -> None:
         axis_name = axis.upper()
         stage_position_panel_adapter.set_stage_motion_axes(self, {axis_name})
-
-    def _on_manual_jog_command_changed(
-        self, commanded_distances: object, feedrate: float
-    ) -> None:
-        if not isinstance(commanded_distances, tuple):
-            return
-        self._clear_exact_step_targets()
-        self._stage_motion.cancel_planned_xy_move()
-        if self.serial_terminal_panel is not None:
-            self.serial_terminal_panel.set_live_poll_paused(True)
-        coordinate_snapshot = self._stage_motion.snapshot()
-        result = self._manual_jog_prediction.handle_command(
-            commanded_distances,
-            feedrate=feedrate,
-            now=time.monotonic(),
-            coordinate_move_active=coordinate_snapshot.coordinate_active,
-            coordinate_move_stage_position=(
-                coordinate_snapshot.coordinate_stage_position
-            ),
-            latest_stage_position=self.stage_controller.latest_stage_position(),
-            current_design_stage_xy=self._current_design_stage_xy,
-        )
-        if result.zero_distance:
-            logger.debug(
-                "MOTION PREDICTION stop_requested command=%s", commanded_distances
-            )
-            self._manual_jog_timer.stop()
-            stage_position_panel_adapter.clear_stage_motion_axes(self)
-            self._schedule_status_refreshes(self.MANUAL_JOG_SETTLE_POLL_DELAYS_MS)
-            return
-        if result.clear_coordinate_move_tracking:
-            logger.debug(
-                "Coordinate move tracking cleared after manual jog command: %s",
-                commanded_distances,
-            )
-            self._stage_motion.discard_coordinate_tracking_for_manual_jog()
-        stage_position_panel_adapter.set_stage_motion_axes(
-            self,
-            set(result.motion_axes),
-        )
-        prediction = self._manual_jog_prediction
-        design_stage_xy = (
-            self._design_xy_from_raw_stage_xy(prediction.stage_xy)
-            if prediction.stage_xy is not None
-            else None
-        )
-        velocity_x, velocity_y = prediction.velocity_xy or (0.0, 0.0)
-        logger.debug(
-            "MOTION PREDICTION start stage=%s design=%s velocity=(%.4f, %.4f) feedrate=%.3f command=%s source=%s",
-            self._format_optional_point(prediction.stage_xy),
-            self._format_optional_point(design_stage_xy),
-            velocity_x,
-            velocity_y,
-            float(feedrate),
-            commanded_distances,
-            result.stage_source,
-        )
-        if result.publish_position is not None:
-            stage_position_update.publish_stage_position_estimate(
-                self,
-                result.publish_position,
-            )
-        if result.start_timer and not self._manual_jog_timer.isActive():
-            self._manual_jog_timer.start()
-
-    def _on_manual_jog_stopped(self) -> None:
-        prediction = self._manual_jog_prediction
-        result = prediction.handle_stop(
-            now=time.monotonic(),
-            last_status_timestamp=self.stage_controller.last_status_timestamp(),
-        )
-        design_stage_xy = (
-            self._design_xy_from_raw_stage_xy(prediction.stage_xy)
-            if prediction.stage_xy is not None
-            else None
-        )
-        logger.debug(
-            "MOTION PREDICTION stop_requested stage=%s design=%s stop_tail_s=%.4f",
-            self._format_optional_point(prediction.stage_xy),
-            self._format_optional_point(design_stage_xy),
-            result.stop_tail_s,
-        )
-        if result.start_timer and not self._manual_jog_timer.isActive():
-            self._manual_jog_timer.start()
-        if result.stop_timer:
-            self._manual_jog_timer.stop()
-        if self.serial_terminal_panel is not None and result.resume_live_poll:
-            QTimer.singleShot(
-                self.TERMINAL_RESUME_AFTER_JOG_MS,
-                lambda: (
-                    self.serial_terminal_panel
-                    and self.serial_terminal_panel.set_live_poll_paused(False)
-                ),
-            )
-        if result.schedule_status_refreshes:
-            self._schedule_status_refreshes(self.MANUAL_JOG_SETTLE_POLL_DELAYS_MS)
 
     def _save_manual_axis_jog_settings(
         self, axis: str, distance_mm: float, mode: str, feedrate_mm_min: float
@@ -165,7 +65,10 @@ class _MainManualJogMixin:
         if control_mode not in {"jog", "step"}:
             return
         if control_mode != "step":
-            self._clear_exact_step_targets()
+            coordinate_step.clear_exact_steps(
+                self,
+                ExactStepClearReason.CONTROL_MODE_CHANGED,
+            )
         settings = self.settings_manager.settings.clone()
         if settings.jog.mode == control_mode:
             return
@@ -215,93 +118,6 @@ class _MainManualJogMixin:
             feedrate_mm_min,
         )
         self._stage_motion.set_coordinate_feedrate(feedrate_mm_min)
-
-    def _on_manual_axis_move_requested(
-        self,
-        axis: str,
-        value_mm: float,
-        mode: str,
-        feedrate_mm_min: float,
-    ) -> None:
-        coordinate_step.on_manual_axis_move_requested(
-            self,
-            axis,
-            value_mm,
-            mode,
-            feedrate_mm_min,
-        )
-
-    def _on_exact_step_window_elapsed(self) -> None:
-        self._exact_step_window_elapsed = True
-        self._dispatch_exact_step_targets()
-
-    def _dispatch_exact_step_targets(self) -> bool:
-        return coordinate_step.dispatch_exact_step_targets(self)
-
-    def _on_coordinate_move_finished(
-        self,
-        completion: CoordinateMoveCompletion,
-    ) -> None:
-        if not isinstance(completion, CoordinateMoveCompletion):
-            raise TypeError("completion must be a CoordinateMoveCompletion")
-        if not completion.success:
-            self._clear_exact_step_targets()
-            return
-        accumulator = getattr(self, "_exact_step_accumulator", None)
-        if accumulator is None:
-            return
-        queued_display_basis = coordinate_motion.motion_basis(
-            getattr(self, "_exact_step_motion_lease", None)
-        )
-        if completion.display_basis != queued_display_basis:
-            stage_position_panel_adapter.refresh_stage_axis_styles(self)
-            self._update_stage_coordinate_apply_state()
-            if not self._exact_step_timer.isActive():
-                self._dispatch_exact_step_targets()
-            return
-        for axis, reached_target in completion.display_targets:
-            pending_target = accumulator.targets.get(axis)
-            if pending_target is None or not math.isclose(
-                pending_target,
-                reached_target,
-                rel_tol=0.0,
-                abs_tol=1e-12,
-            ):
-                continue
-            accumulator.targets.pop(axis, None)
-            self._exact_step_pending_axes.discard(axis)
-            self._stage_motion.pop_pending_coordinate_edit(axis)
-            panel = getattr(self, "_stage_position_panel", None)
-            if panel is not None:
-                panel.pop_pending_target(axis)
-        stage_position_panel_adapter.refresh_stage_axis_styles(self)
-        self._update_stage_coordinate_apply_state()
-        if not self._exact_step_timer.isActive():
-            self._dispatch_exact_step_targets()
-
-    def _clear_exact_step_targets(self) -> None:
-        timer = getattr(self, "_exact_step_timer", None)
-        if timer is not None:
-            timer.stop()
-        accumulator = getattr(self, "_exact_step_accumulator", None)
-        if accumulator is not None:
-            accumulator.clear()
-        for axis in getattr(self, "_exact_step_pending_axes", set()):
-            self._stage_motion.pop_pending_coordinate_edit(axis)
-            panel = getattr(self, "_stage_position_panel", None)
-            if panel is not None:
-                panel.pop_pending_target(axis)
-        self._exact_step_pending_axes = set()
-        self._exact_step_motion_lease = None
-        self._exact_step_pose_rebase_allowed = False
-        self._exact_step_window_elapsed = False
-        if (
-            getattr(self, "_stage_position_panel", None) is not None
-            and hasattr(self, "_stage_motion_axes")
-            and hasattr(self, "_stage_motion_blink_dimmed")
-        ):
-            stage_position_panel_adapter.refresh_stage_axis_styles(self)
-            self._update_stage_coordinate_apply_state()
 
     def _schedule_linear_feedrate_save(self, feedrate_mm_min: float) -> None:
         try:

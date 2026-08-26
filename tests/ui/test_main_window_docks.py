@@ -378,7 +378,6 @@ class _DockOwner:
         "_save_current_needle_height",
         "_save_needle_position_from_display_a_coordinate",
         "_zero_b_axis",
-        "_on_manual_axis_move_requested",
         "_save_manual_axis_jog_settings",
         "_save_jog_control_mode",
         "_on_linear_feedrate_changed",
@@ -390,8 +389,6 @@ class _DockOwner:
         "_on_turntable_feedrate_changed",
         "_on_turntable_step_feedrate_changed",
         "_on_manual_motion_axis",
-        "_on_manual_jog_command_changed",
-        "_on_manual_jog_stopped",
         "_project_gui_relative_motion",
         "_on_homing_status_changed",
         "_on_limit_axes_changed",
@@ -420,7 +417,9 @@ class _DockOwner:
         self.lcr_controller = _FakeLcrController()
         self.settings_manager = _FakeSettingsManager()
         self._stage_motion = SimpleNamespace(
-            set_coordinate_feedrate=self._record_noop("set_coordinate_feedrate")
+            set_coordinate_feedrate=self._record_noop("set_coordinate_feedrate"),
+            on_manual_jog_command=self._record_noop("on_manual_jog_command"),
+            on_manual_jog_stopped=self._record_noop("on_manual_jog_stopped"),
         )
 
         self.serial_connection_dialog = None

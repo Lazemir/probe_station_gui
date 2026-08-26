@@ -22,6 +22,8 @@ from probe_station_gui.design.model import DesignModelError
 from probe_station_gui.settings.manager import ordered_objective_names
 from probe_station_gui.shared.wheel_guard import GuardedComboBox as QComboBox
 from probe_station_gui.stage import move_lifecycle as stage_move_lifecycle
+from probe_station_gui.stage.exact_step import ExactStepClearReason
+from probe_station_gui.views import main_window_coordinate_step as coordinate_step
 from probe_station_gui.views import main_window_coordinate_motion as coordinate_motion
 from probe_station_gui.views import (
     main_window_stage_position_panel as stage_position_panel_adapter,
@@ -168,7 +170,10 @@ class _MainStatusCoordinateUiMixin:
         self.view.setFocus(Qt.OtherFocusReason)
 
     def _on_stage_coordinate_mode_changed(self) -> None:
-        self._clear_exact_step_targets()
+        coordinate_step.clear_exact_steps(
+            self,
+            ExactStepClearReason.COORDINATE_MODE_CHANGED,
+        )
         had_pending = self._stage_motion.clear_pending_coordinate_edits()
         if had_pending and self._stage_position_panel is not None:
             self._stage_position_panel.clear_pending_target_state()
@@ -187,7 +192,10 @@ class _MainStatusCoordinateUiMixin:
         cancel_jog_input = getattr(joystick, "cancel_jog_input", None)
         if callable(cancel_jog_input):
             cancel_jog_input()
-        self._clear_exact_step_targets()
+        coordinate_step.clear_exact_steps(
+            self,
+            ExactStepClearReason.COORDINATE_MODE_CHANGED,
+        )
         self._stage_motion.clear_pending_coordinate_edits()
         panel = getattr(self, "_stage_position_panel", None)
         if panel is not None:

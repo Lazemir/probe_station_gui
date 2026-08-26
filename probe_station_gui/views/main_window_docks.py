@@ -21,7 +21,9 @@ from probe_station_gui.views.contact_oscillation_window import (
 from probe_station_gui.views.dock_widgets import CollapsibleDockWidget
 from probe_station_gui.views.resistance_monitor_panel import ResistanceMonitorPanel
 from probe_station_gui.views.serial_connection_panel import SerialConnectionPanel
+from probe_station_gui.stage.exact_step import ExactStepClearReason
 from probe_station_gui.views import main_window_connection_flow as connection_flow
+from probe_station_gui.views import main_window_coordinate_step as coordinate_step
 from probe_station_gui.views import main_window_homing as homing_ui
 from probe_station_gui.views import (
     main_window_needle_calibration as needle_calibration_ui,
@@ -56,7 +58,6 @@ class MainWindowDockOwner(Protocol):
     ) -> None: ...  # noqa: N802
     def _on_resistance_standby_enabled_changed(self, *args: Any) -> None: ...
     def _zero_b_axis(self, *args: Any) -> None: ...
-    def _on_manual_axis_move_requested(self, *args: Any) -> None: ...
     def _save_manual_axis_jog_settings(self, *args: Any) -> None: ...
     def _save_jog_control_mode(self, *args: Any) -> None: ...
     def _on_linear_feedrate_changed(self, *args: Any) -> None: ...
@@ -68,8 +69,6 @@ class MainWindowDockOwner(Protocol):
     def _on_turntable_feedrate_changed(self, *args: Any) -> None: ...
     def _on_turntable_step_feedrate_changed(self, *args: Any) -> None: ...
     def _on_manual_motion_axis(self, *args: Any) -> None: ...
-    def _on_manual_jog_command_changed(self, *args: Any) -> None: ...
-    def _on_manual_jog_stopped(self, *args: Any) -> None: ...
     def _project_gui_relative_motion(self, *args: Any) -> Any: ...
     def _invalidate_design_registration(self, message: str) -> None: ...
     def _cancel_contact_seek(self, *args: Any) -> None: ...
@@ -221,7 +220,10 @@ def _connect_joystick_panel(owner: MainWindowDockOwner) -> None:
         )
     )
     owner.joystick_panel.reset_requested.connect(
-        lambda: getattr(owner, "_clear_exact_step_targets", lambda: None)()
+        lambda: coordinate_step.clear_exact_steps(
+            owner,
+            ExactStepClearReason.CONTROLLER_RESET_REQUESTED,
+        )
     )
     owner.joystick_panel.reset_requested.connect(
         lambda: owner.stage_controller.reset_controller(source="joystick_reset_button")
@@ -271,7 +273,7 @@ def _connect_joystick_motion_actions(owner: MainWindowDockOwner) -> None:
 
 def _connect_joystick_feedrate_actions(owner: MainWindowDockOwner) -> None:
     owner.joystick_panel.manual_axis_move_requested.connect(
-        owner._on_manual_axis_move_requested
+        lambda *args: coordinate_step.on_manual_axis_move_requested(owner, *args)
     )
     owner.joystick_panel.manual_axis_settings_changed.connect(
         owner._save_manual_axis_jog_settings
@@ -307,9 +309,9 @@ def _connect_joystick_feedrate_actions(owner: MainWindowDockOwner) -> None:
 def _connect_joystick_manual_motion(owner: MainWindowDockOwner) -> None:
     owner.joystick_panel.motion_axis_requested.connect(owner._on_manual_motion_axis)
     owner.joystick_panel.jog_command_changed.connect(
-        owner._on_manual_jog_command_changed
+        owner._stage_motion.on_manual_jog_command
     )
-    owner.joystick_panel.jog_stopped.connect(owner._on_manual_jog_stopped)
+    owner.joystick_panel.jog_stopped.connect(owner._stage_motion.on_manual_jog_stopped)
 
 
 def _connect_stage_controller_to_joystick(owner: MainWindowDockOwner) -> None:

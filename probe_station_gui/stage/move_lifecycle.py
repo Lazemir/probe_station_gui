@@ -8,6 +8,7 @@ from typing import Any, Protocol
 from probe_station_gui.coordinates.coordinator_model import (
     RegistrationAlignmentRequest,
 )
+from probe_station_gui.stage.exact_step import ExactStepClearReason
 from probe_station_gui.views import main_window_homing as homing_ui
 from probe_station_gui.views import (
     main_window_stage_position_panel as stage_position_panel,
@@ -112,9 +113,7 @@ def cancel_stage_coordinate_action(
     *,
     focus_reason: object,
 ) -> None:
-    clear_exact_steps = getattr(owner, "_clear_exact_step_targets", None)
-    if callable(clear_exact_steps):
-        clear_exact_steps()
+    owner._stage_motion.clear_exact_steps(ExactStepClearReason.CANCEL_REQUESTED)
     cancelled_any = _cancel_pending_ui_intents(owner)
     cancelled_any = _cancel_route_measurement(owner) or cancelled_any
     cancelled_any = _cancel_background_captures(owner) or cancelled_any

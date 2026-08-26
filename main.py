@@ -167,9 +167,6 @@ from probe_station_gui.coordinates import CoordinateFrameStoreWorker
 from probe_station_gui.coordinates.application_runtime import (
     create_application_coordinate_runtime,
 )
-from probe_station_gui.coordinates.coordinator_model import (
-    CoordinateMotionLease,
-)
 from probe_station_gui.design import objective_offsets as offsets
 from probe_station_gui.design.frame_registration import (
     DesignFrameMetadata,
@@ -219,16 +216,17 @@ from probe_station_gui.stage import sample_handling
 from probe_station_gui.stage.coordinate_targets import (
     CoordinateTargetConfig,
 )
-from probe_station_gui.stage.exact_step import ExactStepAccumulator
 from probe_station_gui.stage.manual_jog_prediction import (
     ManualJogPredictionConfig,
-    ManualJogPredictionState,
 )
 from probe_station_gui.views import (
     main_window_connection_flow as connection_flow,
 )
 from probe_station_gui.views import (
     main_window_coordinate_flow as coordinate_flow,
+)
+from probe_station_gui.views import (
+    main_window_coordinate_step as coordinate_step,
 )
 from probe_station_gui.views import main_window_homing as homing_ui
 from probe_station_gui.views import (
@@ -581,26 +579,6 @@ class Main(
         self._manual_alignment_capture_context: (
             _ManualAlignmentCaptureContext | None
         ) = None
-        self._manual_jog_prediction = ManualJogPredictionState(
-            ManualJogPredictionConfig(
-                axis_names=self.STAGE_AXIS_NAMES,
-                ignore_idle_after_command_s=self.MANUAL_JOG_IGNORE_IDLE_AFTER_COMMAND_S,
-                reconcile_smooth_threshold_mm=(
-                    self.MANUAL_JOG_RECONCILE_SMOOTH_THRESHOLD_MM
-                ),
-                reconcile_smooth_alpha=self.MANUAL_JOG_RECONCILE_SMOOTH_ALPHA,
-                status_settle_hold_s=self.MANUAL_JOG_STATUS_SETTLE_HOLD_S,
-                default_stop_tail_s=self.MANUAL_JOG_DEFAULT_STOP_TAIL_S,
-                stop_tail_min_s=self.MANUAL_JOG_STOP_TAIL_MIN_S,
-                stop_tail_max_s=self.MANUAL_JOG_STOP_TAIL_MAX_S,
-                stop_tail_learn_alpha=self.MANUAL_JOG_STOP_TAIL_LEARN_ALPHA,
-            )
-        )
-        self._exact_step_accumulator = ExactStepAccumulator(self.STAGE_AXIS_NAMES)
-        self._exact_step_pending_axes: set[str] = set()
-        self._exact_step_motion_lease: CoordinateMotionLease | None = None
-        self._exact_step_pose_rebase_allowed = False
-        self._exact_step_window_elapsed = False
         self._stage_position_panel: StagePositionPanel | None = None
         self._design_snap_enabled = True
         self._last_camera_frame_ui_timestamp: float | None = None
@@ -867,6 +845,8 @@ class Main(
                     target_tolerance_mm=(self.COORDINATE_MOVE_TARGET_TOLERANCE_MM),
                 ),
                 settle_status_poll_delays_ms=self.MANUAL_JOG_SETTLE_POLL_DELAYS_MS,
+                exact_step_accumulation_ms=self.EXACT_STEP_ACCUMULATION_MS,
+                terminal_resume_after_jog_ms=self.TERMINAL_RESUME_AFTER_JOG_MS,
             ),
             self,
         )
@@ -883,7 +863,10 @@ class Main(
             Qt.ConnectionType.QueuedConnection,
         )
         self._stage_motion.coordinate_move_finished.connect(
-            self._on_coordinate_move_finished,
+            lambda completion: coordinate_step.on_coordinate_move_finished(
+                self,
+                completion,
+            ),
             Qt.ConnectionType.QueuedConnection,
         )
         self._stage_motion.continue_homing_requested.connect(
@@ -1000,9 +983,6 @@ class Main(
         self._design_overlay_timer.setSingleShot(True)
         self._design_overlay_timer.setInterval(self.DESIGN_OVERLAY_UPDATE_MS)
         self._design_overlay_timer.timeout.connect(self._flush_pending_design_position)
-        self._manual_jog_timer = QTimer(self)
-        self._manual_jog_timer.setInterval(self.MANUAL_JOG_UPDATE_MS)
-        self._manual_jog_timer.timeout.connect(self._advance_motion_prediction)
         self._stage_motion_blink_timer = QTimer(self)
         self._stage_motion_blink_timer.setInterval(self.STAGE_COORDINATE_BLINK_MS)
         self._stage_motion_blink_timer.timeout.connect(
@@ -1014,11 +994,6 @@ class Main(
         self._linear_feedrate_save_timer.timeout.connect(
             self._save_pending_linear_feedrate_default
         )
-        self._exact_step_timer = QTimer(self)
-        self._exact_step_timer.setSingleShot(True)
-        self._exact_step_timer.setInterval(self.EXACT_STEP_ACCUMULATION_MS)
-        self._exact_step_timer.timeout.connect(self._on_exact_step_window_elapsed)
-
         create_main_window_docks(self)
         _startup_trace("dock widgets created")
 
@@ -1049,7 +1024,6 @@ class Main(
         QTimer.singleShot(0, self._prime_keyboard_focus)
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
-        self._clear_exact_step_targets()
         shutdown_ui.close_event(self, event)
 
 

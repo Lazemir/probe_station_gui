@@ -8,6 +8,7 @@ from probe_station_gui.coordinates.coordinator_model import (
     CoordinateTransition,
 )
 from probe_station_gui.stage import move_lifecycle
+from probe_station_gui.stage.exact_step import ExactStepClearReason
 from tests.app.route_run_execution_support import (
     activate_route_run,
     install_route_run_execution,
@@ -96,6 +97,7 @@ class _StageMotionBoundary:
         self.coordinate_active = False
         self.pending: dict[str, tuple[float, float]] = {}
         self.cancel_planned_calls = 0
+        self.exact_clear_reasons: list[ExactStepClearReason] = []
 
     def snapshot(self) -> object:
         return types.SimpleNamespace(coordinate_active=self.coordinate_active)
@@ -122,6 +124,9 @@ class _StageMotionBoundary:
 
     def cancel_planned_xy_move(self) -> None:
         self.cancel_planned_calls += 1
+
+    def clear_exact_steps(self, reason: ExactStepClearReason) -> None:
+        self.exact_clear_reasons.append(reason)
 
 
 class _Runner:
@@ -339,6 +344,9 @@ def test_coordinate_cancel_has_priority_over_generic_busy_task() -> None:
 
     move_lifecycle.cancel_stage_coordinate_action(owner, focus_reason="focus")
 
+    assert owner._stage_motion.exact_clear_reasons == [
+        ExactStepClearReason.CANCEL_REQUESTED
+    ]
     assert owner.stage_controller.cancelled_motions == [
         "Coordinate move cancel requested."
     ]

@@ -6,8 +6,6 @@ import inspect
 import types
 from pathlib import Path
 
-import pytest
-
 from probe_station_gui.application import stage_motion_session as motion_session
 from probe_station_gui.application.stage_motion_types import StageMotionPresentation
 from probe_station_gui.coordinates.model import PhysicalMachinePose
@@ -42,6 +40,14 @@ def test_main_composes_one_session_without_raw_planned_or_position_state() -> No
         "_pending_planned_move_source_label",
         "_latest_physical_machine_pose",
         "_last_reported_b_position",
+        "_manual_jog_prediction",
+        "_manual_jog_timer",
+        "_exact_step_accumulator",
+        "_exact_step_pending_axes",
+        "_exact_step_motion_lease",
+        "_exact_step_pose_rebase_allowed",
+        "_exact_step_window_elapsed",
+        "_exact_step_timer",
     ):
         assert removed_name not in source
 
@@ -334,29 +340,14 @@ def test_timestamp_only_presentation_skips_idle_renderer_rebuild(monkeypatch) ->
     assert calls == []
 
 
-@pytest.mark.parametrize(
-    ("manual_prediction_available", "coordinate_move_active", "delegated_expected"),
-    ((True, False, True), (False, True, False)),
-)
-def test_typed_presentation_delegates_deferred_motion_workflows_once(
+def test_typed_presentation_never_delegates_back_to_legacy_position_workflow(
     monkeypatch,
-    manual_prediction_available: bool,
-    coordinate_move_active: bool,
-    delegated_expected: bool,
 ) -> None:
     restore_real_imports_for_main()
     main_module = importlib.import_module("main")
     from probe_station_gui.application import stage_design_position
 
     window = main_module.Main.__new__(main_module.Main)
-    window._manual_jog_prediction = types.SimpleNamespace(
-        prediction_available=lambda: manual_prediction_available,
-    )
-    window._stage_motion = types.SimpleNamespace(
-        snapshot=lambda: types.SimpleNamespace(
-            coordinate_active=coordinate_move_active,
-        )
-    )
     window.contact_calibration_window = None
     window._can_display_design_position = lambda: True
     window._update_coordinate_display = lambda **_kwargs: direct_render_calls.append(
@@ -403,27 +394,17 @@ def test_typed_presentation_delegates_deferred_motion_workflows_once(
 
     main_module.Main._apply_stage_motion_presentation(window, presentation)
 
-    if delegated_expected:
-        assert delegated == [
-            (
-                window,
-                presentation.reported_position,
-                presentation.physical_machine_pose,
-            )
-        ]
-        assert direct_render_calls == []
-    else:
-        assert delegated == []
-        assert direct_render_calls == []
+    assert delegated == []
+    assert direct_render_calls == []
 
 
 def test_application_consumers_use_typed_session_boundary() -> None:
     from probe_station_gui.application import api_stage_contact
     from probe_station_gui.application import camera_pipeline
-    from probe_station_gui.application import manual_jog
     from probe_station_gui.application import registration_focus
     from probe_station_gui.application import stage_design_position
     from probe_station_gui.stage import move_lifecycle
+    from probe_station_gui.views import main_window_docks
 
     assert not hasattr(
         camera_pipeline._MainCameraPipelineMixin, "_on_absolute_xy_move_started"
@@ -443,18 +424,19 @@ def test_application_consumers_use_typed_session_boundary() -> None:
         in presentation_source
     )
     assert "coordinate_flow.observe_coordinate_authority" in presentation_source
-    manual_source = inspect.getsource(
-        manual_jog._MainManualJogMixin._on_manual_jog_command_changed
+    manual_wiring_source = inspect.getsource(
+        main_window_docks._connect_joystick_manual_motion
     )
     api_source = inspect.getsource(
         api_stage_contact._MainApiStageContactMixin._interrupt_api_route_controlled_operation
     )
     cancel_source = inspect.getsource(move_lifecycle._cancel_controller_activity)
-    assert "self._stage_motion.cancel_planned_xy_move()" in manual_source
+    assert "owner._stage_motion.on_manual_jog_command" in manual_wiring_source
+    assert "owner._stage_motion.on_manual_jog_stopped" in manual_wiring_source
     assert "self._stage_motion.cancel_planned_xy_move()" in api_source
     assert "owner._stage_motion.cancel_planned_xy_move()" in cancel_source
     assert "_clear_planned_move_prediction" not in (
-        manual_source + api_source + cancel_source
+        manual_wiring_source + api_source + cancel_source
     )
 
 
@@ -471,6 +453,11 @@ def test_deleted_main_motion_state_has_no_production_consumer() -> None:
         "_pending_planned_move_source_label",
         "_latest_physical_machine_pose",
         "_last_reported_b_position",
+        "_manual_jog_timer",
+        "_exact_step_pending_axes",
+        "_exact_step_motion_lease",
+        "_exact_step_pose_rebase_allowed",
+        "_exact_step_window_elapsed",
     }
     root = Path(__file__).resolve().parents[2]
     production_files = [root / "main.py"]

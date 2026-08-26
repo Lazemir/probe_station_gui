@@ -7,6 +7,7 @@ from probe_station_gui.stage.coordinate_targets import (
     CoordinatePendingEdits,
     CoordinateTargetCommonFeedratePlan,
 )
+from probe_station_gui.stage.exact_step import ExactStepOutcome
 
 
 class _FakeStageMotion:
@@ -36,6 +37,11 @@ class _FakeStageMotion:
         self.start_result = True
         self.feedrate_updates: list[float] = []
         self.cancel_coordinate_calls = 0
+        self.exact_step_display_targets: tuple[tuple[str, float], ...] = ()
+        self.exact_step_motion_lease: object | None = None
+        self.exact_step_pose_rebase_allowed = False
+        self.exact_requests: list[object] = []
+        self.exact_clear_reasons: list[object] = []
 
     def snapshot(self) -> object:
         return types.SimpleNamespace(
@@ -51,10 +57,47 @@ class _FakeStageMotion:
             coordinate_effective_feedrate=self.coordinate_effective_feedrate,
             coordinate_common_feedrate=self.coordinate_common_feedrate,
             pending_edit_axes=frozenset(self.pending),
+            exact_step_display_targets=self.exact_step_display_targets,
+            exact_step_motion_lease=self.exact_step_motion_lease,
+            exact_step_pose_rebase_allowed=self.exact_step_pose_rebase_allowed,
             planned_stage_xy=None,
             planned_prediction_active=False,
             planned_waiting_for_fresh_status=False,
         )
+
+    def queue_exact_step(self, request: object) -> ExactStepOutcome:
+        pending_targets = tuple(request.pending_targets or request.move_request.targets)
+        if not pending_targets:
+            return ExactStepOutcome(False, (), self.exact_step_motion_lease, False)
+        if self.exact_step_motion_lease is None or request.allow_pose_rebase:
+            self.exact_step_motion_lease = request.motion_lease
+            self.exact_step_pose_rebase_allowed = bool(request.allow_pose_rebase)
+        self.exact_step_display_targets = tuple(
+            (str(axis).upper(), float(display))
+            for axis, _raw, display in pending_targets
+        )
+        for axis, raw, display in pending_targets:
+            self.upsert_pending_coordinate_edit(
+                axis,
+                raw,
+                display,
+                motion_lease=self.exact_step_motion_lease,
+            )
+        self.exact_requests.append(request)
+        return ExactStepOutcome(
+            True,
+            pending_targets,
+            self.exact_step_motion_lease,
+            len(self.exact_requests) == 1,
+        )
+
+    def clear_exact_steps(self, reason: object) -> None:
+        self.exact_clear_reasons.append(reason)
+        for axis, _display in self.exact_step_display_targets:
+            self.pop_pending_coordinate_edit(axis)
+        self.exact_step_display_targets = ()
+        self.exact_step_motion_lease = None
+        self.exact_step_pose_rebase_allowed = False
 
     def pending_coordinate_edits(self) -> CoordinatePendingEdits:
         return CoordinatePendingEdits(

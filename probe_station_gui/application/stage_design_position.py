@@ -31,25 +31,13 @@ class _MainStageDesignPositionMixin:
     ) -> None:
         if not isinstance(presentation, StageMotionPresentation):
             raise TypeError("presentation must be a StageMotionPresentation")
-        deferred_motion_active = self._manual_jog_prediction.prediction_available()
-        if not presentation.material_change and not deferred_motion_active:
+        if not presentation.material_change:
             return
         if presentation.active_axes:
             stage_position_panel_adapter.set_stage_motion_axes(
                 self,
                 set(presentation.active_axes),
             )
-        if deferred_motion_active:
-            stage_position_update.on_stage_position_changed(
-                self,
-                presentation.reported_position,
-                physical_machine_pose=presentation.physical_machine_pose,
-                motion_coordinate_snapshot=presentation.motion_coordinate_snapshot,
-                stage_state=presentation.stage_state,
-                homed_axes=presentation.homed_axes,
-                last_jog_write_timestamp=presentation.last_jog_write_timestamp,
-            )
-            return
         reported = presentation.reported_position
         if isinstance(reported, tuple) and len(reported) >= 2:
             design_workspace.maybe_restore_persisted_design(self, reported)

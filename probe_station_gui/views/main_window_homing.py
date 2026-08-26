@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-import time
 from typing import Any, Protocol
 
 from PySide6.QtCore import QTimer
 
+from probe_station_gui.stage.exact_step import ExactStepClearReason
+from probe_station_gui.views import main_window_coordinate_step as coordinate_step
 from probe_station_gui.views import (
     main_window_stage_position_panel as stage_position_panel,
 )
@@ -19,7 +20,6 @@ HOMING_RETRY_DELAY_MS = 200
 class MainWindowHomingOwner(Protocol):
     STAGE_AXIS_NAMES: tuple[str, ...]
     _stage_limit_axes: set[str]
-    _manual_jog_prediction: Any
     _stage_motion: Any
     _pending_homing_axes: list[str]
     _homing_active_key: str | None
@@ -71,12 +71,12 @@ def request_home_axis_from_ui(owner: MainWindowHomingOwner, axis: str) -> None:
     axis_name = axis.strip().upper()
     if axis_name not in VALID_HOME_AXES:
         return
-    _clear_exact_step_targets(owner)
+    coordinate_step.clear_exact_steps(owner, ExactStepClearReason.HOMING_REQUESTED)
     queue_or_start_homing_axes(owner, [axis_name])
 
 
 def request_home_all_from_ui(owner: MainWindowHomingOwner) -> None:
-    _clear_exact_step_targets(owner)
+    coordinate_step.clear_exact_steps(owner, ExactStepClearReason.HOMING_REQUESTED)
     if owner.stage_controller.request_home_all():
         owner._pending_homing_axes.clear()
         refresh_pending_homing_ui(owner)
@@ -101,12 +101,6 @@ def queue_or_start_homing_axes(
             HOMING_RETRY_DELAY_MS,
             lambda: start_next_pending_homing_action(owner),
         )
-
-
-def _clear_exact_step_targets(owner: MainWindowHomingOwner) -> None:
-    callback = getattr(owner, "_clear_exact_step_targets", None)
-    if callable(callback):
-        callback()
 
 
 def start_next_pending_homing_action(owner: MainWindowHomingOwner) -> None:
@@ -223,11 +217,9 @@ def _normalized_limit_axes(
 
 
 def _manual_jog_predicted_position(owner: MainWindowHomingOwner) -> object | None:
-    if (
-        owner._manual_jog_prediction.prediction_available(time.monotonic())
-        and owner._manual_jog_prediction.stage_position is not None
-    ):
-        return owner._manual_jog_prediction.stage_position
+    motion = owner._stage_motion.snapshot()
+    if motion.manual_prediction_available:
+        return motion.presented_position
     return None
 
 

@@ -139,9 +139,10 @@ def test_gui_coordinate_selection_stops_active_jog_before_switching(
     window.joystick_panel = SimpleNamespace(
         cancel_jog_input=lambda: events.append("jog-stopped")
     )
-    window._clear_exact_step_targets = lambda: events.append("step-cleared")
     window._stage_motion = SimpleNamespace(
-        clear_pending_coordinate_edits=lambda: events.append("fields-cleared") or False
+        snapshot=lambda: SimpleNamespace(exact_step_display_targets=()),
+        clear_exact_steps=lambda _reason: events.append("step-cleared"),
+        clear_pending_coordinate_edits=lambda: events.append("fields-cleared") or False,
     )
     monkeypatch.setattr(
         stage_position_panel_adapter,
@@ -374,8 +375,10 @@ def test_curve_apply_keeps_estimated_position_authority_on_remapped_snapshot(
                 controller.latest_physical_machine_pose(Main.STAGE_AXIS_NAMES),
             ),
             snapshot=lambda: SimpleNamespace(
-                physical_machine_pose=pose_holder["value"]
+                physical_machine_pose=pose_holder["value"],
+                exact_step_display_targets=(),
             ),
+            clear_exact_steps=lambda _reason: None,
         )
         window.joystick_panel = None
         window.design_navigator_panel = None
@@ -389,7 +392,6 @@ def test_curve_apply_keeps_estimated_position_authority_on_remapped_snapshot(
             apply_configuration=lambda **_kwargs: None,
             request_reconfigure=lambda: None,
         )
-        window._clear_exact_step_targets = lambda: None
         window._apply_objective_settings = lambda: None
         window._telegram_runtime = SimpleNamespace(configure=lambda _settings: None)
         window._update_coordinate_display = lambda **_kwargs: None

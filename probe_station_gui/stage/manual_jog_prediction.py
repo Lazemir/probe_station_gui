@@ -65,6 +65,12 @@ class ManualJogStopTailLearnResult:
     new_tail_s: float
 
 
+@dataclass(frozen=True)
+class ManualJogObservationDecision:
+    display_position: tuple[float, ...] | None
+    deferred: bool
+
+
 @dataclass
 class ManualJogPredictionState:
     config: ManualJogPredictionConfig
@@ -140,7 +146,9 @@ class ManualJogPredictionState:
         self.settle_until = 0.0
         self.stop_status_timestamp = None
 
-    def predicted_stage_xy(self, now: float | None = None) -> tuple[float, float] | None:
+    def predicted_stage_xy(
+        self, now: float | None = None
+    ) -> tuple[float, float] | None:
         if not self.prediction_available(now):
             return None
         stage_xy = _stage_xy_from_position(self.stage_position)
@@ -268,9 +276,7 @@ class ManualJogPredictionState:
                 current_design_stage_xy,
                 base_position=latest_stage_position,
             )
-            self.stage_xy = tuple(
-                float(value) for value in current_design_stage_xy
-            )
+            self.stage_xy = tuple(float(value) for value in current_design_stage_xy)
             stage_source = "current_design"
 
         current_time = float(now)
@@ -425,7 +431,9 @@ class ManualJogPredictionState:
         latest_stage_position: object | None = None,
         current_design_stage_xy: tuple[float, float] | None = None,
     ) -> tuple[float, ...] | None:
-        coordinate_move_position = _coerce_position_tuple(coordinate_move_stage_position)
+        coordinate_move_position = _coerce_position_tuple(
+            coordinate_move_stage_position
+        )
         if coordinate_move_position is not None:
             return coordinate_move_position
         tracked_position = _coerce_position_tuple(self.stage_position)
@@ -464,7 +472,9 @@ class ManualJogPredictionState:
                 axis_index = self.config.axis_names.index(axis)
             except ValueError:
                 continue
-            if axis_index >= len(predicted_position) or axis_index >= len(actual_position):
+            if axis_index >= len(predicted_position) or axis_index >= len(
+                actual_position
+            ):
                 continue
             try:
                 predicted_value = float(predicted_position[axis_index])
@@ -484,9 +494,10 @@ class ManualJogPredictionState:
                 old_tail_s + residual_s,
             ),
         )
-        new_tail_s = old_tail_s + (
-            learned_tail_s - old_tail_s
-        ) * self.config.stop_tail_learn_alpha
+        new_tail_s = (
+            old_tail_s
+            + (learned_tail_s - old_tail_s) * self.config.stop_tail_learn_alpha
+        )
         self.stop_tail_s = new_tail_s
         return ManualJogStopTailLearnResult(
             old_tail_s=old_tail_s,
@@ -534,16 +545,61 @@ class ManualJogPredictionState:
         delta_y = float(actual_stage_xy[1] - predicted_stage_xy[1])
         delta_norm = math.hypot(delta_x, delta_y)
         state = str(latest_state or "").lower()
-        if (
-            delta_norm <= self.config.reconcile_smooth_threshold_mm
-            or state not in {"jog", "run"}
-        ):
+        if delta_norm <= self.config.reconcile_smooth_threshold_mm or state not in {
+            "jog",
+            "run",
+        }:
             return actual_stage_xy
         alpha = self.config.reconcile_smooth_alpha
         return (
             float(predicted_stage_xy[0] + delta_x * alpha),
             float(predicted_stage_xy[1] + delta_y * alpha),
         )
+
+    def reconcile_observation(
+        self,
+        current_position: tuple[float, ...],
+        *,
+        raw_stage_xy: tuple[float, float],
+        latest_state: str,
+        last_jog_write_timestamp: float | None,
+        now: float,
+        presented_position: tuple[float, ...] | None,
+    ) -> ManualJogObservationDecision:
+        if self.waiting_for_fresh_status and latest_state != "idle":
+            return ManualJogObservationDecision(presented_position, True)
+        idle_sample = self.ignore_idle_status_sample(
+            actual_stage_xy=raw_stage_xy,
+            now=now,
+            latest_state=latest_state,
+            last_jog_write_timestamp=last_jog_write_timestamp,
+        )
+        if idle_sample.ignore:
+            return ManualJogObservationDecision(presented_position, True)
+        predicted_xy = self.predicted_stage_xy(now)
+        reconciled_xy = raw_stage_xy
+        if predicted_xy is not None:
+            reconciled_xy = self.smooth_actual_stage_xy(
+                predicted_xy,
+                raw_stage_xy,
+                latest_state=latest_state,
+            )
+        display_position = _position_with_stage_xy(
+            reconciled_xy,
+            base_position=current_position,
+        )
+        self.stage_position = display_position
+        self.stage_xy = reconciled_xy
+        if self.waiting_for_fresh_status and latest_state == "idle":
+            self.learn_stop_tail(
+                self.stop_tail_position or presented_position,
+                display_position,
+            )
+            self.clear_waiting_status()
+            self.clear_stop_prediction()
+        if self.prediction_active(now):
+            self.last_timestamp = now
+        return ManualJogObservationDecision(display_position, False)
 
 
 def _coerce_position_tuple(position: object | None) -> tuple[float, ...] | None:

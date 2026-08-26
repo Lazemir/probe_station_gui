@@ -212,12 +212,6 @@ def _owner(events: list[object]) -> SimpleNamespace:
     owner._persist_serial_connection_state = lambda connected: events.append(
         ("persist_serial_wrapper", connected, owner.serial_connection)
     )
-    owner._manual_jog_timer = SimpleNamespace(
-        stop=lambda: events.append(("manual_timer_stop",))
-    )
-    owner._manual_jog_prediction = SimpleNamespace(
-        reset_tracking=lambda: events.append(("manual_prediction_reset",))
-    )
     owner._update_stage_coordinate_apply_state = lambda: events.append(("apply_state",))
     owner._update_stage_position_display = lambda value: events.append(
         ("stage_display", value)
@@ -336,11 +330,9 @@ def test_on_serial_disconnected_preserves_detach_cleanup_order(monkeypatch) -> N
         ("serial_close", "COM9"),
         ("save_serial", False, "", 0),
     ]
-    assert ("manual_timer_stop",) in events
     reset_event = ("stage_motion_reset", StageMotionResetReason.CONNECTION_CHANGED)
     assert reset_event in events
     assert events.index(("save_serial", False, "", 0)) < events.index(reset_event)
-    assert events.index(reset_event) < events.index(("manual_timer_stop",))
     assert ("stage_set_serial", None) in events
     assert ("serial_panel", "external_disconnect", True) in events
     assert ("joystick", None) in events
