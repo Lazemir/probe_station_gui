@@ -776,5 +776,63 @@ Verify tracked worktree and index are clean. Hand off without push or merge.
 
 ## Execution Evidence
 
-Not yet executed. This plan was written from clean design baseline
+Executed from clean design baseline
 `5ca7da6738ad5e5b711d433d42fdab236720ed44`.
+
+- Task commits:
+  - `003f9a2fbe8f268afab9f1185eaff7286554319c`
+  - `b14cbbbceb19fab21d6daac189e1e28794b0173e`
+  - `85e4edeab854430ae4bd792da68b7f15f57c9bd1`
+  - `5dc376bedb44363a8852a6d28ddffb3a268c8e03`
+  - `ff9c5f9ced194797a16f91439488ad539f83f389`
+  - `04641c551c078ddc7884c84dd655887871f94df2`
+- The formatter review fix is
+  `06e5fd7c71f5760d97a4534a8037e563241cf6ef`; this is the frozen
+  implementation HEAD used for final verification.
+- Final scope: 98 files changed, 11,668 insertions, 4,994 deletions.
+- Collection found 3,531 tests. The final offscreen hardware-free run passed
+  all 3,531 tests plus 16 subtests in 109.25 seconds.
+- Import Linter analyzed 419 files and 2,656 dependencies:
+  `6 kept, 0 broken`.
+- Configured whole-tree Ruff, whole-tree `compileall`, diff/status/index,
+  owner-first import, and reverse-order import gates passed. All 27 added
+  Python files are formatted.
+- Canonical Git-blob formatting debt improved from 20 baseline files to 2;
+  no new formatter debt remains. The retained baseline files are
+  `probe_station_gui/stage/motion_commands.py` and
+  `tests/stage/test_precision_motion.py`.
+- A supplemental strict Ruff run found 22 inherited F401 findings in 9 files;
+  all 9 files are outside this implementation diff.
+- All 730 tracked Python files have positive normal MI. All 91 changed Python
+  files have positive normal and AST comments/docstrings-stripped MI.
+  `stage_motion_session.py` is `1.996925 / 0.008137`; independent review
+  accepted the honest positive value and rejected metric-only fragmentation.
+- Three changed legacy test/support files remain below the soft stripped-MI
+  target 5, but each was already below 5 at baseline and remains above the
+  hard `>0` gate. Independent review accepted this evidence.
+- Changed-production Lizard warnings stayed `16 -> 16`, maximum CC stayed
+  `38 -> 38`, duplicate blocks stayed `1 -> 1`, and duplicate rate improved
+  from `0.158212%` to `0.146123%`.
+- Protected Route SHA-256 values remained exact:
+
+  ```text
+  1f20b1bd6f3d19f91f398ef43506e729187f20a3452711a319e4e5837254b668  probe_station_gui/route/run_control_mailbox.py
+  796aa4876cc4d2c2cf62675a636e5b28dd40de1e6443ac2dd5cae46896ebaf55  probe_station_gui/route/run_coordinator.py
+  c02f96b3d4c4f62038e43a3f705467f58e37b698ef0ae83c6863daabf76e8b68  probe_station_gui/route/external_session.py
+  f7cb8d7dbc730cf6d893c4ae42f8c24b75db37b808210a7de2b0e15482e17f25  probe_station_gui/route/measurement.py
+  e7c1efebb5d03631142114b3f125c08ee4087a10e693b0e4058bfb5187d6cde2  probe_station_gui/route/point_execution.py
+  42044f6c37cef7f0fffd0918eab7a84ffc7fc0a81634acd44cd65942256f790c  probe_station_gui/route/contact_lifecycle.py
+  751fa2eaa84b03094a388327d4246d137cdeaabb184bfb87dc209be595799e00  tests/route/test_run_control_mailbox.py
+  af882b0e3fa40328dd8a16c1ab074ac79e83c16d8d0c3c5bc5cdb87affd4d4b8  tests/route/test_measurement_interrupt_checkpoint.py
+  b26e3571e53679339c8caf7a866ccfa0d80da8e196eb93dd02f75a8d90af7bfc  tests/route/test_measurement_api_route_control.py
+  ccd95aad1d7fcc07ad3b7202a5df2862c4f0b0d6bdce85cd7e06d7ff1591a91b  tests/route/test_point_execution.py
+  08a047a31c1581ec7e332db5826b72061cf7fd17fe209c8d093f9886b9fc0b8c  tests/route/test_contact_lifecycle_interface.py
+  ```
+
+- Final independent review on `06e5fd7`: READY, Critical 0, Important 0,
+  Minor 0.
+- Ignored factual report:
+  `.superpowers/sdd/stage-motion-session-final-report.md`, SHA-256
+  `f8bf461a26bde842266788f6111371b3085ce30cd1f66e0f5198c250d6565d5b`.
+- No task basetemp or Import Linter cache remained. No hardware, network,
+  API server, camera thread, visible GUI, push, or merge was used.
