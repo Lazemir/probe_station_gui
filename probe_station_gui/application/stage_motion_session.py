@@ -12,6 +12,10 @@ from probe_station_gui.application.stage_motion_settle_polls import (
 from probe_station_gui.application.stage_motion_cancellation import (
     StageMotionCancellation,
 )
+from probe_station_gui.application.stage_motion_completion import (
+    StageMotionCompletion,
+)
+from probe_station_gui.application.stage_motion_read_model import StageMotionReadModel
 from probe_station_gui.application.stage_position_state import StagePositionState
 from probe_station_gui.application import stage_motion_types as motion_types
 from probe_station_gui.stage import coordinate_targets as coordinate_types
@@ -34,10 +38,10 @@ from probe_station_gui.stage import types as stage_types
 class _StageMotionSession(QObject):
     presentation_changed = Signal(object)
     action_state_changed = Signal(object)
+    alignment_rotation_finished = Signal(object)
     click_move_finished = Signal(bool)
     coordinate_move_finished = Signal(object)
     continue_homing_requested = Signal()
-    unclaimed_movement_finished = Signal(object)
     status_requested = Signal(str, int)
     terminal_live_poll_paused_changed = Signal(bool)
 
@@ -57,6 +61,15 @@ class _StageMotionSession(QObject):
         self._exact_steps = exact_types.ExactStepWorkflowState(config.axis_names)
         self._cancellation = StageMotionCancellation(
             controller, active_state_stale_s=config.controller_active_state_stale_s
+        )
+        self._read_model = StageMotionReadModel(
+            axis_names=config.axis_names,
+            cancellation=self._cancellation,
+            coordinate_targets=self._coordinate_targets,
+            exact_steps=self._exact_steps,
+            manual_jog_prediction=self._manual_jog_prediction,
+            planned_xy=self._planned_xy,
+            position=self._position,
         )
         self._prediction_timer = QTimer(self)
         self._prediction_timer.setInterval(int(config.prediction_interval_ms))
@@ -78,6 +91,7 @@ class _StageMotionSession(QObject):
         )
 
         self._terminal_live_poll_paused = False
+        self._completion = StageMotionCompletion(controller, self._coordinate_targets)
         self._position.last_presentation = self._position.record_presentation(
             reported_position=None,
             raw_stage_xy=None,
@@ -87,48 +101,7 @@ class _StageMotionSession(QObject):
         )
 
     def snapshot(self) -> motion_types.StageMotionSnapshot:
-        cancellation = self._cancellation.decide_current(
-            coordinate_active=self._coordinate_targets.has_active_move(),
-            monotonic_s=time.monotonic(),
-        )
-        coordinate_active = cancellation.coordinate_priority
-        return motion_types.StageMotionSnapshot(
-            presented_position=self._position.presented_position,
-            presented_stage_xy=self._position.presented_stage_xy,
-            physical_machine_pose=self._position.physical_machine_pose,
-            active_axes=self._position.active_axes,
-            reported_active_motion=cancellation.reported_active_motion,
-            cancelable=cancellation.cancelable,
-            coordinate_active=coordinate_active,
-            coordinate_display_basis=self._coordinate_targets.display_basis,
-            coordinate_display_targets=tuple(
-                (axis, float(self._coordinate_targets.display_targets[axis]))
-                for axis in self._config.axis_names
-                if axis in self._coordinate_targets.display_targets
-            ),
-            coordinate_stage_position=self._coordinate_targets.stage_position,
-            coordinate_programmed_feedrate=self._coordinate_targets.programmed_feedrate,
-            coordinate_effective_feedrate=self._coordinate_targets.effective_feedrate,
-            coordinate_common_feedrate=self._coordinate_targets.common_feedrate,
-            pending_edit_axes=frozenset(self._coordinate_targets.pending_edits),
-            manual_prediction_active=self._manual_jog_prediction.prediction_active(),
-            manual_prediction_available=(
-                self._manual_jog_prediction.prediction_available()
-            ),
-            planned_pending_target_xy=self._planned_xy.pending_target_xy,
-            planned_pending_source_label=self._planned_xy.pending_source_label,
-            planned_stage_xy=self._planned_xy.stage_xy,
-            planned_prediction_active=self._planned_xy.started_at is not None,
-            planned_waiting_for_fresh_status=self._planned_xy.waiting_for_fresh_status,
-            last_reported_b_position=self._position.last_reported_b_position,
-            exact_step_display_targets=tuple(
-                (axis, float(self._exact_steps.accumulator.targets[axis]))
-                for axis in self._config.axis_names
-                if axis in self._exact_steps.accumulator.targets
-            ),
-            exact_step_motion_lease=self._exact_steps.motion_lease,
-            exact_step_pose_rebase_allowed=self._exact_steps.pose_rebase_allowed,
-        )
+        return self._read_model.snapshot(monotonic_s=time.monotonic())
 
     def pending_coordinate_edits(self) -> coordinate_types.CoordinatePendingEdits:
         return self._coordinate_targets.pending_snapshot()
@@ -440,6 +413,7 @@ class _StageMotionSession(QObject):
         if not accepted:
             self._clear_coordinate_tracking(reset_override=True)
             return False
+        self._completion.clear()
         self._coordinate_targets.arm_purpose()
         self._position.presented_position = plan.publish_position
         self._position.presented_stage_xy = coerce_finite_xy(plan.publish_position)
@@ -518,34 +492,23 @@ class _StageMotionSession(QObject):
     @Slot(bool, str)
     def on_movement_finished(self, success: bool, message: str) -> None:
         self._require_object_thread()
-        decision = self._coordinate_targets.claim_movement_finished(success, message)
-        if not decision.claimed:
-            self.unclaimed_movement_finished.emit(
-                stage_types.UnclaimedMovementCompletion(
-                    success=decision.success,
-                    message=decision.message,
-                )
+        effects = self._completion.resolve(success, message)
+        if effects.click_success is not None:
+            self.click_move_finished.emit(effects.click_success)
+        if effects.alignment is not None:
+            self.alignment_rotation_finished.emit(effects.alignment)
+        if effects.coordinate_disposition is not None:
+            self._complete_coordinate_move(
+                success=effects.coordinate_success,
+                disposition=effects.coordinate_disposition,
+                message=effects.status_message or "",
             )
-            return
-        if decision.expected_reissue_cancel:
+        if effects.status_message:
+            self.status_requested.emit(effects.status_message, 5000)
+        if effects.schedule_settle:
             self._settle_status_polls.schedule()
+        if effects.emit_action_state:
             self._emit_action_state()
-            return
-        if decision.disposition is None:
-            if decision.message:
-                self.status_requested.emit(decision.message, 5000)
-            if decision.success:
-                self._settle_status_polls.schedule()
-            return
-        self._complete_coordinate_move(
-            success=decision.success,
-            disposition=decision.disposition,
-            message=decision.message,
-        )
-        if decision.message:
-            self.status_requested.emit(decision.message, 5000)
-        if decision.success:
-            self._settle_status_polls.schedule()
 
     def request_planned_xy_move(
         self,
@@ -611,12 +574,38 @@ class _StageMotionSession(QObject):
         self._terminal_resume_timer.stop()
         self._set_terminal_live_poll_paused(False)
         self._manual_jog_prediction.reset_tracking()
+        self._completion.clear()
         self._clear_exact_step_state()
         self._clear_coordinate_tracking(reset_override=False)
         self._coordinate_targets.clear_pending_edits()
         self._clear_planned_prediction(clear_wait_state=True)
         self.presentation_changed.emit(self._position.reset())
         self._emit_action_state()
+
+    @Slot(float, float, float)
+    def on_click_move_started(
+        self,
+        _x_mm: float,
+        _y_mm: float,
+        _feedrate_mm_min: float,
+    ) -> None:
+        self._require_object_thread()
+        self._completion.arm_click()
+
+    def request_alignment_rotation(
+        self,
+        delta_deg: float,
+        correlation: object,
+    ) -> bool:
+        self._require_object_thread()
+        return self._completion.request_alignment_rotation(delta_deg, correlation)
+
+    def discard_alignment_rotation(self) -> bool:
+        self._require_object_thread()
+        return self._completion.discard_alignment_rotation()
+
+    def alignment_rotation_pending(self) -> bool:
+        return self._completion.alignment_rotation_pending()
 
     @Slot(object)
     def on_tracked_absolute_xy_move_started(

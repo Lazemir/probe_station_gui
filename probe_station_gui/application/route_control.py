@@ -12,7 +12,7 @@ from probe_station_gui.route.adjustment_flow import (
 )
 from probe_station_gui.route.measurement import RouteMeasurementPoint
 from probe_station_gui.route.shift import route_shift_from_stage_xy
-from probe_station_gui.stage import position_update as stage_position_update
+from probe_station_gui.stage.motion_prediction import coerce_finite_xy
 from probe_station_gui.stage.controller import StageControllerError
 from probe_station_gui.views import (
     main_window_stage_position_panel as stage_position_panel_adapter,
@@ -142,7 +142,7 @@ class _MainRouteControlMixin:
                 )
                 return None
             position = latest
-        stage_xy = stage_position_update.stage_xy_from_position(position)
+        stage_xy = coerce_finite_xy(position)
         xy_plan = route_shift_stage_xy_plan(stage_xy_available=stage_xy is not None)
         if xy_plan.message:
             self._show_route_runtime_status(xy_plan.message, xy_plan.timeout_ms)

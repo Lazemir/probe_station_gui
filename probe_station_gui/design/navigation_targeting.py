@@ -161,7 +161,6 @@ def design_panel_presentation(
     session: DesignSession,
     registration: RegistrationWorkflowSnapshot,
     route_running: bool,
-    pending_alignment_preparation: bool,
     design_snap_enabled: bool,
 ) -> DesignPanelPresentation:
     current_target = session_navigation.current_target(session)
@@ -186,11 +185,7 @@ def design_panel_presentation(
         route=session.route,
         selected_route_point_index=session.selected_route_point_index,
         route_measurement_running=bool(route_running),
-        calibration_prompt=(
-            "Calibration step 4/4: chip rotation is in progress."
-            if pending_alignment_preparation
-            else calibration_prompt
-        ),
+        calibration_prompt=calibration_prompt,
         registration_status=registration.registration_status,
         source_design_marks=tuple(registration.source_design_marks),
         check_design_marks=tuple(registration.check_design_marks),

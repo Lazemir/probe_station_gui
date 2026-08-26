@@ -27,10 +27,10 @@ class StageControllerMotionCommandsMixin:
 
         def __getattr__(self, name: str) -> Any: ...
 
-    def request_rotate_b(self, delta_deg: float) -> None:
+    def request_rotate_b(self, delta_deg: float) -> bool:
         """Rotate the B axis by a relative angle in the background."""
 
-        self._start_background_task(
+        return self._start_background_task(
             target=self._run_rotate_b,
             args=(float(delta_deg),),
             busy_message="Stage is busy. Ignoring B rotation request.",

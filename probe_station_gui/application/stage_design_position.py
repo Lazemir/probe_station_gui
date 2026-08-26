@@ -5,7 +5,7 @@ import math
 
 from probe_station_gui.application.stage_motion_types import StageMotionPresentation
 from probe_station_gui.design import navigation_targeting
-from probe_station_gui.stage import position_update as stage_position_update
+from probe_station_gui.stage.motion_prediction import coerce_finite_xy
 from probe_station_gui.stage.coordinate_targets import (
     normalize_api_coordinate_input_mode,
     resolve_stage_axis_target,
@@ -191,9 +191,18 @@ class _MainStageDesignPositionMixin:
         if self.serial_connection is None or not self.serial_connection.is_open:
             self._update_design_position(None)
             return
-        preferred_stage_xy = stage_position_update.preferred_design_display_stage_xy(
-            self
-        )
+        motion = self._stage_motion.snapshot()
+        preferred_stage_xy = coerce_finite_xy(motion.coordinate_stage_position)
+        if preferred_stage_xy is None:
+            preferred_stage_xy = motion.presented_stage_xy
+        latest = self.stage_controller.latest_stage_position()
+        if preferred_stage_xy is None and (
+            self.stage_controller.axes_are_homed({"X", "Y"})
+            or self._can_display_design_position()
+        ):
+            preferred_stage_xy = coerce_finite_xy(latest)
+        if preferred_stage_xy is None and self._can_display_design_position():
+            preferred_stage_xy = self._current_design_stage_xy
         if preferred_stage_xy is None:
             self.stage_controller.request_status_refresh()
             return

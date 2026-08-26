@@ -293,7 +293,7 @@ class _MainDesignMarkupMixin:
         self._design_markup_direct_guide_ids = []
         self._design_markup_pending_visibility = None
         self._reset_manual_alignment(cancel_pick=True)
-        self._pending_alignment_preparation = None
+        self._stage_motion.discard_alignment_rotation()
         self._last_selected_design_point = None
         self._refresh_design_panel()
         self._update_design_position(None)
@@ -321,7 +321,6 @@ class _MainDesignMarkupMixin:
             session_state=candidate_session.snapshot_state(),
             frame_metadata=metadata,
             last_selected_design_point=None,
-            pending_alignment_preparation=None,
         )
         transition = coordinate_flow.activate_current_design(
             self,
@@ -376,7 +375,7 @@ class _MainDesignMarkupMixin:
                 5000,
             )
             return
-        if self._pending_alignment_preparation is not None:
+        if self._stage_motion.alignment_rotation_pending():
             self._show_status(
                 "Wait for chip rotation to finish before rotating the design.",
                 5000,
@@ -414,7 +413,6 @@ class _MainDesignMarkupMixin:
             session_state=candidate_session.snapshot_state(),
             markup=rotated_markup,
             last_selected_design_point=plan.last_selected_design_point,
-            pending_alignment_preparation=None,
         )
         transition = coordinate_flow.activate_current_design(
             self,

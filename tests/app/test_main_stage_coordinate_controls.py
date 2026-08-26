@@ -18,8 +18,6 @@ from tests.app.main_route_session_support import (
     _make_cancel_main,
     _make_stage_position_display_main,
 )
-from probe_station_gui.stage import move_lifecycle as stage_move_lifecycle
-from probe_station_gui.stage import position_update as stage_position_update
 from probe_station_gui.application.stage_motion_types import (
     StageMotionActionState,
     StageMotionConfig,
@@ -690,11 +688,7 @@ class MainStageCoordinateControlsTest(unittest.TestCase):
             "X", 99.0, 1.0, motion_lease=motion_lease
         )
 
-        with mock.patch.object(
-            stage_position_update,
-            "publish_stage_position_estimate",
-        ):
-            coordinate_entry.apply_pending_stage_coordinate_targets(window)
+        coordinate_entry.apply_pending_stage_coordinate_targets(window)
 
         self.assertEqual(
             projection_calls,
@@ -795,11 +789,7 @@ class MainStageCoordinateControlsTest(unittest.TestCase):
             "X", 999.0, 21.0, motion_lease=motion_lease
         )
 
-        with mock.patch.object(
-            stage_position_update,
-            "publish_stage_position_estimate",
-        ):
-            coordinate_entry.apply_pending_stage_coordinate_targets(window)
+        coordinate_entry.apply_pending_stage_coordinate_targets(window)
 
         self.assertEqual(projection_calls, [((("X", 21.0),), motion_lease)])
         self.assertEqual(stage_controller.requests, [({"X": 5.5}, 99.0)])
@@ -1029,12 +1019,8 @@ class MainStageCoordinateControlsTest(unittest.TestCase):
             ),
         )
 
-        with mock.patch.object(
-            stage_move_lifecycle,
-            "has_application_cancelable_operation",
-            return_value=True,
-        ):
-            Main._update_stage_coordinate_apply_state(window)
+        window._has_application_cancelable_operation = lambda: True
+        Main._update_stage_coordinate_apply_state(window)
 
         self.assertEqual(panel.action_button_states[-1], (True, True))
 

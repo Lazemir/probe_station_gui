@@ -81,7 +81,7 @@ def test_repository_import_contracts_pass() -> None:
     result = _run_import_linter(config=ROOT / "pyproject.toml", cwd=ROOT)
 
     assert result.returncode == 0, result.stdout
-    assert "Contracts: 5 kept, 0 broken." in result.stdout
+    assert "Contracts: 6 kept, 0 broken." in result.stdout
 
 
 def test_every_tracked_python_file_has_positive_maintainability_index() -> None:

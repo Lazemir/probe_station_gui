@@ -343,7 +343,6 @@ def test_panel_and_position_presentations_include_navigation_state(
         session,
         registration,
         route_running=True,
-        pending_alignment_preparation=True,
         design_snap_enabled=False,
     )
     position = design_position_presentation(
@@ -358,10 +357,7 @@ def test_panel_and_position_presentations_include_navigation_state(
     assert panel.selected_target_id == "a"
     assert panel.selected_route_point_index == 0
     assert panel.route_measurement_running
-    assert (
-        panel.calibration_prompt
-        == "Calibration step 4/4: chip rotation is in progress."
-    )
+    assert panel.calibration_prompt.startswith("Pick mark 1")
     assert position.current_design_position == (9.0, 10.0)
     assert position.fov_design_size == (11.0, 12.0)
     assert position.selected_design_point == (1.0, 2.0)

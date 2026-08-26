@@ -21,7 +21,6 @@ PRODUCTION_CONSUMERS = (
     ROOT / "probe_station_gui" / "application" / "design_markup.py",
     ROOT / "probe_station_gui" / "application" / "registration_focus.py",
     ROOT / "probe_station_gui" / "route" / "dialog_adapter.py",
-    ROOT / "probe_station_gui" / "stage" / "move_lifecycle.py",
     ROOT / "probe_station_gui" / "views" / "main_window_shutdown.py",
     ROOT / "probe_station_gui" / "views" / "main_window_needle_calibration.py",
 )

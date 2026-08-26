@@ -52,7 +52,7 @@ class _MainSettingsApplyMixin:
             return
         self._manual_alignment_pick_slot = None
         self._manual_alignment_points = [None, None]
-        self._pending_alignment_preparation = None
+        self._stage_motion.discard_alignment_rotation()
         transition = self._coordinate_system_coordinator.set_registration_source_mark(
             RegistrationSourceMarkRequest(snapped_point, slot=slot)
         )
@@ -126,7 +126,7 @@ class _MainSettingsApplyMixin:
         self._alignment_design_draft = normalized
         self._alignment_stage_draft = [None] * len(normalized)
         self._alignment_draft_fit_residuals = None
-        self._pending_alignment_preparation = None
+        self._stage_motion.discard_alignment_rotation()
         self._manual_alignment_pick_slot = None
         design_layout_window = getattr(self, "design_layout_window", None)
         if design_layout_window is not None:

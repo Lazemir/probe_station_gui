@@ -29,6 +29,18 @@ logger = logging.getLogger("main")
 
 
 class _MainOpticalCalibrationMixin:
+    def on_calibration_changed(
+        self,
+        mm_per_pixel_x: float,
+        mm_per_pixel_y: float,
+    ) -> None:
+        self._show_status(
+            f"Calibration: ΔX {mm_per_pixel_x:.6f} mm/px, "
+            f"ΔY {mm_per_pixel_y:.6f} mm/px",
+            5000,
+        )
+        self.view.set_scale(mm_per_pixel_x, mm_per_pixel_y)
+
     def _start_flat_field_calibration_from_wizard(self) -> None:
         wizard = self._optical_calibration_wizard
         if wizard is None:

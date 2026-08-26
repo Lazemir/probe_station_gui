@@ -1,14 +1,11 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 import types
 
-from probe_station_gui.coordinates.coordinator_model import (
-    CoordinateSystemSnapshot,
-    CoordinateTransition,
+from probe_station_gui.application.status_coordinate_ui import (
+    _MainStatusCoordinateUiMixin,
 )
 from probe_station_gui.application.stage_motion_types import StageMotionCancelOutcome
-from probe_station_gui.stage import move_lifecycle
 from probe_station_gui.stage.exact_step import ExactStepClearReason
 from tests.app.route_run_execution_support import (
     activate_route_run,
@@ -103,6 +100,7 @@ class _StageMotionBoundary:
         self.pending: dict[str, tuple[float, float]] = {}
         self.cancel_planned_calls = 0
         self.exact_clear_reasons: list[ExactStepClearReason] = []
+        self.alignment_pending = False
 
     def snapshot(self) -> object:
         return types.SimpleNamespace(
@@ -143,6 +141,14 @@ class _StageMotionBoundary:
             coordinate_priority=coordinate_priority,
             pending_edits_cleared=pending_edits_cleared,
         )
+
+    def alignment_rotation_pending(self) -> bool:
+        return self.alignment_pending
+
+    def discard_alignment_rotation(self) -> bool:
+        was_pending = self.alignment_pending
+        self.alignment_pending = False
+        return was_pending
 
 
 class _Runner:
@@ -198,15 +204,7 @@ class _MicroscopeScanDialog:
         self.statuses.append(status)
 
 
-@dataclass
-class _Preparation:
-    rotation_deg: float = 1.25
-    distance_ratio: float = 0.875
-    rms_residual_mm: float = 0.0123
-    max_residual_mm: float = 0.0456
-
-
-class _Owner:
+class _Owner(_MainStatusCoordinateUiMixin):
     STAGE_AXIS_NAMES = AXES
     MANUAL_JOG_SETTLE_POLL_DELAYS_MS = (40, 120)
 
@@ -217,8 +215,6 @@ class _Owner:
         self._microscope_interaction = _MicroscopeInteraction(self.cancel_order)
         self.joystick_panel = _JoystickPanel()
         self._manual_alignment_pick_slot = None
-        self._pending_alignment_preparation = None
-        self._pending_quick_alignment_rotation = False
         self._pending_homing_axes: list[str] = []
         self._homing_active_key = None
         install_route_run_execution(self)
@@ -231,18 +227,6 @@ class _Owner:
         self._stage_motion = _StageMotionBoundary(
             self.stage_controller,
             self.cancel_order,
-        )
-        self._design_session = types.SimpleNamespace(
-            applied=[],
-            apply_prepared_alignment=lambda preparation: (
-                self._design_session.applied.append(preparation)
-            ),
-        )
-        self._coordinate_system_coordinator = types.SimpleNamespace(
-            apply_registration_alignment=lambda request: (
-                self._design_session.applied.append(request.preparation)
-                or CoordinateTransition(CoordinateSystemSnapshot(False, (), None))
-            )
         )
         self.design_navigator_panel = None
         self.statuses: list[tuple[str, int]] = []
@@ -362,9 +346,9 @@ def test_application_cancelability_excludes_session_motion_state() -> None:
     owner = _Owner()
     owner._stage_motion.coordinate_active = True
 
-    assert move_lifecycle.has_application_cancelable_operation(owner) is False
+    assert _MainStatusCoordinateUiMixin._has_application_cancelable_operation(owner) is False
     owner._microscope_interaction.has_pending_move = True
-    assert move_lifecycle.has_application_cancelable_operation(owner) is True
+    assert _MainStatusCoordinateUiMixin._has_application_cancelable_operation(owner) is True
 
 
 def test_coordinate_cancel_has_priority_over_generic_busy_task() -> None:
@@ -373,7 +357,9 @@ def test_coordinate_cancel_has_priority_over_generic_busy_task() -> None:
     owner._stage_motion.pending["X"] = (5.0, 5.0)
     owner.stage_controller.busy = True
 
-    move_lifecycle.cancel_stage_coordinate_action(owner, focus_reason="focus")
+    _MainStatusCoordinateUiMixin._cancel_stage_coordinate_action(
+        owner, focus_reason="focus"
+    )
 
     assert owner._stage_motion.exact_clear_reasons == [
         ExactStepClearReason.CANCEL_REQUESTED
@@ -398,7 +384,9 @@ def test_route_cancel_runs_before_active_coordinate_move_early_return() -> None:
     owner.design_navigator_panel = design_panel
     owner._stage_motion.coordinate_active = True
 
-    move_lifecycle.cancel_stage_coordinate_action(owner, focus_reason="focus")
+    _MainStatusCoordinateUiMixin._cancel_stage_coordinate_action(
+        owner, focus_reason="focus"
+    )
 
     assert runner.stop_calls == 1
     assert design_panel.waiting == [False]
@@ -420,7 +408,9 @@ def test_global_cancel_preserves_all_application_to_stage_slice_order() -> None:
     owner._microscope_scan_running_value = True
     owner._stage_motion.coordinate_active = True
 
-    move_lifecycle.cancel_stage_coordinate_action(owner, focus_reason="focus")
+    _MainStatusCoordinateUiMixin._cancel_stage_coordinate_action(
+        owner, focus_reason="focus"
+    )
 
     assert owner.cancel_order == [
         "pending-ui",
@@ -440,7 +430,9 @@ def test_background_capture_cancel_reports_generic_cancel_status() -> None:
     owner._surface_map_running = True
     owner._microscope_scan_running_value = True
 
-    move_lifecycle.cancel_stage_coordinate_action(owner, focus_reason="focus")
+    _MainStatusCoordinateUiMixin._cancel_stage_coordinate_action(
+        owner, focus_reason="focus"
+    )
 
     assert surface_map.stop_calls == 1
     assert owner._microscope_scan_stop_requested.set_calls == 1
@@ -454,7 +446,9 @@ def test_pending_edits_only_cancel_clears_edits_and_reports_edit_status() -> Non
     owner = _Owner()
     owner._stage_motion.pending["Y"] = (2.0, 2.0)
 
-    move_lifecycle.cancel_stage_coordinate_action(owner, focus_reason="focus")
+    _MainStatusCoordinateUiMixin._cancel_stage_coordinate_action(
+        owner, focus_reason="focus"
+    )
 
     assert owner.stage_controller.cancelled_motions == []
     assert owner.stage_controller.cancelled_tasks == []
@@ -467,45 +461,22 @@ def test_global_cancel_clears_pending_click_through_interaction_seam() -> None:
     owner = _Owner()
     owner._microscope_interaction.has_pending_move = True
 
-    move_lifecycle.cancel_stage_coordinate_action(owner, focus_reason="focus")
+    _MainStatusCoordinateUiMixin._cancel_stage_coordinate_action(
+        owner, focus_reason="focus"
+    )
 
     assert owner._microscope_interaction.cancel_calls == [True]
     assert owner.statuses == [("Cancel requested.", 3000)]
     assert owner.view.focus_reasons == ["focus"]
 
 
-def test_move_finish_alignment_preparation_returns_before_normal_finish_cleanup() -> (
-    None
-):
+def test_global_cancel_discards_pending_alignment_rotation() -> None:
     owner = _Owner()
-    preparation = _Preparation()
-    owner._pending_alignment_preparation = preparation
+    owner._stage_motion.alignment_pending = True
 
-    move_lifecycle.on_move_finished(owner, True, "Done.")
+    _MainStatusCoordinateUiMixin._cancel_stage_coordinate_action(
+        owner, focus_reason="focus"
+    )
 
-    assert owner._design_session.applied == [preparation]
-    assert owner.design_snap_updates == [False]
-    assert owner.design_panel_refreshes == 1
-    assert owner.design_position_refreshes == 1
-    assert owner.alignment_panel_collapses == 1
-    assert owner.finished_alignment_drafts == 1
-    assert owner._microscope_interaction.clear_calls == 1
-    assert owner.status_refreshes == [owner.MANUAL_JOG_SETTLE_POLL_DELAYS_MS]
-    assert owner.cancel_refreshes == 0
-    assert owner.statuses == [
-        (
-            "Design calibration complete. Rotation +1.250 deg, spacing ratio 0.875. "
-            "RMS 0.0123 mm, max 0.0456 mm.",
-            7000,
-        )
-    ]
-
-
-def test_unclaimed_move_finish_clears_cross_then_reports_status() -> None:
-    owner = _Owner()
-
-    move_lifecycle.on_move_finished(owner, False, "Limit reached.")
-
-    assert owner._microscope_interaction.finish_calls == [False]
-    assert owner.statuses == [("Limit reached.", 5000)]
-    assert owner.cancel_refreshes == 1
+    assert owner._stage_motion.alignment_pending is False
+    assert owner.statuses == [("Cancel requested.", 3000)]

@@ -50,6 +50,7 @@ from tests.coordinates.coordinator_registration_support import (
     _loaded_coordinator,
     _machine_snapshot,
 )
+from tests.app.test_stage_motion_session_coordinate import _session
 
 
 def _multi_view_document(tmp_path: Path) -> DesignDocument:
@@ -561,8 +562,11 @@ def test_failed_design_frame_save_restores_complete_cross_document_workspace(
     statuses: list[str] = []
     baseline_metadata = DesignFrameMetadata.from_document(baseline_document)
     baseline_markup = object()
-    baseline_alignment = object()
     candidate_markup = object()
+    stage_motion, controller = _session()
+    controller.request_rotate_b = lambda _delta: True
+    correlation = object()
+    assert stage_motion.request_alignment_rotation(1.0, correlation) is True
     owner = SimpleNamespace(
         _coordinate_system_coordinator=coordinator,
         _design_session=workspace,
@@ -571,7 +575,6 @@ def test_failed_design_frame_save_restores_complete_cross_document_workspace(
         _design_markup_direct_guide_ids=["baseline-guide"],
         _design_markup_pending_visibility="baseline-visibility",
         _last_selected_design_point=(1.0, 2.0),
-        _pending_alignment_preparation=baseline_alignment,
         _rotation_geometry_snapshot=lambda: SimpleNamespace(
             pivot_machine_xy=(0.0, 0.0)
         ),
@@ -587,6 +590,7 @@ def test_failed_design_frame_save_restores_complete_cross_document_workspace(
                 0.0,
             ),
         ),
+        _stage_motion=stage_motion,
         _refresh_design_panel=lambda: refreshes.append("panel"),
         _refresh_design_position=lambda: refreshes.append("position"),
         _show_status=lambda message, *_args: statuses.append(message),
@@ -608,7 +612,6 @@ def test_failed_design_frame_save_restores_complete_cross_document_workspace(
         direct_guide_ids=("candidate-guide",),
         pending_visibility="candidate-visibility",
         last_selected_design_point=(3.0, 4.0),
-        pending_alignment_preparation=None,
     )
 
     transition = coordinate_flow.activate_current_design(
@@ -642,6 +645,10 @@ def test_failed_design_frame_save_restores_complete_cross_document_workspace(
     assert owner._design_markup_direct_guide_ids == ["baseline-guide"]
     assert owner._design_markup_pending_visibility == "baseline-visibility"
     assert owner._last_selected_design_point == (1.0, 2.0)
-    assert owner._pending_alignment_preparation is baseline_alignment
     assert statuses[-1] == "Design coordinate frames could not be saved."
     assert refreshes[-2:] == ["panel", "position"]
+    completions = []
+    stage_motion.alignment_rotation_finished.connect(completions.append)
+    stage_motion.on_movement_finished(True, "finished")
+    assert len(completions) == 1
+    assert completions[0].correlation is correlation

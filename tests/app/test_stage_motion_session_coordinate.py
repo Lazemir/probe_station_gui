@@ -427,17 +427,12 @@ def test_unrelated_completion_without_coordinate_purpose_is_inert() -> None:
     session, _controller = _session()
     before = session.snapshot()
     completions = []
-    unclaimed = []
     session.coordinate_move_finished.connect(completions.append)
-    session.unclaimed_movement_finished.connect(unclaimed.append)
 
     session.on_movement_finished(False, "Other task failed.")
 
     assert session.snapshot() == before
     assert completions == []
-    assert len(unclaimed) == 1
-    assert unclaimed[0].success is False
-    assert unclaimed[0].message == "Other task failed."
 
 
 def test_claimed_success_disarms_purpose_but_tracking_stays_until_idle(
@@ -446,12 +441,10 @@ def test_claimed_success_disarms_purpose_but_tracking_stays_until_idle(
     session, controller = _session()
     statuses: list[tuple[str, int]] = []
     completions = []
-    unclaimed = []
     session.status_requested.connect(
         lambda text, timeout: statuses.append((text, timeout))
     )
     session.coordinate_move_finished.connect(completions.append)
-    session.unclaimed_movement_finished.connect(unclaimed.append)
     scheduled_polls: list[bool] = []
     monkeypatch.setattr(
         session._settle_status_polls,
@@ -466,16 +459,12 @@ def test_claimed_success_disarms_purpose_but_tracking_stays_until_idle(
     assert session.snapshot().coordinate_active is True
     assert statuses == [("Move complete.", 5000)]
     assert completions == []
-    assert unclaimed == []
     assert scheduled_polls == [True]
 
     session.on_movement_finished(False, "Other task failed.")
 
     assert session.snapshot().coordinate_active is True
     assert completions == []
-    assert len(unclaimed) == 1
-    assert unclaimed[0].success is False
-    assert unclaimed[0].message == "Other task failed."
 
 
 def test_feedrate_reissue_success_updates_programmed_and_effective_feedrates() -> None:
@@ -503,12 +492,10 @@ def test_expected_reissue_cancellation_retains_tracking_and_suppresses_failure()
     controller.state = "Run"
     completions = []
     statuses: list[tuple[str, int]] = []
-    unclaimed = []
     session.coordinate_move_finished.connect(completions.append)
     session.status_requested.connect(
         lambda text, timeout: statuses.append((text, timeout))
     )
-    session.unclaimed_movement_finished.connect(unclaimed.append)
     assert session.start_coordinate_move(_request())
     session.set_coordinate_feedrate(180.0)
     statuses.clear()
@@ -521,7 +508,6 @@ def test_expected_reissue_cancellation_retains_tracking_and_suppresses_failure()
     assert session.snapshot().coordinate_programmed_feedrate == 180.0
     assert completions == []
     assert statuses == [("Move complete.", 5000)]
-    assert unclaimed == []
 
 
 def test_rejected_feedrate_reissue_retains_original_tracking() -> None:

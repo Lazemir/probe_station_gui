@@ -37,6 +37,13 @@ class StageMotionCancelOutcome:
 
 
 @dataclass(frozen=True)
+class AlignmentRotationCompletion:
+    correlation: object
+    success: bool
+    message: str
+
+
+@dataclass(frozen=True)
 class PlannedXYMoveRequest:
     target_stage_xy: tuple[float, float]
     source_label: str

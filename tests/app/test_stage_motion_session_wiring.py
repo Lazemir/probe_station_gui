@@ -301,11 +301,6 @@ def test_timestamp_only_presentation_skips_idle_renderer_rebuild(monkeypatch) ->
     window._update_coordinate_display = lambda **_kwargs: calls.append("coordinate")
     window._update_design_position = lambda _value: calls.append("design")
     monkeypatch.setattr(
-        stage_design_position.stage_position_update,
-        "on_stage_position_changed",
-        lambda *_args, **_kwargs: calls.append("deferred"),
-    )
-    monkeypatch.setattr(
         stage_design_position.design_workspace,
         "maybe_restore_persisted_design",
         lambda *_args: calls.append("restore"),
@@ -354,15 +349,7 @@ def test_typed_presentation_never_delegates_back_to_legacy_position_workflow(
         "coordinate"
     )
     window._update_design_position = lambda _value: direct_render_calls.append("design")
-    delegated: list[tuple[object, object, PhysicalMachinePose]] = []
     direct_render_calls: list[str] = []
-    monkeypatch.setattr(
-        stage_design_position.stage_position_update,
-        "on_stage_position_changed",
-        lambda owner, position, *, physical_machine_pose, **_facts: delegated.append(
-            (owner, position, physical_machine_pose)
-        ),
-    )
     monkeypatch.setattr(
         stage_design_position.design_workspace,
         "maybe_restore_persisted_design",
@@ -394,7 +381,6 @@ def test_typed_presentation_never_delegates_back_to_legacy_position_workflow(
 
     main_module.Main._apply_stage_motion_presentation(window, presentation)
 
-    assert delegated == []
     assert direct_render_calls == []
 
 
@@ -403,7 +389,9 @@ def test_application_consumers_use_typed_session_boundary() -> None:
     from probe_station_gui.application import camera_pipeline
     from probe_station_gui.application import registration_focus
     from probe_station_gui.application import stage_design_position
-    from probe_station_gui.stage import move_lifecycle
+    from probe_station_gui.application.status_coordinate_ui import (
+        _MainStatusCoordinateUiMixin,
+    )
     from probe_station_gui.views import main_window_docks
 
     assert not hasattr(
@@ -430,11 +418,13 @@ def test_application_consumers_use_typed_session_boundary() -> None:
     api_source = inspect.getsource(
         api_stage_contact._MainApiStageContactMixin._interrupt_api_route_controlled_operation
     )
-    cancel_source = inspect.getsource(move_lifecycle.cancel_stage_coordinate_action)
+    cancel_source = inspect.getsource(
+        _MainStatusCoordinateUiMixin._cancel_stage_coordinate_action
+    )
     assert "owner._stage_motion.on_manual_jog_command" in manual_wiring_source
     assert "owner._stage_motion.on_manual_jog_stopped" in manual_wiring_source
     assert "self._stage_motion.cancel_planned_xy_move()" in api_source
-    assert "owner._stage_motion.cancel_stage_motion()" in cancel_source
+    assert "self._stage_motion.cancel_stage_motion()" in cancel_source
     assert "cancel_active_motion" not in cancel_source
     assert "cancel_active_task" not in cancel_source
     assert "_clear_planned_move_prediction" not in (
@@ -570,14 +560,8 @@ def test_main_wires_global_completion_and_homing_directly_to_session() -> None:
         "            self._stage_motion.on_movement_finished"
     ) in main_source
     assert main_source.count("self.stage_controller.movement_finished.connect(") == 1
-    assert (
-        main_source.count("self._stage_motion.unclaimed_movement_finished.connect(")
-        == 1
-    )
-    assert (
-        "lambda completion: stage_move_lifecycle.on_move_finished(\n"
-        "                self,\n"
-        "                completion.success,\n"
-        "                completion.message,"
-    ) in main_source
+    assert "self._stage_motion.unclaimed_movement_finished.connect(" not in main_source
+    assert "self._stage_motion.alignment_rotation_finished.connect(" in main_source
+    assert "self._stage_motion.click_move_finished.connect(" in main_source
+    assert "self._stage_motion.on_click_move_started" in main_source
     assert "self._stage_motion.continue_homing_requested.connect(" in main_source

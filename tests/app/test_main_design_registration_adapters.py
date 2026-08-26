@@ -77,6 +77,9 @@ def test_design_unload_closes_coordinate_owner_before_workspace_adoption(
     transition = CoordinateTransition(CoordinateSystemSnapshot(True, (), None))
     plan = types.SimpleNamespace(accepted=True)
     window = Main.__new__(Main)
+    window._stage_motion = types.SimpleNamespace(
+        discard_alignment_rotation=lambda: False
+    )
     window._design_mutation_ready = lambda: True
     window._design_load_generation = 1
     window._design_session = types.SimpleNamespace(
@@ -95,7 +98,6 @@ def test_design_unload_closes_coordinate_owner_before_workspace_adoption(
     window._design_markup_direct_guide_ids = ["guide"]
     window._design_markup_pending_visibility = object()
     window._reset_manual_alignment = lambda **_kwargs: None
-    window._pending_alignment_preparation = object()
     window._last_selected_design_point = (1.0, 2.0)
     window._refresh_design_panel = lambda: None
     window._update_design_position = lambda _value: None
@@ -227,7 +229,11 @@ def test_rejected_fresh_frame_keeps_source_mark_and_ui_state(
     window._design_session = session
     window._manual_alignment_pick_slot = 1
     window._manual_alignment_points = [(1.0, 2.0), (3.0, 4.0)]
-    window._pending_alignment_preparation = object()
+    window._stage_motion = types.SimpleNamespace(
+        discard_alignment_rotation=lambda: (_ for _ in ()).throw(
+            AssertionError("rejected activation discarded alignment correlation")
+        )
+    )
     window._last_selected_design_point = (9.0, 10.0)
     calls: list[object] = []
     window._coordinate_system_coordinator = types.SimpleNamespace(
@@ -254,14 +260,17 @@ def test_rejected_fresh_frame_keeps_source_mark_and_ui_state(
     assert session.source_stage_marks == ((5.0, 6.0), (7.0, 8.0))
     assert window._manual_alignment_pick_slot == 1
     assert window._manual_alignment_points == [(1.0, 2.0), (3.0, 4.0)]
-    assert window._pending_alignment_preparation is not None
     assert window._last_selected_design_point == (9.0, 10.0)
     assert calls == []
 
 
 def test_rejected_clear_registration_keeps_current_ui_state(monkeypatch) -> None:
     window = Main.__new__(Main)
-    window._pending_alignment_preparation = object()
+    window._stage_motion = types.SimpleNamespace(
+        discard_alignment_rotation=lambda: (_ for _ in ()).throw(
+            AssertionError("rejected activation discarded alignment correlation")
+        )
+    )
     window._last_selected_design_point = (9.0, 10.0)
     calls: list[object] = []
     window._set_design_snap_enabled = lambda value: calls.append(("snap", value))
@@ -279,14 +288,15 @@ def test_rejected_clear_registration_keeps_current_ui_state(monkeypatch) -> None
 
     Main._clear_design_registration(window)
 
-    assert window._pending_alignment_preparation is not None
     assert window._last_selected_design_point == (9.0, 10.0)
     assert calls == []
 
 
 def test_accepted_clear_registration_restarts_ui(monkeypatch) -> None:
     window = Main.__new__(Main)
-    window._pending_alignment_preparation = object()
+    window._stage_motion = types.SimpleNamespace(
+        discard_alignment_rotation=lambda: False
+    )
     window._last_selected_design_point = (9.0, 10.0)
     calls: list[object] = []
     window._set_design_snap_enabled = lambda value: calls.append(("snap", value))
@@ -304,7 +314,6 @@ def test_accepted_clear_registration_restarts_ui(monkeypatch) -> None:
 
     Main._clear_design_registration(window)
 
-    assert window._pending_alignment_preparation is None
     assert window._last_selected_design_point is None
     assert calls == [
         ("snap", True),
@@ -347,6 +356,35 @@ def test_focus_callbacks_translate_only_typed_results(monkeypatch) -> None:
         ),
     ]
     assert rendered == [transition, transition]
+
+
+def test_focus_move_signal_uses_only_its_tracked_token_completion(monkeypatch) -> None:
+    completions: list[CoordinateAdapterCompletion] = []
+    transition = CoordinateTransition(CoordinateSystemSnapshot(True, (), None))
+    window = Main.__new__(Main)
+    window._coordinate_system_coordinator = types.SimpleNamespace(
+        complete=lambda completion: completions.append(completion) or transition
+    )
+    monkeypatch.setattr(
+        main_module.coordinate_flow,
+        "apply_coordinate_transition",
+        lambda *_args: None,
+    )
+
+    Main._on_registration_focus_move_signal(
+        window,
+        21,
+        (4.0, 5.0),
+        True,
+        "moved",
+    )
+
+    assert completions == [
+        CoordinateAdapterCompletion(
+            21,
+            FocusMoveResult(21, True, "moved", completed_target_xy=(4.0, 5.0)),
+        )
+    ]
 
 
 def test_main_observes_focus_context_without_owning_lease_policy(

@@ -19,7 +19,6 @@ from probe_station_gui.coordinates.coordinator_model import (
 from probe_station_gui.coordinates.model import PhysicalMachinePose
 from probe_station_gui.settings.axis_calibration_config import AxisCalibrationSettings
 from probe_station_gui.settings.manager import Settings, SettingsManager
-from probe_station_gui.stage import position_update as stage_position_update
 from probe_station_gui.stage.controller import StageController
 from probe_station_gui.stage.types import _Status
 from probe_station_gui.views import main_window_coordinate_flow as coordinate_flow
@@ -403,21 +402,6 @@ def test_curve_apply_keeps_estimated_position_authority_on_remapped_snapshot(
         assert remapped is not None
         assert remapped.physical_machine_pose.require("X") == 2.0
 
-        observed_poses = []
-        monkeypatch.setattr(
-            stage_position_update.stage_position_panel,
-            "update_stage_position_display",
-            lambda _owner, _position: None,
-        )
-        monkeypatch.setattr(
-            stage_position_update.coordinate_flow,
-            "observe_coordinate_authority",
-            lambda _owner, physical_pose: observed_poses.append(physical_pose),
-        )
-
-        stage_position_update.publish_stage_position_estimate(window, raw_position)
-
         assert window._stage_motion.snapshot().physical_machine_pose.require("X") == 2.0
-        assert observed_poses == [remapped.physical_machine_pose]
     finally:
         controller.shutdown()

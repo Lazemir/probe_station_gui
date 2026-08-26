@@ -101,6 +101,33 @@ class _MicroscopeScanLaunchSnapshot:
 
 
 class _MainCameraPipelineMixin:
+    def _on_measure_action_toggled(self, checked: bool) -> None:
+        sender = self.sender()
+        if not checked:
+            if (self._ruler_action is None or not self._ruler_action.isChecked()) and (
+                self._rect_action is None or not self._rect_action.isChecked()
+            ):
+                self.view.set_measure_mode(None)
+            return
+        if sender is self._ruler_action and self._rect_action is not None:
+            self._rect_action.blockSignals(True)
+            self._rect_action.setChecked(False)
+            self._rect_action.blockSignals(False)
+        elif sender is self._rect_action and self._ruler_action is not None:
+            self._ruler_action.blockSignals(True)
+            self._ruler_action.setChecked(False)
+            self._ruler_action.blockSignals(False)
+        mode = "ruler" if sender is self._ruler_action else "rect"
+        self.view.set_measure_mode(mode)
+
+    def _on_measure_mode_exited(self) -> None:
+        self.view.set_measure_mode(None)
+        for action in (self._ruler_action, self._rect_action):
+            if action is not None:
+                action.blockSignals(True)
+                action.setChecked(False)
+                action.blockSignals(False)
+
     def _preload_design_layout_window(self) -> None:
         if (
             self.design_layout_window is not None

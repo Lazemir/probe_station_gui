@@ -37,6 +37,7 @@ class MainWindowStagePositionPanelOwner(Protocol):
 
     def _on_stage_axis_escape_pressed(self, axis_name: str) -> None: ...
     def _update_stage_coordinate_apply_state(self) -> None: ...
+    def _cancel_stage_coordinate_action(self, *, focus_reason: object) -> None: ...
     def _on_stage_coordinate_mode_changed(self) -> None: ...
     def _current_linear_feedrate(self) -> float: ...
 
@@ -365,12 +366,7 @@ def update_stage_position_display(
 
 
 def cancel_stage_coordinate_action(owner: MainWindowStagePositionPanelOwner) -> None:
-    from probe_station_gui.stage import move_lifecycle as stage_move_lifecycle
-
-    stage_move_lifecycle.cancel_stage_coordinate_action(
-        owner,
-        focus_reason=Qt.OtherFocusReason,
-    )
+    owner._cancel_stage_coordinate_action(focus_reason=Qt.OtherFocusReason)
 
 
 __all__ = [

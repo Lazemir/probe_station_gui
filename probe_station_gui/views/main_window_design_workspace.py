@@ -91,11 +91,6 @@ def restore_design_workspace(
                 applied.last_selected_design_point,
                 previous.last_selected_design_point,
             ),
-            pending_alignment_preparation=_rollback_value(
-                current.pending_alignment_preparation,
-                applied.pending_alignment_preparation,
-                previous.pending_alignment_preparation,
-            ),
         ),
     )
 
@@ -130,7 +125,6 @@ def capture_design_workspace(
     direct_guide_ids: object = _FRAME_METADATA_UNSET,
     pending_visibility: object = _FRAME_METADATA_UNSET,
     last_selected_design_point: object = _FRAME_METADATA_UNSET,
-    pending_alignment_preparation: object = _FRAME_METADATA_UNSET,
 ) -> DesignWorkspaceCheckpoint:
     if session_state is None:
         session_state = owner._design_session.snapshot_state()
@@ -161,11 +155,6 @@ def capture_design_workspace(
             if last_selected_design_point is _FRAME_METADATA_UNSET
             else last_selected_design_point
         ),
-        pending_alignment_preparation=(
-            getattr(owner, "_pending_alignment_preparation", None)
-            if pending_alignment_preparation is _FRAME_METADATA_UNSET
-            else pending_alignment_preparation
-        ),
     )
 
 
@@ -179,7 +168,6 @@ def apply_design_workspace_checkpoint(
     owner._design_markup_direct_guide_ids = list(checkpoint.direct_guide_ids)
     owner._design_markup_pending_visibility = checkpoint.pending_visibility
     owner._last_selected_design_point = checkpoint.last_selected_design_point
-    owner._pending_alignment_preparation = checkpoint.pending_alignment_preparation
 
 
 def controller_state_with_design(owner: object) -> dict[str, object] | None:

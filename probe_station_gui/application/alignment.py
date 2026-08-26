@@ -4,12 +4,13 @@ import logging
 import threading
 import uuid
 from dataclasses import dataclass
+from probe_station_gui.application.stage_motion_types import AlignmentRotationCompletion
 from probe_station_gui.coordinates.coordinator_model import (
     RegistrationCaptureRequest,
     RegistrationAlignmentRequest,
-    RegistrationInvalidationRequest,
 )
 from probe_station_gui.design.model import DesignModelError
+from probe_station_gui.design.session_registration import AlignmentPreparation
 from probe_station_gui.design import objective_alignment as alignment
 from probe_station_gui.settings.objective_config import normalize_objective_name
 from probe_station_gui.stage.exact_step import ExactStepClearReason
@@ -24,6 +25,12 @@ class _ManualAlignmentCaptureContext:
     request_id: str
     slot: int
     cancelled: threading.Event
+
+
+@dataclass(frozen=True)
+class _AlignmentRotationCorrelation:
+    preparation: AlignmentPreparation | None
+    collapse_design_on_success: bool
 
 
 class _MainAlignmentMixin:
@@ -105,14 +112,13 @@ class _MainAlignmentMixin:
         if self._design_backed_alignment_active():
             transition = self._coordinate_system_coordinator.clear_registration_source_stage_marks()
             coordinate_flow.apply_coordinate_transition(self, transition)
-            self._pending_alignment_preparation = None
-            self._pending_quick_alignment_rotation = False
+            self._stage_motion.discard_alignment_rotation()
             self._alignment_stage_draft = [None] * len(self._alignment_design_draft)
             self._alignment_draft_fit_residuals = None
             self._set_design_snap_enabled(True)
         else:
             self._reset_manual_alignment(cancel_pick=False)
-            self._pending_quick_alignment_rotation = False
+            self._stage_motion.discard_alignment_rotation()
         self._manual_alignment_pick_slot = None
         self._set_alignment_panel_expanded()
         self._refresh_manual_alignment_ui()
@@ -355,10 +361,16 @@ class _MainAlignmentMixin:
             )
             coordinate_flow.apply_coordinate_transition(self, transition)
             self._finish_alignment_draft()
-        if plan.pending_preparation is not None:
-            self._pending_alignment_preparation = plan.pending_preparation
-        if plan.pending_quick_alignment_rotation:
-            self._pending_quick_alignment_rotation = True
+        if plan.request_b_rotation and plan.rotation_deg is not None:
+            accepted = self._stage_motion.request_alignment_rotation(
+                plan.rotation_deg,
+                _AlignmentRotationCorrelation(
+                    preparation=plan.pending_preparation,
+                    collapse_design_on_success=plan.pending_quick_alignment_rotation,
+                ),
+            )
+            if not accepted:
+                return
         if plan.invalidate_design_registration:
             self._invalidate_design_registration(
                 "Design registration cleared after B-axis rotation."
@@ -380,15 +392,48 @@ class _MainAlignmentMixin:
         if plan.status:
             self._show_status(plan.status, plan.status_timeout_ms)
 
-    def _on_alignment_b_rotation_started(self) -> None:
-        if self._pending_alignment_preparation is None:
+    def _on_alignment_rotation_finished(
+        self,
+        completion: AlignmentRotationCompletion,
+    ) -> None:
+        correlation = completion.correlation
+        if not isinstance(correlation, _AlignmentRotationCorrelation):
             return
-        transition = self._coordinate_system_coordinator.invalidate_registration(
-            RegistrationInvalidationRequest(
-                "Design registration stale after B-axis rotation started."
-            )
-        )
-        coordinate_flow.apply_coordinate_transition(self, transition)
+        preparation = correlation.preparation
+        if preparation is not None:
+            if completion.success:
+                transition = self._coordinate_system_coordinator.apply_registration_alignment(
+                    RegistrationAlignmentRequest(preparation)
+                )
+                coordinate_flow.apply_coordinate_transition(self, transition)
+                self._finish_alignment_draft()
+                self._set_design_snap_enabled(False)
+                self._refresh_design_panel()
+                self._refresh_design_position()
+                self._collapse_alignment_panel_if_ready()
+                self._microscope_interaction.clear_target()
+                self._show_status(
+                    "Design calibration complete. "
+                    f"Rotation {preparation.rotation_deg:+.3f} deg, "
+                    f"spacing ratio {preparation.distance_ratio:.3f}. "
+                    f"RMS {preparation.rms_residual_mm:.4f} mm, "
+                    f"max {preparation.max_residual_mm:.4f} mm.",
+                    7000,
+                )
+            else:
+                self._show_status(
+                    f"Design calibration rotation failed: {completion.message}",
+                    7000,
+                )
+            self._schedule_status_refreshes(self.MANUAL_JOG_SETTLE_POLL_DELAYS_MS)
+            return
+        if completion.message:
+            self._show_status(completion.message, 5000)
+        if completion.success:
+            if correlation.collapse_design_on_success:
+                self._collapse_alignment_panel_if_design_open()
+            self._schedule_status_refreshes(self.MANUAL_JOG_SETTLE_POLL_DELAYS_MS)
+        self._schedule_cancel_state_refresh()
 
     def _finish_alignment_draft(self) -> None:
         self._alignment_design_draft = ()

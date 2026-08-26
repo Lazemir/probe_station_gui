@@ -177,7 +177,7 @@ class _MainDesignLoadMixin:
         self, plan: design_navigation.DesignLoadResultPlan, show_window: bool
     ) -> None:
         self._reset_manual_alignment(cancel_pick=True)
-        self._pending_alignment_preparation = None
+        self._stage_motion.discard_alignment_rotation()
         self._last_selected_design_point = plan.last_selected_design_point
         self._set_design_snap_enabled(True)
         if plan.document_directory is not None:
@@ -275,7 +275,6 @@ class _MainDesignLoadMixin:
             direct_guide_ids=(),
             pending_visibility=None,
             last_selected_design_point=context.plan.last_selected_design_point,
-            pending_alignment_preparation=None,
         )
         transition = coordinate_flow.activate_current_design(
             self,

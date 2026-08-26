@@ -545,6 +545,20 @@ def test_b_rotation_resolves_relative_angle_to_precision_absolute_target() -> No
     controller.shutdown()
 
 
+def test_request_rotate_b_returns_background_acceptance() -> None:
+    controller = StageController()
+    submitted: list[tuple[object, tuple[float, ...], str]] = []
+    controller._start_background_task = lambda *, target, args, busy_message: (
+        submitted.append((target, args, busy_message)) or False
+    )
+
+    accepted = controller.request_rotate_b(2.5)
+
+    assert accepted is False
+    assert submitted == [(controller._run_rotate_b, (2.5,), "Stage is busy. Ignoring B rotation request.")]
+    controller.shutdown()
+
+
 def test_zero_backlash_enabled_profile_is_excluded_from_ui_and_persistence() -> None:
     controller = StageController()
     controller.apply_precision_approach_configuration(

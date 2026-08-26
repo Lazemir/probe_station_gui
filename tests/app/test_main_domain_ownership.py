@@ -53,6 +53,7 @@ OWNER_SPECS = {
             "_surface_map_stage_status": "(self) -> 'dict[str, Any]'",
             "_stage_status_payload": "(self, latest_position: 'object', *, display_position: 'dict[str, float]', accepted: 'bool') -> 'dict[str, Any]'",
             "_surface_map_move_to_xy": "(self, x_mm: 'float', y_mm: 'float') -> 'dict[str, Any]'",
+            "_api_stage_motion_seed_position": "(self) -> 'tuple[float, ...] | None'",
             "_api_list_contacts": "(self) -> 'dict[str, Any]'",
             "_api_move_to_contact": "(self, payload: 'dict[str, Any]') -> 'dict[str, Any]'",
             "_api_contact_needles": "(self, payload: 'dict[str, Any]') -> 'dict[str, Any]'",
@@ -152,11 +153,15 @@ OWNER_SPECS = {
             "_capture_microscope_scan_launch_snapshot": "(self, *, scale: 'object', document: 'object | None', frame_usability_snapshot: 'DesignCoordinateLease | None' = None, registration: 'object | None' = None) -> '_MicroscopeScanLaunchSnapshot'",
             "_stage_position_for_image_metadata": "(self, *, stage_xy: 'tuple[float, float] | None' = None) -> 'tuple[float, ...] | None'",
             "_show_status": "(self, message: 'str', timeout_ms: 'int' = 0) -> 'None'",
+            "_on_measure_action_toggled": "(self, checked: 'bool') -> 'None'",
+            "_on_measure_mode_exited": "(self) -> 'None'",
         },
     ),
     "status_coordinate_ui": (
         "_MainStatusCoordinateUiMixin",
         {
+            "_schedule_status_refreshes": "(self, delays_ms: 'tuple[int, ...]') -> 'None'",
+            "_on_stage_task_started": "(self) -> 'None'",
             "_show_route_runtime_status": "(self, message: 'str', timeout_ms: 'int' = 0) -> 'None'",
             "_show_route_dialog_status": "(self, message: 'str', timeout_ms: 'int' = 0) -> 'None'",
             "_create_objective_widget": "(self) -> 'QWidget'",
@@ -176,6 +181,11 @@ OWNER_SPECS = {
             "_refresh_software_coordinate_display": "(self) -> 'None'",
             "_surface_map_capture_running": "(self) -> 'bool'",
             "_microscope_scan_running": "(self) -> 'bool'",
+            "_has_application_cancelable_operation": "(self) -> 'bool'",
+            "_cancel_stage_coordinate_action": "(self, *, focus_reason: 'object') -> 'None'",
+            "_cancel_pending_stage_ui_intents": "(self) -> 'bool'",
+            "_cancel_route_measurement_for_stage_action": "(self) -> 'bool'",
+            "_cancel_background_stage_operations": "(self) -> 'bool'",
             "_controller_reports_active_motion": "(self) -> 'bool'",
             "_controller_latest_state_blocks_motion": "(self) -> 'bool'",
             "_schedule_cancel_state_refresh": "(self) -> 'None'",
@@ -228,6 +238,7 @@ OWNER_SPECS = {
     "optical_calibration": (
         "_MainOpticalCalibrationMixin",
         {
+            "on_calibration_changed": "(self, mm_per_pixel_x: 'float', mm_per_pixel_y: 'float') -> 'None'",
             "_start_flat_field_calibration_from_wizard": "(self) -> 'None'",
             "_cancel_optical_calibration_wizard": "(self, _run_id: 'object' = None) -> 'None'",
             "_stop_lens_distortion_dialog": "(self) -> 'None'",
@@ -278,7 +289,7 @@ OWNER_SPECS = {
             "_capture_manual_alignment_point": "(self, slot: 'int', captured: 'tuple[float, float]', *, source: 'str') -> 'None'",
             "_request_operator_alignment_machine_capture": "(self, slot: 'int', *, configured_target_xy: 'tuple[float, float] | None', source: 'str') -> 'None'",
             "_apply_alignment_capture_plan": "(self, plan) -> 'None'",
-            "_on_alignment_b_rotation_started": "(self) -> 'None'",
+            "_on_alignment_rotation_finished": "(self, completion: 'AlignmentRotationCompletion') -> 'None'",
             "_finish_alignment_draft": "(self) -> 'None'",
             "_refresh_manual_alignment_ui": "(self) -> 'None'",
             "_update_coordinate_display": "(self, *, center_xy: 'tuple[float, float] | None' = None, cursor_xy: 'tuple[float, float] | None' = None) -> 'None'",
@@ -293,6 +304,7 @@ OWNER_SPECS = {
     "manual_jog": (
         "_MainManualJogMixin",
         {
+            "_on_manual_terminal_command": "(self, command: 'str') -> 'None'",
             "show_joystick_window": "(self) -> 'None'",
             "show_serial_terminal_window": "(self) -> 'None'",
             "_on_manual_motion_axis": "(self, axis: 'str') -> 'None'",
@@ -312,18 +324,6 @@ OWNER_SPECS = {
             "_current_linear_feedrate": "(self) -> 'float'",
             "_coordinate_feedrate_for_axes": "(self, axes: 'object') -> 'float'",
             "_current_needle_feedrate": "(self) -> 'float'",
-        },
-    ),
-    "motion_prediction": (
-        "_MainMotionPredictionMixin",
-        {
-            "_schedule_status_refreshes": "(self, delays_ms: 'tuple[int, ...]') -> 'None'",
-            "_on_manual_terminal_command": "(self, command: 'str') -> 'None'",
-            "_on_stage_task_started": "(self) -> 'None'",
-            "on_autofocus_finished": "(self, success: 'bool', message: 'str') -> 'None'",
-            "on_calibration_changed": "(self, mm_per_pixel_x: 'float', mm_per_pixel_y: 'float') -> 'None'",
-            "_on_measure_action_toggled": "(self, checked: 'bool') -> 'None'",
-            "_on_measure_mode_exited": "(self) -> 'None'",
         },
     ),
     "design_load": (
@@ -447,7 +447,7 @@ OWNER_SPECS = {
     ),
     "registration_focus": (
         "_MainRegistrationFocusMixin",
-        """_add_design_source_mark _add_design_check_mark
+        """on_autofocus_finished _add_design_source_mark _add_design_check_mark
         _capture_stage_source_mark _capture_stage_check_mark
         _capture_stage_registration_mark
         _on_registration_machine_coordinate_snapshot_finished
@@ -504,14 +504,17 @@ OWNER_SIGNATURE_SHA256 = {
     "route_capture_run": "881ba99c4c6fe0d55e21b88d0443ad7ee5f969e3e42891eefd487d680f2f6a6d",
     "route_control": "0dca50743dfaa361fcaf76645b7a0da216640bc1f8700081a9e0ad0c5b17aa5b",
     "route_results": "ec4552e53a60da60698f6cb03e28221150572bafaeec4da96301a82ffdbc82aa",
-    "registration_focus": "8bf43873a2ca6d69216bc91e8f523336d506bc03cd6d27cad7b2eb26780c85d7",
+    "registration_focus": "56a7fe6fafd8ecc8d4afefe980db0a816e48a83f174a01c4177a8d82dcdce372",
     "stage_design_position": "53272b1f669e95ab5962959ac8771f41409fd8ad0e585b25b5dcb58c716a7bbe",
     "scan_sample_meter": "4981a0c643979b59f0391a315cc6083810d6418f72f150355a38a29edb619f89",
 }
 
 OWNER_SUPPORT_CLASSES = {
     "camera_pipeline": {"_MicroscopeScanLaunchSnapshot"},
-    "alignment": {"_ManualAlignmentCaptureContext"},
+    "alignment": {
+        "_AlignmentRotationCorrelation",
+        "_ManualAlignmentCaptureContext",
+    },
     "design_load": {"_LoadedDesignDocument", "_PendingDesignMarkupLoad"},
     "route_launch_setup": {"_DesignContactArmDispatch"},
 }
@@ -560,7 +563,6 @@ def test_main_direct_base_order_is_exact() -> None:
         "_MainOpticalCalibrationMixin",
         "_MainAlignmentMixin",
         "_MainManualJogMixin",
-        "_MainMotionPredictionMixin",
         "_MainDesignLoadMixin",
         "_MainDesignMarkupMixin",
         "_MainDesignEditDialogMixin",
@@ -618,10 +620,6 @@ def test_alignment_owner_is_direct_and_canonical() -> None:
 
 def test_manual_jog_owner_is_direct_and_canonical() -> None:
     _assert_owner("manual_jog")
-
-
-def test_motion_prediction_owner_is_direct_and_canonical() -> None:
-    _assert_owner("motion_prediction")
 
 
 def test_design_load_owner_is_direct_and_canonical() -> None:

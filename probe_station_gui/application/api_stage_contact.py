@@ -51,7 +51,10 @@ from probe_station_gui.stage.api_moves import (
     api_coordinate_move_success_response,
 )
 from probe_station_gui.stage.controller import StageControllerError
-from probe_station_gui.stage import position_update as stage_position_update
+from probe_station_gui.stage.motion_prediction import (
+    coerce_finite_position,
+    position_with_stage_xy,
+)
 from probe_station_gui.views import (
     main_window_stage_position_panel as stage_position_panel_adapter,
 )
@@ -88,9 +91,7 @@ class _MainApiStageContactMixin:
                         move_plan.target_map.items()
                     )
                 ),
-                seed_position=stage_position_update.seed_motion_prediction_position(
-                    self
-                ),
+                seed_position=self._api_stage_motion_seed_position(),
                 feedrate_mm_min=move_plan.feedrate_mm_min,
                 source_label="API",
                 physical_limit_targets=tuple(
@@ -230,9 +231,7 @@ class _MainApiStageContactMixin:
                     (axis, raw_target, display_target)
                     for axis, (raw_target, display_target) in targets.items()
                 ),
-                seed_position=stage_position_update.seed_motion_prediction_position(
-                    self
-                ),
+                seed_position=self._api_stage_motion_seed_position(),
                 feedrate_mm_min=feedrate,
                 source_label="Surface Map",
                 physical_limit_targets=tuple(
@@ -249,6 +248,23 @@ class _MainApiStageContactMixin:
             "targets": {"X": float(x_mm), "Y": float(y_mm)},
             "current_feedrate_mm_min": feedrate,
         }
+
+    def _api_stage_motion_seed_position(self) -> tuple[float, ...] | None:
+        motion = self._stage_motion.snapshot()
+        for candidate in (
+            motion.coordinate_stage_position,
+            motion.presented_position,
+            self.stage_controller.latest_stage_position(),
+        ):
+            position = coerce_finite_position(candidate)
+            if position is not None and len(position) >= 2:
+                return position
+        if self._current_design_stage_xy is None:
+            return None
+        return position_with_stage_xy(
+            self.stage_controller.latest_stage_position(),
+            self._current_design_stage_xy,
+        )
 
     def _api_list_contacts(self) -> dict[str, Any]:
         route = self._design_session.route

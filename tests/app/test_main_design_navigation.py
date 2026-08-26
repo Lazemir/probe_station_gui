@@ -69,10 +69,17 @@ class _FakeStageMotion:
     def __init__(self) -> None:
         self.accepted = True
         self.planned_requests: list[PlannedXYMoveRequest] = []
+        self.alignment_pending = False
 
     def request_planned_xy_move(self, request: PlannedXYMoveRequest) -> bool:
         self.planned_requests.append(request)
         return self.accepted
+
+    def discard_alignment_rotation(self) -> bool:
+        return False
+
+    def alignment_rotation_pending(self) -> bool:
+        return self.alignment_pending
 
 
 class _FakeSettingsManager:

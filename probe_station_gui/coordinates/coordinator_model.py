@@ -427,7 +427,6 @@ class DesignWorkspaceCheckpoint:
     direct_guide_ids: tuple[str, ...] = ()
     pending_visibility: object | None = None
     last_selected_design_point: tuple[float, float] | None = None
-    pending_alignment_preparation: object | None = None
 
 
 @dataclass(frozen=True)

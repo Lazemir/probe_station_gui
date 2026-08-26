@@ -34,7 +34,6 @@ from probe_station_gui.design.klayout_types import (
 )
 from probe_station_gui.design.model import DesignModelError
 from probe_station_gui.settings.objective_config import normalize_objective_name
-from probe_station_gui.stage import move_lifecycle as stage_move_lifecycle
 from probe_station_gui.views import (
     main_window_connection_flow as connection_flow,
 )
@@ -47,6 +46,15 @@ logger = logging.getLogger("main")
 
 
 class _MainRegistrationFocusMixin:
+    def on_autofocus_finished(self, success: bool, message: str) -> None:
+        if message:
+            self._show_status(message, 5000)
+        if success:
+            self._remember_sample_focus_from_latest()
+        else:
+            logger.error("Autofocus failed: %s", message)
+        self._schedule_cancel_state_refresh()
+
     def _add_design_source_mark(self, x_value: float, y_value: float) -> None:
         if not self._design_mutation_ready():
             return
@@ -139,7 +147,7 @@ class _MainRegistrationFocusMixin:
         transition = coordinate_flow.activate_current_design(self, create_new=True)
         if transition is None or not transition.accepted:
             return
-        self._pending_alignment_preparation = None
+        self._stage_motion.discard_alignment_rotation()
         self._last_selected_design_point = None
         self._set_design_snap_enabled(True)
         self._refresh_design_panel()
@@ -174,7 +182,7 @@ class _MainRegistrationFocusMixin:
         )
         if transition is None or not transition.accepted or transition.notices:
             return
-        self._pending_alignment_preparation = None
+        self._stage_motion.discard_alignment_rotation()
         self._last_selected_design_point = None
         self._clear_design_focus_overlay_state()
         self._refresh_design_panel()
@@ -188,7 +196,7 @@ class _MainRegistrationFocusMixin:
         self._clear_design_registration()
 
     def _invalidate_design_registration(self, reason: str) -> None:
-        self._pending_alignment_preparation = None
+        self._stage_motion.discard_alignment_rotation()
         transition = self._coordinate_system_coordinator.invalidate_registration(
             RegistrationInvalidationRequest(reason)
         )
@@ -513,7 +521,6 @@ class _MainRegistrationFocusMixin:
         success: bool,
         message: str,
     ) -> None:
-        stage_move_lifecycle.on_move_finished(self, success, message)
         self._on_registration_focus_move_finished(
             completed_token,
             completed_target_xy,
@@ -613,8 +620,6 @@ class _MainRegistrationFocusMixin:
             self._design_session,
             coordinate_snapshot.registration,
             route_running=route_execution.thread_alive,
-            pending_alignment_preparation=self._pending_alignment_preparation
-            is not None,
             design_snap_enabled=self._design_snap_enabled,
         )
         registration_instances = self._design_registration_instances()

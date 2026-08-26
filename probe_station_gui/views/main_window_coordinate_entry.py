@@ -7,7 +7,10 @@ from typing import Any
 from PySide6.QtCore import Qt
 
 from probe_station_gui.stage.coordinate_targets import CoordinateMoveRequest
-from probe_station_gui.stage import position_update as stage_position_update
+from probe_station_gui.stage.motion_prediction import (
+    coerce_finite_position,
+    position_with_stage_xy,
+)
 from probe_station_gui.views import main_window_coordinate_motion as coordinate_motion
 from probe_station_gui.views import (
     main_window_stage_position_panel as stage_position_panel,
@@ -195,7 +198,7 @@ def apply_pending_stage_coordinate_targets(owner: Any) -> None:
             targets=tuple(
                 (axis, raw, display) for axis, (raw, display) in targets.items()
             ),
-            seed_position=stage_position_update.seed_motion_prediction_position(owner),
+            seed_position=_stage_motion_seed_position(owner),
             feedrate_mm_min=feedrate,
             source_label="coordinate fields",
             physical_limit_targets=tuple(
@@ -221,6 +224,24 @@ def apply_pending_stage_coordinate_targets(owner: Any) -> None:
             if axis not in remaining_axes:
                 panel.pop_pending_target(axis)
     owner._update_stage_coordinate_apply_state()
+
+
+def _stage_motion_seed_position(owner: Any) -> tuple[float, ...] | None:
+    motion = owner._stage_motion.snapshot()
+    for candidate in (
+        motion.coordinate_stage_position,
+        motion.presented_position,
+        owner.stage_controller.latest_stage_position(),
+    ):
+        position = coerce_finite_position(candidate)
+        if position is not None and len(position) >= 2:
+            return position
+    if owner._current_design_stage_xy is None:
+        return None
+    return position_with_stage_xy(
+        owner.stage_controller.latest_stage_position(),
+        owner._current_design_stage_xy,
+    )
 
 
 def set_joystick_control_mode_for_coordinate_apply(owner: Any) -> None:

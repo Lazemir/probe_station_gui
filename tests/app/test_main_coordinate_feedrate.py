@@ -5,7 +5,6 @@ import tempfile
 import threading
 import types
 import unittest
-from unittest import mock
 from pathlib import Path
 
 from probe_station_gui.route.measurement import RouteMeasurementPoint
@@ -569,17 +568,13 @@ assert image.height() == 4
             question=lambda *_args, **_kwargs: 2,
         )
         main_module.threading.Thread = _FakeThread
+        window._has_application_cancelable_operation = lambda: False
         try:
-            with mock.patch.object(
-                main_module.stage_move_lifecycle,
-                "has_application_cancelable_operation",
-                return_value=False,
-            ):
-                needle_calibration_ui.request_sample_unload(
-                    window,
-                    message_box=main_module.QMessageBox,
-                    thread_factory=main_module.threading.Thread,
-                )
+            needle_calibration_ui.request_sample_unload(
+                window,
+                message_box=main_module.QMessageBox,
+                thread_factory=main_module.threading.Thread,
+            )
         finally:
             main_module.QMessageBox = original_box
             main_module.threading.Thread = original_thread
@@ -622,17 +617,13 @@ assert image.height() == 4
             question=lambda *_args, **_kwargs: 1,
         )
         main_module.threading.Thread = _FakeThread
+        window._has_application_cancelable_operation = lambda: False
         try:
-            with mock.patch.object(
-                main_module.stage_move_lifecycle,
-                "has_application_cancelable_operation",
-                return_value=False,
-            ):
-                needle_calibration_ui.request_sample_unload(
-                    window,
-                    message_box=main_module.QMessageBox,
-                    thread_factory=main_module.threading.Thread,
-                )
+            needle_calibration_ui.request_sample_unload(
+                window,
+                message_box=main_module.QMessageBox,
+                thread_factory=main_module.threading.Thread,
+            )
         finally:
             main_module.QMessageBox = original_box
             main_module.threading.Thread = original_thread
@@ -688,17 +679,13 @@ assert image.height() == 4
             question=_unexpected_question,
         )
         main_module.threading.Thread = _FakeThread
+        window._has_application_cancelable_operation = lambda: False
         try:
-            with mock.patch.object(
-                main_module.stage_move_lifecycle,
-                "has_application_cancelable_operation",
-                return_value=False,
-            ):
-                needle_calibration_ui.request_sample_unload(
-                    window,
-                    message_box=main_module.QMessageBox,
-                    thread_factory=main_module.threading.Thread,
-                )
+            needle_calibration_ui.request_sample_unload(
+                window,
+                message_box=main_module.QMessageBox,
+                thread_factory=main_module.threading.Thread,
+            )
         finally:
             main_module.QMessageBox = original_box
             main_module.threading.Thread = original_thread

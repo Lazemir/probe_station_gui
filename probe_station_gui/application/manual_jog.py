@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from PySide6.QtCore import Qt
 from probe_station_gui.stage.exact_step import ExactStepClearReason
 from probe_station_gui.views import (
@@ -15,6 +16,31 @@ logger = logging.getLogger("main")
 
 
 class _MainManualJogMixin:
+    def _on_manual_terminal_command(self, command: str) -> None:
+        stripped = command.strip().upper()
+        if not stripped:
+            return
+        coordinate_step.clear_exact_steps(
+            self,
+            ExactStepClearReason.MANUAL_TERMINAL_COMMAND,
+        )
+        self.stage_controller.invalidate_needles_state()
+        self.stage_controller.invalidate_coordinate_confidence(
+            "Manual controller command."
+        )
+        if re.match(r"^G5(?:4|5|6|7|8|9(?:\.[123])?)$", stripped):
+            self.stage_controller.request_startup_sync(auto_home_a=False)
+            self._schedule_cancel_state_refresh()
+            return
+        if (
+            stripped.startswith("$#")
+            or stripped.startswith("$G")
+            or stripped.startswith("$10")
+            or stripped.startswith("G10")
+        ):
+            self.stage_controller.request_startup_sync(auto_home_a=False)
+            self._schedule_cancel_state_refresh()
+
     def show_joystick_window(self) -> None:
         if not self.joystick_panel or not self.joystick_dock:
             return

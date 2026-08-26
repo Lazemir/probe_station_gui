@@ -7,6 +7,7 @@ from typing import Any, Protocol
 from PySide6.QtCore import QTimer
 
 from probe_station_gui.stage.exact_step import ExactStepClearReason
+from probe_station_gui.stage.motion_prediction import position_with_stage_xy
 from probe_station_gui.views import main_window_coordinate_step as coordinate_step
 from probe_station_gui.views import (
     main_window_stage_position_panel as stage_position_panel,
@@ -54,10 +55,9 @@ def on_homing_status_changed(
     elif motion.planned_stage_xy is not None and (
         motion.planned_prediction_active or motion.planned_waiting_for_fresh_status
     ):
-        from probe_station_gui.stage.position_update import position_with_stage_xy
-
         display_position = motion.presented_position or position_with_stage_xy(
-            owner, motion.planned_stage_xy
+            owner.stage_controller.latest_stage_position(),
+            motion.planned_stage_xy,
         )
     else:
         display_position = owner.stage_controller.latest_stage_position()

@@ -112,9 +112,6 @@ from probe_station_gui.application.design_markup import (
     _MainDesignMarkupMixin,
 )
 from probe_station_gui.application.manual_jog import _MainManualJogMixin
-from probe_station_gui.application.motion_prediction import (
-    _MainMotionPredictionMixin,
-)
 from probe_station_gui.application.objective_tools import _MainObjectiveToolsMixin
 from probe_station_gui.application.optical_calibration import (
     _MainOpticalCalibrationMixin,
@@ -179,7 +176,6 @@ from probe_station_gui.design.markup_store import (
     MarkupStoreWorker,
 )
 from probe_station_gui.design.session import DesignSession
-from probe_station_gui.design.session_registration import AlignmentPreparation
 from probe_station_gui.dialogs.click_calibration_dialog import ClickCalibrationDialog
 from probe_station_gui.dialogs.lens_distortion_dialog import LensDistortionDialog
 from probe_station_gui.dialogs.optical_calibration_wizard import (
@@ -211,7 +207,6 @@ from probe_station_gui.settings.software_coordinate_selection_store import (
 )
 from probe_station_gui.shared.diagnostics import configure_crash_diagnostics
 from probe_station_gui.shared.wheel_guard import GuardedComboBox as QComboBox
-from probe_station_gui.stage import move_lifecycle as stage_move_lifecycle
 from probe_station_gui.stage import sample_handling
 from probe_station_gui.stage.coordinate_targets import (
     CoordinateTargetConfig,
@@ -315,7 +310,6 @@ class Main(
     _MainOpticalCalibrationMixin,
     _MainAlignmentMixin,
     _MainManualJogMixin,
-    _MainMotionPredictionMixin,
     _MainDesignLoadMixin,
     _MainDesignMarkupMixin,
     _MainDesignEditDialogMixin,
@@ -567,11 +561,9 @@ class Main(
         self._last_selected_design_point: tuple[float, float] | None = None
         self._current_design_stage_xy: tuple[float, float] | None = None
         self._pending_design_stage_xy: tuple[float, float] | None = None
-        self._pending_alignment_preparation: AlignmentPreparation | None = None
         self._alignment_design_draft: tuple[tuple[float, float], ...] = ()
         self._alignment_stage_draft: list[tuple[float, float] | None] = []
         self._alignment_draft_fit_residuals: tuple[float, float] | None = None
-        self._pending_quick_alignment_rotation = False
         self._manual_alignment_pick_slot: int | None = None
         self._manual_alignment_pick_generation = 0
         self._manual_alignment_points: list[tuple[float, float] | None] = [None, None]
@@ -868,16 +860,16 @@ class Main(
             ),
             Qt.ConnectionType.QueuedConnection,
         )
-        self._stage_motion.continue_homing_requested.connect(
-            lambda: homing_ui.start_next_pending_homing_action(self),
+        self._stage_motion.alignment_rotation_finished.connect(
+            self._on_alignment_rotation_finished,
             Qt.ConnectionType.QueuedConnection,
         )
-        self._stage_motion.unclaimed_movement_finished.connect(
-            lambda completion: stage_move_lifecycle.on_move_finished(
-                self,
-                completion.success,
-                completion.message,
-            ),
+        self._stage_motion.click_move_finished.connect(
+            lambda success: self._microscope_interaction.finish_move(success=success),
+            Qt.ConnectionType.QueuedConnection,
+        )
+        self._stage_motion.continue_homing_requested.connect(
+            lambda: homing_ui.start_next_pending_homing_action(self),
             Qt.ConnectionType.QueuedConnection,
         )
         self._telegram_runtime = TelegramCommandRuntime(
@@ -902,11 +894,12 @@ class Main(
             self._stage_motion.on_movement_finished,
             Qt.ConnectionType.QueuedConnection,
         )
-        self.stage_controller.b_rotation_started.connect(
-            self._on_alignment_b_rotation_started
-        )
         self.stage_controller.click_move_started.connect(
             self._microscope_interaction.start_target_motion
+        )
+        self.stage_controller.click_move_started.connect(
+            self._stage_motion.on_click_move_started,
+            Qt.ConnectionType.QueuedConnection,
         )
         self.stage_controller.tracked_absolute_xy_move_started.connect(
             self._stage_motion.on_tracked_absolute_xy_move_started,

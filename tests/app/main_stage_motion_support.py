@@ -44,6 +44,7 @@ class _FakeStageMotion:
         self.exact_step_pose_rebase_allowed = False
         self.exact_requests: list[object] = []
         self.exact_clear_reasons: list[object] = []
+        self.alignment_pending = False
 
     def snapshot(self) -> object:
         reported_active_motion = self._reported_active_motion()
@@ -238,3 +239,11 @@ class _FakeStageMotion:
     def cancel_planned_xy_move(self) -> bool:
         self.cancel_planned_calls += 1
         return True
+
+    def alignment_rotation_pending(self) -> bool:
+        return self.alignment_pending
+
+    def discard_alignment_rotation(self) -> bool:
+        was_pending = self.alignment_pending
+        self.alignment_pending = False
+        return was_pending

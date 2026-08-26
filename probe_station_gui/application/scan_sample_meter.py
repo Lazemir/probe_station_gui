@@ -22,7 +22,6 @@ from probe_station_gui.route.measurement import (
     route_measurement_sample_from_raw,
     summarize_route_contact_quality,
 )
-from probe_station_gui.stage import move_lifecycle as stage_move_lifecycle
 from probe_station_gui.stage import sample_handling
 from probe_station_gui.views import main_window_connection_flow as connection_flow
 
@@ -353,7 +352,7 @@ class _MainScanSampleMeterMixin:
             sample_active=self._sample_handling_active(),
             cancelable_operation=bool(
                 self._stage_motion.snapshot().cancelable
-                or stage_move_lifecycle.has_application_cancelable_operation(self)
+                or self._has_application_cancelable_operation()
             ),
         )
         if not decision.accepted:

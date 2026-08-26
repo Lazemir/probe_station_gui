@@ -152,3 +152,24 @@ forbidden_modules = [
     "probe_station_gui.application.api_stage_contact",
     "probe_station_gui.application.api_route_scan",
 ]
+
+[[tool.importlinter.contracts]]
+id = "stage-motion-session-leaf"
+name = "Stage motion session stays independent of callers and unrelated workflows"
+type = "forbidden"
+source_modules = ["probe_station_gui.application.stage_motion_session"]
+forbidden_modules = [
+    "main",
+    "probe_station_gui.camera",
+    "probe_station_gui.dialogs",
+    "probe_station_gui.route",
+    "probe_station_gui.views",
+    "probe_station_gui.application.alignment",
+    "probe_station_gui.application.api_stage_contact",
+    "probe_station_gui.application.camera_pipeline",
+    "probe_station_gui.application.manual_jog",
+    "probe_station_gui.application.registration_focus",
+    "probe_station_gui.application.scan_sample_meter",
+    "probe_station_gui.application.stage_design_position",
+    "probe_station_gui.application.status_coordinate_ui",
+]
