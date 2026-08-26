@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable, Protocol
+from typing import Any, Protocol
 
 from probe_station_gui.coordinates.coordinator_model import (
     RegistrationAlignmentRequest,
@@ -28,7 +28,6 @@ class ClickMoveLifecycle(Protocol):
 
 class StageMoveLifecycleOwner(Protocol):
     MANUAL_JOG_SETTLE_POLL_DELAYS_MS: tuple[int, ...]
-    _coordinate_targets: Any
     _microscope_interaction: ClickMoveLifecycle
     _manual_alignment_pick_slot: Any
     _pending_alignment_preparation: Any
@@ -38,7 +37,6 @@ class StageMoveLifecycleOwner(Protocol):
     _route_run_execution: Any
     _microscope_scan_stop_requested: Any
     _stage_motion: Any
-    _pending_stage_axis_targets: dict[str, tuple[float, float]]
     _coordinate_system_coordinator: Any
     design_navigator_panel: Any
     microscope_scan_dialog: Any
@@ -51,7 +49,6 @@ class StageMoveLifecycleOwner(Protocol):
     def _microscope_scan_running(self) -> bool: ...
     def _sample_handling_active(self) -> bool: ...
     def _cancel_manual_alignment_pick(self) -> None: ...
-    def _clear_pending_stage_coordinate_targets(self) -> bool: ...
     def _schedule_status_refreshes(self, delays_ms: tuple[int, ...]) -> None: ...
     def _schedule_cancel_state_refresh(self) -> None: ...
     def _show_status(self, message: str, timeout_ms: int = 0) -> None: ...
@@ -62,16 +59,6 @@ class StageMoveLifecycleOwner(Protocol):
     def _collapse_alignment_panel_if_design_open(self) -> None: ...
     def _finish_alignment_draft(self) -> None: ...
     def _update_stage_coordinate_apply_state(self) -> None: ...
-    def _on_coordinate_move_finished(
-        self,
-        success: bool,
-        finished_display_targets: dict[str, float],
-        finished_display_basis: object | None,
-    ) -> None: ...
-
-
-ScheduleSingleShot = Callable[[int, Callable[[], None]], Any]
-_LATEST_STAGE_STATE_UNSET = object()
 
 
 def has_cancelable_operation(owner: StageMoveLifecycleOwner) -> bool:
@@ -88,7 +75,7 @@ def _stage_motion_cancelable(owner: StageMoveLifecycleOwner) -> bool:
         hasattr(owner, "stage_controller") and owner.stage_controller.is_busy()
     )
     return (
-        owner._coordinate_targets.has_active_move()
+        owner._stage_motion.snapshot().coordinate_active
         or controller_busy
         or owner._controller_reports_active_motion()
     )
@@ -134,7 +121,10 @@ def cancel_stage_coordinate_action(
     if _cancel_active_coordinate_move(owner, focus_reason=focus_reason):
         return
     cancelled_any = _cancel_controller_activity(owner) or cancelled_any
-    cleared_edits = owner._clear_pending_stage_coordinate_targets()
+    cleared_edits = owner._stage_motion.clear_pending_coordinate_edits()
+    panel = getattr(owner, "_stage_position_panel", None)
+    if cleared_edits and panel is not None:
+        panel.clear_pending_targets(owner._stage_axis_display_values)
     if cleared_edits:
         owner.view.setFocus(focus_reason)
     if cancelled_any:
@@ -147,85 +137,16 @@ def cancel_stage_coordinate_action(
         owner._schedule_cancel_state_refresh()
 
 
-def clear_coordinate_move_tracking(
-    owner: StageMoveLifecycleOwner,
-    *,
-    clear_pending: bool,
-    reset_override: bool,
-) -> None:
-    owner._coordinate_targets.clear_tracking()
-    if clear_pending:
-        owner._pending_stage_axis_targets.clear()
-    if reset_override:
-        owner.stage_controller.queue_feed_override_reset()
-    joystick_panel = getattr(owner, "joystick_panel", None)
-    if joystick_panel is not None:
-        joystick_panel.clear_temporary_linear_feedrate_bounds()
-        if hasattr(joystick_panel, "clear_common_feedrate_target"):
-            joystick_panel.clear_common_feedrate_target()
-    stage_position_panel.refresh_stage_axis_styles(owner)
-    owner._update_stage_coordinate_apply_state()
-
-
-def finish_coordinate_move_if_idle(
-    owner: StageMoveLifecycleOwner,
-    position: object | None,
-    *,
-    monotonic_s: float,
-    schedule_single_shot: ScheduleSingleShot,
-    latest_stage_state: object = _LATEST_STAGE_STATE_UNSET,
-) -> None:
-    observed_state = latest_stage_state
-    if observed_state is _LATEST_STAGE_STATE_UNSET:
-        observed_state = owner.stage_controller.latest_stage_state()
-    decision = owner._coordinate_targets.finish_if_idle_decision(
-        latest_stage_state=observed_state,
-        position=position,
-        monotonic_s=monotonic_s,
-    )
-    if not decision.finish:
-        return
-    if decision.stage_position is not None:
-        owner._coordinate_targets.stage_position = decision.stage_position
-    finished_display_targets = dict(owner._coordinate_targets.display_targets)
-    finished_display_basis = owner._coordinate_targets.display_basis
-    clear_coordinate_move_tracking(owner, clear_pending=False, reset_override=True)
-    callback = getattr(owner, "_on_coordinate_move_finished", None)
-    if callable(callback):
-        callback(True, finished_display_targets, finished_display_basis)
-    if owner._pending_homing_axes:
-        schedule_single_shot(
-            0,
-            lambda: homing_ui.start_next_pending_homing_action(owner),
-        )
-
-
 def on_move_finished(
     owner: StageMoveLifecycleOwner,
     success: bool,
     message: str,
 ) -> None:
-    message_lower = message.lower() if message else ""
     if _finish_pending_alignment_preparation(owner, success, message):
         owner._schedule_status_refreshes(owner.MANUAL_JOG_SETTLE_POLL_DELAYS_MS)
         return
     _finish_quick_alignment_rotation(owner, success)
-    if _handle_coordinate_feedrate_reissue_cancel(owner, success, message_lower):
-        return
-    owner._coordinate_targets.reissue_cancel_pending = False
     _finish_target_cross(owner, success)
-    if _coordinate_tracking_should_clear(success, message_lower):
-        finished_display_targets = dict(owner._coordinate_targets.display_targets)
-        finished_display_basis = owner._coordinate_targets.display_basis
-        clear_coordinate_move_tracking(
-            owner,
-            clear_pending=not success,
-            reset_override=True,
-        )
-        stage_position_panel.clear_stage_motion_axes(owner)
-        callback = getattr(owner, "_on_coordinate_move_finished", None)
-        if callable(callback):
-            callback(success, finished_display_targets, finished_display_basis)
     if message:
         owner._show_status(message, 5000)
     owner._schedule_cancel_state_refresh()
@@ -289,16 +210,13 @@ def _cancel_active_coordinate_move(
     *,
     focus_reason: object,
 ) -> bool:
-    if not owner._coordinate_targets.has_active_move():
+    if not owner._stage_motion.snapshot().coordinate_active:
         return False
-    owner.stage_controller.cancel_active_motion("Coordinate move cancel requested.")
-    clear_coordinate_move_tracking(
-        owner,
-        clear_pending=True,
-        reset_override=True,
-    )
+    owner._stage_motion.cancel_coordinate_move()
     stage_position_panel.clear_stage_motion_axes(owner)
-    owner._clear_pending_stage_coordinate_targets()
+    panel = getattr(owner, "_stage_position_panel", None)
+    if panel is not None:
+        panel.clear_pending_targets(owner._stage_axis_display_values)
     owner.view.setFocus(focus_reason)
     owner._schedule_status_refreshes(owner.MANUAL_JOG_SETTLE_POLL_DELAYS_MS)
     owner._schedule_cancel_state_refresh()
@@ -371,27 +289,6 @@ def _finish_quick_alignment_rotation(
         owner._collapse_alignment_panel_if_design_open()
 
 
-def _handle_coordinate_feedrate_reissue_cancel(
-    owner: StageMoveLifecycleOwner,
-    success: bool,
-    message_lower: str,
-) -> bool:
-    if (
-        success
-        or not owner._coordinate_targets.reissue_cancel_pending
-        or "operation cancelled" not in message_lower
-    ):
-        return False
-    owner._coordinate_targets.reissue_cancel_pending = False
-    logger.debug(
-        "Coordinate move worker cancelled for feedrate reissue; "
-        "keeping coordinate tracking active."
-    )
-    owner._schedule_status_refreshes(owner.MANUAL_JOG_SETTLE_POLL_DELAYS_MS)
-    owner._schedule_cancel_state_refresh()
-    return True
-
-
 def _finish_target_cross(
     owner: StageMoveLifecycleOwner,
     success: bool,
@@ -401,19 +298,8 @@ def _finish_target_cross(
         owner._schedule_status_refreshes(owner.MANUAL_JOG_SETTLE_POLL_DELAYS_MS)
 
 
-def _coordinate_tracking_should_clear(success: bool, message_lower: str) -> bool:
-    return (
-        not success
-        or "skipped" in message_lower
-        or "already" in message_lower
-        or "unchanged" in message_lower
-    )
-
-
 __all__ = [
     "cancel_stage_coordinate_action",
-    "clear_coordinate_move_tracking",
-    "finish_coordinate_move_if_idle",
     "has_cancelable_operation",
     "on_move_finished",
 ]

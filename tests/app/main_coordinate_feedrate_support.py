@@ -9,7 +9,6 @@ from tests.app.import_reset import restore_real_imports_for_main
 restore_real_imports_for_main()
 import main as main_module
 from main import Main
-from probe_station_gui.coordinates.model import PhysicalMachinePose
 from probe_station_gui.design.contact_navigation import api_route_adjusted_stage_xy
 from probe_station_gui.dialogs.route_measurement_dialog import (
     RouteMeasurementDialog,
@@ -36,15 +35,12 @@ from probe_station_gui.instruments.meters.lcr_session_backend import LCRMeterErr
 from probe_station_gui.settings.manager import ObjectiveCalibrationSettings, Settings
 from probe_station_gui.stage.api_moves import api_move_feedrate
 from probe_station_gui.stage.controller import StageControllerError
-from probe_station_gui.stage.coordinate_targets import (
-    CoordinateTargetConfig,
-    CoordinateTargetMoveState,
-)
 from probe_station_gui.stage.manual_jog_prediction import (
     ManualJogPredictionConfig,
     ManualJogPredictionState,
 )
 from tests.app.route_run_execution_support import install_route_run_execution
+from tests.app import main_stage_motion_support
 from probe_station_gui.views.stage_position_panel import format_stage_axis_value
 
 
@@ -134,21 +130,6 @@ class _FakeSignal:
 
     def emit(self, message: str) -> None:
         self.messages.append(str(message))
-
-
-class _FakeStageMotion:
-    def __init__(self) -> None:
-        self.physical_machine_pose = PhysicalMachinePose.from_mapping({})
-        self.cancel_planned_calls = 0
-
-    def snapshot(self) -> object:
-        return types.SimpleNamespace(
-            physical_machine_pose=self.physical_machine_pose,
-        )
-
-    def cancel_planned_xy_move(self) -> bool:
-        self.cancel_planned_calls += 1
-        return True
 
 
 class _FakeThread:
@@ -441,6 +422,20 @@ class _FakeStagePositionPanel:
             for field in self.axis_fields.values()
         )
 
+    def set_pending_target(
+        self,
+        axis: str,
+        raw_target: float,
+        display_target: float,
+    ) -> None:
+        self.pending_targets[str(axis).strip().upper()] = (
+            float(raw_target),
+            float(display_target),
+        )
+
+    def pop_pending_target(self, axis: str) -> tuple[float, float] | None:
+        return self.pending_targets.pop(str(axis).strip().upper(), None)
+
     def set_action_buttons_enabled(
         self,
         apply_enabled: bool,
@@ -650,18 +645,6 @@ class _FakeSettingsManager:
         self.save()
 
 
-def _coordinate_target_state() -> CoordinateTargetMoveState:
-    return CoordinateTargetMoveState(
-        CoordinateTargetConfig(
-            axis_names=Main.STAGE_AXIS_NAMES,
-            min_feedrate_mm_min=Main.MIN_FEEDRATE_MM_MIN,
-            duration_padding_s=Main.PLANNED_MOVE_DURATION_PADDING_S,
-            min_idle_accept_s=Main.COORDINATE_MOVE_MIN_IDLE_ACCEPT_S,
-            target_tolerance_mm=Main.COORDINATE_MOVE_TARGET_TOLERANCE_MM,
-        )
-    )
-
-
 def _make_main(
     current_feedrate: float = 120.0,
 ) -> tuple[
@@ -681,7 +664,6 @@ def _make_main(
     window.stage_controller = stage_controller
     window.joystick_panel = joystick
     window.serial_terminal_panel = None
-    window._pending_stage_axis_targets = {}
     window._stage_axis_fields = {}
     window._stage_unhomed_display_origins = {}
     window._stage_axis_raw_values = {}
@@ -689,8 +671,10 @@ def _make_main(
     window._stage_axis_homed = set()
     window._stage_axis_base_styles = {}
     window._stage_limit_axes = set()
-    window._coordinate_targets = _coordinate_target_state()
-    window._stage_motion = _FakeStageMotion()
+    window._stage_motion = main_stage_motion_support._FakeStageMotion(
+        stage_controller,
+        axis_names=Main.STAGE_AXIS_NAMES,
+    )
     window._pending_homing_axes = []
     window._microscope_interaction = _FakeMicroscopeInteraction()
     window._pending_alignment_preparation = None
@@ -728,7 +712,6 @@ def _make_main(
     window._position_with_axis_values = position_with_axis_values
     panel = _FakeStagePositionPanel(window._stage_axis_fields)
     window._stage_position_panel = panel
-    window._pending_stage_axis_targets = panel.pending_targets
     window._stage_axis_base_styles = panel.base_styles
     window._stage_axis_return_commits = panel.return_commits
     window._stage_motion_axes = set()

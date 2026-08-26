@@ -137,10 +137,8 @@ from probe_station_gui.application.scan_sample_meter import (
     _MainScanSampleMeterMixin,
 )
 from probe_station_gui.application.settings_apply import _MainSettingsApplyMixin
-from probe_station_gui.application.stage_motion_session import (
-    StageMotionConfig,
-    _StageMotionSession,
-)
+from probe_station_gui.application.stage_motion_session import _StageMotionSession
+from probe_station_gui.application.stage_motion_types import StageMotionConfig
 from probe_station_gui.application.stage_design_position import (
     _MainStageDesignPositionMixin,
 )
@@ -220,7 +218,6 @@ from probe_station_gui.stage import move_lifecycle as stage_move_lifecycle
 from probe_station_gui.stage import sample_handling
 from probe_station_gui.stage.coordinate_targets import (
     CoordinateTargetConfig,
-    CoordinateTargetMoveState,
 )
 from probe_station_gui.stage.exact_step import ExactStepAccumulator
 from probe_station_gui.stage.manual_jog_prediction import (
@@ -233,6 +230,7 @@ from probe_station_gui.views import (
 from probe_station_gui.views import (
     main_window_coordinate_flow as coordinate_flow,
 )
+from probe_station_gui.views import main_window_homing as homing_ui
 from probe_station_gui.views import (
     main_window_needle_calibration as needle_calibration_ui,
 )
@@ -598,17 +596,6 @@ class Main(
                 stop_tail_learn_alpha=self.MANUAL_JOG_STOP_TAIL_LEARN_ALPHA,
             )
         )
-        self._coordinate_targets = CoordinateTargetMoveState(
-            CoordinateTargetConfig(
-                axis_names=self.STAGE_AXIS_NAMES,
-                min_feedrate_mm_min=self.MIN_FEEDRATE_MM_MIN,
-                duration_padding_s=self.PLANNED_MOVE_DURATION_PADDING_S,
-                min_idle_accept_s=self.COORDINATE_MOVE_MIN_IDLE_ACCEPT_S,
-                target_tolerance_mm=self.COORDINATE_MOVE_TARGET_TOLERANCE_MM,
-            )
-        )
-        self._pending_stage_axis_targets: dict[str, tuple[float, float]] = {}
-        self._pending_coordinate_motion_lease: CoordinateMotionLease | None = None
         self._exact_step_accumulator = ExactStepAccumulator(self.STAGE_AXIS_NAMES)
         self._exact_step_pending_axes: set[str] = set()
         self._exact_step_motion_lease: CoordinateMotionLease | None = None
@@ -879,6 +866,7 @@ class Main(
                     min_idle_accept_s=self.COORDINATE_MOVE_MIN_IDLE_ACCEPT_S,
                     target_tolerance_mm=(self.COORDINATE_MOVE_TARGET_TOLERANCE_MM),
                 ),
+                settle_status_poll_delays_ms=self.MANUAL_JOG_SETTLE_POLL_DELAYS_MS,
             ),
             self,
         )
@@ -892,6 +880,22 @@ class Main(
         )
         self._stage_motion.status_requested.connect(
             self._show_status,
+            Qt.ConnectionType.QueuedConnection,
+        )
+        self._stage_motion.coordinate_move_finished.connect(
+            self._on_coordinate_move_finished,
+            Qt.ConnectionType.QueuedConnection,
+        )
+        self._stage_motion.continue_homing_requested.connect(
+            lambda: homing_ui.start_next_pending_homing_action(self),
+            Qt.ConnectionType.QueuedConnection,
+        )
+        self._stage_motion.unclaimed_movement_finished.connect(
+            lambda completion: stage_move_lifecycle.on_move_finished(
+                self,
+                completion.success,
+                completion.message,
+            ),
             Qt.ConnectionType.QueuedConnection,
         )
         self._telegram_runtime = TelegramCommandRuntime(
@@ -913,11 +917,8 @@ class Main(
             Qt.ConnectionType.QueuedConnection,
         )
         self.stage_controller.movement_finished.connect(
-            lambda success, message: stage_move_lifecycle.on_move_finished(
-                self,
-                success,
-                message,
-            )
+            self._stage_motion.on_movement_finished,
+            Qt.ConnectionType.QueuedConnection,
         )
         self.stage_controller.b_rotation_started.connect(
             self._on_alignment_b_rotation_started

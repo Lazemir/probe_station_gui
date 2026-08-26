@@ -140,8 +140,8 @@ def test_gui_coordinate_selection_stops_active_jog_before_switching(
         cancel_jog_input=lambda: events.append("jog-stopped")
     )
     window._clear_exact_step_targets = lambda: events.append("step-cleared")
-    window._clear_pending_stage_coordinate_targets = lambda: (
-        events.append("fields-cleared") or False
+    window._stage_motion = SimpleNamespace(
+        clear_pending_coordinate_edits=lambda: events.append("fields-cleared") or False
     )
     monkeypatch.setattr(
         stage_position_panel_adapter,

@@ -9,9 +9,11 @@ import pytest
 from PySide6.QtCore import QObject
 from PySide6.QtWidgets import QApplication
 
-from probe_station_gui.application.stage_motion_session import (
+from probe_station_gui.application.stage_motion_types import (
     PlannedXYMoveRequest,
     StageMotionConfig,
+)
+from probe_station_gui.application.stage_motion_session import (
     _StageMotionSession,
 )
 from probe_station_gui.coordinates.model import PhysicalMachinePose
@@ -35,9 +37,12 @@ SESSION_PATH = (
 
 
 def test_canonical_stage_motion_session_types_exist_and_are_frozen() -> None:
-    module = importlib.import_module(SESSION_MODULE)
+    session_module = importlib.import_module(SESSION_MODULE)
+    types_module = importlib.import_module(
+        "probe_station_gui.application.stage_motion_types"
+    )
 
-    assert issubclass(module._StageMotionSession, QObject)
+    assert issubclass(session_module._StageMotionSession, QObject)
     for name in (
         "StageMotionConfig",
         "StageMotionSnapshot",
@@ -45,9 +50,10 @@ def test_canonical_stage_motion_session_types_exist_and_are_frozen() -> None:
         "StageMotionPresentation",
         "StageMotionActionState",
     ):
-        value_type = getattr(module, name)
+        value_type = getattr(types_module, name)
         assert dataclasses.is_dataclass(value_type)
         assert value_type.__dataclass_params__.frozen is True
+        assert not hasattr(session_module, name)
     assert StageMotionResetReason.CONNECTION_CHANGED.name == "CONNECTION_CHANGED"
 
 

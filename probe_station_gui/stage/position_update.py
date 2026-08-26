@@ -7,11 +7,8 @@ import math
 import time
 from typing import Any, Protocol
 
-from PySide6.QtCore import QTimer
-
 from probe_station_gui.coordinates.model import PhysicalMachinePose
 from probe_station_gui.design import navigation_adapter as design_navigation
-from probe_station_gui.stage import move_lifecycle as stage_move_lifecycle
 from probe_station_gui.stage.position_presenter import stage_position_signal_plan
 from probe_station_gui.views import main_window_coordinate_flow as coordinate_flow
 from probe_station_gui.views import main_window_design_workspace as design_workspace
@@ -28,7 +25,6 @@ class StagePositionUpdateOwner(Protocol):
     STAGE_AXIS_NAMES: tuple[str, ...]
     B_POSITION_CHANGE_TOLERANCE_DEG: float
     MANUAL_JOG_RECONCILE_SMOOTH_ALPHA: float
-    _coordinate_targets: Any
     _manual_jog_prediction: Any
     _stage_motion: Any
     _pending_alignment_preparation: Any
@@ -92,7 +88,9 @@ def seed_motion_prediction_position(
     owner: StagePositionUpdateOwner,
 ) -> tuple[float, ...] | None:
     return owner._manual_jog_prediction.seed_position(
-        coordinate_move_stage_position=owner._coordinate_targets.stage_position,
+        coordinate_move_stage_position=(
+            owner._stage_motion.snapshot().coordinate_stage_position
+        ),
         latest_stage_position=owner.stage_controller.latest_stage_position(),
         current_design_stage_xy=owner._current_design_stage_xy,
     )
@@ -126,8 +124,9 @@ def publish_stage_position_estimate(
 def preferred_design_stage_xy(
     owner: StagePositionUpdateOwner,
 ) -> tuple[float, float] | None:
-    if owner._coordinate_targets.stage_position is not None:
-        stage_xy = stage_xy_from_position(owner._coordinate_targets.stage_position)
+    coordinate_position = owner._stage_motion.snapshot().coordinate_stage_position
+    if coordinate_position is not None:
+        stage_xy = stage_xy_from_position(coordinate_position)
         if stage_xy is not None:
             return stage_xy
     stage_xy = owner._manual_jog_prediction.predicted_stage_xy(time.monotonic())
@@ -223,8 +222,6 @@ def on_stage_position_changed(
         manual_prediction_available=manual_prediction_available,
         registration_valid=(coordinate_snapshot.registration.registration_valid),
     )
-    if signal_plan.status.mark_coordinate_move_active:
-        owner._coordinate_targets.seen_active_state = True
     if owner.contact_calibration_window is not None:
         owner.contact_calibration_window.set_current_stage_position(
             signal_plan.status.contact_calibration_position
@@ -291,13 +288,6 @@ def on_stage_position_changed(
         homed_axes=homed_axes,
     )
     if latest_state == "idle":
-        stage_move_lifecycle.finish_coordinate_move_if_idle(
-            owner,
-            display_position,
-            monotonic_s=time.monotonic(),
-            schedule_single_shot=QTimer.singleShot,
-            latest_stage_state=latest_state,
-        )
         stage_position_panel.clear_stage_motion_axes(owner)
 
 
@@ -311,10 +301,11 @@ def _build_stage_position_signal_plan(
     manual_prediction_available: bool,
     registration_valid: bool,
 ) -> Any:
+    coordinate_snapshot = owner._stage_motion.snapshot()
     return stage_position_signal_plan(
         position,
         latest_state=latest_state,
-        coordinate_move_axis_active=owner._coordinate_targets.has_active_move(),
+        coordinate_move_axis_active=coordinate_snapshot.coordinate_active,
         xy_homed=xy_homed,
         xyz_homed=xyz_homed,
         manual_jog_prediction_available=manual_prediction_available,
@@ -328,7 +319,7 @@ def _build_stage_position_signal_plan(
         pending_alignment_preparation=owner._pending_alignment_preparation,
         registration_valid=registration_valid,
         manual_jog_stage_position=owner._manual_jog_prediction.stage_position,
-        coordinate_move_stage_position=owner._coordinate_targets.stage_position,
+        coordinate_move_stage_position=coordinate_snapshot.coordinate_stage_position,
         planned_move_started_at=None,
         planned_move_waiting_for_fresh_status=False,
         planned_move_stage_xy=None,
@@ -370,13 +361,6 @@ def _apply_unhomed_fallback(
     owner._update_coordinate_display(center_xy=None)
     owner._update_design_position(signal_plan.status.unhomed_design_position)
     if latest_state == "idle":
-        stage_move_lifecycle.finish_coordinate_move_if_idle(
-            owner,
-            position,
-            monotonic_s=time.monotonic(),
-            schedule_single_shot=QTimer.singleShot,
-            latest_stage_state=latest_state,
-        )
         stage_position_panel.clear_stage_motion_axes(owner)
 
 

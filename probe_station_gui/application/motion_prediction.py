@@ -4,7 +4,6 @@ import logging
 import re
 import time
 from PySide6.QtCore import QTimer
-from probe_station_gui.stage import move_lifecycle as stage_move_lifecycle
 from probe_station_gui.stage import position_update as stage_position_update
 
 logger = logging.getLogger("main")
@@ -15,16 +14,15 @@ class _MainMotionPredictionMixin:
         if self._manual_jog_prediction.prediction_active():
             self._advance_manual_jog_prediction()
             return
-        if self._coordinate_targets.started_at is not None:
-            self._advance_coordinate_move_prediction()
-            return
         self._manual_jog_timer.stop()
 
     def _advance_manual_jog_prediction(self) -> None:
         now = time.monotonic()
         result = self._manual_jog_prediction.advance(
             now=now,
-            coordinate_move_stage_position=self._coordinate_targets.stage_position,
+            coordinate_move_stage_position=(
+                self._stage_motion.snapshot().coordinate_stage_position
+            ),
             latest_stage_position=self.stage_controller.latest_stage_position(),
             current_design_stage_xy=self._current_design_stage_xy,
         )
@@ -49,23 +47,6 @@ class _MainMotionPredictionMixin:
             )
         if result.stop_timer:
             self._manual_jog_timer.stop()
-
-    def _advance_coordinate_move_prediction(self) -> None:
-        decision = self._coordinate_targets.advance_prediction(
-            monotonic_s=time.monotonic(),
-        )
-        if decision.clear_tracking:
-            stage_move_lifecycle.clear_coordinate_move_tracking(
-                self,
-                clear_pending=False,
-                reset_override=True,
-            )
-            return
-        if decision.publish_position is not None:
-            stage_position_update.publish_stage_position_estimate(
-                self,
-                decision.publish_position,
-            )
 
     def _schedule_status_refreshes(self, delays_ms: tuple[int, ...]) -> None:
         for delay_ms in delays_ms:

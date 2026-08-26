@@ -2,25 +2,17 @@ from __future__ import annotations
 
 import logging
 import math
-import time
 
-from PySide6.QtCore import QTimer
-
-from probe_station_gui.application.stage_motion_session import StageMotionPresentation
+from probe_station_gui.application.stage_motion_types import StageMotionPresentation
 from probe_station_gui.design import navigation_targeting
-from probe_station_gui.stage import move_lifecycle as stage_move_lifecycle
 from probe_station_gui.stage import position_update as stage_position_update
 from probe_station_gui.stage.coordinate_targets import (
     normalize_api_coordinate_input_mode,
-    plan_coordinate_target_start,
     resolve_stage_axis_target,
     stage_axis_target_limit_error,
 )
 from probe_station_gui.views import (
     main_window_coordinate_flow as coordinate_flow,
-)
-from probe_station_gui.views import (
-    main_window_coordinate_entry as coordinate_entry,
 )
 from probe_station_gui.views import (
     main_window_design_workspace as design_workspace,
@@ -39,10 +31,7 @@ class _MainStageDesignPositionMixin:
     ) -> None:
         if not isinstance(presentation, StageMotionPresentation):
             raise TypeError("presentation must be a StageMotionPresentation")
-        deferred_motion_active = (
-            self._coordinate_targets.has_active_move()
-            or self._manual_jog_prediction.prediction_available()
-        )
+        deferred_motion_active = self._manual_jog_prediction.prediction_available()
         if not presentation.material_change and not deferred_motion_active:
             return
         if presentation.active_axes:
@@ -97,197 +86,7 @@ class _MainStageDesignPositionMixin:
         self._update_coordinate_display(center_xy=coordinate_xy)
         self._update_design_position(design_xy)
         if presentation.clear_motion_axes:
-            stage_move_lifecycle.finish_coordinate_move_if_idle(
-                self,
-                display_position,
-                monotonic_s=time.monotonic(),
-                schedule_single_shot=QTimer.singleShot,
-                latest_stage_state=presentation.stage_state,
-            )
             stage_position_panel_adapter.clear_stage_motion_axes(self)
-
-    def _on_stage_axis_editing_finished(self, axis_name: str) -> bool | None:
-        return coordinate_entry.on_stage_axis_editing_finished(self, axis_name)
-
-    def _apply_pending_stage_coordinate_targets(self) -> None:
-        coordinate_entry.apply_pending_stage_coordinate_targets(self)
-
-    def _start_coordinate_axis_move(
-        self,
-        axis: str,
-        raw_target: float,
-        display_target: float,
-        *,
-        feedrate_mm_min: float | None = None,
-    ) -> bool:
-        return self._start_coordinate_targets_move(
-            {axis: (raw_target, display_target)},
-            feedrate_mm_min=(
-                self._coordinate_feedrate_for_axes((axis,))
-                if feedrate_mm_min is None
-                else feedrate_mm_min
-            ),
-            source_label="coordinate field",
-        )
-
-    def _start_coordinate_targets_move(
-        self,
-        targets: dict[str, tuple[float, float]],
-        *,
-        feedrate_mm_min: float,
-        source_label: str,
-        limit_targets: dict[str, float] | None = None,
-        display_basis: object | None = None,
-    ) -> bool:
-        def limit_error(axis: str, display_target: float) -> str | None:
-            target = (
-                display_target
-                if limit_targets is None
-                else limit_targets.get(axis, display_target)
-            )
-            checker = (
-                self._stage_axis_target_limit_error
-                if limit_targets is None
-                else self._machine_axis_target_limit_error
-            )
-            return checker(axis, target)
-
-        decision = plan_coordinate_target_start(
-            self._coordinate_targets.config,
-            targets=targets,
-            feedrate_mm_min=feedrate_mm_min,
-            source_label=source_label,
-            seed_position=stage_position_update.seed_motion_prediction_position(self),
-            latest_stage_position=self.stage_controller.latest_stage_position(),
-            axis_target_limit_error=limit_error,
-            axis_max_feedrates=self.stage_controller.axis_max_feedrates(),
-            monotonic_s=time.monotonic(),
-        )
-        if not decision.accepted:
-            if decision.status is not None:
-                self._show_status(
-                    decision.status.message,
-                    decision.status.timeout_ms,
-                )
-            return False
-        plan = decision.plan
-        if plan is None:
-            return False
-        for axis in plan.remove_pending_axes:
-            self._pending_stage_axis_targets.pop(axis, None)
-        self._coordinate_targets.apply_start_plan(plan)
-        self._coordinate_targets.display_basis = display_basis
-        stage_position_panel_adapter.set_stage_motion_axes(
-            self,
-            set(plan.ordered_axes),
-        )
-        self._apply_coordinate_common_feedrate_plan(plan.common_feedrate)
-        self._update_stage_coordinate_apply_state()
-        accepted = self.stage_controller.request_absolute_axis_targets_move(
-            plan.raw_targets,
-            feedrate=plan.feedrate_mm_min,
-        )
-        if not accepted:
-            stage_move_lifecycle.clear_coordinate_move_tracking(
-                self,
-                clear_pending=False,
-                reset_override=True,
-            )
-            return False
-        self._show_status(plan.status.message, plan.status.timeout_ms)
-        stage_position_update.publish_stage_position_estimate(
-            self,
-            plan.publish_position,
-        )
-        if not self._manual_jog_timer.isActive():
-            self._manual_jog_timer.start()
-        return True
-
-    def _apply_coordinate_common_feedrate_plan(self, plan: object) -> None:
-        if self.joystick_panel is None:
-            return
-        clear_common_target = bool(getattr(plan, "clear_common_target", False))
-        if clear_common_target:
-            if hasattr(self.joystick_panel, "clear_common_feedrate_target"):
-                self.joystick_panel.clear_common_feedrate_target()
-            return
-        if hasattr(self.joystick_panel, "set_common_feedrate_target"):
-            self.joystick_panel.set_common_feedrate_target(
-                float(getattr(plan, "feedrate_mm_min")),
-                float(getattr(plan, "max_feedrate_mm_min")),
-            )
-
-    def _apply_coordinate_move_feedrate(self, feedrate_mm_min: float) -> None:
-        latest_state = (self.stage_controller.latest_stage_state() or "").lower()
-        decision = self._coordinate_targets.plan_feedrate_reissue(
-            controller_busy=self.stage_controller.is_busy(),
-            latest_stage_state=latest_state,
-            requested_feedrate_mm_min=feedrate_mm_min,
-            monotonic_s=time.monotonic(),
-        )
-        if decision.log_debug_message is not None:
-            logger.debug(decision.log_debug_message)
-        if decision.clear_stale_tracking:
-            stage_move_lifecycle.clear_coordinate_move_tracking(
-                self,
-                clear_pending=False,
-                reset_override=False,
-            )
-            if decision.clear_stage_motion_axes:
-                stage_position_panel_adapter.clear_stage_motion_axes(self)
-            return
-        self._advance_coordinate_move_prediction()
-        if not self._coordinate_targets.has_active_move():
-            return
-        decision = self._coordinate_targets.plan_feedrate_reissue(
-            controller_busy=self.stage_controller.is_busy(),
-            latest_stage_state=latest_state,
-            requested_feedrate_mm_min=feedrate_mm_min,
-            monotonic_s=time.monotonic(),
-        )
-        request = decision.request
-        if request is None:
-            return
-        try:
-            self._coordinate_targets.reissue_cancel_pending = (
-                request.set_reissue_cancel_pending
-            )
-            accepted = self.stage_controller.queue_absolute_axis_targets_jog(
-                request.raw_targets,
-                feedrate=request.requested_feedrate_mm_min,
-                replace_active=True,
-            )
-        except Exception as error:  # pragma: no cover - UI safety guard
-            logger.exception("Failed to update coordinate move feedrate.")
-            accepted = False
-            self._show_status(str(error), 3000)
-        if not accepted:
-            self._coordinate_targets.reissue_cancel_pending = False
-            self._show_status("Unable to update coordinate move feedrate.", 3000)
-            self._schedule_status_refreshes(self.MANUAL_JOG_SETTLE_POLL_DELAYS_MS)
-            return
-        self._coordinate_targets.apply_feedrate_reissue_success(request)
-        self._show_status(
-            f"Active coordinate move feedrate: F{request.requested_feedrate_mm_min:.1f}.",
-            1500,
-        )
-
-    def _start_next_pending_stage_axis_move(self) -> None:
-        if (
-            self._coordinate_targets.has_active_move()
-            or not self._pending_stage_axis_targets
-        ):
-            return
-        if self.stage_controller.is_busy():
-            QTimer.singleShot(200, self._start_next_pending_stage_axis_move)
-            return
-        latest_state = (self.stage_controller.latest_stage_state() or "").lower()
-        if latest_state not in {"", "idle"}:
-            QTimer.singleShot(200, self._start_next_pending_stage_axis_move)
-            return
-        axis = next(iter(self._pending_stage_axis_targets.keys()))
-        raw_target, display_target = self._pending_stage_axis_targets.pop(axis)
-        self._start_coordinate_axis_move(axis, raw_target, display_target)
 
     def _raw_target_from_display_value(
         self, axis_name: str, display_target: float

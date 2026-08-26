@@ -218,9 +218,6 @@ def _owner(events: list[object]) -> SimpleNamespace:
     owner._manual_jog_prediction = SimpleNamespace(
         reset_tracking=lambda: events.append(("manual_prediction_reset",))
     )
-    owner._clear_coordinate_move_tracking = lambda **kwargs: events.append(
-        ("clear_coordinate_tracking", kwargs)
-    )
     owner._update_stage_coordinate_apply_state = lambda: events.append(("apply_state",))
     owner._update_stage_position_display = lambda value: events.append(
         ("stage_display", value)
@@ -314,12 +311,8 @@ def test_on_serial_disconnected_preserves_detach_cleanup_order(monkeypatch) -> N
     events: list[object] = []
     owner = _owner(events)
     owner.serial_connection = _Serial(events, port="COM9")
-    original_clear = connection_flow.stage_move_lifecycle.clear_coordinate_move_tracking
     original_display = (
         coordinate_flow.stage_position_panel.update_stage_position_display
-    )
-    connection_flow.stage_move_lifecycle.clear_coordinate_move_tracking = (
-        lambda _owner, **kwargs: events.append(("clear_coordinate_tracking", kwargs))
     )
     coordinate_flow.stage_position_panel.update_stage_position_display = (
         lambda _owner, value: events.append(("stage_display", value))
@@ -333,9 +326,6 @@ def test_on_serial_disconnected_preserves_detach_cleanup_order(monkeypatch) -> N
     try:
         connection_flow.on_serial_disconnected(owner)
     finally:
-        connection_flow.stage_move_lifecycle.clear_coordinate_move_tracking = (
-            original_clear
-        )
         coordinate_flow.stage_position_panel.update_stage_position_display = (
             original_display
         )

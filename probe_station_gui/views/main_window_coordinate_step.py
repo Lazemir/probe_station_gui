@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from probe_station_gui.stage.coordinate_targets import CoordinateMoveRequest
+from probe_station_gui.stage import position_update as stage_position_update
 from probe_station_gui.views import main_window_coordinate_motion as coordinate_motion
 from probe_station_gui.views import (
     main_window_stage_position_panel as stage_position_panel,
@@ -31,17 +33,18 @@ def on_manual_axis_move_requested(
     if mode not in {"G90", "G91"}:
         owner._show_status(f"Unsupported manual move mode: {mode}.", 3000)
         return
-    if owner.stage_controller.is_busy() and not owner._coordinate_targets.has_active_move():
+    coordinate_snapshot = owner._stage_motion.snapshot()
+    if owner.stage_controller.is_busy() and not coordinate_snapshot.coordinate_active:
         owner._show_status("Stage is busy. Ignoring manual axis move.", 3000)
         return
     motion_lease = coordinate_motion.gui_motion_lease(owner)
-    active_basis = getattr(owner._coordinate_targets, "display_basis", None)
+    active_basis = coordinate_snapshot.coordinate_display_basis
     same_display_basis = (
         motion_lease is None
         or active_basis == coordinate_motion.motion_basis(motion_lease)
     )
     baseline = (
-        owner._coordinate_targets.display_targets.get(axis)
+        dict(coordinate_snapshot.coordinate_display_targets).get(axis)
         if same_display_basis
         else None
     )
@@ -62,7 +65,7 @@ def on_manual_axis_move_requested(
         owner._show_status(f"Invalid {axis} target coordinate.", 3000)
         return
     if motion_lease is not None:
-        allow_pose_rebase = owner._coordinate_targets.has_active_move()
+        allow_pose_rebase = coordinate_snapshot.coordinate_active
         stored_lease = getattr(owner, "_exact_step_motion_lease", None)
         candidate_targets = dict(owner._exact_step_accumulator.targets)
         candidate_targets[axis] = display_target
@@ -103,7 +106,17 @@ def on_manual_axis_move_requested(
             owner._exact_step_pose_rebase_allowed = True
     owner._exact_step_accumulator.set_absolute(axis, display_target)
     owner._exact_step_pending_axes.add(axis)
-    owner._pending_stage_axis_targets[axis] = (float(raw_target), display_target)
+    owner._stage_motion.upsert_pending_coordinate_edit(
+        axis,
+        float(raw_target),
+        display_target,
+        motion_lease=(
+            owner._exact_step_motion_lease if motion_lease is not None else None
+        ),
+    )
+    panel = getattr(owner, "_stage_position_panel", None)
+    if panel is not None:
+        panel.set_pending_target(axis, float(raw_target), display_target)
     stage_position_panel.refresh_stage_axis_styles(owner)
     owner._update_stage_coordinate_apply_state()
     if not owner._exact_step_timer.isActive() and not owner._exact_step_window_elapsed:
@@ -118,7 +131,10 @@ def dispatch_exact_step_targets(owner: Any) -> bool:
     if not stage_position_panel.gui_coordinate_motion_editing_enabled(owner):
         owner._clear_exact_step_targets()
         return False
-    if owner._coordinate_targets.has_active_move() or owner.stage_controller.is_busy():
+    if (
+        owner._stage_motion.snapshot().coordinate_active
+        or owner.stage_controller.is_busy()
+    ):
         return False
     display_targets = dict(owner._exact_step_accumulator.targets)
     if not display_targets:
@@ -171,15 +187,27 @@ def dispatch_exact_step_targets(owner: Any) -> bool:
             targets[axis] = (float(raw_target), float(display_target))
     owner._exact_step_accumulator.drain()
     owner._exact_step_window_elapsed = False
-    accepted = owner._start_coordinate_targets_move(
-        targets,
-        feedrate_mm_min=owner._coordinate_feedrate_for_axes(targets),
-        source_label="Step",
-        limit_targets=projected_machine_targets,
-        display_basis=coordinate_motion.motion_basis(
-            getattr(owner, "_exact_step_motion_lease", None)
+    accepted = owner._stage_motion.start_coordinate_move(
+        CoordinateMoveRequest(
+            targets=tuple(
+                (axis, raw, display) for axis, (raw, display) in targets.items()
+            ),
+            seed_position=stage_position_update.seed_motion_prediction_position(owner),
+            feedrate_mm_min=owner._coordinate_feedrate_for_axes(targets),
+            source_label="Step",
+            physical_limit_targets=tuple(
+                (axis, target)
+                for axis, target in (projected_machine_targets or {}).items()
+            ),
+            display_basis=coordinate_motion.motion_basis(
+                getattr(owner, "_exact_step_motion_lease", None)
+            ),
         ),
     )
+    panel = getattr(owner, "_stage_position_panel", None)
+    if panel is not None:
+        for axis in targets:
+            panel.pop_pending_target(axis)
     if accepted:
         owner._exact_step_pending_axes.difference_update(targets)
         owner._exact_step_pose_rebase_allowed = False

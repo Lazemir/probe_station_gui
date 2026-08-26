@@ -22,7 +22,7 @@ from probe_station_gui.application.design_load import (
     _LoadedDesignDocument,
     _PendingDesignMarkupLoad,
 )
-from probe_station_gui.application.stage_motion_session import PlannedXYMoveRequest
+from probe_station_gui.application.stage_motion_types import PlannedXYMoveRequest
 from probe_station_gui.coordinates.coordinator_model import (
     CoordinateSystemSnapshot,
     CoordinateTransition,

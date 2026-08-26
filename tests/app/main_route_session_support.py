@@ -19,15 +19,14 @@ from tests.app.main_coordinate_feedrate_support import (
     _FakeFrame,
     _FakeLineEdit,
     _FakeMicroscopeInteraction,
-    _FakeStageMotion,
     _FakeStageController,
     _FakeStagePositionPanel,
     _FakeTimer,
     _FakeView,
     _FakeVisibleDialog,
-    _coordinate_target_state,
     _telegram_runtime_stub,
 )
+from tests.app.main_stage_motion_support import _FakeStageMotion
 from tests.app.route_run_execution_support import (
     activate_route_run,
     install_route_run_execution,
@@ -212,13 +211,11 @@ def _make_cancel_main() -> tuple[Main, _FakeStageController, _FakeButton, list[s
     window.stage_controller = stage_controller
     window._stage_coordinate_apply_button = _FakeButton()
     window._stage_coordinate_cancel_button = cancel_button
-    window._pending_stage_axis_targets = {}
     window._stage_axis_fields = {}
     window._stage_axis_display_values = {}
     window._stage_axis_return_commits = set()
     window._stage_axis_base_styles = {}
-    window._coordinate_targets = _coordinate_target_state()
-    window._stage_motion = _FakeStageMotion()
+    window._stage_motion = _FakeStageMotion(stage_controller)
     install_route_run_execution(window)
     window.surface_map_window = None
     window._manual_alignment_pick_slot = None
@@ -235,7 +232,6 @@ def _make_cancel_main() -> tuple[Main, _FakeStageController, _FakeButton, list[s
         cancel_button=cancel_button,
     )
     window._stage_position_panel = panel
-    window._pending_stage_axis_targets = panel.pending_targets
     window._stage_axis_base_styles = panel.base_styles
     window._stage_axis_return_commits = panel.return_commits
     window._stage_motion_axes = set()
@@ -264,14 +260,13 @@ def _make_stage_position_display_main() -> tuple[Main, _FakeStageController]:
     window._stage_axis_display_values = {}
     window._stage_axis_homed = set()
     window._stage_axis_base_styles = {}
-    window._pending_stage_axis_targets = {}
     window._stage_limit_axes = set()
     window._stage_motion_axes = set()
     window._stage_motion_blink_dimmed = False
     window._updating_stage_position_fields = False
     panel = _FakeStagePositionPanel(window._stage_axis_fields)
     window._stage_position_panel = panel
-    window._pending_stage_axis_targets = panel.pending_targets
+    window._stage_motion = _FakeStageMotion(stage_controller)
     window._stage_axis_base_styles = panel.base_styles
     window._stage_axis_return_commits = panel.return_commits
     window._update_stage_coordinate_apply_state = lambda: None

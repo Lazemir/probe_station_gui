@@ -182,7 +182,6 @@ OWNER_SPECS = {
             "_controller_latest_state_is_stale": "(self) -> 'bool'",
             "_schedule_cancel_state_refresh": "(self) -> 'None'",
             "_update_stage_coordinate_apply_state": "(self, _pending: 'bool | None' = None) -> 'None'",
-            "_clear_pending_stage_coordinate_targets": "(self) -> 'bool'",
             "_append_status_log": "(self, message: 'str') -> 'None'",
             "_open_status_log": "(self) -> 'None'",
             "_prime_keyboard_focus": "(self) -> 'None'",
@@ -312,7 +311,7 @@ OWNER_SPECS = {
             "_on_manual_axis_move_requested": "(self, axis: 'str', value_mm: 'float', mode: 'str', feedrate_mm_min: 'float') -> 'None'",
             "_on_exact_step_window_elapsed": "(self) -> 'None'",
             "_dispatch_exact_step_targets": "(self) -> 'bool'",
-            "_on_coordinate_move_finished": "(self, success: 'bool', finished_display_targets: 'dict[str, float]', finished_display_basis: 'object | None') -> 'None'",
+            "_on_coordinate_move_finished": "(self, completion: 'CoordinateMoveCompletion') -> 'None'",
             "_clear_exact_step_targets": "(self) -> 'None'",
             "_schedule_linear_feedrate_save": "(self, feedrate_mm_min: 'float') -> 'None'",
             "_on_linear_feedrate_changed": "(self, feedrate_mm_min: 'float') -> 'None'",
@@ -329,7 +328,6 @@ OWNER_SPECS = {
         {
             "_advance_motion_prediction": "(self) -> 'None'",
             "_advance_manual_jog_prediction": "(self) -> 'None'",
-            "_advance_coordinate_move_prediction": "(self) -> 'None'",
             "_schedule_status_refreshes": "(self, delays_ms: 'tuple[int, ...]') -> 'None'",
             "_on_manual_terminal_command": "(self, command: 'str') -> 'None'",
             "_on_stage_task_started": "(self) -> 'None'",
@@ -483,10 +481,7 @@ OWNER_SPECS = {
     "stage_design_position": (
         "_MainStageDesignPositionMixin",
         """_apply_stage_motion_presentation
-        _on_stage_axis_editing_finished _apply_pending_stage_coordinate_targets
-        _start_coordinate_axis_move _start_coordinate_targets_move
-        _apply_coordinate_common_feedrate_plan _apply_coordinate_move_feedrate
-        _start_next_pending_stage_axis_move _raw_target_from_display_value
+        _raw_target_from_display_value
         _resolve_stage_axis_target _api_machine_display_position
         _api_machine_coordinate_snapshot _resolve_api_stage_axis_target
         _stage_axis_target_limit_error _machine_axis_target_limit_error
@@ -521,7 +516,7 @@ OWNER_SIGNATURE_SHA256 = {
     "route_control": "0dca50743dfaa361fcaf76645b7a0da216640bc1f8700081a9e0ad0c5b17aa5b",
     "route_results": "ec4552e53a60da60698f6cb03e28221150572bafaeec4da96301a82ffdbc82aa",
     "registration_focus": "8bf43873a2ca6d69216bc91e8f523336d506bc03cd6d27cad7b2eb26780c85d7",
-    "stage_design_position": "0860badf615adca5f78109f562547bace3818c40bf1fe381d42ebbe855f249e2",
+    "stage_design_position": "53272b1f669e95ab5962959ac8771f41409fd8ad0e585b25b5dcb58c716a7bbe",
     "scan_sample_meter": "4981a0c643979b59f0391a315cc6083810d6418f72f150355a38a29edb619f89",
 }
 

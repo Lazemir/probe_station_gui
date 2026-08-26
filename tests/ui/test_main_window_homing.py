@@ -48,6 +48,8 @@ def _owner(events: list[object]) -> SimpleNamespace:
                 planned_stage_xy=None,
                 planned_prediction_active=False,
                 planned_waiting_for_fresh_status=False,
+                coordinate_active=False,
+                coordinate_stage_position=None,
             )
         ),
         _pending_homing_axes=[],
@@ -59,7 +61,6 @@ def _owner(events: list[object]) -> SimpleNamespace:
             start=lambda: events.append(("blink_start",)),
             stop=lambda: events.append(("blink_stop",)),
         ),
-        _coordinate_targets=SimpleNamespace(has_active_move=lambda: False),
         joystick_panel=SimpleNamespace(
             set_pending_homing_actions=lambda axes: events.append(
                 ("pending_ui", tuple(sorted(axes)))

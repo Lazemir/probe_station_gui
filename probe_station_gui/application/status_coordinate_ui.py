@@ -157,8 +157,7 @@ class _MainStatusCoordinateUiMixin:
         axis = axis_name.strip().upper()
         panel.discard_return_commit(axis)
         panel.pop_pending_target(axis)
-        if not self._pending_stage_axis_targets:
-            self._pending_coordinate_motion_lease = None
+        self._stage_motion.pop_pending_coordinate_edit(axis)
         panel.reset_axis_field(axis, self._stage_axis_display_values.get(axis))
         field = panel.field(axis)
         if field is not None:
@@ -170,8 +169,8 @@ class _MainStatusCoordinateUiMixin:
 
     def _on_stage_coordinate_mode_changed(self) -> None:
         self._clear_exact_step_targets()
-        self._pending_coordinate_motion_lease = None
-        if self._pending_stage_axis_targets and self._stage_position_panel is not None:
+        had_pending = self._stage_motion.clear_pending_coordinate_edits()
+        if had_pending and self._stage_position_panel is not None:
             self._stage_position_panel.clear_pending_target_state()
             stage_position_panel_adapter.update_stage_position_display(
                 self,
@@ -189,7 +188,10 @@ class _MainStatusCoordinateUiMixin:
         if callable(cancel_jog_input):
             cancel_jog_input()
         self._clear_exact_step_targets()
-        self._clear_pending_stage_coordinate_targets()
+        self._stage_motion.clear_pending_coordinate_edits()
+        panel = getattr(self, "_stage_position_panel", None)
+        if panel is not None:
+            panel.clear_pending_targets(self._stage_axis_display_values)
         stage_position_panel_adapter.select_gui_coordinate_frame(self, frame_id)
 
     def _refresh_software_coordinate_display(self) -> None:
@@ -263,10 +265,11 @@ class _MainStatusCoordinateUiMixin:
         panel = getattr(self, "_stage_position_panel", None)
         if panel is None:
             return
+        stage_position_panel_adapter.apply_coordinate_common_feedrate(self)
         controller_busy = (
             hasattr(self, "stage_controller") and self.stage_controller.is_busy()
         )
-        active = self._coordinate_targets.has_active_move() or controller_busy
+        active = self._stage_motion.snapshot().coordinate_active or controller_busy
         available = panel.has_pending_or_modified_fields()
         panel.set_action_buttons_enabled(
             available
@@ -276,15 +279,6 @@ class _MainStatusCoordinateUiMixin:
             ),
             available or stage_move_lifecycle.has_cancelable_operation(self),
         )
-
-    def _clear_pending_stage_coordinate_targets(self) -> bool:
-        self._pending_coordinate_motion_lease = None
-        panel = getattr(self, "_stage_position_panel", None)
-        if panel is None:
-            return False
-        had_changes = panel.clear_pending_targets(self._stage_axis_display_values)
-        self._update_stage_coordinate_apply_state()
-        return had_changes
 
     def _append_status_log(self, message: str) -> None:
         if not message:

@@ -4,7 +4,7 @@ import json
 import logging
 from pathlib import Path
 
-from probe_station_gui.application.stage_motion_session import PlannedXYMoveRequest
+from probe_station_gui.application.stage_motion_types import PlannedXYMoveRequest
 from probe_station_gui.coordinates.coordinator_model import (
     AutofocusResult as CoordinateAutofocusResult,
 )

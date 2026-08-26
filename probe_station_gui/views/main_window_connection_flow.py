@@ -6,7 +6,6 @@ import logging
 
 from PySide6.QtCore import QTimer
 
-from probe_station_gui.stage import move_lifecycle as stage_move_lifecycle
 from probe_station_gui.stage.types import StageMotionResetReason
 from probe_station_gui.views import main_window_coordinate_flow as coordinate_flow
 from probe_station_gui.views import main_window_design_workspace as design_workspace
@@ -80,11 +79,6 @@ def on_serial_disconnected(owner: object) -> None:
     owner._manual_jog_timer.stop()
     owner._manual_jog_prediction.reset_tracking()
     owner._controller_reboot_recovery_scheduled = False
-    stage_move_lifecycle.clear_coordinate_move_tracking(
-        owner,
-        clear_pending=True,
-        reset_override=False,
-    )
     homing_ui.clear_pending_homing_queue(owner)
     stage_position_panel.clear_stage_motion_axes(owner)
     owner._update_stage_coordinate_apply_state()

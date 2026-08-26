@@ -24,6 +24,18 @@ class StagePositionObservation:
     last_jog_write_timestamp: float | None
     reset_reason: StageMotionResetReason | None = None
 
+    @classmethod
+    def empty(cls) -> StagePositionObservation:
+        return cls(
+            position=None,
+            physical_machine_pose=PhysicalMachinePose.from_mapping({}),
+            motion_coordinate_snapshot=None,
+            stage_state=None,
+            homed_axes=frozenset(),
+            status_timestamp=None,
+            last_jog_write_timestamp=None,
+        )
+
     def has_same_motion_facts_as(self, other: object) -> bool:
         """Compare motion facts only.
 
@@ -69,6 +81,14 @@ class TrackedAbsoluteXYMoveFinished:
     success: bool
     message: str
     status_timestamp: float | None
+
+
+@dataclass(frozen=True)
+class UnclaimedMovementCompletion:
+    """Global movement completion not claimed by the active Stage session flow."""
+
+    success: bool
+    message: str
 
 
 class StageMotionResetReason(Enum):

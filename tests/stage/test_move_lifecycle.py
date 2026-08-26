@@ -8,10 +8,6 @@ from probe_station_gui.coordinates.coordinator_model import (
     CoordinateTransition,
 )
 from probe_station_gui.stage import move_lifecycle
-from probe_station_gui.stage.coordinate_targets import (
-    CoordinateTargetConfig,
-    CoordinateTargetMoveState,
-)
 from tests.app.route_run_execution_support import (
     activate_route_run,
     install_route_run_execution,
@@ -19,18 +15,6 @@ from tests.app.route_run_execution_support import (
 
 
 AXES = ("X", "Y", "Z", "A", "B", "C")
-
-
-def _coordinate_targets() -> CoordinateTargetMoveState:
-    return CoordinateTargetMoveState(
-        CoordinateTargetConfig(
-            axis_names=AXES,
-            min_feedrate_mm_min=1.0,
-            duration_padding_s=0.0,
-            min_idle_accept_s=0.0,
-            target_tolerance_mm=0.01,
-        )
-    )
 
 
 class _StageController:
@@ -104,6 +88,42 @@ class _JoystickPanel:
         self.common_targets_cleared += 1
 
 
+class _StageMotionBoundary:
+    """Only the typed session seam exercised by cancellation integration."""
+
+    def __init__(self, controller: _StageController) -> None:
+        self._controller = controller
+        self.coordinate_active = False
+        self.pending: dict[str, tuple[float, float]] = {}
+        self.cancel_planned_calls = 0
+
+    def snapshot(self) -> object:
+        return types.SimpleNamespace(coordinate_active=self.coordinate_active)
+
+    def pending_coordinate_edits(self) -> object:
+        return types.SimpleNamespace(
+            targets=tuple(
+                (axis, raw, display) for axis, (raw, display) in self.pending.items()
+            )
+        )
+
+    def clear_pending_coordinate_edits(self) -> bool:
+        had_pending = bool(self.pending)
+        self.pending.clear()
+        return had_pending
+
+    def cancel_coordinate_move(self) -> bool:
+        if not self.coordinate_active:
+            return False
+        self._controller.cancel_active_motion("Coordinate move cancel requested.")
+        self.coordinate_active = False
+        self.pending.clear()
+        return True
+
+    def cancel_planned_xy_move(self) -> None:
+        self.cancel_planned_calls += 1
+
+
 class _Runner:
     def __init__(self) -> None:
         self.stop_calls = 0
@@ -165,7 +185,6 @@ class _Owner:
         self.view = _View()
         self._microscope_interaction = _MicroscopeInteraction()
         self.joystick_panel = _JoystickPanel()
-        self._coordinate_targets = _coordinate_targets()
         self._manual_alignment_pick_slot = None
         self._pending_alignment_preparation = None
         self._pending_quick_alignment_rotation = False
@@ -178,10 +197,7 @@ class _Owner:
         self._surface_map_running = False
         self._microscope_scan_running_value = False
         self._microscope_scan_stop_requested = _StopEvent()
-        self._stage_motion = types.SimpleNamespace(
-            cancel_planned_xy_move=lambda: None,
-        )
-        self._pending_stage_axis_targets: dict[str, tuple[float, float]] = {}
+        self._stage_motion = _StageMotionBoundary(self.stage_controller)
         self._design_session = types.SimpleNamespace(
             applied=[],
             apply_prepared_alignment=lambda preparation: (
@@ -213,6 +229,7 @@ class _Owner:
         self.quick_alignment_collapses = 0
         self.finished_alignment_drafts = 0
         self._stage_motion_axes: set[str] = set()
+        self._stage_axis_display_values: dict[str, float] = {}
         self._stage_motion_blink_dimmed = False
         self._stage_motion_blink_timer = types.SimpleNamespace(
             isActive=lambda: False,
@@ -220,7 +237,12 @@ class _Owner:
             start=lambda: None,
         )
         self._stage_position_panel = types.SimpleNamespace(
-            refresh_axis_styles=lambda _axes, _dimmed: self._refresh_stage_axis_styles()
+            refresh_axis_styles=lambda _axes, _dimmed: (
+                self._refresh_stage_axis_styles()
+            ),
+            clear_pending_targets=lambda _display_values: (
+                self._stage_motion.clear_pending_coordinate_edits()
+            ),
         )
 
     def _controller_reports_active_motion(self) -> bool:
@@ -247,12 +269,6 @@ class _Owner:
 
     def _clear_stage_motion_axes(self) -> None:
         self.stage_motion_clears += 1
-
-    def _clear_pending_stage_coordinate_targets(self) -> bool:
-        self.pending_stage_coordinate_clears += 1
-        had_targets = bool(self._pending_stage_axis_targets)
-        self._pending_stage_axis_targets.clear()
-        return had_targets
 
     def _schedule_status_refreshes(self, delays_ms: tuple[int, ...]) -> None:
         self.status_refreshes.append(tuple(delays_ms))
@@ -310,16 +326,15 @@ class _Owner:
 
 def test_has_cancelable_operation_reports_active_coordinate_move() -> None:
     owner = _Owner()
-    owner._coordinate_targets.active_axis = "X"
+    owner._stage_motion.coordinate_active = True
 
     assert move_lifecycle.has_cancelable_operation(owner) is True
 
 
 def test_coordinate_cancel_has_priority_over_generic_busy_task() -> None:
     owner = _Owner()
-    owner._coordinate_targets.active_axis = "X"
-    owner._coordinate_targets.active_axes = {"X"}
-    owner._pending_stage_axis_targets["X"] = (5.0, 5.0)
+    owner._stage_motion.coordinate_active = True
+    owner._stage_motion.pending["X"] = (5.0, 5.0)
     owner.stage_controller.busy = True
 
     move_lifecycle.cancel_stage_coordinate_action(owner, focus_reason="focus")
@@ -332,8 +347,8 @@ def test_coordinate_cancel_has_priority_over_generic_busy_task() -> None:
     assert owner.view.focus_reasons == ["focus"]
     assert owner.status_refreshes == [owner.MANUAL_JOG_SETTLE_POLL_DELAYS_MS]
     assert owner.cancel_refreshes == 1
-    assert owner._pending_stage_axis_targets == {}
-    assert owner._coordinate_targets.has_active_move() is False
+    assert owner._stage_motion.pending == {}
+    assert owner._stage_motion.coordinate_active is False
 
 
 def test_route_cancel_runs_before_active_coordinate_move_early_return() -> None:
@@ -342,8 +357,7 @@ def test_route_cancel_runs_before_active_coordinate_move_early_return() -> None:
     design_panel = _DesignNavigatorPanel()
     activate_route_run(owner, runner)
     owner.design_navigator_panel = design_panel
-    owner._coordinate_targets.active_axis = "X"
-    owner._coordinate_targets.active_axes = {"X"}
+    owner._stage_motion.coordinate_active = True
 
     move_lifecycle.cancel_stage_coordinate_action(owner, focus_reason="focus")
 
@@ -376,7 +390,7 @@ def test_background_capture_cancel_reports_generic_cancel_status() -> None:
 
 def test_pending_edits_only_cancel_clears_edits_and_reports_edit_status() -> None:
     owner = _Owner()
-    owner._pending_stage_axis_targets["Y"] = (2.0, 2.0)
+    owner._stage_motion.pending["Y"] = (2.0, 2.0)
 
     move_lifecycle.cancel_stage_coordinate_action(owner, focus_reason="focus")
 
@@ -425,102 +439,11 @@ def test_move_finish_alignment_preparation_returns_before_normal_finish_cleanup(
     ]
 
 
-def test_clear_coordinate_move_tracking_applies_pending_override_and_ui_cleanup() -> (
-    None
-):
+def test_unclaimed_move_finish_clears_cross_then_reports_status() -> None:
     owner = _Owner()
-    owner._coordinate_targets.active_axis = "Z"
-    owner._pending_stage_axis_targets["Z"] = (3.0, 3.0)
-
-    move_lifecycle.clear_coordinate_move_tracking(
-        owner,
-        clear_pending=True,
-        reset_override=True,
-    )
-
-    assert owner._coordinate_targets.has_active_move() is False
-    assert owner._pending_stage_axis_targets == {}
-    assert owner.stage_controller.feed_override_resets == 1
-    assert owner.joystick_panel.temporary_bounds_cleared == 1
-    assert owner.joystick_panel.common_targets_cleared == 1
-    assert owner.axis_style_refreshes == 1
-    assert owner.apply_state_refreshes == 1
-
-
-def test_move_finish_feedrate_reissue_cancel_keeps_tracking_and_suppresses_status() -> (
-    None
-):
-    owner = _Owner()
-    owner._coordinate_targets.active_axis = "X"
-    owner._coordinate_targets.active_axes = {"X"}
-    owner._coordinate_targets.reissue_cancel_pending = True
-
-    move_lifecycle.on_move_finished(owner, False, "Operation cancelled.")
-
-    assert owner._coordinate_targets.has_active_move() is True
-    assert owner._coordinate_targets.reissue_cancel_pending is False
-    assert owner.statuses == []
-    assert owner.status_refreshes == [owner.MANUAL_JOG_SETTLE_POLL_DELAYS_MS]
-    assert owner.cancel_refreshes == 1
-
-
-def test_move_finish_normal_failure_clears_tracking_and_cross_then_reports_status() -> (
-    None
-):
-    owner = _Owner()
-    owner._coordinate_targets.active_axis = "X"
-    owner._coordinate_targets.display_targets = {"X": 12.0}
-    owner._coordinate_targets.display_basis = ("design", "frame-a")
 
     move_lifecycle.on_move_finished(owner, False, "Limit reached.")
 
     assert owner._microscope_interaction.finish_calls == [False]
-    assert owner._coordinate_targets.has_active_move() is False
-    assert owner._stage_motion_axes == set()
-    assert owner.coordinate_move_completions == [
-        (False, {"X": 12.0}, ("design", "frame-a"))
-    ]
     assert owner.statuses == [("Limit reached.", 5000)]
     assert owner.cancel_refreshes == 1
-
-
-def test_move_finish_success_with_skipped_message_clears_coordinate_tracking() -> None:
-    owner = _Owner()
-    owner._coordinate_targets.active_axis = "X"
-
-    move_lifecycle.on_move_finished(owner, True, "Move skipped.")
-
-    assert owner._microscope_interaction.finish_calls == [True]
-    assert owner._coordinate_targets.has_active_move() is False
-    assert owner.status_refreshes == [owner.MANUAL_JOG_SETTLE_POLL_DELAYS_MS]
-    assert owner.statuses == [("Move skipped.", 5000)]
-
-
-def test_finish_coordinate_move_if_idle_schedules_pending_homing_action() -> None:
-    owner = _Owner()
-    owner._coordinate_targets.active_axis = "X"
-    owner._coordinate_targets.active_axes = {"X"}
-    owner._coordinate_targets.target_position = (1.0, 0.0, 0.0, 0.0, 0.0, 0.0)
-    owner._coordinate_targets.started_at = 1.0
-    owner._coordinate_targets.display_targets = {"X": 1.0}
-    owner._coordinate_targets.display_basis = ("custom", "frame-b")
-    owner._pending_homing_axes = ["Z"]
-    scheduled: list[int] = []
-
-    def schedule(delay_ms: int, callback) -> None:
-        scheduled.append(delay_ms)
-        callback()
-
-    move_lifecycle.finish_coordinate_move_if_idle(
-        owner,
-        (1.0, 0.0, 0.0, 0.0, 0.0, 0.0),
-        monotonic_s=2.0,
-        schedule_single_shot=schedule,
-    )
-
-    assert owner._coordinate_targets.has_active_move() is False
-    assert owner.coordinate_move_completions == [
-        (True, {"X": 1.0}, ("custom", "frame-b"))
-    ]
-    assert scheduled == [0]
-    assert owner.stage_controller.home_axis_requests == ["Z"]

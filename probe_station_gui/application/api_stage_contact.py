@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from probe_station_gui.stage.coordinate_targets import CoordinateMoveRequest
 from probe_station_gui.application.route_run_execution import (
     RouteRunKind,
     RouteRunReleaseCause,
@@ -50,6 +51,7 @@ from probe_station_gui.stage.api_moves import (
     api_coordinate_move_success_response,
 )
 from probe_station_gui.stage.controller import StageControllerError
+from probe_station_gui.stage import position_update as stage_position_update
 from probe_station_gui.views import (
     main_window_stage_position_panel as stage_position_panel_adapter,
 )
@@ -74,18 +76,30 @@ class _MainApiStageContactMixin:
         if isinstance(move_plan, dict):
             return move_plan
         if (
-            self._coordinate_targets.has_active_move()
+            self._stage_motion.snapshot().coordinate_active
             or self.stage_controller.is_busy()
         ):
             return api_coordinate_move_busy_response()
-        if not self._start_coordinate_targets_move(
-            move_plan.target_map,
-            feedrate_mm_min=move_plan.feedrate_mm_min,
-            source_label="API",
-            limit_targets={
-                axis: float(display_target)
-                for axis, (_raw_target, display_target) in move_plan.target_map.items()
-            },
+        if not self._stage_motion.start_coordinate_move(
+            CoordinateMoveRequest(
+                targets=tuple(
+                    (axis, raw_target, display_target)
+                    for axis, (raw_target, display_target) in (
+                        move_plan.target_map.items()
+                    )
+                ),
+                seed_position=stage_position_update.seed_motion_prediction_position(
+                    self
+                ),
+                feedrate_mm_min=move_plan.feedrate_mm_min,
+                source_label="API",
+                physical_limit_targets=tuple(
+                    (axis, float(display_target))
+                    for axis, (_raw_target, display_target) in (
+                        move_plan.target_map.items()
+                    )
+                ),
+            )
         ):
             return api_coordinate_move_start_failed_response()
         return api_coordinate_move_success_response(
@@ -122,6 +136,13 @@ class _MainApiStageContactMixin:
         display_position: dict[str, float],
         accepted: bool,
     ) -> dict[str, Any]:
+        motion_snapshot = self._stage_motion.snapshot()
+        pending = self._stage_motion.pending_coordinate_edits()
+        coordinate_axes = (
+            motion_snapshot.active_axes
+            if motion_snapshot.coordinate_active
+            else frozenset()
+        )
         payload: dict[str, Any] = {}
         if accepted:
             payload["accepted"] = True
@@ -141,11 +162,13 @@ class _MainApiStageContactMixin:
                 ),
                 "display_position": display_position,
                 "pending_targets": {
-                    axis: float(values[1])
-                    for axis, values in self._pending_stage_axis_targets.items()
+                    axis: float(display) for axis, _raw, display in pending.targets
                 },
-                "active_coordinate_axis": self._coordinate_targets.active_axis,
-                "active_coordinate_axes": sorted(self._coordinate_targets.active_axes),
+                "active_coordinate_axis": next(
+                    (axis for axis in self.STAGE_AXIS_NAMES if axis in coordinate_axes),
+                    None,
+                ),
+                "active_coordinate_axes": sorted(coordinate_axes),
                 "current_feedrate_mm_min": self._current_linear_feedrate(),
             }
         )
@@ -162,7 +185,7 @@ class _MainApiStageContactMixin:
                 "message": "Serial connection is not available.",
             }
         if (
-            self._coordinate_targets.has_active_move()
+            self._stage_motion.snapshot().coordinate_active
             or self.stage_controller.is_busy()
         ):
             return {
@@ -201,14 +224,22 @@ class _MainApiStageContactMixin:
             if limit_error is not None:
                 return {"accepted": False, "message": limit_error}
             targets[axis] = (float(raw_target), float(resolved_display_target))
-        accepted = self._start_coordinate_targets_move(
-            targets,
-            feedrate_mm_min=feedrate,
-            source_label="Surface Map",
-            limit_targets={
-                axis: display_target
-                for axis, (_raw_target, display_target) in targets.items()
-            },
+        accepted = self._stage_motion.start_coordinate_move(
+            CoordinateMoveRequest(
+                targets=tuple(
+                    (axis, raw_target, display_target)
+                    for axis, (raw_target, display_target) in targets.items()
+                ),
+                seed_position=stage_position_update.seed_motion_prediction_position(
+                    self
+                ),
+                feedrate_mm_min=feedrate,
+                source_label="Surface Map",
+                physical_limit_targets=tuple(
+                    (axis, display_target)
+                    for axis, (_raw_target, display_target) in targets.items()
+                ),
+            )
         )
         return {
             "accepted": bool(accepted),

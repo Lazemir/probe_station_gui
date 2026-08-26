@@ -29,29 +29,38 @@ class MainWindowStagePositionPanelOwner(Protocol):
     _stage_axis_homed: set[str]
     _stage_limit_axes: set[str]
     _stage_axis_base_styles: dict[str, tuple[str, str]]
-    _pending_stage_axis_targets: dict[str, tuple[float, float]]
+    _stage_motion: Any
     _stage_motion_axes: set[str]
     _stage_motion_blink_dimmed: bool
     _stage_motion_blink_timer: Any
     stage_controller: Any
 
     def _on_stage_axis_escape_pressed(self, axis_name: str) -> None: ...
-    def _on_stage_axis_editing_finished(self, axis_name: str) -> bool | None: ...
     def _update_stage_coordinate_apply_state(self) -> None: ...
     def _on_stage_coordinate_mode_changed(self) -> None: ...
-    def _apply_pending_stage_coordinate_targets(self) -> None: ...
     def _current_linear_feedrate(self) -> float: ...
 
 
 def create_stage_position_widget(
     owner: MainWindowStagePositionPanelOwner,
 ) -> StagePositionPanel:
+    from probe_station_gui.views import main_window_coordinate_entry
+
     panel = StagePositionPanel(VISIBLE_STAGE_AXES, owner)
     panel.axis_escape_pressed.connect(owner._on_stage_axis_escape_pressed)
-    panel.axis_editing_finished.connect(owner._on_stage_axis_editing_finished)
+    panel.axis_editing_finished.connect(
+        lambda axis: main_window_coordinate_entry.on_stage_axis_editing_finished(
+            owner,
+            axis,
+        )
+    )
     panel.axis_text_edited.connect(owner._update_stage_coordinate_apply_state)
     panel.input_mode_changed.connect(owner._on_stage_coordinate_mode_changed)
-    panel.apply_requested.connect(owner._apply_pending_stage_coordinate_targets)
+    panel.apply_requested.connect(
+        lambda: main_window_coordinate_entry.apply_pending_stage_coordinate_targets(
+            owner
+        )
+    )
     panel.cancel_requested.connect(lambda: cancel_stage_coordinate_action(owner))
     selection_handler = getattr(owner, "_on_software_coordinate_system_changed", None)
     panel.coordinate_system_changed.connect(
@@ -62,7 +71,6 @@ def create_stage_position_widget(
     owner._stage_position_panel = panel
     owner._stage_axis_fields = panel.axis_fields
     owner._stage_axis_base_styles = panel.base_styles
-    owner._pending_stage_axis_targets = panel.pending_targets
     refresh_coordinate_frame_display(owner)
     return panel
 
@@ -210,6 +218,26 @@ def update_coordinate_confidence(
     panel.update_confidence_roles(roles)
 
 
+def apply_coordinate_common_feedrate(
+    owner: MainWindowStagePositionPanelOwner,
+) -> None:
+    joystick = getattr(owner, "joystick_panel", None)
+    if joystick is None:
+        return
+    plan = owner._stage_motion.snapshot().coordinate_common_feedrate
+    if plan.clear_common_target:
+        clearer = getattr(joystick, "clear_common_feedrate_target", None)
+        if callable(clearer):
+            clearer()
+        return
+    setter = getattr(joystick, "set_common_feedrate_target", None)
+    if callable(setter):
+        setter(
+            float(plan.feedrate_mm_min),
+            float(plan.max_feedrate_mm_min),
+        )
+
+
 def set_stage_motion_axes(
     owner: MainWindowStagePositionPanelOwner,
     axes: object,
@@ -279,7 +307,12 @@ def update_stage_position_display(
             else set()
         ),
         limit_axes=owner._stage_limit_axes,
-        pending_targets=owner._pending_stage_axis_targets,
+        pending_targets={
+            axis: (raw, display)
+            for axis, raw, display in (
+                owner._stage_motion.pending_coordinate_edits().targets
+            )
+        },
         display_axis_value=lambda axis_name, raw_value: display_axis_value_from_raw(
             owner,
             axis_name,

@@ -20,6 +20,42 @@ def coerce_finite_xy(value: object) -> tuple[float, float] | None:
     return xy if all(math.isfinite(axis_value) for axis_value in xy) else None
 
 
+def coerce_finite_position(value: object | None) -> tuple[float, ...] | None:
+    if not isinstance(value, (tuple, list)):
+        return None
+    try:
+        position = tuple(float(axis_value) for axis_value in value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return (
+        position if all(math.isfinite(axis_value) for axis_value in position) else None
+    )
+
+
+def position_with_stage_xy(
+    position: object | None,
+    stage_xy: tuple[float, float],
+) -> tuple[float, ...]:
+    values = list(coerce_finite_position(position) or ())
+    if len(values) < 2:
+        values = [stage_xy[0], stage_xy[1]]
+    else:
+        values[0], values[1] = stage_xy
+    return tuple(values)
+
+
+def axis_value(
+    position: tuple[float, ...],
+    axis_names: tuple[str, ...],
+    axis: str,
+) -> float | None:
+    try:
+        index = axis_names.index(axis)
+    except ValueError:
+        return None
+    return position[index] if index < len(position) else None
+
+
 def planned_xy_matches(
     candidate: object,
     expected: tuple[float, float],

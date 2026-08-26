@@ -24,10 +24,6 @@ from probe_station_gui.stage.axis_calibration import StageAxisCalibrationMapper
 from probe_station_gui.stage import types as stage_types
 from probe_station_gui.stage.controller import StageController as QtStageController
 
-from probe_station_gui.stage.coordinate_targets import (
-    CoordinateTargetConfig,
-    CoordinateTargetMoveState,
-)
 from probe_station_gui.stage.manual_jog_prediction import (
     ManualJogPredictionConfig,
     ManualJogPredictionState,
@@ -419,22 +415,12 @@ class _Owner:
         self._stage_axis_homed = set()
         self._stage_limit_axes = set()
         self._stage_axis_base_styles = {}
-        self._pending_stage_axis_targets = {}
         self._stage_motion_axes = {"X"}
         self._stage_motion_blink_dimmed = False
         self._stage_motion_blink_timer = types.SimpleNamespace(isActive=lambda: False)
         self._stage_position_panel = types.SimpleNamespace(
             refresh_axis_styles=lambda _axes, _dimmed: self.calls.append(
                 ("clear_motion", None)
-            )
-        )
-        self._coordinate_targets = CoordinateTargetMoveState(
-            CoordinateTargetConfig(
-                axis_names=AXES,
-                min_feedrate_mm_min=1.0,
-                duration_padding_s=0.0,
-                min_idle_accept_s=0.0,
-                target_tolerance_mm=0.001,
             )
         )
         self._manual_jog_prediction = ManualJogPredictionState(
@@ -454,6 +440,9 @@ class _Owner:
         self._stage_motion = types.SimpleNamespace(
             snapshot=lambda: types.SimpleNamespace(
                 physical_machine_pose=self._physical_machine_pose,
+                coordinate_active=False,
+                coordinate_stage_position=None,
+                presented_stage_xy=None,
             )
         )
         self._pending_alignment_preparation = None
@@ -532,9 +521,6 @@ class _Owner:
     def _format_optional_point(self, point: tuple[float, float] | None) -> str:
         return "None" if point is None else f"{point[0]:.3f},{point[1]:.3f}"
 
-    def _finish_coordinate_move_if_idle(self, position: object | None = None) -> None:
-        self.calls.append(("finish", position))
-
     def _publish_stage_position_estimate(
         self,
         position: tuple[float, ...] | None,
@@ -562,7 +548,7 @@ def test_position_update_reads_registration_projection_only_from_coordinator() -
     assert "_coordinate_system_coordinator.snapshot()" in source
 
 
-def test_unhomed_fallback_clears_prediction_and_keeps_idle_finish_order(
+def test_unhomed_fallback_clears_prediction_and_motion_axes(
     monkeypatch,
 ) -> None:
     owner = _Owner()
@@ -580,11 +566,6 @@ def test_unhomed_fallback_clears_prediction_and_keeps_idle_finish_order(
         lambda _owner, position: owner.calls.append(("display", position)),
     )
     monkeypatch.setattr(
-        position_update.stage_move_lifecycle,
-        "finish_coordinate_move_if_idle",
-        lambda _owner, position, **_kwargs: owner.calls.append(("finish", position)),
-    )
-    monkeypatch.setattr(
         position_update.coordinate_flow,
         "observe_coordinate_authority",
         lambda _owner, pose: owner.calls.append(("authority", pose)),
@@ -600,7 +581,6 @@ def test_unhomed_fallback_clears_prediction_and_keeps_idle_finish_order(
         ("authority", owner._physical_machine_pose),
         ("coordinate", None),
         ("design", (1.0, 2.0)),
-        ("finish", (1.0, 2.0, 3.0)),
         ("clear_motion", None),
     ]
 
@@ -632,7 +612,7 @@ def test_deferred_presentations_keep_complete_queued_observation_generations(
     from probe_station_gui.application.stage_design_position import (
         _MainStageDesignPositionMixin,
     )
-    from probe_station_gui.application.stage_motion_session import (
+    from probe_station_gui.application.stage_motion_types import (
         StageMotionPresentation,
     )
 
@@ -653,7 +633,6 @@ def test_deferred_presentations_keep_complete_queued_observation_generations(
         "motion snapshot"
     )
     owner.stage_controller.homed_axes = unexpected_cache_read("homed axes")
-    owner._coordinate_targets.active_axes = {"X"}
     pose_a = PhysicalMachinePose.from_mapping({"X": 11.0})
     pose_b = PhysicalMachinePose.from_mapping({"X": 22.0})
     owner._physical_machine_pose = pose_b

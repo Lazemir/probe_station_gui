@@ -292,6 +292,7 @@ class _FakeJoystickWindow:
 
     def __getattr__(self, name: str) -> Any:
         if name.startswith("set_"):
+
             def setter(*_args: object, **_kwargs: object) -> None:
                 return None
 
@@ -381,7 +382,6 @@ class _DockOwner:
         "_save_manual_axis_jog_settings",
         "_save_jog_control_mode",
         "_on_linear_feedrate_changed",
-        "_apply_coordinate_move_feedrate",
         "_on_step_feedrate_changed",
         "_on_focus_feedrate_changed",
         "_on_focus_step_feedrate_changed",
@@ -419,6 +419,9 @@ class _DockOwner:
         self.stage_controller = _FakeStageController()
         self.lcr_controller = _FakeLcrController()
         self.settings_manager = _FakeSettingsManager()
+        self._stage_motion = SimpleNamespace(
+            set_coordinate_feedrate=self._record_noop("set_coordinate_feedrate")
+        )
 
         self.serial_connection_dialog = None
         self.serial_connection_tabs = None
@@ -471,7 +474,9 @@ class _DockOwner:
         self.dock_calls.append(("resize", *args))
 
 
-def test_create_main_window_docks_assigns_owner_attrs_and_dock_names(monkeypatch) -> None:
+def test_create_main_window_docks_assigns_owner_attrs_and_dock_names(
+    monkeypatch,
+) -> None:
     monkeypatch.setattr(main_window_docks, "QDialog", _FakeDialog)
     monkeypatch.setattr(main_window_docks, "QHBoxLayout", _FakeLayout)
     monkeypatch.setattr(main_window_docks, "QPushButton", _FakeButton)

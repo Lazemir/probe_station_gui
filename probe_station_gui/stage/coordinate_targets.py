@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
+from enum import Enum, auto
 from typing import Callable, Mapping, Sequence
 
 from probe_station_gui.stage.api_moves import normalize_api_coordinate_input_mode
@@ -20,6 +21,46 @@ class CoordinateTargetConfig:
     duration_padding_s: float
     min_idle_accept_s: float
     target_tolerance_mm: float
+
+
+@dataclass(frozen=True)
+class CoordinateMoveRequest:
+    """Resolved targets from one immutable coordinate projection.
+
+    ``seed_position`` remains explicit until the manual prediction workflow is
+    migrated into the Stage motion session in Task 4.
+    """
+
+    targets: tuple[tuple[str, float, float], ...]
+    feedrate_mm_min: float
+    source_label: str
+    seed_position: tuple[float, ...] | None = None
+    physical_limit_targets: tuple[tuple[str, float], ...] = ()
+    display_basis: object | None = None
+
+
+class CoordinateMoveDisposition(Enum):
+    COMPLETED = auto()
+    FAILED = auto()
+    SKIPPED = auto()
+    ALREADY = auto()
+    UNCHANGED = auto()
+
+
+@dataclass(frozen=True)
+class CoordinateMoveCompletion:
+    success: bool
+    disposition: CoordinateMoveDisposition
+    message: str
+    display_targets: tuple[tuple[str, float], ...]
+    display_basis: object | None
+    stage_position: tuple[float, ...] | None
+
+
+@dataclass(frozen=True)
+class CoordinatePendingEdits:
+    targets: tuple[tuple[str, float, float], ...]
+    motion_lease: object | None
 
 
 @dataclass(frozen=True)
@@ -93,6 +134,15 @@ class CoordinateTargetFinishDecision:
     stage_position: tuple[float, ...] | None = None
 
 
+@dataclass(frozen=True)
+class CoordinateMovementCompletionDecision:
+    claimed: bool
+    success: bool
+    message: str
+    expected_reissue_cancel: bool = False
+    disposition: CoordinateMoveDisposition | None = None
+
+
 @dataclass
 class CoordinateTargetMoveState:
     config: CoordinateTargetConfig
@@ -109,6 +159,14 @@ class CoordinateTargetMoveState:
     effective_feedrate: float | None = None
     seen_active_state: bool = False
     reissue_cancel_pending: bool = False
+    common_feedrate: CoordinateTargetCommonFeedratePlan = field(
+        default_factory=lambda: CoordinateTargetCommonFeedratePlan(
+            clear_common_target=True
+        )
+    )
+    purpose_armed: bool = False
+    pending_edits: dict[str, tuple[float, float]] = field(default_factory=dict)
+    pending_motion_lease: object | None = None
 
     def has_active_move(self) -> bool:
         return bool(self.active_axes_with_fallback())
@@ -119,7 +177,12 @@ class CoordinateTargetMoveState:
             axes.add(self.active_axis)
         return axes
 
-    def apply_start_plan(self, plan: CoordinateTargetStartPlan) -> None:
+    def apply_start_plan(
+        self,
+        plan: CoordinateTargetStartPlan,
+        *,
+        display_basis: object | None = None,
+    ) -> None:
         self.active_axis = plan.active_axis
         self.active_axes = set(plan.active_axes)
         self.origin_position = tuple(float(value) for value in plan.origin_position)
@@ -128,13 +191,120 @@ class CoordinateTargetMoveState:
         self.display_targets = {
             axis: float(value) for axis, value in plan.display_targets.items()
         }
-        self.display_basis = None
+        self.display_basis = display_basis
         self.started_at = float(plan.started_at)
         self.ends_at = float(plan.ends_at)
         self.programmed_feedrate = float(plan.feedrate_mm_min)
         self.effective_feedrate = float(plan.feedrate_mm_min)
         self.seen_active_state = False
         self.reissue_cancel_pending = False
+        self.common_feedrate = plan.common_feedrate
+        for axis in plan.remove_pending_axes:
+            self.pending_edits.pop(axis, None)
+        if not self.pending_edits:
+            self.pending_motion_lease = None
+
+    def pending_snapshot(self) -> CoordinatePendingEdits:
+        return CoordinatePendingEdits(
+            targets=tuple(
+                (axis, *self.pending_edits[axis])
+                for axis in self.config.axis_names
+                if axis in self.pending_edits
+            ),
+            motion_lease=self.pending_motion_lease,
+        )
+
+    def upsert_pending_edit(
+        self,
+        axis: str,
+        raw_target: float,
+        display_target: float,
+        *,
+        motion_lease: object | None,
+    ) -> None:
+        axis_name = str(axis).strip().upper()
+        if axis_name not in self.config.axis_names:
+            raise ValueError(f"Unknown Stage axis: {axis_name}")
+        self.pending_edits[axis_name] = (float(raw_target), float(display_target))
+        self.pending_motion_lease = motion_lease
+
+    def pop_pending_edit(self, axis: str) -> tuple[float, float] | None:
+        removed = self.pending_edits.pop(str(axis).strip().upper(), None)
+        if not self.pending_edits:
+            self.pending_motion_lease = None
+        return removed
+
+    def clear_pending_edits(self) -> bool:
+        had_edits = bool(self.pending_edits)
+        self.pending_edits.clear()
+        self.pending_motion_lease = None
+        return had_edits
+
+    def consume_pending_edits(self) -> CoordinatePendingEdits:
+        pending = self.pending_snapshot()
+        self.clear_pending_edits()
+        return pending
+
+    def arm_purpose(self) -> None:
+        self.purpose_armed = True
+
+    def claim_movement_finished(
+        self,
+        success: bool,
+        message: str,
+    ) -> CoordinateMovementCompletionDecision:
+        message_text = str(message or "")
+        if not self.purpose_armed:
+            return CoordinateMovementCompletionDecision(
+                claimed=False,
+                success=bool(success),
+                message=message_text,
+            )
+        message_lower = message_text.lower()
+        if (
+            not success
+            and self.reissue_cancel_pending
+            and "operation cancelled" in message_lower
+        ):
+            self.reissue_cancel_pending = False
+            return CoordinateMovementCompletionDecision(
+                claimed=True,
+                success=False,
+                message=message_text,
+                expected_reissue_cancel=True,
+            )
+        self.reissue_cancel_pending = False
+        disposition = coordinate_terminal_disposition(success, message_lower)
+        if success and disposition is None:
+            self.purpose_armed = False
+        return CoordinateMovementCompletionDecision(
+            claimed=True,
+            success=bool(success),
+            message=message_text,
+            disposition=disposition,
+        )
+
+    def complete(
+        self,
+        *,
+        success: bool,
+        disposition: CoordinateMoveDisposition,
+        message: str,
+    ) -> CoordinateMoveCompletion:
+        completion = CoordinateMoveCompletion(
+            success=bool(success),
+            disposition=disposition,
+            message=str(message),
+            display_targets=tuple(
+                (axis, float(self.display_targets[axis]))
+                for axis in self.config.axis_names
+                if axis in self.display_targets
+            ),
+            display_basis=self.display_basis,
+            stage_position=self.stage_position,
+        )
+        self.clear_tracking()
+        return completion
 
     def advance_prediction(
         self,
@@ -246,6 +416,10 @@ class CoordinateTargetMoveState:
         self.effective_feedrate = None
         self.seen_active_state = False
         self.reissue_cancel_pending = False
+        self.common_feedrate = CoordinateTargetCommonFeedratePlan(
+            clear_common_target=True
+        )
+        self.purpose_armed = False
 
     def finish_if_idle_decision(
         self,
@@ -265,10 +439,8 @@ class CoordinateTargetMoveState:
             position=position,
         ):
             return CoordinateTargetFinishDecision(finish=False)
-        if (
-            self.started_at is not None
-            and float(monotonic_s) - self.started_at
-            < float(self.config.min_idle_accept_s)
+        if self.started_at is not None and float(monotonic_s) - self.started_at < float(
+            self.config.min_idle_accept_s
         ):
             return CoordinateTargetFinishDecision(finish=False)
         stage_position = _coerce_position_tuple(position)
@@ -309,6 +481,21 @@ def coordinate_target_common_feedrate_plan(
     )
 
 
+def coordinate_terminal_disposition(
+    success: bool,
+    message_lower: str,
+) -> CoordinateMoveDisposition | None:
+    if not success:
+        return CoordinateMoveDisposition.FAILED
+    if "skipped" in message_lower:
+        return CoordinateMoveDisposition.SKIPPED
+    if "already" in message_lower:
+        return CoordinateMoveDisposition.ALREADY
+    if "unchanged" in message_lower:
+        return CoordinateMoveDisposition.UNCHANGED
+    return None
+
+
 def plan_coordinate_target_start(
     config: CoordinateTargetConfig,
     *,
@@ -321,9 +508,7 @@ def plan_coordinate_target_start(
     axis_max_feedrates: Mapping[str, object] | None,
     monotonic_s: float,
 ) -> CoordinateTargetStartDecision:
-    ordered_axes = tuple(
-        axis for axis in config.axis_names if axis in targets
-    )
+    ordered_axes = tuple(axis for axis in config.axis_names if axis in targets)
     if not ordered_axes:
         return CoordinateTargetStartDecision(accepted=False)
     feedrate = max(float(config.min_feedrate_mm_min), float(feedrate_mm_min))
@@ -339,14 +524,8 @@ def plan_coordinate_target_start(
                 3000,
             ),
         )
-    raw_targets = {
-        axis: float(targets[axis][0])
-        for axis in ordered_axes
-    }
-    display_targets = {
-        axis: float(targets[axis][1])
-        for axis in ordered_axes
-    }
+    raw_targets = {axis: float(targets[axis][0]) for axis in ordered_axes}
+    display_targets = {axis: float(targets[axis][1]) for axis in ordered_axes}
     for axis, display_target in display_targets.items():
         limit_error = axis_target_limit_error(axis, display_target)
         if limit_error is not None:
@@ -378,9 +557,7 @@ def plan_coordinate_target_start(
     started_at = float(monotonic_s)
     status = CoordinateTargetStatus(
         "Moving "
-        + ", ".join(
-            f"{axis}={display_targets[axis]:.3f}" for axis in ordered_axes
-        )
+        + ", ".join(f"{axis}={display_targets[axis]:.3f}" for axis in ordered_axes)
         + f" at F{feedrate:.1f} from {source_label}.",
         3000,
     )
@@ -431,10 +608,13 @@ def coordinate_move_duration_s(
         delta = float(target_position[axis_index]) - float(origin_position[axis_index])
         squared += delta * delta
     distance = math.sqrt(squared)
-    speed_mm_per_s = max(
-        float(config.min_feedrate_mm_min),
-        float(feedrate_mm_min),
-    ) / 60.0
+    speed_mm_per_s = (
+        max(
+            float(config.min_feedrate_mm_min),
+            float(feedrate_mm_min),
+        )
+        / 60.0
+    )
     return (distance / speed_mm_per_s) + float(config.duration_padding_s)
 
 
@@ -456,10 +636,9 @@ def coordinate_position_is_at_target(
             return False
         if axis_index >= len(position) or axis_index >= len(target_position):
             return False
-        if (
-            abs(float(position[axis_index]) - float(target_position[axis_index]))
-            > float(config.target_tolerance_mm)
-        ):
+        if abs(
+            float(position[axis_index]) - float(target_position[axis_index])
+        ) > float(config.target_tolerance_mm):
             return False
     return True
 
@@ -566,6 +745,11 @@ def _coerce_position_tuple(position: object | None) -> tuple[float, ...] | None:
 
 
 __all__ = [
+    "CoordinateMoveCompletion",
+    "CoordinateMoveDisposition",
+    "CoordinateMoveRequest",
+    "CoordinateMovementCompletionDecision",
+    "CoordinatePendingEdits",
     "CoordinateTargetCommonFeedratePlan",
     "CoordinateTargetConfig",
     "CoordinateTargetFeedrateDecision",
@@ -577,6 +761,7 @@ __all__ = [
     "CoordinateTargetStartPlan",
     "CoordinateTargetStatus",
     "coordinate_move_duration_s",
+    "coordinate_terminal_disposition",
     "coordinate_position_is_at_target",
     "coordinate_target_common_feedrate_plan",
     "plan_coordinate_target_start",

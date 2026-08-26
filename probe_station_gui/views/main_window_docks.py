@@ -23,7 +23,9 @@ from probe_station_gui.views.resistance_monitor_panel import ResistanceMonitorPa
 from probe_station_gui.views.serial_connection_panel import SerialConnectionPanel
 from probe_station_gui.views import main_window_connection_flow as connection_flow
 from probe_station_gui.views import main_window_homing as homing_ui
-from probe_station_gui.views import main_window_needle_calibration as needle_calibration_ui
+from probe_station_gui.views import (
+    main_window_needle_calibration as needle_calibration_ui,
+)
 from probe_station_gui.views.main_window_auxiliary import (
     sync_contact_calibration_window_action,
     toggle_design_layout_window,
@@ -45,17 +47,19 @@ class MainWindowDockOwner(Protocol):
     oscillation_panel: Any
     alignment_panel: Any
     alignment_dock: Any
+    _stage_motion: Any
 
     def addDockWidget(self, area: Any, dock: Any) -> None: ...  # noqa: N802
     def splitDockWidget(self, first: Any, second: Any, orientation: Any) -> None: ...  # noqa: N802
-    def resizeDocks(self, docks: list[Any], sizes: list[int], orientation: Any) -> None: ...  # noqa: N802
+    def resizeDocks(
+        self, docks: list[Any], sizes: list[int], orientation: Any
+    ) -> None: ...  # noqa: N802
     def _on_resistance_standby_enabled_changed(self, *args: Any) -> None: ...
     def _zero_b_axis(self, *args: Any) -> None: ...
     def _on_manual_axis_move_requested(self, *args: Any) -> None: ...
     def _save_manual_axis_jog_settings(self, *args: Any) -> None: ...
     def _save_jog_control_mode(self, *args: Any) -> None: ...
     def _on_linear_feedrate_changed(self, *args: Any) -> None: ...
-    def _apply_coordinate_move_feedrate(self, *args: Any) -> None: ...
     def _on_step_feedrate_changed(self, *args: Any) -> None: ...
     def _on_focus_feedrate_changed(self, *args: Any) -> None: ...
     def _on_focus_step_feedrate_changed(self, *args: Any) -> None: ...
@@ -172,9 +176,7 @@ def _create_joystick_dock(owner: MainWindowDockOwner) -> None:
     owner.joystick_dock = CollapsibleDockWidget("Joystick", owner)
     owner.joystick_dock.setObjectName("JoystickDock")
     owner.joystick_dock.setWidget(owner.joystick_panel)
-    owner.joystick_dock.setAllowedAreas(
-        Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea
-    )
+    owner.joystick_dock.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
     owner.addDockWidget(Qt.LeftDockWidgetArea, owner.joystick_dock)
     owner.splitDockWidget(owner.resistance_dock, owner.joystick_dock, Qt.Vertical)
 
@@ -222,9 +224,7 @@ def _connect_joystick_panel(owner: MainWindowDockOwner) -> None:
         lambda: getattr(owner, "_clear_exact_step_targets", lambda: None)()
     )
     owner.joystick_panel.reset_requested.connect(
-        lambda: owner.stage_controller.reset_controller(
-            source="joystick_reset_button"
-        )
+        lambda: owner.stage_controller.reset_controller(source="joystick_reset_button")
     )
 
 
@@ -251,12 +251,10 @@ def _connect_joystick_motion_actions(owner: MainWindowDockOwner) -> None:
         lambda: needle_calibration_ui.save_current_needle_height(owner)
     )
     owner.stage_controller.needle_height_save_finished.connect(
-        lambda request_id, result: (
-            needle_calibration_ui.on_needle_height_save_finished(
-                owner,
-                request_id,
-                result,
-            )
+        lambda request_id, result: needle_calibration_ui.on_needle_height_save_finished(
+            owner,
+            request_id,
+            result,
         )
     )
     owner.joystick_panel.needle_contact_coordinate_save_requested.connect(
@@ -283,7 +281,7 @@ def _connect_joystick_feedrate_actions(owner: MainWindowDockOwner) -> None:
         owner._on_linear_feedrate_changed
     )
     owner.joystick_panel.common_feedrate_changed.connect(
-        owner._apply_coordinate_move_feedrate
+        owner._stage_motion.set_coordinate_feedrate
     )
     owner.joystick_panel.step_feedrate_changed.connect(owner._on_step_feedrate_changed)
     owner.joystick_panel.focus_feedrate_changed.connect(
@@ -448,9 +446,7 @@ def _create_alignment_dock(owner: MainWindowDockOwner) -> None:
     owner.alignment_dock = CollapsibleDockWidget("Alignment", owner)
     owner.alignment_dock.setObjectName("AlignmentDock")
     owner.alignment_dock.setWidget(owner.alignment_panel)
-    owner.alignment_dock.setAllowedAreas(
-        Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea
-    )
+    owner.alignment_dock.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
     owner.addDockWidget(Qt.RightDockWidgetArea, owner.alignment_dock)
     owner.alignment_dock.hide()
 

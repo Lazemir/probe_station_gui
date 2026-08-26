@@ -23,7 +23,7 @@ class MainWindowHomingOwner(Protocol):
     _stage_motion: Any
     _pending_homing_axes: list[str]
     _homing_active_key: str | None
-    _coordinate_targets: Any
+    _stage_motion: Any
     joystick_panel: Any
     stage_controller: Any
 
@@ -112,7 +112,10 @@ def _clear_exact_step_targets(owner: MainWindowHomingOwner) -> None:
 def start_next_pending_homing_action(owner: MainWindowHomingOwner) -> None:
     if owner._homing_active_key is not None or not owner._pending_homing_axes:
         return
-    if owner.stage_controller.is_busy() or owner._coordinate_targets.has_active_move():
+    if (
+        owner.stage_controller.is_busy()
+        or owner._stage_motion.snapshot().coordinate_active
+    ):
         QTimer.singleShot(
             HOMING_RETRY_DELAY_MS,
             lambda: start_next_pending_homing_action(owner),
@@ -250,5 +253,5 @@ def _can_start_homing_now(owner: MainWindowHomingOwner) -> bool:
         owner._homing_active_key is None
         and not owner.stage_controller.is_busy()
         and not owner._controller_latest_state_blocks_motion()
-        and not owner._coordinate_targets.has_active_move()
+        and not owner._stage_motion.snapshot().coordinate_active
     )

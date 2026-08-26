@@ -8,8 +8,11 @@ from pathlib import Path
 
 import pytest
 
-from probe_station_gui.application.stage_motion_session import StageMotionPresentation
+from probe_station_gui.application import stage_motion_session as motion_session
+from probe_station_gui.application.stage_motion_types import StageMotionPresentation
 from probe_station_gui.coordinates.model import PhysicalMachinePose
+from probe_station_gui.stage import coordinate_targets
+from probe_station_gui.stage import types as stage_types
 from tests.app.import_reset import restore_real_imports_for_main
 from tests.app.test_stage_motion_session_planned_position import (
     SESSION_PATH,
@@ -52,6 +55,7 @@ def test_controller_motion_signals_connect_directly_to_session_slots() -> None:
         ("tracked_absolute_xy_move_finished", "on_tracked_absolute_xy_move_finished"),
         ("tracked_absolute_xy_move_started", "on_tracked_absolute_xy_move_started"),
         ("stage_position_observed", "on_stage_position_changed"),
+        ("movement_finished", "on_movement_finished"),
     ):
         assert (
             f"{signal_name}.connect(\n"
@@ -59,7 +63,6 @@ def test_controller_motion_signals_connect_directly_to_session_slots() -> None:
             "            Qt.ConnectionType.QueuedConnection,\n"
             "        )"
         ) in source
-    assert "self._stage_motion.on_movement_finished" not in source
     assert "self._stage_motion.on_absolute_xy_move_started" not in source
 
 
@@ -74,9 +77,6 @@ def test_typed_presentation_renders_stage_authority_and_design_in_order(
 
     window = main_module.Main.__new__(main_module.Main)
     calls: list[object] = []
-    window._coordinate_targets = types.SimpleNamespace(
-        has_active_move=lambda: False,
-    )
     window._manual_jog_prediction = types.SimpleNamespace(
         prediction_available=lambda: False,
     )
@@ -158,7 +158,6 @@ def test_typed_renderer_uses_exact_observation_snapshot_without_controller_rerea
         latest_machine_coordinate_snapshot=cache_read("machine snapshot"),
         homed_axes=cache_read("homed axes"),
     )
-    window._coordinate_targets = types.SimpleNamespace(has_active_move=lambda: False)
     window._manual_jog_prediction = types.SimpleNamespace(
         prediction_available=lambda: False,
     )
@@ -244,9 +243,6 @@ def test_unhomed_presentation_hides_coordinate_xy_but_keeps_baseline_raw_outputs
 
     calls: list[tuple[str, object]] = []
     window = main_module.Main.__new__(main_module.Main)
-    window._coordinate_targets = types.SimpleNamespace(
-        has_active_move=lambda: False,
-    )
     window._manual_jog_prediction = types.SimpleNamespace(
         prediction_available=lambda: False,
     )
@@ -292,7 +288,6 @@ def test_timestamp_only_presentation_skips_idle_renderer_rebuild(monkeypatch) ->
     window._manual_jog_prediction = types.SimpleNamespace(
         prediction_available=lambda: False,
     )
-    window._coordinate_targets = types.SimpleNamespace(has_active_move=lambda: False)
     window.contact_calibration_window = types.SimpleNamespace(
         set_current_stage_position=lambda _value: calls.append("contact")
     )
@@ -340,13 +335,14 @@ def test_timestamp_only_presentation_skips_idle_renderer_rebuild(monkeypatch) ->
 
 
 @pytest.mark.parametrize(
-    ("manual_prediction_available", "coordinate_move_active"),
-    ((True, False), (False, True)),
+    ("manual_prediction_available", "coordinate_move_active", "delegated_expected"),
+    ((True, False, True), (False, True, False)),
 )
 def test_typed_presentation_delegates_deferred_motion_workflows_once(
     monkeypatch,
     manual_prediction_available: bool,
     coordinate_move_active: bool,
+    delegated_expected: bool,
 ) -> None:
     restore_real_imports_for_main()
     main_module = importlib.import_module("main")
@@ -356,8 +352,10 @@ def test_typed_presentation_delegates_deferred_motion_workflows_once(
     window._manual_jog_prediction = types.SimpleNamespace(
         prediction_available=lambda: manual_prediction_available,
     )
-    window._coordinate_targets = types.SimpleNamespace(
-        has_active_move=lambda: coordinate_move_active,
+    window._stage_motion = types.SimpleNamespace(
+        snapshot=lambda: types.SimpleNamespace(
+            coordinate_active=coordinate_move_active,
+        )
     )
     window.contact_calibration_window = None
     window._can_display_design_position = lambda: True
@@ -405,14 +403,18 @@ def test_typed_presentation_delegates_deferred_motion_workflows_once(
 
     main_module.Main._apply_stage_motion_presentation(window, presentation)
 
-    assert delegated == [
-        (
-            window,
-            presentation.reported_position,
-            presentation.physical_machine_pose,
-        )
-    ]
-    assert direct_render_calls == []
+    if delegated_expected:
+        assert delegated == [
+            (
+                window,
+                presentation.reported_position,
+                presentation.physical_machine_pose,
+            )
+        ]
+        assert direct_render_calls == []
+    else:
+        assert delegated == []
+        assert direct_render_calls == []
 
 
 def test_application_consumers_use_typed_session_boundary() -> None:
@@ -488,3 +490,105 @@ def test_deleted_main_motion_state_has_no_production_consumer() -> None:
                 offenders.append(f"{path.relative_to(root)}:{node.lineno}:{node.name}")
 
     assert offenders == []
+
+
+def test_coordinate_contracts_live_below_application_session() -> None:
+    coordinate_contracts = (
+        "CoordinateMoveRequest",
+        "CoordinateMoveCompletion",
+        "CoordinateMoveDisposition",
+        "CoordinatePendingEdits",
+    )
+    for name in coordinate_contracts:
+        assert getattr(coordinate_targets, name, None) is not None, name
+        assert not hasattr(motion_session, name), name
+    assert getattr(stage_types, "UnclaimedMovementCompletion", None) is not None
+    assert not hasattr(motion_session, "UnclaimedMovementCompletion")
+
+    root = Path(__file__).resolve().parents[2] / "probe_station_gui"
+    offenders: list[str] = []
+    for package in (root / "stage", root / "views"):
+        for path in package.rglob("*.py"):
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            for node in ast.walk(tree):
+                if (
+                    isinstance(node, ast.ImportFrom)
+                    and node.module
+                    == "probe_station_gui.application.stage_motion_session"
+                ):
+                    offenders.append(
+                        f"{path.relative_to(root.parent).as_posix()}:{node.lineno}"
+                    )
+    assert offenders == []
+
+
+def test_migrated_coordinate_state_has_no_owner_outside_session() -> None:
+    root = Path(__file__).resolve().parents[2]
+    session_path = (
+        root / "probe_station_gui" / "application" / "stage_motion_session.py"
+    )
+    forbidden = {
+        "_coordinate_targets",
+        "_pending_stage_axis_targets",
+        "_pending_coordinate_motion_lease",
+    }
+    offenders: list[str] = []
+    for path in [root / "main.py", *(root / "probe_station_gui").rglob("*.py")]:
+        if path == session_path:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Attribute) and node.attr in forbidden:
+                offenders.append(
+                    f"{path.relative_to(root).as_posix()}:{node.lineno}:{node.attr}"
+                )
+    assert offenders == []
+
+
+def test_deleted_coordinate_lifecycle_wrappers_have_no_production_definition() -> None:
+    root = Path(__file__).resolve().parents[2]
+    forbidden = {
+        "_on_stage_axis_editing_finished",
+        "_apply_pending_stage_coordinate_targets",
+        "_start_coordinate_axis_move",
+        "_start_coordinate_targets_move",
+        "_apply_coordinate_common_feedrate_plan",
+        "_apply_coordinate_move_feedrate",
+        "_start_next_pending_stage_axis_move",
+        "_advance_coordinate_move_prediction",
+        "_clear_pending_stage_coordinate_targets",
+    }
+    offenders: list[str] = []
+    for path in [root / "main.py", *(root / "probe_station_gui").rglob("*.py")]:
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and node.name in forbidden
+            ):
+                offenders.append(
+                    f"{path.relative_to(root).as_posix()}:{node.lineno}:{node.name}"
+                )
+    assert offenders == []
+
+
+def test_main_wires_global_completion_and_homing_directly_to_session() -> None:
+    root = Path(__file__).resolve().parents[2]
+    main_source = (root / "main.py").read_text(encoding="utf-8")
+
+    assert (
+        "self.stage_controller.movement_finished.connect(\n"
+        "            self._stage_motion.on_movement_finished"
+    ) in main_source
+    assert main_source.count("self.stage_controller.movement_finished.connect(") == 1
+    assert (
+        main_source.count("self._stage_motion.unclaimed_movement_finished.connect(")
+        == 1
+    )
+    assert (
+        "lambda completion: stage_move_lifecycle.on_move_finished(\n"
+        "                self,\n"
+        "                completion.success,\n"
+        "                completion.message,"
+    ) in main_source
+    assert "self._stage_motion.continue_homing_requested.connect(" in main_source

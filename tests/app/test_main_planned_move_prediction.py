@@ -11,6 +11,7 @@ from tests.app.import_reset import restore_real_imports_for_main
 restore_real_imports_for_main()
 import main as main_module
 from probe_station_gui.application import design_load
+from probe_station_gui.stage.coordinate_targets import CoordinatePendingEdits
 from main import Main
 from probe_station_gui.coordinates.coordinator_model import (
     CoordinateAuthorityObservation,
@@ -19,10 +20,6 @@ from probe_station_gui.coordinates.coordinator_model import (
     RegistrationWorkflowSnapshot,
 )
 from probe_station_gui.coordinates.model import PhysicalMachinePose
-from probe_station_gui.stage.coordinate_targets import (
-    CoordinateTargetConfig,
-    CoordinateTargetMoveState,
-)
 from probe_station_gui.stage.manual_jog_prediction import (
     ManualJogPredictionConfig,
     ManualJogPredictionState,
@@ -149,20 +146,20 @@ def _make_main(
     )
     window.contact_calibration_window = None
     window._pending_alignment_preparation = None
-    window._stage_motion = types.SimpleNamespace(
-        snapshot=lambda: types.SimpleNamespace(
-            physical_machine_pose=PhysicalMachinePose.from_mapping({})
-        )
+    motion_state = types.SimpleNamespace(
+        physical_machine_pose=PhysicalMachinePose.from_mapping({}),
+        coordinate_active=False,
+        coordinate_stage_position=None,
+        presented_stage_xy=None,
     )
-    window._coordinate_targets = CoordinateTargetMoveState(
-        CoordinateTargetConfig(
-            axis_names=Main.STAGE_AXIS_NAMES,
-            min_feedrate_mm_min=Main.MIN_FEEDRATE_MM_MIN,
-            duration_padding_s=Main.PLANNED_MOVE_DURATION_PADDING_S,
-            min_idle_accept_s=Main.COORDINATE_MOVE_MIN_IDLE_ACCEPT_S,
-            target_tolerance_mm=Main.COORDINATE_MOVE_TARGET_TOLERANCE_MM,
-        )
+    motion_state.snapshot = lambda: types.SimpleNamespace(
+        physical_machine_pose=motion_state.physical_machine_pose,
+        coordinate_active=motion_state.coordinate_active,
+        coordinate_stage_position=motion_state.coordinate_stage_position,
+        presented_stage_xy=motion_state.presented_stage_xy,
     )
+    motion_state.pending_coordinate_edits = lambda: CoordinatePendingEdits((), None)
+    window._stage_motion = motion_state
     window._manual_jog_prediction = ManualJogPredictionState(
         ManualJogPredictionConfig(
             axis_names=Main.STAGE_AXIS_NAMES,
@@ -205,7 +202,6 @@ def _make_main(
     window._stage_axis_homed = set()
     window._stage_axis_base_styles = {}
     window._stage_limit_axes = set()
-    window._pending_stage_axis_targets = {}
     window._current_linear_feedrate = lambda: 123.0
     window._update_stage_coordinate_apply_state = lambda: None
     window._update_coordinate_display = lambda **_kwargs: None
@@ -266,20 +262,34 @@ def _prepare_design_refresh(
     window._design_session = types.SimpleNamespace(document=object())
     window.serial_connection = types.SimpleNamespace(is_open=True)
     window._pending_design_stage_xy = None
-    window._stage_motion = types.SimpleNamespace(
-        snapshot=lambda: types.SimpleNamespace(
-            presented_stage_xy=session_xy,
-            physical_machine_pose=PhysicalMachinePose.from_mapping({}),
-        )
+    motion_state = types.SimpleNamespace(
+        presented_stage_xy=session_xy,
+        physical_machine_pose=PhysicalMachinePose.from_mapping({}),
+        coordinate_active=False,
+        coordinate_stage_position=None,
     )
+    motion_state.snapshot = lambda: types.SimpleNamespace(
+        presented_stage_xy=motion_state.presented_stage_xy,
+        physical_machine_pose=motion_state.physical_machine_pose,
+        coordinate_active=motion_state.coordinate_active,
+        coordinate_stage_position=motion_state.coordinate_stage_position,
+    )
+    motion_state.pending_coordinate_edits = lambda: CoordinatePendingEdits((), None)
+    window._stage_motion = motion_state
 
 
 class MainPlannedMovePredictionTest(unittest.TestCase):
     def test_design_refresh_keeps_active_coordinate_prediction_precedence(self) -> None:
         window, published, _reconciles, _smooth_calls = _make_main()
         _prepare_design_refresh(window)
-        window._coordinate_targets.active_axes = {"X"}
-        window._coordinate_targets.stage_position = (8.0, 9.0, 4.0, 0.0, 0.0)
+        window._stage_motion.coordinate_active = True
+        window._stage_motion.coordinate_stage_position = (
+            8.0,
+            9.0,
+            4.0,
+            0.0,
+            0.0,
+        )
 
         Main._refresh_design_position(window)
 
@@ -383,7 +393,6 @@ class MainPlannedMovePredictionTest(unittest.TestCase):
         window, published, _reconciles, _smooth_calls = _make_main(state="idle")
         coordinate_updates: list[tuple[float, float] | None] = []
         design_updates: list[tuple[float, float] | None] = []
-        finished: list[tuple[float, ...]] = []
         cleared: list[str] = []
         displayed: list[tuple[float, ...]] = []
 
@@ -402,19 +411,10 @@ class MainPlannedMovePredictionTest(unittest.TestCase):
             refresh_axis_styles=lambda _axes, _dimmed: cleared.append("clear")
         )
 
-        with (
-            mock.patch.object(
-                position_update.stage_position_panel,
-                "update_stage_position_display",
-                side_effect=lambda _owner, position: displayed.append(position),
-            ),
-            mock.patch.object(
-                position_update.stage_move_lifecycle,
-                "finish_coordinate_move_if_idle",
-                side_effect=lambda _owner, position, **_kwargs: finished.append(
-                    position
-                ),
-            ),
+        with mock.patch.object(
+            position_update.stage_position_panel,
+            "update_stage_position_display",
+            side_effect=lambda _owner, position: displayed.append(position),
         ):
             position_update.on_stage_position_changed(window, (1.0, 2.0, 3.0))
 
@@ -423,11 +423,10 @@ class MainPlannedMovePredictionTest(unittest.TestCase):
         self.assertIsNone(window._manual_jog_prediction.stage_xy)
         self.assertEqual(coordinate_updates, [None])
         self.assertEqual(design_updates, [(1.0, 2.0)])
-        self.assertEqual(finished, [(1.0, 2.0, 3.0)])
         self.assertEqual(cleared, ["clear"])
         self.assertEqual(published, [])
 
-    def test_publish_happens_before_idle_finish_and_motion_clear(self) -> None:
+    def test_publish_happens_before_motion_clear(self) -> None:
         window, _published, _reconciles, _smooth_calls = _make_main(state="idle")
         calls: list[str] = []
         window._stage_motion_axes = {"X"}
@@ -435,27 +434,18 @@ class MainPlannedMovePredictionTest(unittest.TestCase):
             refresh_axis_styles=lambda _axes, _dimmed: calls.append("clear")
         )
 
-        with (
-            mock.patch.object(
-                position_update,
-                "publish_stage_position_estimate",
-                side_effect=lambda _owner, position, **_kwargs: calls.append(
-                    f"publish:{position[:2]}"
-                ),
-            ),
-            mock.patch.object(
-                position_update.stage_move_lifecycle,
-                "finish_coordinate_move_if_idle",
-                side_effect=lambda _owner, position, **_kwargs: calls.append(
-                    f"finish:{position[:2]}"
-                ),
+        with mock.patch.object(
+            position_update,
+            "publish_stage_position_estimate",
+            side_effect=lambda _owner, position, **_kwargs: calls.append(
+                f"publish:{position[:2]}"
             ),
         ):
             position_update.on_stage_position_changed(window, (1.0, 2.0, 3.0))
 
         self.assertEqual(
             calls,
-            ["publish:(1.0, 2.0)", "finish:(1.0, 2.0)", "clear"],
+            ["publish:(1.0, 2.0)", "clear"],
         )
 
 
