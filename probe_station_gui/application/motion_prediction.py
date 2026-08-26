@@ -1,16 +1,11 @@
 from __future__ import annotations
 
 import logging
-import math
 import re
 import time
 from PySide6.QtCore import QTimer
-from probe_station_gui.stage.motion_prediction import motion_progress
 from probe_station_gui.stage import move_lifecycle as stage_move_lifecycle
 from probe_station_gui.stage import position_update as stage_position_update
-from probe_station_gui.views import (
-    main_window_stage_position_panel as stage_position_panel_adapter,
-)
 
 logger = logging.getLogger("main")
 
@@ -22,9 +17,6 @@ class _MainMotionPredictionMixin:
             return
         if self._coordinate_targets.started_at is not None:
             self._advance_coordinate_move_prediction()
-            return
-        if self._planned_move_started_at is not None:
-            self._advance_planned_move_prediction()
             return
         self._manual_jog_timer.stop()
 
@@ -74,118 +66,6 @@ class _MainMotionPredictionMixin:
                 self,
                 decision.publish_position,
             )
-
-    def _advance_planned_move_prediction(self) -> None:
-        if (
-            self._planned_move_origin_xy is None
-            or self._planned_move_target_xy is None
-            or self._planned_move_started_at is None
-            or self._planned_move_ends_at is None
-        ):
-            self._clear_planned_move_prediction(clear_wait_state=False)
-            return
-        now = time.monotonic()
-        progress = motion_progress(
-            self._planned_move_started_at,
-            self._planned_move_ends_at,
-            now,
-        )
-        origin_x, origin_y = self._planned_move_origin_xy
-        target_x, target_y = self._planned_move_target_xy
-        self._planned_move_stage_xy = (
-            float(origin_x + (target_x - origin_x) * progress),
-            float(origin_y + (target_y - origin_y) * progress),
-        )
-        stage_position_update.publish_stage_position_estimate(
-            self,
-            stage_position_update.position_with_stage_xy(
-                self,
-                self._planned_move_stage_xy,
-            ),
-        )
-        if progress >= 1.0:
-            self._planned_move_waiting_for_fresh_status = (
-                self._planned_move_stage_xy is not None
-            )
-            self._planned_move_stop_status_timestamp = (
-                self.stage_controller.last_status_timestamp()
-            )
-            self._planned_move_origin_xy = None
-            self._planned_move_target_xy = None
-            self._planned_move_started_at = None
-            self._planned_move_ends_at = None
-
-    def _clear_planned_move_prediction(self, *, clear_wait_state: bool) -> None:
-        self._pending_planned_move_target_xy = None
-        self._pending_planned_move_source_label = None
-        self._planned_move_origin_xy = None
-        self._planned_move_target_xy = None
-        self._planned_move_started_at = None
-        self._planned_move_ends_at = None
-        if clear_wait_state:
-            self._planned_move_stage_xy = None
-            self._planned_move_waiting_for_fresh_status = False
-            self._planned_move_stop_status_timestamp = None
-
-    def _start_planned_move_prediction(
-        self,
-        target_stage_xy: tuple[float, float],
-        *,
-        source_label: str,
-        feedrate_mm_min: float | None = None,
-    ) -> None:
-        origin_stage_xy = stage_position_update.preferred_design_stage_xy(self)
-        if origin_stage_xy is None:
-            origin_stage_xy = self._current_design_stage_xy
-        if origin_stage_xy is None:
-            latest = self.stage_controller.latest_stage_position()
-            if latest is not None and len(latest) >= 2:
-                origin_stage_xy = (float(latest[0]), float(latest[1]))
-        if origin_stage_xy is None:
-            return
-        distance_mm = math.hypot(
-            float(target_stage_xy[0] - origin_stage_xy[0]),
-            float(target_stage_xy[1] - origin_stage_xy[1]),
-        )
-        if distance_mm <= 1e-6:
-            self._clear_planned_move_prediction(clear_wait_state=True)
-            return
-        feedrate = (
-            float(self.stage_controller.DEFAULT_FEEDRATE)
-            if feedrate_mm_min is None
-            else max(self.MIN_FEEDRATE_MM_MIN, float(feedrate_mm_min))
-        )
-        speed_mm_per_s = feedrate / 60.0
-        if speed_mm_per_s <= 1e-6:
-            return
-        duration_s = (
-            distance_mm / speed_mm_per_s
-        ) + self.PLANNED_MOVE_DURATION_PADDING_S
-        started_at = time.monotonic()
-        self._manual_jog_prediction.clear_waiting_status()
-        self._planned_move_origin_xy = origin_stage_xy
-        self._planned_move_stage_xy = origin_stage_xy
-        self._planned_move_target_xy = target_stage_xy
-        self._planned_move_started_at = started_at
-        self._planned_move_ends_at = started_at + max(duration_s, 0.05)
-        self._planned_move_waiting_for_fresh_status = False
-        self._planned_move_stop_status_timestamp = None
-        stage_position_panel_adapter.set_stage_motion_axes(self, {"X", "Y"})
-        logger.debug(
-            "MOTION PREDICTION planned_move_start source=%s origin=%s target=%s distance=%.4f duration=%.4f feedrate=%.3f",
-            source_label,
-            self._format_optional_point(origin_stage_xy),
-            self._format_optional_point(target_stage_xy),
-            distance_mm,
-            duration_s,
-            feedrate,
-        )
-        stage_position_update.publish_stage_position_estimate(
-            self,
-            stage_position_update.position_with_stage_xy(self, origin_stage_xy),
-        )
-        if not self._manual_jog_timer.isActive():
-            self._manual_jog_timer.start()
 
     def _schedule_status_refreshes(self, delays_ms: tuple[int, ...]) -> None:
         for delay_ms in delays_ms:

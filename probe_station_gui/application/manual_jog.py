@@ -42,7 +42,7 @@ class _MainManualJogMixin:
         if not isinstance(commanded_distances, tuple):
             return
         self._clear_exact_step_targets()
-        self._clear_planned_move_prediction(clear_wait_state=True)
+        self._stage_motion.cancel_planned_xy_move()
         if self.serial_terminal_panel is not None:
             self.serial_terminal_panel.set_live_poll_paused(True)
         result = self._manual_jog_prediction.handle_command(

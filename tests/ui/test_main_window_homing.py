@@ -42,9 +42,14 @@ def _owner(events: list[object]) -> SimpleNamespace:
             prediction_available=lambda _now: False,
             stage_position=None,
         ),
-        _planned_move_stage_xy=None,
-        _planned_move_started_at=None,
-        _planned_move_waiting_for_fresh_status=False,
+        _stage_motion=SimpleNamespace(
+            snapshot=lambda: SimpleNamespace(
+                presented_position=None,
+                planned_stage_xy=None,
+                planned_prediction_active=False,
+                planned_waiting_for_fresh_status=False,
+            )
+        ),
         _pending_homing_axes=[],
         _homing_active_key=None,
         _stage_motion_axes=set(),

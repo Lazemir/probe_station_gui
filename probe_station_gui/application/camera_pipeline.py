@@ -173,46 +173,6 @@ class _MainCameraPipelineMixin:
             and getattr(self.serial_connection, "is_open", False)
         )
 
-    def _on_absolute_xy_move_started(
-        self,
-        target_x_mm: float,
-        target_y_mm: float,
-        feedrate_mm_min: float,
-    ) -> None:
-        pending_target = self._pending_planned_move_target_xy
-        if pending_target is None:
-            return
-        try:
-            target = (float(target_x_mm), float(target_y_mm))
-            feedrate = float(feedrate_mm_min)
-        except (TypeError, ValueError):
-            self._pending_planned_move_target_xy = None
-            self._pending_planned_move_source_label = None
-            return
-        if (
-            math.hypot(
-                target[0] - pending_target[0],
-                target[1] - pending_target[1],
-            )
-            > 1e-4
-        ):
-            logger.debug(
-                "MOTION PREDICTION planned_move_start_ignored pending=%s actual=%s",
-                self._format_optional_point(pending_target),
-                self._format_optional_point(target),
-            )
-            self._pending_planned_move_target_xy = None
-            self._pending_planned_move_source_label = None
-            return
-        source_label = self._pending_planned_move_source_label or "absolute XY move"
-        self._pending_planned_move_target_xy = None
-        self._pending_planned_move_source_label = None
-        self._start_planned_move_prediction(
-            target,
-            source_label=source_label,
-            feedrate_mm_min=feedrate,
-        )
-
     def on_error(self, message: str) -> None:
         logger.error("Camera error: %s", message)
         self._telegram_runtime.send_alert(

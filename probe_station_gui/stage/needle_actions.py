@@ -72,9 +72,7 @@ class StageControllerNeedleActionsMixin:
                     if action == "adjust"
                     else f"needle {action} request"
                 )
-                self.status_message.emit(
-                    f"Stage is busy. Ignoring {description}."
-                )
+                self.status_message.emit(f"Stage is busy. Ignoring {description}.")
                 return
             self._start_needles_action_locked(
                 action,
@@ -277,7 +275,9 @@ class StageControllerNeedleActionsMixin:
         if not segments:
             self._update_needles_from_a_position(target_a)
             return False
-        for segment_index, (segment_lowering, segment_feedrate, slow_zone) in enumerate(segments):
+        for segment_index, (segment_lowering, segment_feedrate, slow_zone) in enumerate(
+            segments
+        ):
             self._check_cancelled()
             segment_target_a = self._axis_a_configured_target_for_lowering(
                 segment_lowering,
@@ -285,11 +285,10 @@ class StageControllerNeedleActionsMixin:
             )
             if abs(segment_target_a - current_a) < 1e-6:
                 continue
-            use_precision_approach = (
-                segment_index == len(segments) - 1
-                and precision_profile_is_effective(
-                    self._precision_approach_settings.profiles["A"]
-                )
+            use_precision_approach = segment_index == len(
+                segments
+            ) - 1 and precision_profile_is_effective(
+                self._precision_approach_settings.profiles["A"]
             )
             if slow_zone:
                 programmed_feedrate = self._begin_needles_feedrate_control(
@@ -512,9 +511,7 @@ class StageControllerNeedleActionsMixin:
                 )
             if action in {"raise", "lift", "lower"}:
                 target_lowering = self._needle_target_lowering_for_action(action)
-                target_a = self._axis_a_configured_target_for_lowering(
-                    target_lowering
-                )
+                target_a = self._axis_a_configured_target_for_lowering(target_lowering)
                 segments = self._needle_motion_profile_segments(
                     action,
                     current_a,
@@ -677,10 +674,16 @@ class StageControllerNeedleActionsMixin:
         """Return the best available cached A-axis coordinate."""
 
         if self._position_reporting_mode != "machine":
-            if self._last_stage_position is not None and len(self._last_stage_position) > 3:
+            if (
+                self._last_stage_position is not None
+                and len(self._last_stage_position) > 3
+            ):
                 return float(self._last_stage_position[3])
             return None
-        if self._last_machine_position is not None and len(self._last_machine_position) > 3:
+        if (
+            self._last_machine_position is not None
+            and len(self._last_machine_position) > 3
+        ):
             return float(self._last_machine_position[3])
         return None
 
@@ -698,9 +701,12 @@ class StageControllerNeedleActionsMixin:
             machine = list(self._last_machine_position)
             machine[index] = float(value)
             self._last_machine_position = tuple(machine)
-        if self._last_stage_position is not None and len(self._last_stage_position) > index:
+        if (
+            self._last_stage_position is not None
+            and len(self._last_stage_position) > index
+        ):
             stage = list(self._last_stage_position)
             stage[index] = float(value)
             coords = tuple(stage)
             self._last_stage_position = coords
-            self.stage_position_changed.emit(coords)
+            self._publish_cached_stage_position(coords)

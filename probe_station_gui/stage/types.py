@@ -3,8 +3,78 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import Enum, auto
 import threading
 from typing import Optional
+
+from probe_station_gui.coordinates.model import PhysicalMachinePose
+from probe_station_gui.stage.machine_coordinates import MachineCoordinateSnapshot
+
+
+@dataclass(frozen=True)
+class StagePositionObservation:
+    """Immutable controller facts captured from one Stage status generation."""
+
+    position: tuple[float, ...] | None
+    physical_machine_pose: PhysicalMachinePose
+    motion_coordinate_snapshot: MachineCoordinateSnapshot | None
+    stage_state: str | None
+    homed_axes: frozenset[str]
+    status_timestamp: float | None
+    last_jog_write_timestamp: float | None
+    reset_reason: StageMotionResetReason | None = None
+
+    def has_same_motion_facts_as(self, other: object) -> bool:
+        """Compare motion facts only.
+
+        The status timestamp is generation metadata, and the reset reason is
+        consumed before this comparison by the application session.
+        """
+
+        if not isinstance(other, StagePositionObservation):
+            return False
+        return (
+            self.position,
+            self.physical_machine_pose,
+            self.motion_coordinate_snapshot,
+            self.stage_state,
+            self.homed_axes,
+            self.last_jog_write_timestamp,
+        ) == (
+            other.position,
+            other.physical_machine_pose,
+            other.motion_coordinate_snapshot,
+            other.stage_state,
+            other.homed_axes,
+            other.last_jog_write_timestamp,
+        )
+
+
+@dataclass(frozen=True)
+class TrackedAbsoluteXYMoveStarted:
+    """Actual start of one token-correlated absolute X/Y operation."""
+
+    motion_token: object
+    origin_position: tuple[float, ...]
+    target_stage_xy: tuple[float, float]
+    feedrate_mm_min: float
+
+
+@dataclass(frozen=True)
+class TrackedAbsoluteXYMoveFinished:
+    """Result of one token-correlated absolute X/Y operation."""
+
+    motion_token: object
+    target_stage_xy: tuple[float, float]
+    success: bool
+    message: str
+    status_timestamp: float | None
+
+
+class StageMotionResetReason(Enum):
+    """Reason transient Stage-motion presentation state is discarded."""
+
+    CONNECTION_CHANGED = auto()
 
 
 @dataclass(frozen=True)

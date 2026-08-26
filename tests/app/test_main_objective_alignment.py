@@ -9,6 +9,7 @@ from probe_station_gui.coordinates.coordinator_model import (
     CoordinateSystemSnapshot,
     CoordinateTransition,
 )
+from probe_station_gui.coordinates.model import PhysicalMachinePose
 from probe_station_gui.design.objective_offsets import ObjectiveOffsetReference
 from probe_station_gui.design.session_registration import AlignmentPreparation
 from probe_station_gui.settings.manager import Settings
@@ -283,9 +284,10 @@ def test_settings_objective_change_is_rejected_for_alive_microscope_scan() -> No
     class _SettingsDialog:
         instance = None
 
-        def __init__(self, *_args, **_kwargs) -> None:
+        def __init__(self, *_args, **kwargs) -> None:
             self.settings_applied = _Signal()
             self.restored_active_names: list[str] = []
+            self.physical_pose_source = kwargs["physical_pose_source"]
             type(self).instance = self
 
         def exec(self):
@@ -311,6 +313,10 @@ def test_settings_objective_change_is_rejected_for_alive_microscope_scan() -> No
     window.grabber = None
     window._exposure_policy_adapter = None
     window._api_key_store = None
+    expected_pose = PhysicalMachinePose.from_mapping({"X": 12.5})
+    window._stage_motion = types.SimpleNamespace(
+        snapshot=lambda: types.SimpleNamespace(physical_machine_pose=expected_pose)
+    )
 
     open_settings_dialog(window, dialog_class=_SettingsDialog)
 
@@ -323,6 +329,7 @@ def test_settings_objective_change_is_rejected_for_alive_microscope_scan() -> No
     assert manager.settings.objectives.objectives["X20"].magnification == 25.0
     assert stage.applied_objectives == []
     assert _SettingsDialog.instance is not None
+    assert _SettingsDialog.instance.physical_pose_source() == expected_pose
     assert _SettingsDialog.instance.restored_active_names == ["X5"]
     assert statuses == ["Stage is busy; active objective settings not changed."]
 

@@ -22,6 +22,7 @@ from probe_station_gui.application.design_load import (
     _LoadedDesignDocument,
     _PendingDesignMarkupLoad,
 )
+from probe_station_gui.application.stage_motion_session import PlannedXYMoveRequest
 from probe_station_gui.coordinates.coordinator_model import (
     CoordinateSystemSnapshot,
     CoordinateTransition,
@@ -62,6 +63,16 @@ class _FakeStageController:
     def request_move_to_xy(self, x_value: float, y_value: float) -> bool:
         self.move_requests.append((float(x_value), float(y_value)))
         return self.move_accepted
+
+
+class _FakeStageMotion:
+    def __init__(self) -> None:
+        self.accepted = True
+        self.planned_requests: list[PlannedXYMoveRequest] = []
+
+    def request_planned_xy_move(self, request: PlannedXYMoveRequest) -> bool:
+        self.planned_requests.append(request)
+        return self.accepted
 
 
 class _FakeSettingsManager:
@@ -121,6 +132,7 @@ def _make_window() -> tuple[Main, _FakeStageController, list[str]]:
     stage_controller = _FakeStageController()
     statuses: list[str] = []
     window.stage_controller = stage_controller
+    window._stage_motion = _FakeStageMotion()
     window._design_session = DesignSession()
     window._coordinate_system_coordinator = types.SimpleNamespace(
         current_design_lease=lambda: types.SimpleNamespace(
@@ -191,9 +203,6 @@ def _make_window() -> tuple[Main, _FakeStageController, list[str]]:
 
     window._begin_design_markup_load = finish_markup_load
     window._raw_stage_xy_from_design_xy = lambda _design_xy: (1.5, -2.0)
-    window._clear_planned_move_prediction = lambda **_kwargs: statuses.append(
-        "clear_prediction"
-    )
     return window, stage_controller, statuses
 
 

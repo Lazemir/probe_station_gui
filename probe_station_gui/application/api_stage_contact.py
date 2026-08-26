@@ -678,7 +678,7 @@ class _MainApiStageContactMixin:
             logger.exception("Failed to cancel API route control active motion.")
         stage_position_panel_adapter.clear_stage_motion_axes(self)
         try:
-            self._clear_planned_move_prediction(clear_wait_state=True)
+            self._stage_motion.cancel_planned_xy_move()
         except Exception:
             logger.exception(
                 "Failed to clear planned move prediction after API route control interrupt."

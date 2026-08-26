@@ -137,6 +137,10 @@ from probe_station_gui.application.scan_sample_meter import (
     _MainScanSampleMeterMixin,
 )
 from probe_station_gui.application.settings_apply import _MainSettingsApplyMixin
+from probe_station_gui.application.stage_motion_session import (
+    StageMotionConfig,
+    _StageMotionSession,
+)
 from probe_station_gui.application.stage_design_position import (
     _MainStageDesignPositionMixin,
 )
@@ -161,10 +165,7 @@ from probe_station_gui.camera.live_correction import (
     LatestFrameProcessor,
     LiveCameraCorrectionPipeline,
 )
-from probe_station_gui.coordinates import (
-    CoordinateFrameStoreWorker,
-    PhysicalMachinePose,
-)
+from probe_station_gui.coordinates import CoordinateFrameStoreWorker
 from probe_station_gui.coordinates.application_runtime import (
     create_application_coordinate_runtime,
 )
@@ -216,7 +217,6 @@ from probe_station_gui.settings.software_coordinate_selection_store import (
 from probe_station_gui.shared.diagnostics import configure_crash_diagnostics
 from probe_station_gui.shared.wheel_guard import GuardedComboBox as QComboBox
 from probe_station_gui.stage import move_lifecycle as stage_move_lifecycle
-from probe_station_gui.stage import position_update as stage_position_update
 from probe_station_gui.stage import sample_handling
 from probe_station_gui.stage.coordinate_targets import (
     CoordinateTargetConfig,
@@ -598,15 +598,6 @@ class Main(
                 stop_tail_learn_alpha=self.MANUAL_JOG_STOP_TAIL_LEARN_ALPHA,
             )
         )
-        self._planned_move_origin_xy: tuple[float, float] | None = None
-        self._planned_move_stage_xy: tuple[float, float] | None = None
-        self._planned_move_target_xy: tuple[float, float] | None = None
-        self._planned_move_started_at: float | None = None
-        self._planned_move_ends_at: float | None = None
-        self._planned_move_waiting_for_fresh_status = False
-        self._planned_move_stop_status_timestamp: float | None = None
-        self._pending_planned_move_target_xy: tuple[float, float] | None = None
-        self._pending_planned_move_source_label: str | None = None
         self._coordinate_targets = CoordinateTargetMoveState(
             CoordinateTargetConfig(
                 axis_names=self.STAGE_AXIS_NAMES,
@@ -624,9 +615,7 @@ class Main(
         self._exact_step_pose_rebase_allowed = False
         self._exact_step_window_elapsed = False
         self._stage_position_panel: StagePositionPanel | None = None
-        self._latest_physical_machine_pose: PhysicalMachinePose | None = None
         self._design_snap_enabled = True
-        self._last_reported_b_position: float | None = None
         self._last_camera_frame_ui_timestamp: float | None = None
         self._suppress_next_camera_ui_gap = False
         self._latest_camera_frame: QImage | None = None
@@ -859,6 +848,52 @@ class Main(
         )
 
         self.stage_controller = self._create_stage_controller()
+        self._stage_motion = _StageMotionSession(
+            self.stage_controller,
+            StageMotionConfig(
+                axis_names=self.STAGE_AXIS_NAMES,
+                prediction_interval_ms=self.MANUAL_JOG_UPDATE_MS,
+                planned_move_duration_padding_s=(self.PLANNED_MOVE_DURATION_PADDING_S),
+                planned_start_tolerance_mm=1e-4,
+                min_feedrate_mm_min=self.MIN_FEEDRATE_MM_MIN,
+                b_position_change_tolerance_deg=(self.B_POSITION_CHANGE_TOLERANCE_DEG),
+                manual_jog=ManualJogPredictionConfig(
+                    axis_names=self.STAGE_AXIS_NAMES,
+                    ignore_idle_after_command_s=(
+                        self.MANUAL_JOG_IGNORE_IDLE_AFTER_COMMAND_S
+                    ),
+                    reconcile_smooth_threshold_mm=(
+                        self.MANUAL_JOG_RECONCILE_SMOOTH_THRESHOLD_MM
+                    ),
+                    reconcile_smooth_alpha=(self.MANUAL_JOG_RECONCILE_SMOOTH_ALPHA),
+                    status_settle_hold_s=self.MANUAL_JOG_STATUS_SETTLE_HOLD_S,
+                    default_stop_tail_s=self.MANUAL_JOG_DEFAULT_STOP_TAIL_S,
+                    stop_tail_min_s=self.MANUAL_JOG_STOP_TAIL_MIN_S,
+                    stop_tail_max_s=self.MANUAL_JOG_STOP_TAIL_MAX_S,
+                    stop_tail_learn_alpha=(self.MANUAL_JOG_STOP_TAIL_LEARN_ALPHA),
+                ),
+                coordinate_target=CoordinateTargetConfig(
+                    axis_names=self.STAGE_AXIS_NAMES,
+                    min_feedrate_mm_min=self.MIN_FEEDRATE_MM_MIN,
+                    duration_padding_s=self.PLANNED_MOVE_DURATION_PADDING_S,
+                    min_idle_accept_s=self.COORDINATE_MOVE_MIN_IDLE_ACCEPT_S,
+                    target_tolerance_mm=(self.COORDINATE_MOVE_TARGET_TOLERANCE_MM),
+                ),
+            ),
+            self,
+        )
+        self._stage_motion.presentation_changed.connect(
+            self._apply_stage_motion_presentation,
+            Qt.ConnectionType.QueuedConnection,
+        )
+        self._stage_motion.action_state_changed.connect(
+            lambda _state: self._update_stage_coordinate_apply_state(),
+            Qt.ConnectionType.QueuedConnection,
+        )
+        self._stage_motion.status_requested.connect(
+            self._show_status,
+            Qt.ConnectionType.QueuedConnection,
+        )
         self._telegram_runtime = TelegramCommandRuntime(
             request_publisher=self.telegram_bot_request_received.emit,
             command_snapshot_provider=self._telegram_command_snapshot,
@@ -873,6 +908,10 @@ class Main(
         self.telegram_bot_request_received.connect(self._telegram_runtime.handle_on_gui)
         self._compose_optical_calibration_runtime()
         self.stage_controller.status_message.connect(self._show_status)
+        self.stage_controller.tracked_absolute_xy_move_finished.connect(
+            self._stage_motion.on_tracked_absolute_xy_move_finished,
+            Qt.ConnectionType.QueuedConnection,
+        )
         self.stage_controller.movement_finished.connect(
             lambda success, message: stage_move_lifecycle.on_move_finished(
                 self,
@@ -886,8 +925,9 @@ class Main(
         self.stage_controller.click_move_started.connect(
             self._microscope_interaction.start_target_motion
         )
-        self.stage_controller.absolute_xy_move_started.connect(
-            self._on_absolute_xy_move_started
+        self.stage_controller.tracked_absolute_xy_move_started.connect(
+            self._stage_motion.on_tracked_absolute_xy_move_started,
+            Qt.ConnectionType.QueuedConnection,
         )
         self.stage_controller.calibration_changed.connect(self.on_calibration_changed)
         self.stage_controller.objective_calibration_updated.connect(
@@ -919,11 +959,9 @@ class Main(
             self._on_design_contact_arm_requested,
             Qt.ConnectionType.BlockingQueuedConnection,
         )
-        self.stage_controller.stage_position_changed.connect(
-            lambda position: stage_position_update.on_stage_position_changed(
-                self,
-                position,
-            )
+        self.stage_controller.stage_position_observed.connect(
+            self._stage_motion.on_stage_position_changed,
+            Qt.ConnectionType.QueuedConnection,
         )
         self.stage_controller.coordinate_confidence_changed.connect(
             lambda updates: stage_position_panel_adapter.update_coordinate_confidence(

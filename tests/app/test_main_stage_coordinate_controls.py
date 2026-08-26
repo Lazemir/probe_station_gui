@@ -20,6 +20,7 @@ from tests.app.main_route_session_support import (
     _make_stage_position_display_main,
 )
 from probe_station_gui.stage import move_lifecycle as stage_move_lifecycle
+from probe_station_gui.stage import position_update as stage_position_update
 from probe_station_gui.settings.axis_calibration_config import (
     AxisCalibrationSettings,
     default_axis_calibrations,
@@ -714,7 +715,7 @@ class MainStageCoordinateControlsTest(unittest.TestCase):
         window._pending_stage_axis_targets = {"X": (99.0, 1.0)}
 
         with mock.patch.object(
-            main_module.stage_position_update,
+            stage_position_update,
             "publish_stage_position_estimate",
         ):
             Main._apply_pending_stage_coordinate_targets(window)
@@ -761,7 +762,7 @@ class MainStageCoordinateControlsTest(unittest.TestCase):
         window._pending_stage_axis_targets = {"X": (999.0, 21.0)}
 
         with mock.patch.object(
-            main_module.stage_position_update,
+            stage_position_update,
             "publish_stage_position_estimate",
         ):
             Main._apply_pending_stage_coordinate_targets(window)
@@ -795,7 +796,7 @@ class MainStageCoordinateControlsTest(unittest.TestCase):
 
         Main._on_manual_axis_move_requested(window, "X", 0.001, "G91", 120.0)
         with mock.patch.object(
-            main_module.stage_position_update,
+            stage_position_update,
             "publish_stage_position_estimate",
         ):
             exact_timer.fire()
@@ -901,7 +902,7 @@ class MainStageCoordinateControlsTest(unittest.TestCase):
         window._coordinate_targets.started_at = None
         window._coordinate_targets.seen_active_state = True
         with mock.patch.object(
-            main_module.stage_position_update,
+            stage_position_update,
             "publish_stage_position_estimate",
         ):
             stage_move_lifecycle.finish_coordinate_move_if_idle(
@@ -962,7 +963,7 @@ class MainStageCoordinateControlsTest(unittest.TestCase):
         stage_controller.busy = False
 
         with mock.patch.object(
-            main_module.stage_position_update,
+            stage_position_update,
             "publish_stage_position_estimate",
         ):
             stage_move_lifecycle.on_move_finished(window, False, "Limit reached.")
@@ -1022,7 +1023,7 @@ class MainStageCoordinateControlsTest(unittest.TestCase):
         window._stage_axis_display_values.update({"X": 1.0, "Y": 2.0})
         Main._on_manual_axis_move_requested(window, "X", 0.001, "G91", 120.0)
         with mock.patch.object(
-            main_module.stage_position_update,
+            stage_position_update,
             "publish_stage_position_estimate",
         ):
             exact_timer.fire()
@@ -1040,7 +1041,7 @@ class MainStageCoordinateControlsTest(unittest.TestCase):
         window._coordinate_targets.started_at = None
         window._coordinate_targets.seen_active_state = True
         with mock.patch.object(
-            main_module.stage_position_update,
+            stage_position_update,
             "publish_stage_position_estimate",
         ):
             stage_move_lifecycle.finish_coordinate_move_if_idle(
@@ -1339,7 +1340,7 @@ class MainStageCoordinateControlsTest(unittest.TestCase):
         stage_controller.latest_position = (1.0, 2.0, 3.0, 0.0, 0.0, 0.0)
 
         with mock.patch.object(
-            main_module.stage_position_update,
+            stage_position_update,
             "publish_stage_position_estimate",
             side_effect=lambda _owner, position: published.append(
                 tuple(float(value) for value in position)

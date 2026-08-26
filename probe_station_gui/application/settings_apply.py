@@ -12,7 +12,6 @@ from probe_station_gui.camera.optical_calibration_adapters import (
 from probe_station_gui.camera.optical_calibration_runtime import (
     OpticalCalibrationOutcome,
 )
-from probe_station_gui.coordinates import PhysicalMachinePose
 from probe_station_gui.coordinates.coordinator_model import (
     RegistrationSourceMarkRequest,
     RegistrationSourceMarksRequest,
@@ -169,17 +168,7 @@ class _MainSettingsApplyMixin:
             startup_mode=coordinate_settings.startup_mode,
             preferred_system=coordinate_settings.preferred_system,
         )
-        latest_snapshot = getattr(
-            self.stage_controller,
-            "latest_machine_coordinate_snapshot",
-            None,
-        )
-        machine_snapshot = latest_snapshot() if callable(latest_snapshot) else None
-        self._latest_physical_machine_pose = (
-            machine_snapshot.physical_machine_pose
-            if machine_snapshot is not None
-            else PhysicalMachinePose({})
-        )
+        self._stage_motion.refresh_physical_machine_pose()
         if apply_objective_runtime:
             self._apply_objective_settings()
         if self.design_navigator_panel is not None:

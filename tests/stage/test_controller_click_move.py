@@ -9,6 +9,7 @@ from probe_station_gui.settings.precision_approach import (
     PrecisionApproachSettings,
 )
 from probe_station_gui.stage.coordinate_confidence import AxisCoordinateConfidence
+from probe_station_gui.stage import types as stage_types
 
 try:
     from .controller_test_support import StageController, _FakeSerial
@@ -125,6 +126,129 @@ def test_request_move_to_xy_reports_rejected_background_start() -> None:
         assert accepted is False
         assert submitted["target"] == controller._run_move_to_xy
         assert submitted["args"] == (4.0, 5.0)
+    finally:
+        controller.shutdown()
+
+
+def test_request_move_to_xy_binds_optional_motion_token_before_background_start() -> (
+    None
+):
+    controller = StageController()
+    submitted: dict[str, object] = {}
+    token = object()
+
+    def reject_start(**kwargs: object) -> bool:
+        submitted.update(kwargs)
+        return False
+
+    controller._start_background_task = reject_start
+
+    try:
+        accepted = controller.request_move_to_xy(4.0, 5.0, motion_token=token)
+
+        assert accepted is False
+        assert submitted["target"] == controller._run_move_to_xy
+        assert submitted["args"] == (4.0, 5.0, token)
+    finally:
+        controller.shutdown()
+
+
+def test_tokened_absolute_xy_emits_typed_events_and_preserves_legacy_signals() -> None:
+    controller = StageController()
+    status = SimpleNamespace(
+        display_position=(1.0, 2.0, 0.0),
+        position=(1.0, 2.0, 0.0),
+        work_position=(1.0, 2.0, 0.0),
+        homed_axes={"X", "Y"},
+    )
+    controller._serial_session = lambda: _NullContext()
+    controller._move_safety_check = lambda: None
+    controller._query_synced_status_for_absolute_motion = lambda **_kwargs: status
+    controller._require_homed_axes = lambda *_args, **_kwargs: None
+    controller._require_position_for_absolute_motion = lambda *_args, **_kwargs: (
+        status.display_position
+    )
+    controller._status_matches_axis_targets = lambda *_args, **_kwargs: False
+    controller._execute_precision_axis_targets_locked = lambda *_args, **_kwargs: None
+    controller._last_status_timestamp = 12.5
+    token = object()
+    events: list[object] = []
+    assert hasattr(type(controller), "tracked_absolute_xy_move_started")
+    assert hasattr(type(controller), "tracked_absolute_xy_move_finished")
+    controller.movement_started = SimpleNamespace(
+        emit=lambda: events.append("legacy movement started")
+    )
+    controller.absolute_xy_move_started = SimpleNamespace(
+        emit=lambda *values: events.append(("legacy absolute started", values))
+    )
+
+    def emit_legacy_finish(*values: object) -> None:
+        events.append(("legacy movement finished", values))
+        controller._last_status_timestamp = 99.0
+
+    controller.movement_finished = SimpleNamespace(emit=emit_legacy_finish)
+    controller.tracked_absolute_xy_move_started = SimpleNamespace(
+        emit=lambda value: events.append(("tracked started", value))
+    )
+    controller.tracked_absolute_xy_move_finished = SimpleNamespace(
+        emit=lambda value: events.append(("tracked finished", value))
+    )
+
+    try:
+        controller._run_move_to_xy(4.0, 5.0, token)
+
+        assert events == [
+            "legacy movement started",
+            ("legacy absolute started", (4.0, 5.0, controller.DEFAULT_FEEDRATE)),
+            (
+                "tracked started",
+                stage_types.TrackedAbsoluteXYMoveStarted(
+                    motion_token=token,
+                    origin_position=(1.0, 2.0, 0.0),
+                    target_stage_xy=(4.0, 5.0),
+                    feedrate_mm_min=controller.DEFAULT_FEEDRATE,
+                ),
+            ),
+            (
+                "legacy movement finished",
+                (True, "Arrived at X=4.000 mm, Y=5.000 mm."),
+            ),
+            (
+                "tracked finished",
+                stage_types.TrackedAbsoluteXYMoveFinished(
+                    motion_token=token,
+                    target_stage_xy=(4.0, 5.0),
+                    success=True,
+                    message="Arrived at X=4.000 mm, Y=5.000 mm.",
+                    status_timestamp=12.5,
+                ),
+            ),
+        ]
+    finally:
+        controller.shutdown()
+
+
+def test_untracked_absolute_xy_emits_no_tracked_events() -> None:
+    controller = StageController()
+    tracked_events: list[object] = []
+    assert hasattr(type(controller), "tracked_absolute_xy_move_started")
+    assert hasattr(type(controller), "tracked_absolute_xy_move_finished")
+    controller.movement_started = SimpleNamespace(emit=lambda: None)
+    controller.movement_finished = SimpleNamespace(emit=lambda *_args: None)
+    controller.tracked_absolute_xy_move_started = SimpleNamespace(
+        emit=tracked_events.append
+    )
+    controller.tracked_absolute_xy_move_finished = SimpleNamespace(
+        emit=tracked_events.append
+    )
+    controller._serial_session = lambda: _NullContext()
+    controller._move_safety_check = lambda: None
+    controller._move_to_xy_locked = lambda x, y: f"arrived:{x}:{y}"
+
+    try:
+        controller._run_move_to_xy(4.0, 5.0)
+
+        assert tracked_events == []
     finally:
         controller.shutdown()
 

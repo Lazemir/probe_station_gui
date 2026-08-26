@@ -30,7 +30,9 @@ from probe_station_gui.stage.autofocus_math import (
     qimage_to_gray as qimage_to_gray,
     static_focus_candidates as static_focus_candidates,
 )
-from probe_station_gui.stage.motion_prediction import interpolate_position as interpolate_position
+from probe_station_gui.stage.motion_prediction import (
+    interpolate_position as interpolate_position,
+)
 from probe_station_gui.stage.errors import (
     AxisStateError as AxisStateError,
     SERIAL_IO_EXCEPTIONS,
@@ -183,7 +185,10 @@ class StageController(
     b_rotation_started: Signal = Signal()
     click_move_started: Signal = Signal(float, float, float)
     absolute_xy_move_started: Signal = Signal(float, float, float)
+    tracked_absolute_xy_move_started: Signal = Signal(object)
+    tracked_absolute_xy_move_finished: Signal = Signal(object)
     stage_position_changed: Signal = Signal(object)
+    stage_position_observed: Signal = Signal(object)
     autofocus_finished: Signal = Signal(bool, str)
     clicked_point_resolved: Signal = Signal(object, bool, object, object, str)
     objective_calibration_updated: Signal = Signal(str, object, object)
@@ -346,9 +351,9 @@ class StageController(
         self._active_needles_programmed_feedrate: float | None = None
         self._oscillation_active = False
         self._motion_safety_disabled = False
-        self._queued_needles_actions: deque[
-            tuple[str, float | None, float | None]
-        ] = deque()
+        self._queued_needles_actions: deque[tuple[str, float | None, float | None]] = (
+            deque()
+        )
         self._oscillation_needles_actions: deque[
             tuple[str, float | None, float | None]
         ] = deque()
@@ -559,7 +564,9 @@ class StageController(
 
         lease = self._operation_lifecycle.try_reserve_idle("feedrate query")
         if lease is None:
-            raise StageControllerError("Stage is busy. Cannot read controller feedrate limits.")
+            raise StageControllerError(
+                "Stage is busy. Cannot read controller feedrate limits."
+            )
         with lease:
             with self._state_lock:
                 with self._serial_session():
@@ -666,10 +673,14 @@ class StageController(
         lease = self._operation_lifecycle.try_reserve_idle("A position query")
         if lease is None:
             operation = self._operation_lifecycle.snapshot()
-            thread_name = operation.owner_thread.name if operation.owner_thread else "<unnamed>"
+            thread_name = (
+                operation.owner_thread.name if operation.owner_thread else "<unnamed>"
+            )
             latest = self._last_stage_position
             timestamp = self._last_status_timestamp
-            age_s = None if timestamp is None else max(0.0, time.monotonic() - timestamp)
+            age_s = (
+                None if timestamp is None else max(0.0, time.monotonic() - timestamp)
+            )
             reason = (
                 f"stage task is active ({thread_name}); "
                 f"latest_state={self._last_stage_state!r}, "
@@ -919,5 +930,6 @@ class StageController(
     @property
     def _cancel_event(self) -> threading.Event:
         return self._operation_lifecycle.cancellation_event
+
 
 __all__ = ["StageController", "MoveVector"]

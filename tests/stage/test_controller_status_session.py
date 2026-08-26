@@ -28,6 +28,7 @@ except ImportError:
 
 _stage_controller_module = __import__(StageController.__module__, fromlist=["time"])
 
+
 class StageControllerStatusRefreshTest(unittest.TestCase):
     def test_poll_status_once_uses_captured_serial_for_status_mask(self) -> None:
         controller = StageController()
@@ -90,10 +91,14 @@ class StageControllerStatusRefreshTest(unittest.TestCase):
         controller._axis_limits = {"Z": (0.0, 23.0)}
         controller._axis_max_feedrates = {"Z": 100.0}
         positions = []
+        typed_observations = []
         reboot_events = []
         ready_events = []
         controller.stage_position_changed = types.SimpleNamespace(
             emit=lambda position: positions.append(position)
+        )
+        controller.stage_position_observed = types.SimpleNamespace(
+            emit=typed_observations.append
         )
         controller.controller_reboot_detected = types.SimpleNamespace(
             emit=lambda: reboot_events.append(True)
@@ -127,6 +132,13 @@ class StageControllerStatusRefreshTest(unittest.TestCase):
         self.assertEqual(controller._axis_limits, {})
         self.assertEqual(controller._axis_max_feedrates, {})
         self.assertEqual(positions[0], None)
+        self.assertEqual(len(typed_observations), 2)
+        self.assertEqual(typed_observations[0].position, None)
+        self.assertEqual(
+            typed_observations[0].reset_reason.name,
+            "CONNECTION_CHANGED",
+        )
+        self.assertIsNone(typed_observations[1].reset_reason)
         self.assertEqual(reboot_events, [True])
         self.assertEqual(ready_events, [True])
 
@@ -244,7 +256,9 @@ class StageControllerStatusRefreshTest(unittest.TestCase):
         self.assertEqual(controller._last_stage_position, (1.0, 2.0, 3.0, 4.0))
         self.assertEqual(positions, [(1.0, 2.0, 3.0, 4.0)])
 
-    def test_cached_position_update_emits_when_state_changes_at_same_position(self) -> None:
+    def test_cached_position_update_emits_when_state_changes_at_same_position(
+        self,
+    ) -> None:
         controller = StageController()
         positions = []
         controller.stage_position_changed = types.SimpleNamespace(
@@ -316,8 +330,12 @@ class StageControllerStartupSyncTest(unittest.TestCase):
         controller._serial = original
         controller._ensure_controller_session_marker = lambda: None
         positions = []
+        typed_observations = []
         controller.stage_position_changed = types.SimpleNamespace(
             emit=lambda position: positions.append(position)
+        )
+        controller.stage_position_observed = types.SimpleNamespace(
+            emit=typed_observations.append
         )
 
         controller._run_startup_sync(auto_home_a=True)
@@ -330,13 +348,18 @@ class StageControllerStartupSyncTest(unittest.TestCase):
         self.assertEqual(controller._axis_max_feedrates["X"], 500.0)
         self.assertEqual(controller._axis_limits["Z"], (0.0, 23.0))
         self.assertEqual(positions[-1], (1.0, 2.0, 3.0, 0.0))
+        self.assertEqual(
+            [observation.position for observation in typed_observations],
+            [(1.0, 2.0, 3.0, 0.0), (1.0, 2.0, 3.0, 0.0)],
+        )
+        self.assertTrue(
+            all(observation.reset_reason is None for observation in typed_observations)
+        )
 
     def test_startup_sync_homes_a_when_not_reported_homed(self) -> None:
         controller = StageController()
         controller._serial = _FakeSerial()
-        controller._refresh_coordinate_system_state = (
-            lambda apply_preference=True: None
-        )
+        controller._refresh_coordinate_system_state = lambda apply_preference=True: None
         controller._ensure_axis_limits = lambda **_kwargs: None
         controller._ensure_controller_session_marker = lambda: None
         controller._query_status = lambda _serial: types.SimpleNamespace(
@@ -345,9 +368,7 @@ class StageControllerStartupSyncTest(unittest.TestCase):
             homed_axes={"X", "Y"},
         )
         performed = []
-        controller._perform_home_command = (
-            lambda command: performed.append(command)
-        )
+        controller._perform_home_command = lambda command: performed.append(command)
         controller.status_message = types.SimpleNamespace(
             emit=lambda *_args, **_kwargs: None
         )
@@ -371,9 +392,7 @@ class StageControllerStartupSyncTest(unittest.TestCase):
     def test_startup_sync_skips_a_homing_when_axis_is_homed(self) -> None:
         controller = StageController()
         controller._serial = _FakeSerial()
-        controller._refresh_coordinate_system_state = (
-            lambda apply_preference=True: None
-        )
+        controller._refresh_coordinate_system_state = lambda apply_preference=True: None
         controller._ensure_axis_limits = lambda **_kwargs: None
         controller._ensure_controller_session_marker = lambda: None
         controller._query_status = lambda _serial: types.SimpleNamespace(
@@ -382,9 +401,7 @@ class StageControllerStartupSyncTest(unittest.TestCase):
             homed_axes={"X", "Y", "A"},
         )
         performed = []
-        controller._perform_home_command = (
-            lambda command: performed.append(command)
-        )
+        controller._perform_home_command = lambda command: performed.append(command)
         controller.status_message = types.SimpleNamespace(
             emit=lambda *_args, **_kwargs: None
         )
@@ -405,13 +422,13 @@ class StageControllerStartupSyncTest(unittest.TestCase):
 
         self.assertEqual(performed, [])
 
-    def test_startup_sync_uses_cached_homing_when_status_does_not_report_it(self) -> None:
+    def test_startup_sync_uses_cached_homing_when_status_does_not_report_it(
+        self,
+    ) -> None:
         controller = StageController()
         controller._serial = _FakeSerial()
         controller._homed_axes = {"X", "Y", "A"}
-        controller._refresh_coordinate_system_state = (
-            lambda apply_preference=True: None
-        )
+        controller._refresh_coordinate_system_state = lambda apply_preference=True: None
         controller._ensure_axis_limits = lambda **_kwargs: None
         controller._ensure_controller_session_marker = lambda: None
         controller._query_status = lambda _serial: types.SimpleNamespace(
@@ -423,9 +440,7 @@ class StageControllerStartupSyncTest(unittest.TestCase):
             coordinate_system="G54",
         )
         performed = []
-        controller._perform_home_command = (
-            lambda command: performed.append(command)
-        )
+        controller._perform_home_command = lambda command: performed.append(command)
         controller.status_message = types.SimpleNamespace(
             emit=lambda *_args, **_kwargs: None
         )
@@ -450,13 +465,11 @@ class StageControllerStartupSyncTest(unittest.TestCase):
         controller = StageController()
         controller._serial = _FakeSerial()
         controller._axis_max_feedrates = {"X": 500.0, "Z": 100.0, "A": 80.0}
-        controller._refresh_coordinate_system_state = (
-            lambda apply_preference=True: None
-        )
+        controller._refresh_coordinate_system_state = lambda apply_preference=True: None
         controller._ensure_axis_limits = lambda **_kwargs: None
         controller._ensure_controller_session_marker = lambda: None
-        controller._query_axis_max_feedrates_locked = (
-            lambda: (_ for _ in ()).throw(AssertionError("$CD should be skipped"))
+        controller._query_axis_max_feedrates_locked = lambda: (_ for _ in ()).throw(
+            AssertionError("$CD should be skipped")
         )
         controller._query_status = lambda _serial: types.SimpleNamespace(
             state="Idle",
@@ -669,7 +682,9 @@ class StageControllerReconnectStateTest(unittest.TestCase):
         self.assertTrue(current)
         self.assertEqual(serial_connection.writes, [b"$G\n", b"$G\n"])
 
-    def test_status_reader_detects_live_controller_reboot_and_clears_homing(self) -> None:
+    def test_status_reader_detects_live_controller_reboot_and_clears_homing(
+        self,
+    ) -> None:
         controller = StageController()
         controller._homed_axes = {"A", "Y"}
         controller._needles_up = True
@@ -704,7 +719,9 @@ class StageControllerReconnectStateTest(unittest.TestCase):
         self.assertEqual(positions[-1], None)
         self.assertEqual(reboot_events, [True])
 
-    def test_repeated_live_controller_reboot_lines_emit_one_recovery_event(self) -> None:
+    def test_repeated_live_controller_reboot_lines_emit_one_recovery_event(
+        self,
+    ) -> None:
         controller = StageController()
         reboot_events = []
         controller.controller_reboot_detected = types.SimpleNamespace(
@@ -796,6 +813,7 @@ class StageControllerReconnectStateTest(unittest.TestCase):
         self.assertTrue(controller._needles_known)
         self.assertTrue(controller._axis_a_ready)
         self.assertIsNotNone(controller._controller_session_marker)
+
 
 if __name__ == "__main__":
     unittest.main()

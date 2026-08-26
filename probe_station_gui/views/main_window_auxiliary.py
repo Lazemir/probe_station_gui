@@ -27,6 +27,7 @@ class MainWindowAuxiliaryOwner(Protocol):
     _design_layout_window_action: Any
     _contact_calibration_window_action: Any
     contact_calibration_window: Any
+    _stage_motion: Any
     stage_controller: Any
     serial_connection: Any
     serial_connection_dialog: Any
@@ -247,8 +248,8 @@ def open_settings_dialog(
         exposure_policy_source=getattr(owner, "_exposure_policy_adapter", None),
         axis_position_source=owner.stage_controller,
         api_key_store=owner._api_key_store,
-        physical_pose_source=lambda: getattr(
-            owner, "_latest_physical_machine_pose", None
+        physical_pose_source=lambda: (
+            owner._stage_motion.snapshot().physical_machine_pose
         ),
         stage_idle_source=lambda: not bool(owner.stage_controller.is_busy()),
         stage_state_signal=getattr(

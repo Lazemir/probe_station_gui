@@ -178,15 +178,9 @@ class _Owner:
         self._surface_map_running = False
         self._microscope_scan_running_value = False
         self._microscope_scan_stop_requested = _StopEvent()
-        self._pending_planned_move_target_xy = None
-        self._pending_planned_move_source_label = None
-        self._planned_move_started_at = None
-        self._planned_move_waiting_for_fresh_status = False
-        self._planned_move_target_xy = None
-        self._planned_move_origin_xy = None
-        self._planned_move_stage_xy = None
-        self._planned_move_ends_at = None
-        self._planned_move_stop_status_timestamp = None
+        self._stage_motion = types.SimpleNamespace(
+            cancel_planned_xy_move=lambda: None,
+        )
         self._pending_stage_axis_targets: dict[str, tuple[float, float]] = {}
         self._design_session = types.SimpleNamespace(
             applied=[],
@@ -205,7 +199,6 @@ class _Owner:
         self.status_refreshes: list[tuple[int, ...]] = []
         self.cancel_refreshes = 0
         self.stage_motion_clears = 0
-        self.planned_prediction_clears: list[bool] = []
         self.pending_stage_coordinate_clears = 0
         self.axis_style_refreshes = 0
         self.apply_state_refreshes = 0
@@ -254,10 +247,6 @@ class _Owner:
 
     def _clear_stage_motion_axes(self) -> None:
         self.stage_motion_clears += 1
-
-    def _clear_planned_move_prediction(self, *, clear_wait_state: bool) -> None:
-        self.planned_prediction_clears.append(clear_wait_state)
-        self._planned_move_started_at = None
 
     def _clear_pending_stage_coordinate_targets(self) -> bool:
         self.pending_stage_coordinate_clears += 1
@@ -407,37 +396,6 @@ def test_global_cancel_clears_pending_click_through_interaction_seam() -> None:
     assert owner._microscope_interaction.cancel_calls == [True]
     assert owner.statuses == [("Cancel requested.", 3000)]
     assert owner.view.focus_reasons == ["focus"]
-
-
-def test_move_finish_success_completes_planned_move_prediction_wait_state() -> None:
-    owner = _Owner()
-    owner._pending_planned_move_target_xy = (4.0, 5.0)
-    owner._pending_planned_move_source_label = "design"
-    owner._planned_move_started_at = 2.0
-    owner._planned_move_origin_xy = (1.0, 1.0)
-    owner._planned_move_target_xy = (4.0, 5.0)
-    owner._planned_move_ends_at = 3.0
-
-    move_lifecycle.on_move_finished(owner, True, "Done.")
-
-    assert owner._pending_planned_move_target_xy is None
-    assert owner._pending_planned_move_source_label is None
-    assert owner._planned_move_stage_xy == (4.0, 5.0)
-    assert owner._planned_move_origin_xy is None
-    assert owner._planned_move_target_xy is None
-    assert owner._planned_move_started_at is None
-    assert owner._planned_move_ends_at is None
-    assert owner._planned_move_waiting_for_fresh_status is True
-    assert owner._planned_move_stop_status_timestamp == 11.0
-
-
-def test_move_finish_failure_clears_planned_move_prediction() -> None:
-    owner = _Owner()
-    owner._planned_move_started_at = 2.0
-
-    move_lifecycle.on_move_finished(owner, False, "Failed.")
-
-    assert owner.planned_prediction_clears == [True]
 
 
 def test_move_finish_alignment_preparation_returns_before_normal_finish_cleanup() -> (

@@ -506,6 +506,7 @@ class StageControllerNeedlesMotionTest(unittest.TestCase):
         finally:
             controller.shutdown()
 
+
 class StageControllerNeedlesStateTest(unittest.TestCase):
     def test_status_without_a_homing_keeps_needles_unknown(self) -> None:
         controller = StageController()
@@ -675,7 +676,9 @@ class StageControllerPriorityNeedlesActionTest(unittest.TestCase):
         self.assertEqual(controller._homed_axes, {"X", "Y", "A"})
         self.assertEqual(emitted, [{"X", "Y", "A"}])
 
-    def test_cancel_active_motion_sends_jog_cancel_without_invalidating_state(self) -> None:
+    def test_cancel_active_motion_sends_jog_cancel_without_invalidating_state(
+        self,
+    ) -> None:
         controller = StageController()
         controller._serial = _WritableFakeSerial()
         controller._homed_axes = {"X", "Y", "A"}
@@ -811,7 +814,34 @@ class StageControllerPriorityNeedlesActionTest(unittest.TestCase):
         )
         self.assertIn("queued during oscillation", messages[-1])
 
+
 class StageControllerPrecisionNeedleTargetTest(unittest.TestCase):
+    def test_inline_needle_axis_cache_update_publishes_typed_observation(self) -> None:
+        controller = StageController()
+        controller._position_reporting_mode = "machine"
+        controller._last_stage_position = (1.0, 2.0, 3.0, 0.0, 5.0)
+        controller._last_machine_position = (1.0, 2.0, 3.0, 0.0, 5.0)
+        controller._last_synchronized_machine_position = (1.0, 2.0, 3.0, 0.0, 5.0)
+        controller._homed_axes = {"X", "Y", "Z", "A"}
+        legacy_positions = []
+        typed_observations = []
+        controller.stage_position_changed = types.SimpleNamespace(
+            emit=legacy_positions.append
+        )
+        controller.stage_position_observed = types.SimpleNamespace(
+            emit=typed_observations.append
+        )
+
+        controller._update_cached_axis_position("A", -0.5)
+
+        expected = (1.0, 2.0, 3.0, -0.5, 5.0)
+        self.assertEqual(legacy_positions, [expected])
+        self.assertEqual([value.position for value in typed_observations], [expected])
+        self.assertEqual(
+            typed_observations[0].homed_axes, frozenset({"X", "Y", "Z", "A"})
+        )
+        self.assertIsNone(typed_observations[0].reset_reason)
+
     def test_final_profile_segment_uses_shared_precision_executor(self) -> None:
         controller = StageController()
         profiles = PrecisionApproachSettings()
@@ -820,19 +850,17 @@ class StageControllerPrecisionNeedleTargetTest(unittest.TestCase):
         controller._axis_a_configured_target_for_lowering = (
             lambda lowering, _status=None: float(lowering)
         )
-        controller._needle_motion_profile_segments = (
-            lambda *_args, **_kwargs: [(1.0, 5.0, False)]
-        )
+        controller._needle_motion_profile_segments = lambda *_args, **_kwargs: [
+            (1.0, 5.0, False)
+        ]
         controller._update_needles_from_a_position = lambda _position: None
         moves = []
-        controller._execute_precision_axis_targets_locked = (
-            lambda targets, **kwargs: moves.append((dict(targets), dict(kwargs)))
+        controller._execute_precision_axis_targets_locked = lambda targets, **kwargs: (
+            moves.append((dict(targets), dict(kwargs)))
         )
-        controller._send_absolute_axis_move = (
-            lambda *_args, **_kwargs: (_ for _ in ()).throw(
-                AssertionError("final needle target bypassed precision executor")
-            )
-        )
+        controller._send_absolute_axis_move = lambda *_args, **_kwargs: (
+            _ for _ in ()
+        ).throw(AssertionError("final needle target bypassed precision executor"))
 
         moved = controller._send_needle_motion_profile_locked(
             action="lower",

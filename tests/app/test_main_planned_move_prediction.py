@@ -18,6 +18,7 @@ from probe_station_gui.coordinates.coordinator_model import (
     CoordinateTransition,
     RegistrationWorkflowSnapshot,
 )
+from probe_station_gui.coordinates.model import PhysicalMachinePose
 from probe_station_gui.stage.coordinate_targets import (
     CoordinateTargetConfig,
     CoordinateTargetMoveState,
@@ -148,7 +149,11 @@ def _make_main(
     )
     window.contact_calibration_window = None
     window._pending_alignment_preparation = None
-    window._last_reported_b_position = None
+    window._stage_motion = types.SimpleNamespace(
+        snapshot=lambda: types.SimpleNamespace(
+            physical_machine_pose=PhysicalMachinePose.from_mapping({})
+        )
+    )
     window._coordinate_targets = CoordinateTargetMoveState(
         CoordinateTargetConfig(
             axis_names=Main.STAGE_AXIS_NAMES,
@@ -158,12 +163,6 @@ def _make_main(
             target_tolerance_mm=Main.COORDINATE_MOVE_TARGET_TOLERANCE_MM,
         )
     )
-    window._planned_move_stage_xy = (5.0, 5.0)
-    window._planned_move_started_at = 1.0
-    window._planned_move_waiting_for_fresh_status = False
-    window._planned_move_stop_status_timestamp = None
-    window._pending_planned_move_target_xy = None
-    window._pending_planned_move_source_label = None
     window._manual_jog_prediction = ManualJogPredictionState(
         ManualJogPredictionConfig(
             axis_names=Main.STAGE_AXIS_NAMES,
@@ -259,7 +258,44 @@ def _make_design_restore_main(
     return window, stage_controller, statuses, starts, saved_without_design
 
 
+def _prepare_design_refresh(
+    window: Main,
+    *,
+    session_xy: tuple[float, float] = (1.0, 2.0),
+) -> None:
+    window._design_session = types.SimpleNamespace(document=object())
+    window.serial_connection = types.SimpleNamespace(is_open=True)
+    window._pending_design_stage_xy = None
+    window._stage_motion = types.SimpleNamespace(
+        snapshot=lambda: types.SimpleNamespace(
+            presented_stage_xy=session_xy,
+            physical_machine_pose=PhysicalMachinePose.from_mapping({}),
+        )
+    )
+
+
 class MainPlannedMovePredictionTest(unittest.TestCase):
+    def test_design_refresh_keeps_active_coordinate_prediction_precedence(self) -> None:
+        window, published, _reconciles, _smooth_calls = _make_main()
+        _prepare_design_refresh(window)
+        window._coordinate_targets.active_axes = {"X"}
+        window._coordinate_targets.stage_position = (8.0, 9.0, 4.0, 0.0, 0.0)
+
+        Main._refresh_design_position(window)
+
+        self.assertEqual(published, [(8.0, 9.0)])
+
+    def test_design_refresh_keeps_active_manual_prediction_precedence(self) -> None:
+        window, published, _reconciles, _smooth_calls = _make_main()
+        _prepare_design_refresh(window)
+        window._manual_jog_prediction.stage_position = (6.0, 7.0, 4.0, 0.0, 0.0)
+        window._manual_jog_prediction.stage_xy = (6.0, 7.0)
+        window._manual_jog_prediction.axis_velocities = {"X": 1.0}
+
+        Main._refresh_design_position(window)
+
+        self.assertEqual(published, [(6.0, 7.0)])
+
     def test_manual_b_motion_marks_activity_without_staling_registration(self) -> None:
         window = Main.__new__(Main)
         invalidations: list[str] = []
@@ -294,74 +330,8 @@ class MainPlannedMovePredictionTest(unittest.TestCase):
         self.assertEqual(finished, [])
         self.assertEqual(cleared, [])
 
-    def test_design_coordinate_waits_for_absolute_xy_move_start(self) -> None:
-        window, _published, _reconciles, _smooth_calls = _make_main(state="idle")
-        stage_controller = window.stage_controller
-        window._design_session = type("_DesignSession", (), {"document": object()})()
-        window._raw_stage_xy_from_design_xy = lambda _design_xy: (1.5, -2.0)
-        window._last_selected_design_point = None
-        window._refresh_design_panel = lambda: None
-        starts = []
-        window._start_planned_move_prediction = lambda target, **kwargs: starts.append(
-            (target, kwargs)
-        )
-
-        accepted = Main._move_to_design_coordinate(
-            window,
-            (100.0, 200.0),
-            source_label="design window",
-        )
-
-        self.assertTrue(accepted)
-        self.assertEqual(stage_controller.move_requests, [(1.5, -2.0)])
-        self.assertEqual(window._pending_planned_move_target_xy, (1.5, -2.0))
-        self.assertEqual(window._pending_planned_move_source_label, "design window")
-        self.assertEqual(starts, [])
-
-        Main._on_absolute_xy_move_started(window, 1.5, -2.0, 300.0)
-
-        self.assertIsNone(window._pending_planned_move_target_xy)
-        self.assertIsNone(window._pending_planned_move_source_label)
-        self.assertEqual(
-            starts,
-            [
-                (
-                    (1.5, -2.0),
-                    {
-                        "source_label": "design window",
-                        "feedrate_mm_min": 300.0,
-                    },
-                )
-            ],
-        )
-
-    def test_active_planned_move_status_keeps_predicted_position(self) -> None:
-        window, published, reconciles, smooth_calls = _make_main(state="run")
-
-        position_update.on_stage_position_changed(window, (0.0, 0.0, 4.0, 0.0, 0.0))
-
-        self.assertEqual(window._planned_move_stage_xy, (5.0, 5.0))
-        self.assertEqual(window._manual_jog_prediction.stage_xy, (5.0, 5.0))
-        self.assertEqual(published[-1][:2], (5.0, 5.0))
-        self.assertEqual(reconciles, [((5.0, 5.0), (0.0, 0.0))])
-        self.assertEqual(smooth_calls, [])
-
-    def test_completed_planned_move_can_accept_fresh_status(self) -> None:
-        window, published, _reconciles, smooth_calls = _make_main(state="idle")
-        window._planned_move_started_at = None
-        window._planned_move_waiting_for_fresh_status = True
-
-        position_update.on_stage_position_changed(window, (0.0, 0.0, 4.0, 0.0, 0.0))
-
-        self.assertEqual(window._planned_move_stage_xy, (0.0, 0.0))
-        self.assertFalse(window._planned_move_waiting_for_fresh_status)
-        self.assertEqual(published[-1][:2], (0.0, 0.0))
-        self.assertEqual(smooth_calls, [((5.0, 5.0), (0.0, 0.0))])
-
     def test_idle_status_learns_manual_stop_tail_and_clears_waiting(self) -> None:
         window, published, _reconciles, _smooth_calls = _make_main(state="idle")
-        window._planned_move_started_at = None
-        window._planned_move_stage_xy = None
         prediction = window._manual_jog_prediction
         prediction.stage_position = (5.0, 5.0, 4.0, 0.0, 0.0)
         prediction.stage_xy = (5.0, 5.0)
@@ -382,8 +352,6 @@ class MainPlannedMovePredictionTest(unittest.TestCase):
     ) -> None:
         window, published, reconciles, _smooth_calls = _make_main(state="idle")
         now = time.monotonic()
-        window._planned_move_started_at = None
-        window._planned_move_stage_xy = None
         prediction = window._manual_jog_prediction
         prediction.stage_position = (5.0, 5.0, 4.0, 0.0, 0.0)
         prediction.stage_xy = (5.0, 5.0)
@@ -422,7 +390,6 @@ class MainPlannedMovePredictionTest(unittest.TestCase):
         window.stage_controller.axes_are_homed = lambda axes: False
         window._manual_jog_prediction.stage_position = (9.0, 9.0, 9.0)
         window._manual_jog_prediction.stage_xy = (9.0, 9.0)
-        window._planned_move_stage_xy = (8.0, 8.0)
         window._update_coordinate_display = lambda *, center_xy=None, cursor_xy=None: (
             coordinate_updates.append(center_xy)
         )
@@ -454,85 +421,15 @@ class MainPlannedMovePredictionTest(unittest.TestCase):
         self.assertEqual(displayed, [(1.0, 2.0, 3.0)])
         self.assertIsNone(window._manual_jog_prediction.stage_position)
         self.assertIsNone(window._manual_jog_prediction.stage_xy)
-        self.assertIsNone(window._planned_move_stage_xy)
         self.assertEqual(coordinate_updates, [None])
         self.assertEqual(design_updates, [(1.0, 2.0)])
         self.assertEqual(finished, [(1.0, 2.0, 3.0)])
         self.assertEqual(cleared, ["clear"])
         self.assertEqual(published, [])
 
-    def test_b_axis_motion_reprojects_registration_without_invalidating_it(
-        self,
-    ) -> None:
-        authority_observations: list[CoordinateAuthorityObservation] = []
-        window, _published, _reconciles, _smooth_calls = _make_main(
-            state="run",
-            registration_valid=True,
-            authority_observer=authority_observations.append,
-        )
-        invalidations: list[str] = []
-        window._invalidate_design_registration = lambda reason: invalidations.append(
-            reason
-        )
-        window.stage_controller.machine_position = (0.0, 0.0, 4.0, 0.0, 5.5)
-        window._last_reported_b_position = 5.0
-
-        position_update.on_stage_position_changed(window, (0.0, 0.0, 4.0, 0.0, 5.5))
-
-        self.assertEqual(invalidations, [])
-        self.assertEqual(
-            authority_observations[-1].physical_pose.to_dict(),
-            {"X": 0.0, "Y": 0.0, "Z": 4.0, "A": 0.0, "B": 5.5},
-        )
-        self.assertEqual(window._last_reported_b_position, 5.5)
-
-        below_tolerance, _published, _reconciles, _smooth_calls = _make_main(
-            state="run",
-            registration_valid=True,
-        )
-        below_tolerance._invalidate_design_registration = lambda reason: (
-            invalidations.append(f"unexpected:{reason}")
-        )
-        below_tolerance._last_reported_b_position = 5.0
-
-        position_update.on_stage_position_changed(
-            below_tolerance, (0.0, 0.0, 4.0, 0.0, 5.0)
-        )
-
-        pending_alignment, _published, _reconciles, _smooth_calls = _make_main(
-            state="run",
-            registration_valid=True,
-        )
-        pending_alignment._pending_alignment_preparation = object()
-        pending_alignment._invalidate_design_registration = lambda reason: (
-            invalidations.append(f"unexpected:{reason}")
-        )
-        pending_alignment._last_reported_b_position = 5.0
-
-        position_update.on_stage_position_changed(
-            pending_alignment, (0.0, 0.0, 4.0, 0.0, 5.5)
-        )
-
-        invalid_registration, _published, _reconciles, _smooth_calls = _make_main(
-            state="run",
-            registration_valid=False,
-        )
-        invalid_registration._invalidate_design_registration = lambda reason: (
-            invalidations.append(f"unexpected:{reason}")
-        )
-        invalid_registration._last_reported_b_position = 5.0
-
-        position_update.on_stage_position_changed(
-            invalid_registration, (0.0, 0.0, 4.0, 0.0, 5.5)
-        )
-
-        self.assertEqual(invalidations, [])
-
     def test_publish_happens_before_idle_finish_and_motion_clear(self) -> None:
         window, _published, _reconciles, _smooth_calls = _make_main(state="idle")
         calls: list[str] = []
-        window._planned_move_started_at = None
-        window._planned_move_stage_xy = None
         window._stage_motion_axes = {"X"}
         window._stage_position_panel = types.SimpleNamespace(
             refresh_axis_styles=lambda _axes, _dimmed: calls.append("clear")
@@ -542,7 +439,7 @@ class MainPlannedMovePredictionTest(unittest.TestCase):
             mock.patch.object(
                 position_update,
                 "publish_stage_position_estimate",
-                side_effect=lambda _owner, position: calls.append(
+                side_effect=lambda _owner, position, **_kwargs: calls.append(
                     f"publish:{position[:2]}"
                 ),
             ),

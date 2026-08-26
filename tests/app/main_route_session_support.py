@@ -19,6 +19,7 @@ from tests.app.main_coordinate_feedrate_support import (
     _FakeFrame,
     _FakeLineEdit,
     _FakeMicroscopeInteraction,
+    _FakeStageMotion,
     _FakeStageController,
     _FakeStagePositionPanel,
     _FakeTimer,
@@ -217,6 +218,7 @@ def _make_cancel_main() -> tuple[Main, _FakeStageController, _FakeButton, list[s
     window._stage_axis_return_commits = set()
     window._stage_axis_base_styles = {}
     window._coordinate_targets = _coordinate_target_state()
+    window._stage_motion = _FakeStageMotion()
     install_route_run_execution(window)
     window.surface_map_window = None
     window._manual_alignment_pick_slot = None
@@ -242,7 +244,6 @@ def _make_cancel_main() -> tuple[Main, _FakeStageController, _FakeButton, list[s
     window._show_status = lambda message, _timeout_ms=None: statuses.append(
         str(message)
     )
-    window._clear_planned_move_prediction = lambda *, clear_wait_state: None
     window._schedule_status_refreshes = lambda _delays: None
     window._schedule_cancel_state_refresh = lambda: None
     return window, stage_controller, cancel_button, statuses

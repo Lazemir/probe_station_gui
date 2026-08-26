@@ -7,13 +7,17 @@ import logging
 from PySide6.QtCore import QTimer
 
 from probe_station_gui.stage import move_lifecycle as stage_move_lifecycle
+from probe_station_gui.stage.types import StageMotionResetReason
 from probe_station_gui.views import main_window_coordinate_flow as coordinate_flow
 from probe_station_gui.views import main_window_design_workspace as design_workspace
 from probe_station_gui.views import main_window_homing as homing_ui
-from probe_station_gui.views import main_window_stage_position_panel as stage_position_panel
+from probe_station_gui.views import (
+    main_window_stage_position_panel as stage_position_panel,
+)
 
 
 logger = logging.getLogger(__name__)
+
 
 def serial_baud_rate(serial_port: object) -> int:
     try:
@@ -35,7 +39,7 @@ def on_serial_connected(owner: object, serial_port: object) -> None:
         owner.serial_connection.baudrate,
     )
     owner._stage_unhomed_display_origins.clear()
-    owner._last_reported_b_position = None
+    owner._stage_motion.reset(StageMotionResetReason.CONNECTION_CHANGED)
     cached_state = owner.settings_manager.load_controller_state()
     owner._controller_state_persistence_suspended = True
     try:
@@ -61,7 +65,9 @@ def on_serial_connected(owner: object, serial_port: object) -> None:
 
 
 def on_serial_disconnected(owner: object) -> None:
-    from probe_station_gui.views.main_window_shutdown import stop_jog_before_serial_close
+    from probe_station_gui.views.main_window_shutdown import (
+        stop_jog_before_serial_close,
+    )
 
     _clear_exact_step_targets(owner)
     stop_jog_before_serial_close(owner, "serial disconnect")
@@ -70,7 +76,7 @@ def on_serial_disconnected(owner: object) -> None:
     owner.serial_connection = None
     persist_serial_connection_state(owner, False)
     owner._stage_unhomed_display_origins.clear()
-    owner._last_reported_b_position = None
+    owner._stage_motion.reset(StageMotionResetReason.CONNECTION_CHANGED)
     owner._manual_jog_timer.stop()
     owner._manual_jog_prediction.reset_tracking()
     owner._controller_reboot_recovery_scheduled = False
@@ -81,7 +87,6 @@ def on_serial_disconnected(owner: object) -> None:
     )
     homing_ui.clear_pending_homing_queue(owner)
     stage_position_panel.clear_stage_motion_axes(owner)
-    owner._clear_planned_move_prediction(clear_wait_state=True)
     owner._update_stage_coordinate_apply_state()
     logger.info("Serial disconnected")
     owner.stage_controller.request_stop_oscillation()
@@ -210,6 +215,7 @@ def apply_joystick_feedrate_preferences(owner: object) -> None:
 
 
 def on_controller_reboot_detected(owner: object) -> None:
+    owner._stage_motion.reset(StageMotionResetReason.CONNECTION_CHANGED)
     _clear_exact_step_targets(owner)
     owner._stage_unhomed_display_origins.clear()
     owner._pending_persisted_design_state = None
@@ -281,7 +287,6 @@ def persist_controller_state_if_available(owner: object) -> None:
     owner.settings_manager.save_controller_state(state)
 
 
-
 def persist_serial_connection_state(owner: object, connected: bool) -> None:
     owner.settings_manager.save_serial_connection_state(
         connected,
@@ -306,6 +311,7 @@ def persist_lcr_connection_state(
 def request_lcr_disconnect(owner: object) -> None:
     persist_lcr_connection_state(owner, False)
     owner.lcr_controller.request_disconnect()
+
 
 __all__ = [
     "apply_axis_feedrate_limits",

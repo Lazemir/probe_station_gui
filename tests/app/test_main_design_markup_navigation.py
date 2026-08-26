@@ -24,6 +24,7 @@ from probe_station_gui.coordinates.registry import CoordinateFrameRegistry
 from probe_station_gui.design.layout_state import DesignLayoutState
 from probe_station_gui.design.markup import MarkupDocument, MarkupLoadChoice
 from probe_station_gui.design.markup_store import StoreLoadResult
+from probe_station_gui.design.model import MeasurementTarget
 from probe_station_gui.design.selection_model import (
     MixedArrayRequest,
     SelectionModel,
@@ -769,6 +770,25 @@ def test_clear_all_deletes_sidecar_instead_of_saving_empty_markup(
     assert "publish_markup" not in statuses
 
 
+def test_move_to_design_target_submits_correlated_planned_request() -> None:
+    window, stage_controller, _statuses = _make_window()
+    session_navigation.set_targets(
+        window._design_session,
+        [MeasurementTarget("target-a", "Target A", (100.0, 200.0))],
+    )
+    window._design_session.select_target_by_id = lambda target_id: (
+        session_navigation.select_target_by_id(window._design_session, target_id)
+    )
+
+    Main._move_to_design_target(window, "target-a")
+
+    assert stage_controller.move_requests == []
+    assert len(window._stage_motion.planned_requests) == 1
+    request = window._stage_motion.planned_requests[0]
+    assert request.target_stage_xy == (1.5, -2.0)
+    assert request.source_label == "design target"
+
+
 def test_move_to_design_coordinate_seeds_prediction_and_requests_move_after_acceptance() -> (
     None
 ):
@@ -796,11 +816,13 @@ def test_move_to_design_coordinate_seeds_prediction_and_requests_move_after_acce
     )
 
     assert accepted
-    assert statuses == ["refresh_panel", "clear_prediction"]
+    assert statuses == ["refresh_panel"]
     assert window._last_selected_design_point == (100.0, 200.0)
-    assert window._pending_planned_move_target_xy == (1.5, -2.0)
-    assert window._pending_planned_move_source_label == "design window"
-    assert stage_controller.move_requests == [(1.5, -2.0)]
+    assert stage_controller.move_requests == []
+    assert len(window._stage_motion.planned_requests) == 1
+    request = window._stage_motion.planned_requests[0]
+    assert request.target_stage_xy == (1.5, -2.0)
+    assert request.source_label == "design window"
 
 
 def test_move_to_design_coordinate_reports_busy_race_rejection() -> None:
@@ -821,16 +843,16 @@ def test_move_to_design_coordinate_reports_busy_race_rejection() -> None:
         ),
     )
 
+    window._stage_motion.accepted = False
+
     accepted = Main._move_to_design_coordinate(
         window,
         (100.0, 200.0),
         source_label="focus reference",
-        move_request=lambda _x, _y: False,
     )
 
     assert accepted is False
-    assert window._pending_planned_move_target_xy is None
-    assert window._pending_planned_move_source_label is None
+    assert len(window._stage_motion.planned_requests) == 1
 
 
 def test_move_to_design_coordinate_reports_real_controller_rejection() -> None:
@@ -838,6 +860,12 @@ def test_move_to_design_coordinate_reports_real_controller_rejection() -> None:
     stage_controller = RealStageController()
     stage_controller._start_background_task = lambda **_kwargs: False
     window.stage_controller = stage_controller
+    window._stage_motion = types.SimpleNamespace(
+        request_planned_xy_move=lambda request: stage_controller.request_move_to_xy(
+            request.target_stage_xy[0],
+            request.target_stage_xy[1],
+        )
+    )
     session_navigation.load_document(
         window._design_session,
         DesignDocument(
@@ -862,7 +890,5 @@ def test_move_to_design_coordinate_reports_real_controller_rejection() -> None:
         )
 
         assert accepted is False
-        assert window._pending_planned_move_target_xy is None
-        assert window._pending_planned_move_source_label is None
     finally:
         stage_controller.shutdown()

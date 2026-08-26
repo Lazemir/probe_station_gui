@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+import dataclasses
 import inspect
 import types
 
 import pytest
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QApplication
 
+from tests.stage.controller_test_support import StageController
+
+from probe_station_gui.coordinates.model import PhysicalMachinePose
 from probe_station_gui.coordinates.coordinator_model import (
     CoordinateSystemSnapshot,
     CoordinateTransition,
@@ -15,6 +21,8 @@ from probe_station_gui.settings.axis_calibration_config import (
     default_axis_calibrations,
 )
 from probe_station_gui.stage.axis_calibration import StageAxisCalibrationMapper
+from probe_station_gui.stage import types as stage_types
+from probe_station_gui.stage.controller import StageController as QtStageController
 
 from probe_station_gui.stage.coordinate_targets import (
     CoordinateTargetConfig,
@@ -30,6 +38,329 @@ from probe_station_gui.stage import position_update
 AXES = ("X", "Y", "Z", "A", "B")
 
 
+def _real_controller_with_x_curve() -> StageController:
+    controller = StageController()
+    calibrations = default_axis_calibrations()
+    calibrations["X"] = AxisCalibrationSettings(
+        enabled=True,
+        calibration_file="x.npz",
+        controller_points=[0.0, 10.0, 20.0],
+        physical_points=[0.0, 12.0, 30.0],
+    )
+    controller.apply_axis_calibrations(calibrations)
+    return controller
+
+
+def test_latest_physical_machine_pose_maps_one_synchronized_generation_once(
+    monkeypatch,
+) -> None:
+    controller = _real_controller_with_x_curve()
+    controller._last_synchronized_machine_position = (
+        15.0,
+        22.0,
+        3.0,
+        4.0,
+        5.0,
+        6.0,
+    )
+    real_mapper = controller._axis_calibration_mapper
+    mapper_calls = 0
+
+    def counted_mapper():
+        nonlocal mapper_calls
+        mapper_calls += 1
+        return real_mapper()
+
+    monkeypatch.setattr(controller, "_axis_calibration_mapper", counted_mapper)
+    monkeypatch.setattr(
+        controller,
+        "_query_current_stage_position_status",
+        lambda: pytest.fail("public cached accessor queried the controller"),
+    )
+
+    try:
+        pose = controller.latest_physical_machine_pose(("Y", "X", "B"))
+
+        assert isinstance(pose, PhysicalMachinePose)
+        assert pose.to_dict() == pytest.approx({"X": 21.0, "Y": 22.0, "B": 5.0})
+        assert mapper_calls == 1
+    finally:
+        controller.shutdown()
+
+
+def test_latest_physical_machine_pose_omits_only_out_of_domain_axis() -> None:
+    controller = StageController()
+    calibrations = default_axis_calibrations()
+    calibrations["X"] = AxisCalibrationSettings(
+        enabled=True,
+        calibration_file="x.npz",
+        controller_points=[0.0, 1.0],
+        physical_points=[0.0, 2.0],
+    )
+    controller.apply_axis_calibrations(calibrations)
+    controller._last_synchronized_machine_position = (2.0, 3.0, 4.0)
+
+    try:
+        pose = controller.latest_physical_machine_pose(("X", "Y", "Z"))
+
+        assert pose.to_dict() == pytest.approx({"Y": 3.0, "Z": 4.0})
+    finally:
+        controller.shutdown()
+
+
+def test_latest_physical_machine_pose_returns_empty_pose_without_snapshot() -> None:
+    controller = StageController()
+
+    try:
+        pose = controller.latest_physical_machine_pose(AXES)
+
+        assert pose == PhysicalMachinePose.from_mapping({})
+    finally:
+        controller.shutdown()
+
+
+def test_latest_physical_machine_pose_omits_invalid_nonfinite_and_unknown_axes() -> (
+    None
+):
+    controller = StageController()
+    controller._last_synchronized_machine_position = (1.0, float("nan"), 3.0)
+
+    try:
+        pose = controller.latest_physical_machine_pose((" x ", "Y", "Q", "B"))
+
+        assert pose.to_dict() == {"X": 1.0}
+    finally:
+        controller.shutdown()
+
+
+def test_stage_position_observation_is_an_immutable_stage_value() -> None:
+    observation_type = getattr(stage_types, "StagePositionObservation", None)
+
+    assert observation_type is not None
+    assert dataclasses.is_dataclass(observation_type)
+    assert observation_type.__dataclass_params__.frozen is True
+
+
+def test_stage_position_observation_compares_motion_facts_not_generation_metadata() -> (
+    None
+):
+    observation = stage_types.StagePositionObservation(
+        position=(1.0, 2.0, 3.0),
+        physical_machine_pose=PhysicalMachinePose.from_mapping({"X": 11.0}),
+        motion_coordinate_snapshot=None,
+        stage_state="Idle",
+        homed_axes=frozenset({"X", "Y", "Z"}),
+        status_timestamp=10.0,
+        last_jog_write_timestamp=4.0,
+    )
+
+    assert observation.has_same_motion_facts_as(
+        dataclasses.replace(observation, status_timestamp=11.0)
+    )
+    assert observation.has_same_motion_facts_as(
+        dataclasses.replace(
+            observation,
+            reset_reason=stage_types.StageMotionResetReason.CONNECTION_CHANGED,
+        )
+    )
+    assert not observation.has_same_motion_facts_as(object())
+    for changes in (
+        {"position": (9.0, 2.0, 3.0)},
+        {"physical_machine_pose": PhysicalMachinePose.from_mapping({"X": 12.0})},
+        {"motion_coordinate_snapshot": object()},
+        {"stage_state": "Run"},
+        {"homed_axes": frozenset({"X", "Y"})},
+        {"last_jog_write_timestamp": 5.0},
+    ):
+        assert not observation.has_same_motion_facts_as(
+            dataclasses.replace(observation, **changes)
+        )
+
+
+def test_stage_position_observation_keeps_queued_generations_and_emits_outside_lock() -> (
+    None
+):
+    application = QApplication.instance() or QApplication([])
+    controller = QtStageController()
+    observed = []
+    legacy_positions = []
+    lock_owned_during_emission = []
+    observation_signal = getattr(controller, "stage_position_observed", None)
+    assert observation_signal is not None
+    observation_signal.connect(
+        lambda observation: observed.append(observation),
+        Qt.ConnectionType.QueuedConnection,
+    )
+    observation_signal.connect(
+        lambda _observation: lock_owned_during_emission.append(
+            controller._state_lock._is_owned()
+        ),
+        Qt.ConnectionType.DirectConnection,
+    )
+    controller.stage_position_changed.connect(legacy_positions.append)
+    controller._position_reporting_mode = "machine"
+    controller._homed_axes = {"X", "Y", "Z"}
+    first_position = (1.0, 2.0, 3.0, 4.0, 5.0)
+    second_position = (6.0, 7.0, 8.0, 9.0, 10.0)
+
+    try:
+        controller._last_status_timestamp = 10.0
+        controller._last_jog_write_timestamp = 4.0
+        controller._update_cached_positions(
+            stage_types._Status(
+                state="Run",
+                position=(11.0, 12.0, 13.0, 14.0, 15.0),
+                synchronized_machine_position=(11.0, 12.0, 13.0, 14.0, 15.0),
+                display_position=first_position,
+            )
+        )
+        controller._last_status_timestamp = 20.0
+        controller._last_jog_write_timestamp = 5.0
+        controller._update_cached_positions(
+            stage_types._Status(
+                state="Idle",
+                position=(21.0, 22.0, 23.0, 24.0, 25.0),
+                synchronized_machine_position=(21.0, 22.0, 23.0, 24.0, 25.0),
+                display_position=second_position,
+            )
+        )
+
+        assert observed == []
+        assert lock_owned_during_emission == [False, False]
+        application.processEvents()
+
+        assert legacy_positions == [first_position, second_position]
+        assert [observation.position for observation in observed] == [
+            first_position,
+            second_position,
+        ]
+        assert [
+            observation.physical_machine_pose.to_dict()["X"] for observation in observed
+        ] == [
+            11.0,
+            21.0,
+        ]
+        assert [
+            observation.motion_coordinate_snapshot.raw_machine_position[0]
+            for observation in observed
+        ] == [11.0, 21.0]
+        assert [observation.stage_state for observation in observed] == ["Run", "Idle"]
+        assert [observation.homed_axes for observation in observed] == [
+            frozenset({"X", "Y", "Z"}),
+            frozenset({"X", "Y", "Z"}),
+        ]
+        assert [observation.status_timestamp for observation in observed] == [
+            10.0,
+            20.0,
+        ]
+        assert [observation.last_jog_write_timestamp for observation in observed] == [
+            4.0,
+            5.0,
+        ]
+    finally:
+        controller.shutdown()
+
+
+def test_typed_observation_publishes_every_valid_status_generation() -> None:
+    controller = QtStageController()
+    typed_observations = []
+    legacy_positions = []
+    controller.stage_position_observed.connect(typed_observations.append)
+    controller.stage_position_changed.connect(legacy_positions.append)
+    controller._position_reporting_mode = "machine"
+    controller._homed_axes = {"X", "Y", "Z"}
+    position = (1.0, 2.0, 3.0, 4.0, 5.0)
+    status = stage_types._Status(
+        state="Idle",
+        position=position,
+        synchronized_machine_position=position,
+        display_position=position,
+    )
+
+    try:
+        controller._last_status_timestamp = 10.0
+        controller._update_cached_positions(status)
+        controller._last_status_timestamp = 11.0
+        controller._update_cached_positions(status)
+
+        assert legacy_positions == [position]
+        assert [value.position for value in typed_observations] == [position, position]
+        assert [value.status_timestamp for value in typed_observations] == [10.0, 11.0]
+        assert [value.reset_reason for value in typed_observations] == [None, None]
+    finally:
+        controller.shutdown()
+
+
+def test_cache_clear_observation_carries_explicit_connection_reset_reason() -> None:
+    controller = QtStageController()
+    typed_observations = []
+    controller.stage_position_observed.connect(typed_observations.append)
+
+    try:
+        controller.clear_cached_controller_state()
+
+        assert len(typed_observations) == 1
+        assert typed_observations[0].position is None
+        assert (
+            typed_observations[0].reset_reason
+            is stage_types.StageMotionResetReason.CONNECTION_CHANGED
+        )
+    finally:
+        controller.shutdown()
+
+
+def test_typed_observation_is_captured_before_legacy_signal_reentry() -> None:
+    controller = QtStageController()
+    typed_observations = []
+    controller._position_reporting_mode = "machine"
+    controller._homed_axes = {"X", "Y", "Z"}
+    position = (1.0, 2.0, 3.0, 4.0, 5.0)
+
+    def mutate_controller_caches(_position: object) -> None:
+        controller._last_synchronized_machine_position = (
+            91.0,
+            92.0,
+            93.0,
+            94.0,
+            95.0,
+        )
+        controller._last_stage_state = "Alarm"
+        controller._homed_axes = {"A"}
+        controller._last_status_timestamp = 99.0
+        controller._last_jog_write_timestamp = 98.0
+
+    controller.stage_position_changed.connect(
+        mutate_controller_caches,
+        Qt.ConnectionType.DirectConnection,
+    )
+    controller.stage_position_observed.connect(typed_observations.append)
+
+    try:
+        controller._last_status_timestamp = 10.0
+        controller._last_jog_write_timestamp = 4.0
+        controller._update_cached_positions(
+            stage_types._Status(
+                state="Run",
+                position=(11.0, 12.0, 13.0, 14.0, 15.0),
+                synchronized_machine_position=(11.0, 12.0, 13.0, 14.0, 15.0),
+                display_position=position,
+            )
+        )
+
+        assert len(typed_observations) == 1
+        observation = typed_observations[0]
+        assert observation.position == position
+        assert observation.physical_machine_pose.to_dict()["X"] == 11.0
+        assert observation.motion_coordinate_snapshot.raw_machine_position[0] == 11.0
+        assert observation.stage_state == "Run"
+        assert observation.homed_axes == frozenset({"X", "Y", "Z"})
+        assert observation.status_timestamp == 10.0
+        assert observation.last_jog_write_timestamp == 4.0
+        assert observation.reset_reason is None
+    finally:
+        controller.shutdown()
+
+
 class _StageController:
     def __init__(self) -> None:
         self.state = "idle"
@@ -43,7 +374,9 @@ class _StageController:
             position_reporting_mode="work",
             active_work_coordinate_system="G54",
             controller_coordinate_offsets={"G54": (0.0,) * 6},
-            axis_index={axis: index for index, axis in enumerate(("X", "Y", "Z", "A", "B", "C"))},
+            axis_index={
+                axis: index for index, axis in enumerate(("X", "Y", "Z", "A", "B", "C"))
+            },
         )
 
     def latest_stage_state(self) -> str:
@@ -117,12 +450,13 @@ class _Owner:
                 stop_tail_learn_alpha=0.2,
             )
         )
-        self._planned_move_stage_xy = None
-        self._planned_move_started_at = None
-        self._planned_move_waiting_for_fresh_status = False
-        self._planned_move_stop_status_timestamp = None
+        self._physical_machine_pose = PhysicalMachinePose.from_mapping({})
+        self._stage_motion = types.SimpleNamespace(
+            snapshot=lambda: types.SimpleNamespace(
+                physical_machine_pose=self._physical_machine_pose,
+            )
+        )
         self._pending_alignment_preparation = None
-        self._last_reported_b_position = None
         self._design_session = types.SimpleNamespace(
             document=object(),
             registration=types.SimpleNamespace(valid=True),
@@ -148,7 +482,9 @@ class _Owner:
             return None
         return tuple(float(item) for item in value)
 
-    def _stage_xy_from_position(self, position: object | None) -> tuple[float, float] | None:
+    def _stage_xy_from_position(
+        self, position: object | None
+    ) -> tuple[float, float] | None:
         return position_update.stage_xy_from_position(position)
 
     def _position_with_stage_xy(
@@ -233,7 +569,6 @@ def test_unhomed_fallback_clears_prediction_and_keeps_idle_finish_order(
     owner.stage_controller.homed = set()
     owner._manual_jog_prediction.stage_position = (9.0, 9.0, 3.0)
     owner._manual_jog_prediction.stage_xy = (9.0, 9.0)
-    owner._planned_move_stage_xy = (8.0, 8.0)
     monkeypatch.setattr(
         position_update.design_workspace,
         "maybe_restore_persisted_design",
@@ -259,31 +594,15 @@ def test_unhomed_fallback_clears_prediction_and_keeps_idle_finish_order(
 
     assert owner._manual_jog_prediction.stage_position is None
     assert owner._manual_jog_prediction.stage_xy is None
-    assert owner._planned_move_stage_xy is None
     assert owner.calls == [
         ("restore", (1.0, 2.0, 3.0)),
         ("display", (1.0, 2.0, 3.0)),
-        ("authority", owner._latest_physical_machine_pose),
+        ("authority", owner._physical_machine_pose),
         ("coordinate", None),
         ("design", (1.0, 2.0)),
         ("finish", (1.0, 2.0, 3.0)),
         ("clear_motion", None),
     ]
-
-
-def test_preferred_design_stage_xy_clears_completed_planned_wait_state() -> None:
-    owner = _Owner()
-    owner._planned_move_stage_xy = (8.0, 8.0)
-    owner._planned_move_waiting_for_fresh_status = True
-    owner._planned_move_stop_status_timestamp = 9.0
-    owner.stage_controller.last_status_time = 10.0
-    owner.stage_controller.position = (1.5, 2.5, 3.0)
-
-    stage_xy = position_update.preferred_design_stage_xy(owner)
-
-    assert stage_xy == (1.5, 2.5)
-    assert owner._planned_move_waiting_for_fresh_status is False
-    assert owner._planned_move_stop_status_timestamp is None
 
 
 def test_position_publication_observes_authority_without_main_policy_helper(
@@ -304,109 +623,95 @@ def test_position_publication_observes_authority_without_main_policy_helper(
 
     position_update.publish_stage_position_estimate(owner, (1.0, 2.0, 3.0))
 
-    assert observations == [None]
+    assert observations == [owner._physical_machine_pose]
 
 
-def test_actual_position_update_maps_cached_machine_mpos_once_not_work_or_wco(
+def test_deferred_presentations_keep_complete_queued_observation_generations(
     monkeypatch,
 ) -> None:
+    from probe_station_gui.application.stage_design_position import (
+        _MainStageDesignPositionMixin,
+    )
+    from probe_station_gui.application.stage_motion_session import (
+        StageMotionPresentation,
+    )
+
     owner = _Owner()
-    calibrations = default_axis_calibrations()
-    calibrations["X"] = AxisCalibrationSettings(
-        enabled=True,
-        calibration_file="x.npz",
-        controller_points=[0.0, 10.0, 20.0],
-        physical_points=[0.0, 12.0, 30.0],
+    cache_reads: list[str] = []
+
+    def unexpected_cache_read(name: str):
+        def read(*_args: object) -> object:
+            cache_reads.append(name)
+            raise RuntimeError(f"unexpected mutable cache read: {name}")
+
+        return read
+
+    owner.stage_controller.latest_stage_state = unexpected_cache_read("state")
+    owner.stage_controller.axes_are_homed = unexpected_cache_read("homed")
+    owner.stage_controller.last_jog_write_timestamp = unexpected_cache_read("jog")
+    owner.stage_controller.latest_motion_coordinate_snapshot = unexpected_cache_read(
+        "motion snapshot"
     )
-    owner.stage_controller.mapper = StageAxisCalibrationMapper(
-        calibrations=calibrations,
-        position_reporting_mode="work",
-        active_work_coordinate_system="G54",
-        controller_coordinate_offsets={"G54": (10.0, 20.0, 0.0, 0.0, 0.0, 0.0)},
-        axis_index={axis: index for index, axis in enumerate(("X", "Y", "Z", "A", "B", "C"))},
-    )
-    owner.stage_controller.machine_position = (15.0, 22.0, 3.0, 4.0, 5.0)
-    captured: list[tuple[object, object]] = []
+    owner.stage_controller.homed_axes = unexpected_cache_read("homed axes")
+    owner._coordinate_targets.active_axes = {"X"}
+    pose_a = PhysicalMachinePose.from_mapping({"X": 11.0})
+    pose_b = PhysicalMachinePose.from_mapping({"X": 22.0})
+    owner._physical_machine_pose = pose_b
+    observations: list[tuple[object, object, object]] = []
     monkeypatch.setattr(
         position_update.design_workspace,
         "maybe_restore_persisted_design",
-        lambda _owner, _position: None,
+        lambda *_args: None,
     )
     monkeypatch.setattr(
         position_update.stage_position_panel,
         "update_stage_position_display",
-        lambda actual_owner, position: captured.append(
-            (position, actual_owner._latest_physical_machine_pose)
+        lambda *_args: None,
+    )
+    monkeypatch.setattr(
+        position_update.coordinate_flow,
+        "observe_coordinate_authority",
+        lambda _owner, pose, **facts: observations.append(
+            (pose, facts["machine_snapshot"], facts["homed_axes"])
         ),
     )
-    monkeypatch.setattr(
-        position_update.stage_move_lifecycle,
-        "finish_coordinate_move_if_idle",
-        lambda *_args, **_kwargs: None,
+
+    def presentation(
+        position: tuple[float, ...],
+        pose: PhysicalMachinePose,
+        motion_snapshot: object,
+        homed_axes: frozenset[str],
+        jog_timestamp: float,
+    ) -> StageMotionPresentation:
+        return StageMotionPresentation(
+            reported_position=position,
+            presented_position=position,
+            raw_stage_xy=(position[0], position[1]),
+            presented_stage_xy=(position[0], position[1]),
+            physical_machine_pose=pose,
+            contact_calibration_position=(position[0], position[1], position[2]),
+            b_position=None,
+            active_axes=frozenset(),
+            unhomed_fallback=False,
+            clear_motion_axes=False,
+            motion_coordinate_snapshot=motion_snapshot,
+            stage_state="Run",
+            homed_axes=homed_axes,
+            status_timestamp=jog_timestamp + 1.0,
+            last_jog_write_timestamp=jog_timestamp,
+        )
+
+    snapshots = (object(), object())
+    homed = (frozenset({"X", "Y"}), frozenset({"X", "Y", "Z"}))
+    queued = (
+        presentation((1.0, 2.0, 3.0), pose_a, snapshots[0], homed[0], 1.0),
+        presentation((4.0, 5.0, 6.0), pose_b, snapshots[1], homed[1], 2.0),
     )
+    for payload in queued:
+        _MainStageDesignPositionMixin._apply_stage_motion_presentation(owner, payload)
 
-    position_update.on_stage_position_changed(owner, (5.0, 2.0, 3.0, 4.0, 5.0))
-
-    assert captured
-    emitted_work_position, pose = captured[-1]
-    assert emitted_work_position[0] == pytest.approx(5.0)
-    assert pose.values["X"] == pytest.approx(21.0)
-    assert pose.values["Y"] == pytest.approx(22.0)
-
-
-def test_out_of_domain_machine_axis_is_unavailable_without_breaking_other_axes() -> None:
-    owner = _Owner()
-    calibrations = default_axis_calibrations()
-    calibrations["X"] = AxisCalibrationSettings(
-        enabled=True,
-        calibration_file="x.npz",
-        controller_points=[0.0, 1.0],
-        physical_points=[0.0, 2.0],
-    )
-    owner.stage_controller.mapper = StageAxisCalibrationMapper(
-        calibrations=calibrations,
-        position_reporting_mode="machine",
-        active_work_coordinate_system=None,
-        controller_coordinate_offsets={},
-        axis_index={axis: index for index, axis in enumerate(("X", "Y", "Z", "A", "B", "C"))},
-    )
-    owner.stage_controller.machine_position = (2.0, 3.0, 4.0, 5.0, 6.0)
-
-    pose = position_update.physical_machine_pose_from_controller(
-        owner.stage_controller,
-        AXES,
-    )
-
-    assert pose is not None
-    assert "X" not in pose.values
-    assert pose.values["Y"] == pytest.approx(3.0)
-
-
-def test_status_without_synchronized_machine_snapshot_publishes_empty_physical_pose(
-    monkeypatch,
-) -> None:
-    owner = _Owner()
-    owner.stage_controller.latest_synchronized_machine_position = lambda: None
-    captured: list[object] = []
-    monkeypatch.setattr(
-        position_update.design_workspace,
-        "maybe_restore_persisted_design",
-        lambda _owner, _position: None,
-    )
-    monkeypatch.setattr(
-        position_update.stage_position_panel,
-        "update_stage_position_display",
-        lambda actual_owner, _position: captured.append(
-            actual_owner._latest_physical_machine_pose
-        ),
-    )
-    monkeypatch.setattr(
-        position_update.stage_move_lifecycle,
-        "finish_coordinate_move_if_idle",
-        lambda *_args, **_kwargs: None,
-    )
-
-    position_update.on_stage_position_changed(owner, (5.0, 2.0, 3.0, 4.0, 5.0))
-
-    assert captured
-    assert captured[-1].values == {}
+    assert cache_reads == []
+    assert observations == [
+        (pose_a, snapshots[0], homed[0]),
+        (pose_b, snapshots[1], homed[1]),
+    ]

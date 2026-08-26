@@ -6,6 +6,7 @@ import time
 
 from PySide6.QtCore import QTimer
 
+from probe_station_gui.application.stage_motion_session import StageMotionPresentation
 from probe_station_gui.design import navigation_targeting
 from probe_station_gui.stage import move_lifecycle as stage_move_lifecycle
 from probe_station_gui.stage import position_update as stage_position_update
@@ -16,7 +17,13 @@ from probe_station_gui.stage.coordinate_targets import (
     stage_axis_target_limit_error,
 )
 from probe_station_gui.views import (
+    main_window_coordinate_flow as coordinate_flow,
+)
+from probe_station_gui.views import (
     main_window_coordinate_entry as coordinate_entry,
+)
+from probe_station_gui.views import (
+    main_window_design_workspace as design_workspace,
 )
 from probe_station_gui.views import (
     main_window_stage_position_panel as stage_position_panel_adapter,
@@ -26,6 +33,79 @@ logger = logging.getLogger("main")
 
 
 class _MainStageDesignPositionMixin:
+    def _apply_stage_motion_presentation(
+        self,
+        presentation: StageMotionPresentation,
+    ) -> None:
+        if not isinstance(presentation, StageMotionPresentation):
+            raise TypeError("presentation must be a StageMotionPresentation")
+        deferred_motion_active = (
+            self._coordinate_targets.has_active_move()
+            or self._manual_jog_prediction.prediction_available()
+        )
+        if not presentation.material_change and not deferred_motion_active:
+            return
+        if presentation.active_axes:
+            stage_position_panel_adapter.set_stage_motion_axes(
+                self,
+                set(presentation.active_axes),
+            )
+        if deferred_motion_active:
+            stage_position_update.on_stage_position_changed(
+                self,
+                presentation.reported_position,
+                physical_machine_pose=presentation.physical_machine_pose,
+                motion_coordinate_snapshot=presentation.motion_coordinate_snapshot,
+                stage_state=presentation.stage_state,
+                homed_axes=presentation.homed_axes,
+                last_jog_write_timestamp=presentation.last_jog_write_timestamp,
+            )
+            return
+        reported = presentation.reported_position
+        if isinstance(reported, tuple) and len(reported) >= 2:
+            design_workspace.maybe_restore_persisted_design(self, reported)
+        if self.contact_calibration_window is not None:
+            self.contact_calibration_window.set_current_stage_position(
+                presentation.contact_calibration_position
+            )
+        display_position = (
+            reported
+            if presentation.unhomed_fallback
+            else presentation.presented_position
+        )
+        stage_position_panel_adapter.update_stage_position_display(
+            self,
+            display_position,
+        )
+        coordinate_flow.observe_coordinate_authority(
+            self,
+            presentation.physical_machine_pose,
+            machine_snapshot=presentation.motion_coordinate_snapshot,
+            homed_axes=presentation.homed_axes,
+        )
+        can_display_design = self._can_display_design_position()
+        coordinate_xy = (
+            presentation.presented_stage_xy
+            if can_display_design and not presentation.unhomed_fallback
+            else None
+        )
+        design_xy = (
+            presentation.raw_stage_xy
+            if can_display_design and presentation.unhomed_fallback
+            else coordinate_xy
+        )
+        self._update_coordinate_display(center_xy=coordinate_xy)
+        self._update_design_position(design_xy)
+        if presentation.clear_motion_axes:
+            stage_move_lifecycle.finish_coordinate_move_if_idle(
+                self,
+                display_position,
+                monotonic_s=time.monotonic(),
+                schedule_single_shot=QTimer.singleShot,
+                latest_stage_state=presentation.stage_state,
+            )
+            stage_position_panel_adapter.clear_stage_motion_axes(self)
+
     def _on_stage_axis_editing_finished(self, axis_name: str) -> bool | None:
         return coordinate_entry.on_stage_axis_editing_finished(self, axis_name)
 

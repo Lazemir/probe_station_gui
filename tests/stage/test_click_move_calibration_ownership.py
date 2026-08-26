@@ -116,10 +116,11 @@ def test_residual_imports_and_retained_methods_are_exact() -> None:
 
     assert imported_modules.isdisjoint({"logging", "math"})
     assert autofocus_names == {"focus_metric", "qimage_to_gray"}
-    assert len(retained_methods) == 30
+    assert len(retained_methods) == 31
+    assert "_emit_tracked_xy_finish" in retained_methods
     assert (
         _method_manifest(retained_methods)
-        == "0e6a5a3021c91ea9ec8c25d5449eef18c54ac3b242240315f53878d4eaaadd20"
+        == "fa502590cf72b6a594b83169e71feca7e3f294efba1f23d67db53e77b4044a6a"
     )
 
 

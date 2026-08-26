@@ -4,6 +4,7 @@ import json
 import logging
 from pathlib import Path
 
+from probe_station_gui.application.stage_motion_session import PlannedXYMoveRequest
 from probe_station_gui.coordinates.coordinator_model import (
     AutofocusResult as CoordinateAutofocusResult,
 )
@@ -212,7 +213,11 @@ class _MainRegistrationFocusMixin:
             self._show_status(plan.status_message, plan.status_timeout_ms)
 
     def _move_to_design_target(self, target_id: str) -> None:
-        target = self._design_session.select_target_by_id(target_id)
+        selection = navigation_targeting.select_design_target(
+            self._design_session,
+            target_id,
+        )
+        target = selection.target
         stage_xy = (
             self._raw_stage_xy_from_design_xy(target.design_center)
             if target is not None
@@ -229,7 +234,12 @@ class _MainRegistrationFocusMixin:
             return
         self._refresh_design_panel()
         assert plan.stage_xy is not None
-        self.stage_controller.request_move_to_xy(plan.stage_xy[0], plan.stage_xy[1])
+        self._stage_motion.request_planned_xy_move(
+            PlannedXYMoveRequest(
+                target_stage_xy=plan.stage_xy,
+                source_label="design target",
+            )
+        )
 
     def _move_to_minimap_design_point(self, x_value: float, y_value: float) -> None:
         design_xy = (float(x_value), float(y_value))
@@ -253,7 +263,6 @@ class _MainRegistrationFocusMixin:
         design_xy: tuple[float, float],
         *,
         source_label: str,
-        move_request: object | None = None,
     ) -> bool:
         document = self._design_session.document
         stage_xy = (
@@ -274,15 +283,13 @@ class _MainRegistrationFocusMixin:
             return False
         self._last_selected_design_point = plan.last_selected_design_point
         self._refresh_design_panel()
-        self._clear_planned_move_prediction(clear_wait_state=True)
-        self._pending_planned_move_target_xy = plan.pending_planned_move_target_xy
-        self._pending_planned_move_source_label = plan.source_label
         assert plan.stage_xy is not None and plan.design_xy is not None
-        request = move_request or self.stage_controller.request_move_to_xy
-        started = request(plan.stage_xy[0], plan.stage_xy[1])
-        if started is False:
-            self._pending_planned_move_target_xy = None
-            self._pending_planned_move_source_label = None
+        if not self._stage_motion.request_planned_xy_move(
+            PlannedXYMoveRequest(
+                target_stage_xy=plan.stage_xy,
+                source_label=plan.source_label,
+            )
+        ):
             return False
         logger.debug(
             "DESIGN MOVE source=%s design=(%.3f, %.3f) stage=(%.3f, %.3f)",

@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterator
+import math
+from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from typing import Optional
 
 import serial
 
+from probe_station_gui.coordinates.model import PhysicalMachinePose
+from probe_station_gui.stage.axis_calibration import StageAxisCalibrationMapper
 from probe_station_gui.stage.axis_mapping import CalibrationOutOfDomain
 from probe_station_gui.stage.errors import StageControllerError
 from probe_station_gui.stage.fluidnc_session import (
@@ -20,10 +23,42 @@ from probe_station_gui.stage.machine_coordinates import (
     MachineCoordinateSnapshot,
     MachineCoordinateSnapshotUnavailable,
 )
-from probe_station_gui.stage.types import _Status
+from probe_station_gui.stage.types import (
+    StageMotionResetReason,
+    StagePositionObservation,
+    _Status,
+)
 
 
 logger = logging.getLogger(__name__)
+
+
+def _physical_machine_pose_from_position(
+    machine_position: tuple[float, ...] | None,
+    axes: Iterable[str],
+    mapper: StageAxisCalibrationMapper,
+    axis_index: Mapping[str, int],
+) -> PhysicalMachinePose:
+    values: dict[str, float] = {}
+    if machine_position is None:
+        return PhysicalMachinePose.from_mapping(values)
+    for raw_axis in axes:
+        axis = str(raw_axis).strip().upper()
+        index = axis_index.get(axis)
+        if index is None or index >= len(machine_position):
+            continue
+        try:
+            controller_value = float(machine_position[index])
+            if not math.isfinite(controller_value):
+                continue
+            physical_value = float(
+                mapper.controller_to_physical(axis, controller_value)
+            )
+        except (CalibrationOutOfDomain, TypeError, ValueError, OverflowError):
+            continue
+        if math.isfinite(physical_value):
+            values[axis] = physical_value
+    return PhysicalMachinePose.from_mapping(values)
 
 
 class StageControllerConnectionMixin:
@@ -78,9 +113,7 @@ class StageControllerConnectionMixin:
             ),
         )
 
-    def _fluidnc_session_for(
-        self, serial_connection: serial.Serial
-    ) -> FluidNCSession:
+    def _fluidnc_session_for(self, serial_connection: serial.Serial) -> FluidNCSession:
         return FluidNCSession(
             serial_connection=serial_connection,
             callbacks=self._fluidnc_session_callbacks(),
@@ -122,6 +155,10 @@ class StageControllerConnectionMixin:
                         "Controller reboot banner detected on serial connect."
                     )
                 self._refresh_axis_a_ready_from_state()
+        self._publish_cached_stage_position(
+            None,
+            reset_reason=StageMotionResetReason.CONNECTION_CHANGED,
+        )
 
     def export_cached_controller_state(self) -> dict[str, object] | None:
         """Return controller state suitable for persistence across app restarts."""
@@ -159,8 +196,7 @@ class StageControllerConnectionMixin:
                 for axis, values in self._axis_limits.items()
             },
             "axis_max_feedrates": {
-                axis: float(rate)
-                for axis, rate in self._axis_max_feedrates.items()
+                axis: float(rate) for axis, rate in self._axis_max_feedrates.items()
             },
             "coordinate_confidence": self._export_coordinate_confidence_state(),
         }
@@ -273,6 +309,10 @@ class StageControllerConnectionMixin:
         """Forget locally cached controller state."""
 
         self._clear_unverified_controller_state_locked()
+        self._publish_cached_stage_position(
+            None,
+            reset_reason=StageMotionResetReason.CONNECTION_CHANGED,
+        )
 
     def _clear_unverified_controller_state_locked(self) -> None:
         """Clear volatile state that must be verified from the live controller."""
@@ -304,7 +344,6 @@ class StageControllerConnectionMixin:
         self._update_homing_status(set())
         self._update_limit_axes(set())
         self._set_needles_state(False, known=False)
-        self.stage_position_changed.emit(None)
 
     def _handle_controller_reboot_detected(self, line: str, source: str) -> None:
         already_pending = self._controller_reboot_recovery_pending
@@ -313,6 +352,10 @@ class StageControllerConnectionMixin:
         self._queued_jog_generation += 1
         self._clear_pending_async_writes()
         self._clear_unverified_controller_state_locked()
+        self._publish_cached_stage_position(
+            None,
+            reset_reason=StageMotionResetReason.CONNECTION_CHANGED,
+        )
         if already_pending:
             logger.debug(
                 "Additional controller reboot/reset line from %s: %r",
@@ -331,9 +374,7 @@ class StageControllerConnectionMixin:
         if not line_indicates_controller_reboot(line):
             return
         self._handle_controller_reboot_detected(line, source)
-        raise StageControllerError(
-            "Controller reboot detected. Cleared homing state."
-        )
+        raise StageControllerError("Controller reboot detected. Cleared homing state.")
 
     def _handle_pending_serial_data_side_effects(
         self, data: bytes, source: str
@@ -384,6 +425,20 @@ class StageControllerConnectionMixin:
             return None
         return tuple(self._last_synchronized_machine_position)
 
+    def latest_physical_machine_pose(
+        self,
+        axes: Iterable[str],
+    ) -> PhysicalMachinePose:
+        """Map the latest synchronized Machine pose without controller I/O."""
+
+        machine_position = self.latest_synchronized_machine_position()
+        return _physical_machine_pose_from_position(
+            machine_position,
+            axes,
+            self._axis_calibration_mapper(),
+            self.AXIS_INDEX,
+        )
+
     def latest_machine_coordinate_snapshot(
         self,
     ) -> MachineCoordinateSnapshot | None:
@@ -411,9 +466,11 @@ class StageControllerConnectionMixin:
             return None
         controller_value = float(machine_position[index])
         try:
-            physical_value = self._axis_calibration_mapper().machine_controller_to_physical(
-                normalized,
-                controller_value,
+            physical_value = (
+                self._axis_calibration_mapper().machine_controller_to_physical(
+                    normalized,
+                    controller_value,
+                )
             )
         except CalibrationOutOfDomain:
             return None
@@ -450,6 +507,53 @@ class StageControllerConnectionMixin:
 
         return self._last_jog_write_timestamp
 
+    def _capture_stage_position_observation(
+        self,
+        position: tuple[float, ...] | None,
+        *,
+        reset_reason: StageMotionResetReason | None = None,
+    ) -> StagePositionObservation:
+        mapper = self._axis_calibration_mapper()
+        return StagePositionObservation(
+            position=(
+                None if position is None else tuple(float(value) for value in position)
+            ),
+            physical_machine_pose=_physical_machine_pose_from_position(
+                self._last_synchronized_machine_position,
+                self.AXIS_INDEX,
+                mapper,
+                self.AXIS_INDEX,
+            ),
+            motion_coordinate_snapshot=self._last_motion_coordinate_snapshot,
+            stage_state=self._last_stage_state,
+            homed_axes=frozenset(self._homed_axes),
+            status_timestamp=self._last_status_timestamp,
+            last_jog_write_timestamp=self._last_jog_write_timestamp,
+            reset_reason=reset_reason,
+        )
+
+    def _publish_stage_position_observation(
+        self,
+        observation: StagePositionObservation,
+        *,
+        emit_legacy: bool,
+    ) -> None:
+        if emit_legacy:
+            self.stage_position_changed.emit(observation.position)
+        self.stage_position_observed.emit(observation)
+
+    def _publish_cached_stage_position(
+        self,
+        position: tuple[float, ...] | None,
+        *,
+        reset_reason: StageMotionResetReason | None = None,
+    ) -> None:
+        observation = self._capture_stage_position_observation(
+            position,
+            reset_reason=reset_reason,
+        )
+        self._publish_stage_position_observation(observation, emit_legacy=True)
+
     def _update_cached_positions(self, status: _Status) -> None:
         previous_state = self._last_stage_state
         previous_synchronized_machine = self._last_synchronized_machine_position
@@ -464,26 +568,25 @@ class StageControllerConnectionMixin:
             if synchronized_machine is not None
             else None
         )
+        mapper = self._axis_calibration_mapper()
         try:
-            self._last_motion_coordinate_snapshot = (
-                MachineCoordinateSnapshot.from_motion_status(
-                    status,
-                    self._axis_calibration_mapper(),
-                    self.AXIS_INDEX,
-                )
+            motion_coordinate_snapshot = MachineCoordinateSnapshot.from_motion_status(
+                status,
+                mapper,
+                self.AXIS_INDEX,
             )
         except MachineCoordinateSnapshotUnavailable:
-            self._last_motion_coordinate_snapshot = None
+            motion_coordinate_snapshot = None
+        self._last_motion_coordinate_snapshot = motion_coordinate_snapshot
         try:
-            self._last_machine_coordinate_snapshot = (
-                MachineCoordinateSnapshot.from_status(
-                    status,
-                    self._axis_calibration_mapper(),
-                    self.AXIS_INDEX,
-                )
+            machine_coordinate_snapshot = MachineCoordinateSnapshot.from_status(
+                status,
+                mapper,
+                self.AXIS_INDEX,
             )
         except MachineCoordinateSnapshotUnavailable:
-            self._last_machine_coordinate_snapshot = None
+            machine_coordinate_snapshot = None
+        self._last_machine_coordinate_snapshot = machine_coordinate_snapshot
         synchronized_machine_changed = (
             previous_synchronized_machine != self._last_synchronized_machine_position
         )
@@ -491,12 +594,29 @@ class StageControllerConnectionMixin:
             previous_position = self._last_stage_position
             coords = tuple(float(v) for v in status.display_position)
             self._last_stage_position = coords
-            if (
+            emit_legacy = bool(
                 previous_position != coords
                 or previous_state != status.state
                 or synchronized_machine_changed
-            ):
-                self.stage_position_changed.emit(coords)
+            )
+            observation = StagePositionObservation(
+                position=coords,
+                physical_machine_pose=_physical_machine_pose_from_position(
+                    self._last_synchronized_machine_position,
+                    self.AXIS_INDEX,
+                    mapper,
+                    self.AXIS_INDEX,
+                ),
+                motion_coordinate_snapshot=motion_coordinate_snapshot,
+                stage_state=str(status.state),
+                homed_axes=frozenset(self._homed_axes),
+                status_timestamp=self._last_status_timestamp,
+                last_jog_write_timestamp=self._last_jog_write_timestamp,
+            )
+            self._publish_stage_position_observation(
+                observation,
+                emit_legacy=emit_legacy,
+            )
         if (
             status.coordinate_system
             and status.work_offset is not None

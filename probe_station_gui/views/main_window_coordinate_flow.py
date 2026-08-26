@@ -36,13 +36,16 @@ from probe_station_gui.coordinates.model import PhysicalMachinePose
 from probe_station_gui.coordinates.persistence import CoordinateFrameStoreFailure
 from probe_station_gui.design.model import DesignModelError
 from probe_station_gui.views import main_window_design_workspace as design_workspace
-from probe_station_gui.views import main_window_stage_position_panel as stage_position_panel
+from probe_station_gui.views import (
+    main_window_stage_position_panel as stage_position_panel,
+)
 
 
 logger = logging.getLogger(__name__)
 
 
 _FRAME_METADATA_UNSET = object()
+_CONTROLLER_CACHE_UNSET = object()
 
 
 def apply_coordinate_transition(
@@ -208,29 +211,42 @@ def _persist_coordinate_selection(owner: object, frame_id: str) -> None:
 def coordinate_authority_observation(
     owner: object,
     physical_pose: PhysicalMachinePose | None = None,
+    *,
+    machine_snapshot: object = _CONTROLLER_CACHE_UNSET,
+    homed_axes: object = _CONTROLLER_CACHE_UNSET,
 ) -> CoordinateAuthorityObservation:
     """Capture one immutable controller/settings authority observation."""
 
     stage = getattr(owner, "stage_controller", None)
-    latest_snapshot = getattr(stage, "latest_motion_coordinate_snapshot", None)
-    if not callable(latest_snapshot):
-        latest_snapshot = getattr(stage, "latest_machine_coordinate_snapshot", None)
-    try:
-        machine_snapshot = latest_snapshot() if callable(latest_snapshot) else None
-    except Exception:
-        machine_snapshot = None
+    captured_snapshot = machine_snapshot
+    if captured_snapshot is _CONTROLLER_CACHE_UNSET:
+        latest_snapshot = getattr(stage, "latest_motion_coordinate_snapshot", None)
+        if not callable(latest_snapshot):
+            latest_snapshot = getattr(stage, "latest_machine_coordinate_snapshot", None)
+        try:
+            captured_snapshot = latest_snapshot() if callable(latest_snapshot) else None
+        except Exception:
+            captured_snapshot = None
     pose = physical_pose
     if not isinstance(pose, PhysicalMachinePose):
         pose = (
-            machine_snapshot.physical_machine_pose
-            if machine_snapshot is not None
+            captured_snapshot.physical_machine_pose
+            if captured_snapshot is not None
             else PhysicalMachinePose({})
         )
-    homed_getter = getattr(stage, "homed_axes", None)
-    try:
-        homed_axes = frozenset(homed_getter()) if callable(homed_getter) else frozenset()
-    except Exception:
-        homed_axes = frozenset()
+    captured_homed_axes = homed_axes
+    if captured_homed_axes is _CONTROLLER_CACHE_UNSET:
+        homed_getter = getattr(stage, "homed_axes", None)
+        try:
+            captured_homed_axes = (
+                frozenset(homed_getter()) if callable(homed_getter) else frozenset()
+            )
+        except Exception:
+            captured_homed_axes = frozenset()
+    elif captured_homed_axes is None:
+        captured_homed_axes = frozenset()
+    else:
+        captured_homed_axes = frozenset(captured_homed_axes)
     pivot = None
     pivot_error = None
     pivot_error_permanent = False
@@ -256,8 +272,8 @@ def coordinate_authority_observation(
         objective_offset = (float("nan"), float("nan"))
     return CoordinateAuthorityObservation(
         physical_pose=pose,
-        homed_axes=homed_axes,
-        machine_snapshot=machine_snapshot,
+        homed_axes=captured_homed_axes,
+        machine_snapshot=captured_snapshot,
         pivot_machine_xy=pivot,
         objective_xy_offset=objective_offset,
         pivot_error=pivot_error,
@@ -268,12 +284,20 @@ def coordinate_authority_observation(
 def observe_coordinate_authority(
     owner: object,
     physical_pose: PhysicalMachinePose | None = None,
+    *,
+    machine_snapshot: object = _CONTROLLER_CACHE_UNSET,
+    homed_axes: object = _CONTROLLER_CACHE_UNSET,
 ) -> CoordinateTransition | None:
     coordinator = getattr(owner, "_coordinate_system_coordinator", None)
     if coordinator is None:
         return None
     transition = coordinator.observe_authority(
-        coordinate_authority_observation(owner, physical_pose)
+        coordinate_authority_observation(
+            owner,
+            physical_pose,
+            machine_snapshot=machine_snapshot,
+            homed_axes=homed_axes,
+        )
     )
     apply_coordinate_transition(owner, transition)
     return transition
@@ -282,7 +306,9 @@ def observe_coordinate_authority(
 def _registration_view_changed(transition: CoordinateTransition) -> bool:
     if transition.view_changed:
         return True
-    if any(isinstance(intent, SaveCoordinateFramesIntent) for intent in transition.intents):
+    if any(
+        isinstance(intent, SaveCoordinateFramesIntent) for intent in transition.intents
+    ):
         return True
     return any(
         notice.code in {"registration_capture_updated", "registration_save_pending"}
@@ -328,6 +354,7 @@ def _render_coordinate_ui_effects(
     for effect in reversed(workspace_rollbacks):
         design_workspace.restore_design_workspace(owner, effect)
 
+
 def _render_registration_snapshot(
     owner: object,
     transition: CoordinateTransition,
@@ -344,10 +371,7 @@ def _render_registration_snapshot(
         active_generation = getattr(owner, "_manual_alignment_pick_generation", None)
         matching = bool(
             (release.generation is None and active_slot is None)
-            or (
-                active_slot == release.slot
-                and active_generation == release.generation
-            )
+            or (active_slot == release.slot and active_generation == release.generation)
         )
         if matching:
             owner._manual_alignment_pick_slot = None
@@ -468,9 +492,7 @@ def activate_current_design(
 
 
 def handle_coordinate_frame_loaded(owner: object, result: object) -> None:
-    was_loaded = bool(
-        owner._coordinate_system_coordinator.snapshot().frames_loaded
-    )
+    was_loaded = bool(owner._coordinate_system_coordinator.snapshot().frames_loaded)
     if not was_loaded:
         settings = getattr(getattr(owner, "settings_manager", None), "settings", None)
         software_coordinates = getattr(settings, "software_coordinates", None)
@@ -564,6 +586,7 @@ def complete_legacy_design_migration(
     state.pop("design_session", None)
     state["design_session"] = deepcopy(persisted_design_state)
     owner.settings_manager.save_controller_state(state)
+
 
 __all__ = [
     "activate_current_design",

@@ -70,7 +70,9 @@ def test_task3_fixtures_do_not_recreate_deleted_coordinate_policy_fields() -> No
         "tests/coordinates/test_coordinator_registration_rollback_rendering.py",
         "tests/ui/test_main_window_connection_flow.py",
     )
-    source = "\n".join((root / relative).read_text(encoding="utf-8") for relative in fixture_paths)
+    source = "\n".join(
+        (root / relative).read_text(encoding="utf-8") for relative in fixture_paths
+    )
     for forbidden in (
         "_coordinate_frame_lifecycle",
         "_coordinate_frames_loaded",
@@ -85,7 +87,9 @@ def test_main_seeds_gui_restore_only_into_coordinator() -> None:
     assert "_api_coordinate_frame_id" not in source
 
 
-def test_application_runtime_does_not_expose_or_adopt_a_mutable_design_session() -> None:
+def test_application_runtime_does_not_expose_or_adopt_a_mutable_design_session() -> (
+    None
+):
     runtime = application_runtime.create_application_coordinate_runtime()
 
     assert not hasattr(runtime, "design_session")
@@ -167,9 +171,7 @@ def test_selection_persistence_intent_is_fire_and_forget() -> None:
                 updates.append(frame_id) or persisted
             )
         ),
-        _software_coordinate_selection_store=SimpleNamespace(
-            publish=published.append
-        ),
+        _software_coordinate_selection_store=SimpleNamespace(publish=published.append),
     )
     transition = CoordinateTransition(
         CoordinateSystemSnapshot(False, (), None),
@@ -285,10 +287,7 @@ def test_joystick_projection_reuses_basis_lease_and_requests_pose_rebase() -> No
         project_motion=lambda request: requests.append(request) or projection,
     )
 
-    assert (
-        Main._project_gui_relative_motion(window, (("X", 1.0),), None)
-        is projection
-    )
+    assert Main._project_gui_relative_motion(window, (("X", 1.0),), None) is projection
     assert (
         Main._project_gui_relative_motion(window, (("X", 1.0),), start_lease)
         is projection
@@ -368,7 +367,16 @@ def test_curve_apply_keeps_estimated_position_authority_on_remapped_snapshot(
         window = Main.__new__(Main)
         window.stage_controller = controller
         window.settings_manager = manager
-        window._latest_physical_machine_pose = before.physical_machine_pose
+        pose_holder = {"value": before.physical_machine_pose}
+        window._stage_motion = SimpleNamespace(
+            refresh_physical_machine_pose=lambda: pose_holder.__setitem__(
+                "value",
+                controller.latest_physical_machine_pose(Main.STAGE_AXIS_NAMES),
+            ),
+            snapshot=lambda: SimpleNamespace(
+                physical_machine_pose=pose_holder["value"]
+            ),
+        )
         window.joystick_panel = None
         window.design_navigator_panel = None
         window.design_layout_window = None
@@ -407,7 +415,7 @@ def test_curve_apply_keeps_estimated_position_authority_on_remapped_snapshot(
 
         stage_position_update.publish_stage_position_estimate(window, raw_position)
 
-        assert window._latest_physical_machine_pose is remapped.physical_machine_pose
+        assert window._stage_motion.snapshot().physical_machine_pose.require("X") == 2.0
         assert observed_poses == [remapped.physical_machine_pose]
     finally:
         controller.shutdown()

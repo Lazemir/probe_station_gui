@@ -19,7 +19,11 @@ from probe_station_gui.stage.errors import StageControllerError
 from probe_station_gui.stage.motion_command_planning import (
     clamped_motion_feedrate,
 )
-from probe_station_gui.stage.types import MoveVector
+from probe_station_gui.stage.types import (
+    MoveVector,
+    TrackedAbsoluteXYMoveFinished,
+    TrackedAbsoluteXYMoveStarted,
+)
 
 
 class StageControllerClickMoveMixin(_StageControllerClickCalibrationMixin):
@@ -50,12 +54,19 @@ class StageControllerClickMoveMixin(_StageControllerClickCalibrationMixin):
             busy_message="Stage is busy. Ignoring the new click.",
         )
 
-    def request_move_to_xy(self, target_x_mm: float, target_y_mm: float) -> bool:
+    def request_move_to_xy(
+        self,
+        target_x_mm: float,
+        target_y_mm: float,
+        *,
+        motion_token: object | None = None,
+    ) -> bool:
         """Move to an absolute X/Y coordinate in the configured report mode."""
 
+        target = (float(target_x_mm), float(target_y_mm))
         return self._start_background_task(
             target=self._run_move_to_xy,
-            args=(float(target_x_mm), float(target_y_mm)),
+            args=target if motion_token is None else (*target, motion_token),
             busy_message="Stage is busy. Ignoring absolute move request.",
         )
 
@@ -326,16 +337,63 @@ class StageControllerClickMoveMixin(_StageControllerClickCalibrationMixin):
             )
         return (True, "Move complete.")
 
-    def _run_move_to_xy(self, target_x_mm: float, target_y_mm: float) -> None:
+    def _run_move_to_xy(
+        self,
+        target_x_mm: float,
+        target_y_mm: float,
+        motion_token: object | None = None,
+    ) -> None:
+        target = (float(target_x_mm), float(target_y_mm))
         self.movement_started.emit()
         try:
             self._check_cancelled()
             with self._serial_session():
                 self._move_safety_check()
-                message = self._move_to_xy_locked(target_x_mm, target_y_mm)
+                message = self._move_to_xy_locked(
+                    *target,
+                    **({} if motion_token is None else {"motion_token": motion_token}),
+                )
+            status_timestamp = self.last_status_timestamp()
             self.movement_finished.emit(True, message)
+            self._emit_tracked_xy_finish(
+                motion_token,
+                target,
+                success=True,
+                message=message,
+                status_timestamp=status_timestamp,
+            )
         except StageControllerError as exc:
-            self.movement_finished.emit(False, str(exc))
+            message = str(exc)
+            status_timestamp = self.last_status_timestamp()
+            self.movement_finished.emit(False, message)
+            self._emit_tracked_xy_finish(
+                motion_token,
+                target,
+                success=False,
+                message=message,
+                status_timestamp=status_timestamp,
+            )
+
+    def _emit_tracked_xy_finish(
+        self,
+        motion_token: object | None,
+        target_stage_xy: tuple[float, float],
+        *,
+        success: bool,
+        message: str,
+        status_timestamp: float | None,
+    ) -> None:
+        if motion_token is None:
+            return
+        self.tracked_absolute_xy_move_finished.emit(
+            TrackedAbsoluteXYMoveFinished(
+                motion_token=motion_token,
+                target_stage_xy=target_stage_xy,
+                success=bool(success),
+                message=str(message),
+                status_timestamp=status_timestamp,
+            )
+        )
 
     def _run_token_bound_move_to_xy(
         self,
@@ -385,6 +443,7 @@ class StageControllerClickMoveMixin(_StageControllerClickCalibrationMixin):
         target_y_mm: float,
         *,
         feedrate: float | None = None,
+        motion_token: object | None = None,
     ) -> str:
         with self._serial_session_lock:
             status = self._query_synced_status_for_absolute_motion(
@@ -394,10 +453,11 @@ class StageControllerClickMoveMixin(_StageControllerClickCalibrationMixin):
             if status is None:
                 raise StageControllerError("Unable to read current stage position.")
             self._require_homed_axes(status, {"X", "Y"})
-            self._require_position_for_absolute_motion(
+            current_position = self._require_position_for_absolute_motion(
                 status,
                 required_axes=2,
             )
+            origin_position = tuple(float(value) for value in current_position)
             target_position = (float(target_x_mm), float(target_y_mm))
             targets = {"X": target_position[0], "Y": target_position[1]}
             if self._status_matches_axis_targets(
@@ -417,6 +477,15 @@ class StageControllerClickMoveMixin(_StageControllerClickCalibrationMixin):
                 float(target_y_mm),
                 float(effective_feedrate),
             )
+            if motion_token is not None:
+                self.tracked_absolute_xy_move_started.emit(
+                    TrackedAbsoluteXYMoveStarted(
+                        motion_token=motion_token,
+                        origin_position=origin_position,
+                        target_stage_xy=target_position,
+                        feedrate_mm_min=float(effective_feedrate),
+                    )
+                )
             self._execute_precision_axis_targets_locked(
                 targets,
                 feedrate=feedrate,

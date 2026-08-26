@@ -134,7 +134,6 @@ OWNER_SPECS = {
             "_preload_lazy_dialog_modules": "(self) -> 'None'",
             "_on_design_layout_module_ready": "(self, design_layout_window_class: 'object', error: 'object') -> 'None'",
             "_stage_serial_ready": "(self) -> 'bool'",
-            "_on_absolute_xy_move_started": "(self, target_x_mm: 'float', target_y_mm: 'float', feedrate_mm_min: 'float') -> 'None'",
             "on_error": "(self, message: 'str') -> 'None'",
             "_on_camera_frame": "(self, qimg: 'QImage') -> 'None'",
             "_on_live_camera_frame_processed": "(self, result: 'LiveCameraCorrectionResult') -> 'None'",
@@ -331,9 +330,6 @@ OWNER_SPECS = {
             "_advance_motion_prediction": "(self) -> 'None'",
             "_advance_manual_jog_prediction": "(self) -> 'None'",
             "_advance_coordinate_move_prediction": "(self) -> 'None'",
-            "_advance_planned_move_prediction": "(self) -> 'None'",
-            "_clear_planned_move_prediction": "(self, *, clear_wait_state: 'bool') -> 'None'",
-            "_start_planned_move_prediction": "(self, target_stage_xy: 'tuple[float, float]', *, source_label: 'str', feedrate_mm_min: 'float | None' = None) -> 'None'",
             "_schedule_status_refreshes": "(self, delays_ms: 'tuple[int, ...]') -> 'None'",
             "_on_manual_terminal_command": "(self, command: 'str') -> 'None'",
             "_on_stage_task_started": "(self) -> 'None'",
@@ -486,7 +482,8 @@ OWNER_SPECS = {
     ),
     "stage_design_position": (
         "_MainStageDesignPositionMixin",
-        """_on_stage_axis_editing_finished _apply_pending_stage_coordinate_targets
+        """_apply_stage_motion_presentation
+        _on_stage_axis_editing_finished _apply_pending_stage_coordinate_targets
         _start_coordinate_axis_move _start_coordinate_targets_move
         _apply_coordinate_common_feedrate_plan _apply_coordinate_move_feedrate
         _start_next_pending_stage_axis_move _raw_target_from_display_value
@@ -523,8 +520,8 @@ OWNER_SIGNATURE_SHA256 = {
     "route_capture_run": "881ba99c4c6fe0d55e21b88d0443ad7ee5f969e3e42891eefd487d680f2f6a6d",
     "route_control": "0dca50743dfaa361fcaf76645b7a0da216640bc1f8700081a9e0ad0c5b17aa5b",
     "route_results": "ec4552e53a60da60698f6cb03e28221150572bafaeec4da96301a82ffdbc82aa",
-    "registration_focus": "e0be34f7f38da698f1fc768e7e93dd4a9f5ef8984bc7deae535757daaf4f207c",
-    "stage_design_position": "ee80cb6ae2acb7e6fe0178537e654461b4f2cb088ccdd048c6f619584809c575",
+    "registration_focus": "8bf43873a2ca6d69216bc91e8f523336d506bc03cd6d27cad7b2eb26780c85d7",
+    "stage_design_position": "0860badf615adca5f78109f562547bace3818c40bf1fe381d42ebbe855f249e2",
     "scan_sample_meter": "4981a0c643979b59f0391a315cc6083810d6418f72f150355a38a29edb619f89",
 }
 

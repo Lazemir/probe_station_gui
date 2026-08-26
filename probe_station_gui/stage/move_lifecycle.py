@@ -37,15 +37,7 @@ class StageMoveLifecycleOwner(Protocol):
     _homing_active_key: Any
     _route_run_execution: Any
     _microscope_scan_stop_requested: Any
-    _pending_planned_move_target_xy: tuple[float, float] | None
-    _pending_planned_move_source_label: str | None
-    _planned_move_started_at: float | None
-    _planned_move_waiting_for_fresh_status: bool
-    _planned_move_target_xy: tuple[float, float] | None
-    _planned_move_origin_xy: tuple[float, float] | None
-    _planned_move_stage_xy: tuple[float, float] | None
-    _planned_move_ends_at: float | None
-    _planned_move_stop_status_timestamp: float | None
+    _stage_motion: Any
     _pending_stage_axis_targets: dict[str, tuple[float, float]]
     _coordinate_system_coordinator: Any
     design_navigator_panel: Any
@@ -59,12 +51,10 @@ class StageMoveLifecycleOwner(Protocol):
     def _microscope_scan_running(self) -> bool: ...
     def _sample_handling_active(self) -> bool: ...
     def _cancel_manual_alignment_pick(self) -> None: ...
-    def _clear_planned_move_prediction(self, *, clear_wait_state: bool) -> None: ...
     def _clear_pending_stage_coordinate_targets(self) -> bool: ...
     def _schedule_status_refreshes(self, delays_ms: tuple[int, ...]) -> None: ...
     def _schedule_cancel_state_refresh(self) -> None: ...
     def _show_status(self, message: str, timeout_ms: int = 0) -> None: ...
-    def _format_optional_point(self, point: tuple[float, float] | None) -> str: ...
     def _set_design_snap_enabled(self, enabled: bool) -> None: ...
     def _refresh_design_panel(self) -> None: ...
     def _refresh_design_position(self) -> None: ...
@@ -81,6 +71,7 @@ class StageMoveLifecycleOwner(Protocol):
 
 
 ScheduleSingleShot = Callable[[int, Callable[[], None]], Any]
+_LATEST_STAGE_STATE_UNSET = object()
 
 
 def has_cancelable_operation(owner: StageMoveLifecycleOwner) -> bool:
@@ -182,9 +173,13 @@ def finish_coordinate_move_if_idle(
     *,
     monotonic_s: float,
     schedule_single_shot: ScheduleSingleShot,
+    latest_stage_state: object = _LATEST_STAGE_STATE_UNSET,
 ) -> None:
+    observed_state = latest_stage_state
+    if observed_state is _LATEST_STAGE_STATE_UNSET:
+        observed_state = owner.stage_controller.latest_stage_state()
     decision = owner._coordinate_targets.finish_if_idle_decision(
-        latest_stage_state=owner.stage_controller.latest_stage_state(),
+        latest_stage_state=observed_state,
         position=position,
         monotonic_s=monotonic_s,
     )
@@ -211,8 +206,6 @@ def on_move_finished(
     message: str,
 ) -> None:
     message_lower = message.lower() if message else ""
-    _clear_pending_planned_move_target(owner, success, message)
-    _finish_planned_move_prediction(owner, success)
     if _finish_pending_alignment_preparation(owner, success, message):
         owner._schedule_status_refreshes(owner.MANUAL_JOG_SETTLE_POLL_DELAYS_MS)
         return
@@ -317,63 +310,16 @@ def _cancel_controller_activity(owner: StageMoveLifecycleOwner) -> bool:
     if owner._controller_reports_active_motion():
         owner.stage_controller.cancel_active_motion("Motion cancel requested.")
         stage_position_panel.clear_stage_motion_axes(owner)
-        owner._clear_planned_move_prediction(clear_wait_state=True)
+        owner._stage_motion.cancel_planned_xy_move()
         cancelled_any = True
         owner._schedule_status_refreshes(owner.MANUAL_JOG_SETTLE_POLL_DELAYS_MS)
     if owner.stage_controller.is_busy():
         owner.stage_controller.cancel_active_task("Operation cancel requested.")
         stage_position_panel.clear_stage_motion_axes(owner)
-        owner._clear_planned_move_prediction(clear_wait_state=True)
+        owner._stage_motion.cancel_planned_xy_move()
         cancelled_any = True
         owner._schedule_status_refreshes(owner.MANUAL_JOG_SETTLE_POLL_DELAYS_MS)
     return cancelled_any
-
-
-def _clear_pending_planned_move_target(
-    owner: StageMoveLifecycleOwner,
-    success: bool,
-    message: str,
-) -> None:
-    if owner._pending_planned_move_target_xy is None:
-        return
-    logger.debug(
-        "MOTION PREDICTION planned_move_pending_cleared success=%s message=%s",
-        success,
-        message,
-    )
-    owner._pending_planned_move_target_xy = None
-    owner._pending_planned_move_source_label = None
-
-
-def _finish_planned_move_prediction(
-    owner: StageMoveLifecycleOwner,
-    success: bool,
-) -> None:
-    if (
-        owner._planned_move_started_at is None
-        and not owner._planned_move_waiting_for_fresh_status
-    ):
-        return
-    logger.debug(
-        "MOTION PREDICTION planned_move_finish success=%s stage=%s",
-        success,
-        owner._format_optional_point(owner._planned_move_stage_xy),
-    )
-    if not success:
-        owner._clear_planned_move_prediction(clear_wait_state=True)
-        return
-    if owner._planned_move_target_xy is not None:
-        owner._planned_move_stage_xy = owner._planned_move_target_xy
-    owner._planned_move_origin_xy = None
-    owner._planned_move_target_xy = None
-    owner._planned_move_started_at = None
-    owner._planned_move_ends_at = None
-    owner._planned_move_waiting_for_fresh_status = (
-        owner._planned_move_stage_xy is not None
-    )
-    owner._planned_move_stop_status_timestamp = (
-        owner.stage_controller.last_status_timestamp()
-    )
 
 
 def _finish_pending_alignment_preparation(

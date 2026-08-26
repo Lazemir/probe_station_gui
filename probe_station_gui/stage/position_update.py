@@ -15,10 +15,13 @@ from probe_station_gui.stage import move_lifecycle as stage_move_lifecycle
 from probe_station_gui.stage.position_presenter import stage_position_signal_plan
 from probe_station_gui.views import main_window_coordinate_flow as coordinate_flow
 from probe_station_gui.views import main_window_design_workspace as design_workspace
-from probe_station_gui.views import main_window_stage_position_panel as stage_position_panel
+from probe_station_gui.views import (
+    main_window_stage_position_panel as stage_position_panel,
+)
 
 
 logger = logging.getLogger("main")
+_CONTROLLER_CACHE_UNSET = object()
 
 
 class StagePositionUpdateOwner(Protocol):
@@ -27,12 +30,8 @@ class StagePositionUpdateOwner(Protocol):
     MANUAL_JOG_RECONCILE_SMOOTH_ALPHA: float
     _coordinate_targets: Any
     _manual_jog_prediction: Any
-    _planned_move_stage_xy: tuple[float, float] | None
-    _planned_move_started_at: float | None
-    _planned_move_waiting_for_fresh_status: bool
-    _planned_move_stop_status_timestamp: float | None
+    _stage_motion: Any
     _pending_alignment_preparation: Any
-    _last_reported_b_position: float | None
     _coordinate_system_coordinator: Any
     _current_design_stage_xy: tuple[float, float] | None
     contact_calibration_window: Any
@@ -53,39 +52,6 @@ class StagePositionUpdateOwner(Protocol):
         actual_stage_xy: tuple[float, float],
     ) -> None: ...
     def _format_optional_point(self, point: tuple[float, float] | None) -> str: ...
-
-
-def physical_machine_pose_from_controller(
-    controller: object,
-    axis_names: tuple[str, ...] | list[str],
-) -> PhysicalMachinePose | None:
-    """Map one cached raw Machine-position snapshot through universal curves."""
-
-    machine_position_getter = getattr(
-        controller,
-        "latest_synchronized_machine_position",
-        None,
-    )
-    mapper_getter = getattr(controller, "_axis_calibration_mapper", None)
-    if not callable(machine_position_getter) or not callable(mapper_getter):
-        return None
-    machine_position = machine_position_getter()
-    if not isinstance(machine_position, (tuple, list)):
-        return None
-    mapper = mapper_getter()
-    values: dict[str, float] = {}
-    for index, raw_axis in enumerate(axis_names):
-        axis = str(raw_axis).strip().upper()
-        if index >= len(machine_position):
-            continue
-        try:
-            raw_value = float(machine_position[index])
-            physical_value = float(mapper.controller_to_physical(axis, raw_value))
-        except (TypeError, ValueError, OverflowError):
-            continue
-        if math.isfinite(physical_value):
-            values[axis] = physical_value
-    return PhysicalMachinePose(values) if values else None
 
 
 def stage_xy_from_position(position: object | None) -> tuple[float, float] | None:
@@ -135,6 +101,10 @@ def seed_motion_prediction_position(
 def publish_stage_position_estimate(
     owner: StagePositionUpdateOwner,
     position: tuple[float, ...] | None,
+    *,
+    physical_machine_pose: PhysicalMachinePose | None = None,
+    motion_coordinate_snapshot: object = _CONTROLLER_CACHE_UNSET,
+    homed_axes: object = _CONTROLLER_CACHE_UNSET,
 ) -> None:
     stage_xy = stage_xy_from_position(position)
     design_stage_xy = (
@@ -143,9 +113,11 @@ def publish_stage_position_estimate(
         else None
     )
     stage_position_panel.update_stage_position_display(owner, position)
-    coordinate_flow.observe_coordinate_authority(
+    _observe_coordinate_authority(
         owner,
-        getattr(owner, "_latest_physical_machine_pose", None),
+        physical_machine_pose or owner._stage_motion.snapshot().physical_machine_pose,
+        motion_coordinate_snapshot=motion_coordinate_snapshot,
+        homed_axes=homed_axes,
     )
     owner._update_coordinate_display(center_xy=design_stage_xy)
     owner._update_design_position(design_stage_xy)
@@ -161,11 +133,6 @@ def preferred_design_stage_xy(
     stage_xy = owner._manual_jog_prediction.predicted_stage_xy(time.monotonic())
     if stage_xy is not None:
         return stage_xy
-    if (
-        owner._planned_move_started_at is not None
-        and owner._planned_move_stage_xy is not None
-    ):
-        return owner._planned_move_stage_xy
     stage_xy = owner._manual_jog_prediction.resolve_waiting_stage_xy(
         now=time.monotonic(),
         latest_state=owner.stage_controller.latest_stage_state(),
@@ -173,20 +140,9 @@ def preferred_design_stage_xy(
     )
     if stage_xy is not None:
         return stage_xy
-    if owner._planned_move_waiting_for_fresh_status:
-        last_status_timestamp = owner.stage_controller.last_status_timestamp()
-        if (
-            last_status_timestamp is not None
-            and owner._planned_move_stop_status_timestamp is not None
-            and last_status_timestamp > owner._planned_move_stop_status_timestamp
-        ):
-            owner._planned_move_waiting_for_fresh_status = False
-            owner._planned_move_stop_status_timestamp = None
-        elif owner._planned_move_stage_xy is not None:
-            return owner._planned_move_stage_xy
-        else:
-            owner._planned_move_waiting_for_fresh_status = False
-            owner._planned_move_stop_status_timestamp = None
+    presented_stage_xy = owner._stage_motion.snapshot().presented_stage_xy
+    if presented_stage_xy is not None:
+        return presented_stage_xy
     latest = owner.stage_controller.latest_stage_position()
     if (
         latest is None
@@ -204,49 +160,58 @@ def preferred_design_display_stage_xy(
     if stage_xy is not None:
         return stage_xy
     latest = owner.stage_controller.latest_stage_position()
-    if (
-        owner._can_display_design_position()
-        and latest is not None
-        and len(latest) >= 2
-    ):
+    if owner._can_display_design_position() and latest is not None and len(latest) >= 2:
         try:
             return (float(latest[0]), float(latest[1]))
         except (TypeError, ValueError):
             return None
     return (
-        owner._current_design_stage_xy
-        if owner._can_display_design_position()
-        else None
+        owner._current_design_stage_xy if owner._can_display_design_position() else None
     )
 
 
 def on_stage_position_changed(
     owner: StagePositionUpdateOwner,
     position: object,
+    *,
+    physical_machine_pose: PhysicalMachinePose | None = None,
+    motion_coordinate_snapshot: object = _CONTROLLER_CACHE_UNSET,
+    stage_state: object = _CONTROLLER_CACHE_UNSET,
+    homed_axes: object = _CONTROLLER_CACHE_UNSET,
+    last_jog_write_timestamp: object = _CONTROLLER_CACHE_UNSET,
 ) -> None:
+    physical_pose = (
+        physical_machine_pose
+        if physical_machine_pose is not None
+        else owner._stage_motion.snapshot().physical_machine_pose
+    )
     if not isinstance(position, tuple) or len(position) < 2:
-        owner._latest_physical_machine_pose = PhysicalMachinePose({})
         stage_position_panel.update_stage_position_display(owner, position)
-        coordinate_flow.observe_coordinate_authority(
+        _observe_coordinate_authority(
             owner,
-            owner._latest_physical_machine_pose,
+            physical_pose,
+            motion_coordinate_snapshot=motion_coordinate_snapshot,
+            homed_axes=homed_axes,
         )
         return
-    owner._latest_physical_machine_pose = (
-        physical_machine_pose_from_controller(
-            owner.stage_controller,
-            owner.STAGE_AXIS_NAMES,
-        )
-        or PhysicalMachinePose({})
-    )
     logger.debug("TIMING stage_position_changed position=%s", position)
     current_position = design_navigation.coerce_position_tuple(position)
     if current_position is not None:
         design_workspace.maybe_restore_persisted_design(owner, current_position)
     now = time.monotonic()
-    latest_state = (owner.stage_controller.latest_stage_state() or "").lower()
-    xy_homed = owner.stage_controller.axes_are_homed({"X", "Y"})
-    xyz_homed = owner.stage_controller.axes_are_homed({"X", "Y", "Z"})
+    latest_state = (
+        owner.stage_controller.latest_stage_state()
+        if stage_state is _CONTROLLER_CACHE_UNSET
+        else stage_state
+    )
+    latest_state = str(latest_state or "").lower()
+    if homed_axes is _CONTROLLER_CACHE_UNSET:
+        xy_homed = owner.stage_controller.axes_are_homed({"X", "Y"})
+        xyz_homed = owner.stage_controller.axes_are_homed({"X", "Y", "Z"})
+    else:
+        observed_homed_axes = frozenset(homed_axes or ())
+        xy_homed = {"X", "Y"}.issubset(observed_homed_axes)
+        xyz_homed = {"X", "Y", "Z"}.issubset(observed_homed_axes)
     manual_prediction_available = owner._manual_jog_prediction.prediction_available(now)
     coordinate_snapshot = owner._coordinate_system_coordinator.snapshot()
     signal_plan = _build_stage_position_signal_plan(
@@ -256,9 +221,7 @@ def on_stage_position_changed(
         xy_homed=xy_homed,
         xyz_homed=xyz_homed,
         manual_prediction_available=manual_prediction_available,
-        registration_valid=(
-            coordinate_snapshot.registration.registration_valid
-        ),
+        registration_valid=(coordinate_snapshot.registration.registration_valid),
     )
     if signal_plan.status.mark_coordinate_move_active:
         owner._coordinate_targets.seen_active_state = True
@@ -267,9 +230,17 @@ def on_stage_position_changed(
             signal_plan.status.contact_calibration_position
         )
     center_xy = signal_plan.status.center_xy
-    _track_b_axis_position(owner, signal_plan)
     if signal_plan.status.use_unhomed_fallback:
-        _apply_unhomed_fallback(owner, position, signal_plan, center_xy, latest_state)
+        _apply_unhomed_fallback(
+            owner,
+            position,
+            signal_plan,
+            center_xy,
+            latest_state,
+            physical_machine_pose=physical_pose,
+            motion_coordinate_snapshot=motion_coordinate_snapshot,
+            homed_axes=homed_axes,
+        )
         return
     if signal_plan.defer_manual_jog_stop_sample:
         logger.debug(
@@ -277,15 +248,25 @@ def on_stage_position_changed(
             owner._format_optional_point(center_xy),
             latest_state,
         )
-        coordinate_flow.observe_coordinate_authority(
+        _observe_coordinate_authority(
             owner,
-            owner._latest_physical_machine_pose,
+            physical_pose,
+            motion_coordinate_snapshot=motion_coordinate_snapshot,
+            homed_axes=homed_axes,
         )
         return
-    if _ignore_manual_idle_sample(owner, center_xy, now, latest_state):
-        coordinate_flow.observe_coordinate_authority(
+    if _ignore_manual_idle_sample(
+        owner,
+        center_xy,
+        now,
+        latest_state,
+        last_jog_write_timestamp=last_jog_write_timestamp,
+    ):
+        _observe_coordinate_authority(
             owner,
-            owner._latest_physical_machine_pose,
+            physical_pose,
+            motion_coordinate_snapshot=motion_coordinate_snapshot,
+            homed_axes=homed_axes,
         )
         return
     center_xy = _reconciled_stage_xy(owner, signal_plan, center_xy, latest_state)
@@ -302,13 +283,20 @@ def on_stage_position_changed(
         now,
         latest_state,
     )
-    publish_stage_position_estimate(owner, display_position)
+    publish_stage_position_estimate(
+        owner,
+        display_position,
+        physical_machine_pose=physical_pose,
+        motion_coordinate_snapshot=motion_coordinate_snapshot,
+        homed_axes=homed_axes,
+    )
     if latest_state == "idle":
         stage_move_lifecycle.finish_coordinate_move_if_idle(
             owner,
             display_position,
             monotonic_s=time.monotonic(),
             schedule_single_shot=QTimer.singleShot,
+            latest_stage_state=latest_state,
         )
         stage_position_panel.clear_stage_motion_axes(owner)
 
@@ -335,17 +323,15 @@ def _build_stage_position_signal_plan(
             if not xy_homed and not manual_prediction_available
             else False
         ),
-        last_reported_b_position=owner._last_reported_b_position,
+        last_reported_b_position=None,
         tolerance_deg=owner.B_POSITION_CHANGE_TOLERANCE_DEG,
         pending_alignment_preparation=owner._pending_alignment_preparation,
         registration_valid=registration_valid,
         manual_jog_stage_position=owner._manual_jog_prediction.stage_position,
         coordinate_move_stage_position=owner._coordinate_targets.stage_position,
-        planned_move_started_at=owner._planned_move_started_at,
-        planned_move_waiting_for_fresh_status=(
-            owner._planned_move_waiting_for_fresh_status
-        ),
-        planned_move_stage_xy=owner._planned_move_stage_xy,
+        planned_move_started_at=None,
+        planned_move_waiting_for_fresh_status=False,
+        planned_move_stage_xy=None,
         manual_jog_waiting_for_fresh_status=(
             owner._manual_jog_prediction.waiting_for_fresh_status
         ),
@@ -360,27 +346,27 @@ def _build_stage_position_signal_plan(
     )
 
 
-def _track_b_axis_position(owner: StagePositionUpdateOwner, signal_plan: Any) -> None:
-    if signal_plan.b_axis.current_b is not None:
-        owner._last_reported_b_position = signal_plan.b_axis.current_b
-
-
 def _apply_unhomed_fallback(
     owner: StagePositionUpdateOwner,
     position: object,
     signal_plan: Any,
     center_xy: tuple[float, float],
     latest_state: str,
+    *,
+    physical_machine_pose: PhysicalMachinePose,
+    motion_coordinate_snapshot: object,
+    homed_axes: object,
 ) -> None:
     _ = center_xy
     stage_position_panel.update_stage_position_display(owner, position)
-    coordinate_flow.observe_coordinate_authority(
+    _observe_coordinate_authority(
         owner,
-        owner._latest_physical_machine_pose,
+        physical_machine_pose,
+        motion_coordinate_snapshot=motion_coordinate_snapshot,
+        homed_axes=homed_axes,
     )
     owner._manual_jog_prediction.stage_position = None
     owner._manual_jog_prediction.stage_xy = None
-    owner._planned_move_stage_xy = None
     owner._update_coordinate_display(center_xy=None)
     owner._update_design_position(signal_plan.status.unhomed_design_position)
     if latest_state == "idle":
@@ -389,6 +375,7 @@ def _apply_unhomed_fallback(
             position,
             monotonic_s=time.monotonic(),
             schedule_single_shot=QTimer.singleShot,
+            latest_stage_state=latest_state,
         )
         stage_position_panel.clear_stage_motion_axes(owner)
 
@@ -398,12 +385,17 @@ def _ignore_manual_idle_sample(
     center_xy: tuple[float, float],
     now: float,
     latest_state: str,
+    *,
+    last_jog_write_timestamp: object,
 ) -> bool:
+    observed_jog_timestamp = last_jog_write_timestamp
+    if observed_jog_timestamp is _CONTROLLER_CACHE_UNSET:
+        observed_jog_timestamp = owner.stage_controller.last_jog_write_timestamp()
     ignore_result = owner._manual_jog_prediction.ignore_idle_status_sample(
         actual_stage_xy=center_xy,
         now=now,
         latest_state=latest_state,
-        last_jog_write_timestamp=owner.stage_controller.last_jog_write_timestamp(),
+        last_jog_write_timestamp=observed_jog_timestamp,
     )
     if not ignore_result.ignore:
         return False
@@ -414,6 +406,25 @@ def _ignore_manual_idle_sample(
         ignore_result.state,
     )
     return True
+
+
+def _observe_coordinate_authority(
+    owner: StagePositionUpdateOwner,
+    physical_machine_pose: PhysicalMachinePose,
+    *,
+    motion_coordinate_snapshot: object,
+    homed_axes: object,
+) -> None:
+    observation_facts = {}
+    if motion_coordinate_snapshot is not _CONTROLLER_CACHE_UNSET:
+        observation_facts["machine_snapshot"] = motion_coordinate_snapshot
+    if homed_axes is not _CONTROLLER_CACHE_UNSET:
+        observation_facts["homed_axes"] = homed_axes
+    coordinate_flow.observe_coordinate_authority(
+        owner,
+        physical_machine_pose,
+        **observation_facts,
+    )
 
 
 def _reconciled_stage_xy(
@@ -460,13 +471,8 @@ def _update_position_prediction_state(
 ) -> None:
     owner._manual_jog_prediction.stage_position = display_position
     owner._manual_jog_prediction.stage_xy = center_xy
-    if not signal_plan.prediction.planned_move_active:
-        owner._planned_move_stage_xy = center_xy
     if owner._manual_jog_prediction.waiting_for_fresh_status and latest_state == "idle":
         _learn_manual_stop_tail(owner, signal_plan, display_position)
-    if owner._planned_move_waiting_for_fresh_status:
-        owner._planned_move_waiting_for_fresh_status = False
-        owner._planned_move_stop_status_timestamp = None
     if owner._manual_jog_prediction.prediction_active(now):
         owner._manual_jog_prediction.last_timestamp = now
 
@@ -495,7 +501,6 @@ def _learn_manual_stop_tail(
 
 __all__ = [
     "on_stage_position_changed",
-    "physical_machine_pose_from_controller",
     "position_with_stage_xy",
     "preferred_design_display_stage_xy",
     "preferred_design_stage_xy",

@@ -19,7 +19,11 @@ from probe_station_gui.stage.jog_commands import (
     move_vector_from_jog_command,
     relative_jog_command_to_absolute,
 )
-from probe_station_gui.stage.types import MoveVector, _QueuedSerialWrite
+from probe_station_gui.stage.types import (
+    MoveVector,
+    StageMotionResetReason,
+    _QueuedSerialWrite,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -55,7 +59,9 @@ class StageControllerJogQueueMixin:
         """Queue the latest jog command for asynchronous serial delivery."""
 
         if self.is_busy():
-            raise StageControllerError("Stage is busy. Wait for the current operation to finish.")
+            raise StageControllerError(
+                "Stage is busy. Wait for the current operation to finish."
+            )
         stripped = command.strip()
         if not stripped:
             return
@@ -92,7 +98,9 @@ class StageControllerJogQueueMixin:
 
         active_busy = self.is_busy()
         if active_busy and not replace_active:
-            raise StageControllerError("Stage is busy. Wait for the current operation to finish.")
+            raise StageControllerError(
+                "Stage is busy. Wait for the current operation to finish."
+            )
         normalized: dict[str, float] = {}
         for raw_axis, raw_value in targets.items():
             axis = str(raw_axis).upper().strip()
@@ -500,6 +508,10 @@ class StageControllerJogQueueMixin:
 
         with self._state_lock:
             self._clear_unverified_controller_state_locked()
+        self._publish_cached_stage_position(
+            None,
+            reset_reason=StageMotionResetReason.CONNECTION_CHANGED,
+        )
         self._async_write_queue.put(
             _QueuedSerialWrite(
                 priority=self.SERIAL_PRIORITY_SOFT_RESET,

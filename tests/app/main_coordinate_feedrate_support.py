@@ -9,6 +9,7 @@ from tests.app.import_reset import restore_real_imports_for_main
 restore_real_imports_for_main()
 import main as main_module
 from main import Main
+from probe_station_gui.coordinates.model import PhysicalMachinePose
 from probe_station_gui.design.contact_navigation import api_route_adjusted_stage_xy
 from probe_station_gui.dialogs.route_measurement_dialog import (
     RouteMeasurementDialog,
@@ -133,6 +134,21 @@ class _FakeSignal:
 
     def emit(self, message: str) -> None:
         self.messages.append(str(message))
+
+
+class _FakeStageMotion:
+    def __init__(self) -> None:
+        self.physical_machine_pose = PhysicalMachinePose.from_mapping({})
+        self.cancel_planned_calls = 0
+
+    def snapshot(self) -> object:
+        return types.SimpleNamespace(
+            physical_machine_pose=self.physical_machine_pose,
+        )
+
+    def cancel_planned_xy_move(self) -> bool:
+        self.cancel_planned_calls += 1
+        return True
 
 
 class _FakeThread:
@@ -674,12 +690,9 @@ def _make_main(
     window._stage_axis_base_styles = {}
     window._stage_limit_axes = set()
     window._coordinate_targets = _coordinate_target_state()
+    window._stage_motion = _FakeStageMotion()
     window._pending_homing_axes = []
     window._microscope_interaction = _FakeMicroscopeInteraction()
-    window._pending_planned_move_target_xy = None
-    window._pending_planned_move_source_label = None
-    window._planned_move_started_at = None
-    window._planned_move_waiting_for_fresh_status = False
     window._pending_alignment_preparation = None
     window._pending_quick_alignment_rotation = False
     window._current_design_stage_xy = None
@@ -722,7 +735,6 @@ def _make_main(
     window._stage_motion_blink_dimmed = False
     window._stage_motion_blink_timer = timer
     window._update_stage_coordinate_apply_state = lambda: None
-    window._clear_planned_move_prediction = lambda *, clear_wait_state: None
     window._schedule_status_refreshes = lambda _delays: None
     window._schedule_cancel_state_refresh = lambda: None
     window._show_status = lambda message, _timeout_ms=None: statuses.append(

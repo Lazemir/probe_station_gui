@@ -7,7 +7,9 @@ from typing import Any, Protocol
 
 from PySide6.QtCore import QTimer
 
-from probe_station_gui.views import main_window_stage_position_panel as stage_position_panel
+from probe_station_gui.views import (
+    main_window_stage_position_panel as stage_position_panel,
+)
 
 
 VALID_HOME_AXES = {"X", "Y", "Z", "A"}
@@ -18,9 +20,7 @@ class MainWindowHomingOwner(Protocol):
     STAGE_AXIS_NAMES: tuple[str, ...]
     _stage_limit_axes: set[str]
     _manual_jog_prediction: Any
-    _planned_move_stage_xy: tuple[float, float] | None
-    _planned_move_started_at: float | None
-    _planned_move_waiting_for_fresh_status: bool
+    _stage_motion: Any
     _pending_homing_axes: list[str]
     _homing_active_key: str | None
     _coordinate_targets: Any
@@ -48,20 +48,16 @@ def on_homing_status_changed(
     _homed_axes: object,
 ) -> None:
     predicted_position = _manual_jog_predicted_position(owner)
+    motion = owner._stage_motion.snapshot()
     if predicted_position is not None:
         display_position = predicted_position
-    elif (
-        owner._planned_move_stage_xy is not None
-        and (
-            owner._planned_move_started_at is not None
-            or owner._planned_move_waiting_for_fresh_status
-        )
+    elif motion.planned_stage_xy is not None and (
+        motion.planned_prediction_active or motion.planned_waiting_for_fresh_status
     ):
         from probe_station_gui.stage.position_update import position_with_stage_xy
 
-        display_position = position_with_stage_xy(
-            owner,
-            owner._planned_move_stage_xy,
+        display_position = motion.presented_position or position_with_stage_xy(
+            owner, motion.planned_stage_xy
         )
     else:
         display_position = owner.stage_controller.latest_stage_position()
