@@ -243,7 +243,9 @@ class _MainStatusCoordinateUiMixin:
 
     def _cancel_stage_coordinate_action(self, *, focus_reason: object) -> None:
         cancelled_any = self._cancel_pending_stage_ui_intents()
-        cancelled_any = self._cancel_route_measurement_for_stage_action() or cancelled_any
+        cancelled_any = (
+            self._cancel_route_measurement_for_stage_action() or cancelled_any
+        )
         cancelled_any = self._cancel_background_stage_operations() or cancelled_any
         outcome = self._stage_motion.cancel_stage_motion()
         if outcome.stage_motion_cancelled:

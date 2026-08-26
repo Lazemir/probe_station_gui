@@ -402,8 +402,10 @@ class _MainAlignmentMixin:
         preparation = correlation.preparation
         if preparation is not None:
             if completion.success:
-                transition = self._coordinate_system_coordinator.apply_registration_alignment(
-                    RegistrationAlignmentRequest(preparation)
+                transition = (
+                    self._coordinate_system_coordinator.apply_registration_alignment(
+                        RegistrationAlignmentRequest(preparation)
+                    )
                 )
                 coordinate_flow.apply_coordinate_transition(self, transition)
                 self._finish_alignment_draft()

@@ -346,9 +346,15 @@ def test_application_cancelability_excludes_session_motion_state() -> None:
     owner = _Owner()
     owner._stage_motion.coordinate_active = True
 
-    assert _MainStatusCoordinateUiMixin._has_application_cancelable_operation(owner) is False
+    assert (
+        _MainStatusCoordinateUiMixin._has_application_cancelable_operation(owner)
+        is False
+    )
     owner._microscope_interaction.has_pending_move = True
-    assert _MainStatusCoordinateUiMixin._has_application_cancelable_operation(owner) is True
+    assert (
+        _MainStatusCoordinateUiMixin._has_application_cancelable_operation(owner)
+        is True
+    )
 
 
 def test_coordinate_cancel_has_priority_over_generic_busy_task() -> None:
