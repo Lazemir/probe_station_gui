@@ -430,11 +430,13 @@ def test_application_consumers_use_typed_session_boundary() -> None:
     api_source = inspect.getsource(
         api_stage_contact._MainApiStageContactMixin._interrupt_api_route_controlled_operation
     )
-    cancel_source = inspect.getsource(move_lifecycle._cancel_controller_activity)
+    cancel_source = inspect.getsource(move_lifecycle.cancel_stage_coordinate_action)
     assert "owner._stage_motion.on_manual_jog_command" in manual_wiring_source
     assert "owner._stage_motion.on_manual_jog_stopped" in manual_wiring_source
     assert "self._stage_motion.cancel_planned_xy_move()" in api_source
-    assert "owner._stage_motion.cancel_planned_xy_move()" in cancel_source
+    assert "owner._stage_motion.cancel_stage_motion()" in cancel_source
+    assert "cancel_active_motion" not in cancel_source
+    assert "cancel_active_task" not in cancel_source
     assert "_clear_planned_move_prediction" not in (
         manual_wiring_source + api_source + cancel_source
     )

@@ -330,9 +330,11 @@ def test_on_serial_disconnected_preserves_detach_cleanup_order(monkeypatch) -> N
         ("serial_close", "COM9"),
         ("save_serial", False, "", 0),
     ]
-    reset_event = ("stage_motion_reset", StageMotionResetReason.CONNECTION_CHANGED)
+    reset_event = ("stage_motion_reset", StageMotionResetReason.DISCONNECT)
     assert reset_event in events
     assert events.index(("save_serial", False, "", 0)) < events.index(reset_event)
+    assert events.index(("stage_set_serial", None)) < events.index(reset_event)
+    assert events.index(reset_event) < events.index(("stage_display", None))
     assert ("stage_set_serial", None) in events
     assert ("serial_panel", "external_disconnect", True) in events
     assert ("joystick", None) in events

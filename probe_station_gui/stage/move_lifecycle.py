@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Protocol
+from typing import Any
 
 from probe_station_gui.coordinates.coordinator_model import (
     RegistrationAlignmentRequest,
 )
-from probe_station_gui.stage.exact_step import ExactStepClearReason
 from probe_station_gui.views import main_window_homing as homing_ui
 from probe_station_gui.views import (
     main_window_stage_position_panel as stage_position_panel,
@@ -18,78 +17,22 @@ from probe_station_gui.views import (
 logger = logging.getLogger("main")
 
 
-class ClickMoveLifecycle(Protocol):
-    @property
-    def has_pending_move(self) -> bool: ...
-
-    def cancel_pending(self, *, clear_target: bool) -> None: ...
-    def finish_move(self, *, success: bool) -> None: ...
-    def clear_target(self) -> None: ...
-
-
-class StageMoveLifecycleOwner(Protocol):
-    MANUAL_JOG_SETTLE_POLL_DELAYS_MS: tuple[int, ...]
-    _microscope_interaction: ClickMoveLifecycle
-    _manual_alignment_pick_slot: Any
-    _pending_alignment_preparation: Any
-    _pending_quick_alignment_rotation: bool
-    _pending_homing_axes: Any
-    _homing_active_key: Any
-    _route_run_execution: Any
-    _microscope_scan_stop_requested: Any
-    _stage_motion: Any
-    _coordinate_system_coordinator: Any
-    design_navigator_panel: Any
-    microscope_scan_dialog: Any
-    surface_map_window: Any
-    view: Any
-    stage_controller: Any
-
-    def _controller_reports_active_motion(self) -> bool: ...
-    def _surface_map_capture_running(self) -> bool: ...
-    def _microscope_scan_running(self) -> bool: ...
-    def _sample_handling_active(self) -> bool: ...
-    def _cancel_manual_alignment_pick(self) -> None: ...
-    def _schedule_status_refreshes(self, delays_ms: tuple[int, ...]) -> None: ...
-    def _schedule_cancel_state_refresh(self) -> None: ...
-    def _show_status(self, message: str, timeout_ms: int = 0) -> None: ...
-    def _set_design_snap_enabled(self, enabled: bool) -> None: ...
-    def _refresh_design_panel(self) -> None: ...
-    def _refresh_design_position(self) -> None: ...
-    def _collapse_alignment_panel_if_ready(self) -> None: ...
-    def _collapse_alignment_panel_if_design_open(self) -> None: ...
-    def _finish_alignment_draft(self) -> None: ...
-    def _update_stage_coordinate_apply_state(self) -> None: ...
-
-
-def has_cancelable_operation(owner: StageMoveLifecycleOwner) -> bool:
+def has_application_cancelable_operation(owner: Any) -> bool:
     return (
-        _stage_motion_cancelable(owner)
-        or _threaded_operation_active(owner)
+        _threaded_operation_active(owner)
         or _capture_or_sample_active(owner)
         or _pending_ui_intent_active(owner)
     )
 
 
-def _stage_motion_cancelable(owner: StageMoveLifecycleOwner) -> bool:
-    controller_busy = (
-        hasattr(owner, "stage_controller") and owner.stage_controller.is_busy()
-    )
-    return (
-        owner._stage_motion.snapshot().coordinate_active
-        or controller_busy
-        or owner._controller_reports_active_motion()
-    )
-
-
-def _threaded_operation_active(owner: StageMoveLifecycleOwner) -> bool:
+def _threaded_operation_active(owner: Any) -> bool:
     return (
         _thread_is_alive(getattr(owner, "_route_contact_move_thread", None))
         or owner._route_run_execution.snapshot().thread_alive
     )
 
 
-def _capture_or_sample_active(owner: StageMoveLifecycleOwner) -> bool:
+def _capture_or_sample_active(owner: Any) -> bool:
     return (
         owner._surface_map_capture_running()
         or owner._microscope_scan_running()
@@ -97,7 +40,7 @@ def _capture_or_sample_active(owner: StageMoveLifecycleOwner) -> bool:
     )
 
 
-def _pending_ui_intent_active(owner: StageMoveLifecycleOwner) -> bool:
+def _pending_ui_intent_active(owner: Any) -> bool:
     return (
         owner._manual_alignment_pick_slot is not None
         or owner._microscope_interaction.has_pending_move
@@ -109,35 +52,38 @@ def _pending_ui_intent_active(owner: StageMoveLifecycleOwner) -> bool:
 
 
 def cancel_stage_coordinate_action(
-    owner: StageMoveLifecycleOwner,
+    owner: Any,
     *,
     focus_reason: object,
 ) -> None:
-    owner._stage_motion.clear_exact_steps(ExactStepClearReason.CANCEL_REQUESTED)
     cancelled_any = _cancel_pending_ui_intents(owner)
     cancelled_any = _cancel_route_measurement(owner) or cancelled_any
     cancelled_any = _cancel_background_captures(owner) or cancelled_any
-    if _cancel_active_coordinate_move(owner, focus_reason=focus_reason):
-        return
-    cancelled_any = _cancel_controller_activity(owner) or cancelled_any
-    cleared_edits = owner._stage_motion.clear_pending_coordinate_edits()
+    outcome = owner._stage_motion.cancel_stage_motion()
+    if outcome.stage_motion_cancelled:
+        stage_position_panel.clear_stage_motion_axes(owner)
     panel = getattr(owner, "_stage_position_panel", None)
-    if cleared_edits and panel is not None:
+    if outcome.pending_edits_cleared and panel is not None:
         panel.clear_pending_targets(owner._stage_axis_display_values)
-    if cleared_edits:
+    if outcome.coordinate_priority:
+        owner.view.setFocus(focus_reason)
+        owner._schedule_cancel_state_refresh()
+        return
+    cancelled_any = outcome.stage_motion_cancelled or cancelled_any
+    if outcome.pending_edits_cleared:
         owner.view.setFocus(focus_reason)
     if cancelled_any:
         owner.view.setFocus(focus_reason)
         owner._show_status("Cancel requested.", 3000)
         owner._schedule_cancel_state_refresh()
         return
-    if cleared_edits:
+    if outcome.pending_edits_cleared:
         owner._show_status("Cleared pending coordinate edits.", 2000)
         owner._schedule_cancel_state_refresh()
 
 
 def on_move_finished(
-    owner: StageMoveLifecycleOwner,
+    owner: Any,
     success: bool,
     message: str,
 ) -> None:
@@ -155,7 +101,7 @@ def _thread_is_alive(thread: object | None) -> bool:
     return thread is not None and thread.is_alive()
 
 
-def _cancel_pending_ui_intents(owner: StageMoveLifecycleOwner) -> bool:
+def _cancel_pending_ui_intents(owner: Any) -> bool:
     cancelled_any = False
     if owner._microscope_interaction.has_pending_move:
         owner._microscope_interaction.cancel_pending(clear_target=True)
@@ -175,7 +121,7 @@ def _cancel_pending_ui_intents(owner: StageMoveLifecycleOwner) -> bool:
     return cancelled_any
 
 
-def _cancel_route_measurement(owner: StageMoveLifecycleOwner) -> bool:
+def _cancel_route_measurement(owner: Any) -> bool:
     runner = owner._route_run_execution.snapshot().runner
     if runner is None:
         return False
@@ -188,7 +134,7 @@ def _cancel_route_measurement(owner: StageMoveLifecycleOwner) -> bool:
     return True
 
 
-def _cancel_background_captures(owner: StageMoveLifecycleOwner) -> bool:
+def _cancel_background_captures(owner: Any) -> bool:
     cancelled_any = False
     if owner._surface_map_capture_running():
         try:
@@ -204,43 +150,8 @@ def _cancel_background_captures(owner: StageMoveLifecycleOwner) -> bool:
     return cancelled_any
 
 
-def _cancel_active_coordinate_move(
-    owner: StageMoveLifecycleOwner,
-    *,
-    focus_reason: object,
-) -> bool:
-    if not owner._stage_motion.snapshot().coordinate_active:
-        return False
-    owner._stage_motion.cancel_coordinate_move()
-    stage_position_panel.clear_stage_motion_axes(owner)
-    panel = getattr(owner, "_stage_position_panel", None)
-    if panel is not None:
-        panel.clear_pending_targets(owner._stage_axis_display_values)
-    owner.view.setFocus(focus_reason)
-    owner._schedule_status_refreshes(owner.MANUAL_JOG_SETTLE_POLL_DELAYS_MS)
-    owner._schedule_cancel_state_refresh()
-    return True
-
-
-def _cancel_controller_activity(owner: StageMoveLifecycleOwner) -> bool:
-    cancelled_any = False
-    if owner._controller_reports_active_motion():
-        owner.stage_controller.cancel_active_motion("Motion cancel requested.")
-        stage_position_panel.clear_stage_motion_axes(owner)
-        owner._stage_motion.cancel_planned_xy_move()
-        cancelled_any = True
-        owner._schedule_status_refreshes(owner.MANUAL_JOG_SETTLE_POLL_DELAYS_MS)
-    if owner.stage_controller.is_busy():
-        owner.stage_controller.cancel_active_task("Operation cancel requested.")
-        stage_position_panel.clear_stage_motion_axes(owner)
-        owner._stage_motion.cancel_planned_xy_move()
-        cancelled_any = True
-        owner._schedule_status_refreshes(owner.MANUAL_JOG_SETTLE_POLL_DELAYS_MS)
-    return cancelled_any
-
-
 def _finish_pending_alignment_preparation(
-    owner: StageMoveLifecycleOwner,
+    owner: Any,
     success: bool,
     message: str,
 ) -> bool:
@@ -278,7 +189,7 @@ def _finish_pending_alignment_preparation(
 
 
 def _finish_quick_alignment_rotation(
-    owner: StageMoveLifecycleOwner,
+    owner: Any,
     success: bool,
 ) -> None:
     if not owner._pending_quick_alignment_rotation:
@@ -289,7 +200,7 @@ def _finish_quick_alignment_rotation(
 
 
 def _finish_target_cross(
-    owner: StageMoveLifecycleOwner,
+    owner: Any,
     success: bool,
 ) -> None:
     owner._microscope_interaction.finish_move(success=success)
@@ -299,6 +210,6 @@ def _finish_target_cross(
 
 __all__ = [
     "cancel_stage_coordinate_action",
-    "has_cancelable_operation",
+    "has_application_cancelable_operation",
     "on_move_finished",
 ]

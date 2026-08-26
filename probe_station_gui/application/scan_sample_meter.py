@@ -351,7 +351,10 @@ class _MainScanSampleMeterMixin:
             action,
             stage_ready=self._stage_serial_ready(),
             sample_active=self._sample_handling_active(),
-            cancelable_operation=stage_move_lifecycle.has_cancelable_operation(self),
+            cancelable_operation=bool(
+                self._stage_motion.snapshot().cancelable
+                or stage_move_lifecycle.has_application_cancelable_operation(self)
+            ),
         )
         if not decision.accepted:
             self._show_status(decision.status_message, 4000)

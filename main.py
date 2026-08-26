@@ -392,7 +392,6 @@ class Main(
     TERMINAL_REFRESH_DELAYS_MS = (180, 500)
     TERMINAL_RESET_REFRESH_DELAYS_MS = (500, 1100, 1800)
     TERMINAL_RESUME_AFTER_JOG_MS = 180
-    CONTROLLER_ACTIVE_STATE_STALE_S = 2.0
     STAGE_AXIS_NAMES = ("X", "Y", "Z", "A", "B", "C")
     MIN_FEEDRATE_MM_MIN = 1.0
     STAGE_AXIS_DIMMED_BACKGROUNDS = {
@@ -855,7 +854,7 @@ class Main(
             Qt.ConnectionType.QueuedConnection,
         )
         self._stage_motion.action_state_changed.connect(
-            lambda _state: self._update_stage_coordinate_apply_state(),
+            self._update_stage_coordinate_apply_state,
             Qt.ConnectionType.QueuedConnection,
         )
         self._stage_motion.status_requested.connect(

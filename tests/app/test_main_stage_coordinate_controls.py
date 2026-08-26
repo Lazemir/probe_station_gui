@@ -20,6 +20,10 @@ from tests.app.main_route_session_support import (
 )
 from probe_station_gui.stage import move_lifecycle as stage_move_lifecycle
 from probe_station_gui.stage import position_update as stage_position_update
+from probe_station_gui.application.stage_motion_types import (
+    StageMotionActionState,
+    StageMotionConfig,
+)
 from probe_station_gui.settings.axis_calibration_config import (
     AxisCalibrationSettings,
     default_axis_calibrations,
@@ -541,7 +545,7 @@ class MainStageCoordinateControlsTest(unittest.TestCase):
                 "message": "Stage is busy. Ignoring API coordinate target.",
             },
         )
-        stage_controller.is_busy.assert_called_once_with()
+        self.assertEqual(stage_controller.is_busy.call_count, 2)
 
     def test_api_move_to_coordinates_returns_start_failure_response(self) -> None:
         window, stage_controller, _joystick, _timer, _statuses = _make_main(77.0)
@@ -1000,7 +1004,7 @@ class MainStageCoordinateControlsTest(unittest.TestCase):
         window, stage_controller, cancel_button, _statuses = _make_cancel_main()
         stage_controller.latest_state = "Jog"
         stage_controller.last_status_time = (
-            time.monotonic() - Main.CONTROLLER_ACTIVE_STATE_STALE_S - 0.5
+            time.monotonic() - StageMotionConfig.controller_active_state_stale_s - 0.5
         )
 
         Main._update_stage_coordinate_apply_state(window)
@@ -1027,12 +1031,32 @@ class MainStageCoordinateControlsTest(unittest.TestCase):
 
         with mock.patch.object(
             stage_move_lifecycle,
-            "has_cancelable_operation",
+            "has_application_cancelable_operation",
             return_value=True,
         ):
             Main._update_stage_coordinate_apply_state(window)
 
         self.assertEqual(panel.action_button_states[-1], (True, True))
+
+    def test_pending_edit_action_state_keeps_apply_and_cancel_enabled(self) -> None:
+        window, _controller, _cancel_button, _statuses = _make_cancel_main()
+        window._stage_position_panel.pending_targets["X"] = (5.0, 5.0)
+
+        Main._update_stage_coordinate_apply_state(
+            window,
+            StageMotionActionState(
+                active_axes=frozenset(),
+                cancelable=True,
+                coordinate_active=False,
+                planned_pending=False,
+                planned_active=False,
+            ),
+        )
+
+        self.assertEqual(
+            window._stage_position_panel.action_button_states[-1],
+            (True, True),
+        )
 
     def test_cancel_button_cancels_generic_busy_stage_task(self) -> None:
         window, stage_controller, _cancel_button, statuses = _make_cancel_main()
@@ -1077,7 +1101,7 @@ class MainStageCoordinateControlsTest(unittest.TestCase):
         window, stage_controller, _cancel_button, _statuses = _make_cancel_main()
         stage_controller.latest_state = "Jog"
         stage_controller.last_status_time = (
-            time.monotonic() - Main.CONTROLLER_ACTIVE_STATE_STALE_S - 0.5
+            time.monotonic() - StageMotionConfig.controller_active_state_stale_s - 0.5
         )
         window._refresh_pending_homing_ui = lambda: None
 

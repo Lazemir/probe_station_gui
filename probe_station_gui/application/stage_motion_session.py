@@ -9,6 +9,9 @@ from PySide6.QtCore import QObject, QThread, QTimer, Signal, Slot
 from probe_station_gui.application.stage_motion_settle_polls import (
     _StageMotionSettleStatusPolls,
 )
+from probe_station_gui.application.stage_motion_cancellation import (
+    StageMotionCancellation,
+)
 from probe_station_gui.application.stage_position_state import StagePositionState
 from probe_station_gui.application import stage_motion_types as motion_types
 from probe_station_gui.stage import coordinate_targets as coordinate_types
@@ -52,6 +55,9 @@ class _StageMotionSession(QObject):
         self._planned_xy = PlannedXYMotionState()
         self._position = StagePositionState(config.axis_names)
         self._exact_steps = exact_types.ExactStepWorkflowState(config.axis_names)
+        self._cancellation = StageMotionCancellation(
+            controller, active_state_stale_s=config.controller_active_state_stale_s
+        )
         self._prediction_timer = QTimer(self)
         self._prediction_timer.setInterval(int(config.prediction_interval_ms))
         self._prediction_timer.timeout.connect(self.tick)
@@ -81,13 +87,19 @@ class _StageMotionSession(QObject):
         )
 
     def snapshot(self) -> motion_types.StageMotionSnapshot:
+        cancellation = self._cancellation.decide_current(
+            coordinate_active=self._coordinate_targets.has_active_move(),
+            monotonic_s=time.monotonic(),
+        )
+        coordinate_active = cancellation.coordinate_priority
         return motion_types.StageMotionSnapshot(
             presented_position=self._position.presented_position,
             presented_stage_xy=self._position.presented_stage_xy,
             physical_machine_pose=self._position.physical_machine_pose,
             active_axes=self._position.active_axes,
-            cancelable=False,
-            coordinate_active=self._coordinate_targets.has_active_move(),
+            reported_active_motion=cancellation.reported_active_motion,
+            cancelable=cancellation.cancelable,
+            coordinate_active=coordinate_active,
             coordinate_display_basis=self._coordinate_targets.display_basis,
             coordinate_display_targets=tuple(
                 (axis, float(self._coordinate_targets.display_targets[axis]))
@@ -316,6 +328,51 @@ class _StageMotionSession(QObject):
         self._coordinate_targets.clear_pending_edits()
         self._emit_action_state()
         return True
+
+    def cancel_stage_motion(self) -> motion_types.StageMotionCancelOutcome:
+        """Cancel only motion workflows owned by this Stage session."""
+
+        self._require_object_thread()
+        had_pending_edits = bool(self._coordinate_targets.pending_edits)
+        self.clear_exact_steps(exact_types.ExactStepClearReason.CANCEL_REQUESTED)
+        decision = self._cancellation.decide_current(
+            coordinate_active=self._coordinate_targets.has_active_move(),
+            monotonic_s=time.monotonic(),
+        )
+        if decision.coordinate_priority:
+            self._controller.cancel_active_motion("Coordinate move cancel requested.")
+            self._clear_coordinate_tracking(reset_override=True)
+            pending_edits_cleared = bool(
+                self._coordinate_targets.clear_pending_edits() or had_pending_edits
+            )
+            self._settle_status_polls.schedule()
+            self._emit_action_state()
+            return motion_types.StageMotionCancelOutcome(
+                stage_motion_cancelled=True,
+                coordinate_priority=True,
+                pending_edits_cleared=pending_edits_cleared,
+            )
+
+        cancelled = False
+        if decision.cancel_reported_motion:
+            self._controller.cancel_active_motion("Motion cancel requested.")
+            cancelled = True
+        elif decision.cancel_active_task:
+            self._controller.cancel_active_task("Operation cancel requested.")
+            cancelled = True
+        if cancelled:
+            self._position.active_axes = frozenset()
+            self.cancel_planned_xy_move()
+            self._settle_status_polls.schedule()
+        pending_edits_cleared = bool(
+            self._coordinate_targets.clear_pending_edits() or had_pending_edits
+        )
+        self._emit_action_state()
+        return motion_types.StageMotionCancelOutcome(
+            stage_motion_cancelled=cancelled,
+            coordinate_priority=False,
+            pending_edits_cleared=pending_edits_cleared,
+        )
 
     def start_coordinate_move(
         self, request: coordinate_types.CoordinateMoveRequest
@@ -849,16 +906,14 @@ class _StageMotionSession(QObject):
         self.presentation_changed.emit(presentation)
 
     def _emit_action_state(self) -> None:
-        pending = self._planned_xy.pending_target_xy is not None
-        active = self._planned_xy.started_at is not None
-        coordinate_active = self._coordinate_targets.has_active_move()
         self.action_state_changed.emit(
-            motion_types.StageMotionActionState(
+            self._cancellation.action_state(
                 active_axes=self._position.active_axes,
-                cancelable=bool(pending or active or coordinate_active),
-                coordinate_active=coordinate_active,
-                planned_pending=pending,
-                planned_active=active,
+                coordinate_active=self._coordinate_targets.has_active_move(),
+                pending_edits=bool(self._coordinate_targets.pending_edits),
+                planned_pending=self._planned_xy.pending_target_xy is not None,
+                planned_active=self._planned_xy.started_at is not None,
+                monotonic_s=time.monotonic(),
             )
         )
 

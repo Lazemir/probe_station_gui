@@ -141,6 +141,9 @@ class _Controller:
     def last_status_timestamp(self) -> float | None:
         return self.status_timestamp
 
+    def is_busy(self) -> bool:
+        return False
+
     def latest_physical_machine_pose(
         self,
         axes: tuple[str, ...],
@@ -395,6 +398,7 @@ def test_tracked_start_and_tick_survive_invalid_observation_without_cache_reread
 
     session.tick()
 
+    controller.last_status_timestamp = lambda: controller.status_timestamp
     snapshot = session.snapshot()
     assert cache_reads == []
     assert snapshot.presented_stage_xy == (4.0, 6.0)

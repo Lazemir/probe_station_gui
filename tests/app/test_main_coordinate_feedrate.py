@@ -548,6 +548,9 @@ assert image.height() == 4
         )
         window._stage_serial_ready = lambda: True
         window._sample_handling_active = lambda: False
+        window._stage_motion = types.SimpleNamespace(
+            snapshot=lambda: types.SimpleNamespace(cancelable=False)
+        )
         window._invalidate_design_registration = lambda reason: invalidations.append(
             reason
         )
@@ -569,7 +572,7 @@ assert image.height() == 4
         try:
             with mock.patch.object(
                 main_module.stage_move_lifecycle,
-                "has_cancelable_operation",
+                "has_application_cancelable_operation",
                 return_value=False,
             ):
                 needle_calibration_ui.request_sample_unload(
@@ -595,6 +598,9 @@ assert image.height() == 4
         )
         window._stage_serial_ready = lambda: True
         window._sample_handling_active = lambda: False
+        window._stage_motion = types.SimpleNamespace(
+            snapshot=lambda: types.SimpleNamespace(cancelable=False)
+        )
         window._invalidate_design_registration = lambda reason: events.append(
             ("invalidate", reason)
         )
@@ -619,7 +625,7 @@ assert image.height() == 4
         try:
             with mock.patch.object(
                 main_module.stage_move_lifecycle,
-                "has_cancelable_operation",
+                "has_application_cancelable_operation",
                 return_value=False,
             ):
                 needle_calibration_ui.request_sample_unload(
@@ -656,6 +662,9 @@ assert image.height() == 4
         )
         window._stage_serial_ready = lambda: True
         window._sample_handling_active = lambda: False
+        window._stage_motion = types.SimpleNamespace(
+            snapshot=lambda: types.SimpleNamespace(cancelable=False)
+        )
         window._invalidate_design_registration = lambda reason: invalidations.append(
             reason
         )
@@ -682,7 +691,7 @@ assert image.height() == 4
         try:
             with mock.patch.object(
                 main_module.stage_move_lifecycle,
-                "has_cancelable_operation",
+                "has_application_cancelable_operation",
                 return_value=False,
             ):
                 needle_calibration_ui.request_sample_unload(

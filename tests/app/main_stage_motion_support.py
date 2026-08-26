@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import types
+import time
 
+from probe_station_gui.application.stage_motion_types import StageMotionCancelOutcome
 from probe_station_gui.coordinates.model import PhysicalMachinePose
 from probe_station_gui.stage.coordinate_targets import (
     CoordinatePendingEdits,
@@ -44,11 +46,19 @@ class _FakeStageMotion:
         self.exact_clear_reasons: list[object] = []
 
     def snapshot(self) -> object:
+        reported_active_motion = self._reported_active_motion()
+        cancelable = (
+            self.coordinate_active
+            or reported_active_motion
+            or bool(self.controller is not None and self.controller.is_busy())
+        )
         return types.SimpleNamespace(
             physical_machine_pose=self.physical_machine_pose,
             presented_position=None,
             presented_stage_xy=None,
             active_axes=self.active_axes,
+            reported_active_motion=reported_active_motion,
+            cancelable=cancelable,
             coordinate_active=self.coordinate_active,
             coordinate_display_basis=self.coordinate_display_basis,
             coordinate_display_targets=self.coordinate_display_targets,
@@ -61,9 +71,19 @@ class _FakeStageMotion:
             exact_step_motion_lease=self.exact_step_motion_lease,
             exact_step_pose_rebase_allowed=self.exact_step_pose_rebase_allowed,
             planned_stage_xy=None,
+            planned_pending_target_xy=None,
             planned_prediction_active=False,
             planned_waiting_for_fresh_status=False,
         )
+
+    def _reported_active_motion(self) -> bool:
+        if self.controller is None:
+            return False
+        state = (self.controller.latest_stage_state() or "").strip().lower()
+        if state not in {"run", "jog"}:
+            return False
+        timestamp = self.controller.last_status_timestamp()
+        return timestamp is None or time.monotonic() - float(timestamp) <= 2.0
 
     def queue_exact_step(self, request: object) -> ExactStepOutcome:
         pending_targets = tuple(request.pending_targets or request.move_request.targets)
@@ -187,6 +207,33 @@ class _FakeStageMotion:
         self.active_axes = frozenset()
         self.clear_pending_coordinate_edits()
         return True
+
+    def cancel_stage_motion(self) -> StageMotionCancelOutcome:
+        coordinate_priority = self.coordinate_active
+        cancelled = False
+        if coordinate_priority:
+            cancelled = self.cancel_coordinate_move()
+        elif self.controller is not None:
+            state = (self.controller.latest_stage_state() or "").strip().lower()
+            timestamp = self.controller.last_status_timestamp()
+            fresh_motion = state in {"run", "jog"} and (
+                timestamp is None or time.monotonic() - float(timestamp) <= 2.0
+            )
+            if fresh_motion:
+                self.controller.cancel_active_motion("Motion cancel requested.")
+                cancelled = True
+            elif self.controller.is_busy():
+                self.controller.cancel_active_task("Operation cancel requested.")
+                cancelled = True
+            if cancelled:
+                self.active_axes = frozenset()
+                self.cancel_planned_xy_move()
+        pending_edits_cleared = self.clear_pending_coordinate_edits()
+        return StageMotionCancelOutcome(
+            stage_motion_cancelled=cancelled,
+            coordinate_priority=coordinate_priority,
+            pending_edits_cleared=pending_edits_cleared,
+        )
 
     def cancel_planned_xy_move(self) -> bool:
         self.cancel_planned_calls += 1

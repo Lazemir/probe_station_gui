@@ -7,6 +7,7 @@ from probe_station_gui.coordinates.coordinator_model import (
     CoordinateSystemSnapshot,
     CoordinateTransition,
 )
+from probe_station_gui.application.stage_motion_types import StageMotionCancelOutcome
 from probe_station_gui.stage import move_lifecycle
 from probe_station_gui.stage.exact_step import ExactStepClearReason
 from tests.app.route_run_execution_support import (
@@ -60,13 +61,16 @@ class _View:
 
 
 class _MicroscopeInteraction:
-    def __init__(self) -> None:
+    def __init__(self, events: list[str] | None = None) -> None:
+        self._events = events
         self.has_pending_move = False
         self.cancel_calls: list[bool] = []
         self.finish_calls: list[bool] = []
         self.clear_calls = 0
 
     def cancel_pending(self, *, clear_target: bool) -> None:
+        if self._events is not None:
+            self._events.append("pending-ui")
         self.has_pending_move = False
         self.cancel_calls.append(clear_target)
 
@@ -92,15 +96,19 @@ class _JoystickPanel:
 class _StageMotionBoundary:
     """Only the typed session seam exercised by cancellation integration."""
 
-    def __init__(self, controller: _StageController) -> None:
+    def __init__(self, controller: _StageController, events: list[str]) -> None:
         self._controller = controller
+        self._events = events
         self.coordinate_active = False
         self.pending: dict[str, tuple[float, float]] = {}
         self.cancel_planned_calls = 0
         self.exact_clear_reasons: list[ExactStepClearReason] = []
 
     def snapshot(self) -> object:
-        return types.SimpleNamespace(coordinate_active=self.coordinate_active)
+        return types.SimpleNamespace(
+            coordinate_active=self.coordinate_active,
+            cancelable=bool(self.coordinate_active or self._controller.is_busy()),
+        )
 
     def pending_coordinate_edits(self) -> object:
         return types.SimpleNamespace(
@@ -114,26 +122,37 @@ class _StageMotionBoundary:
         self.pending.clear()
         return had_pending
 
-    def cancel_coordinate_move(self) -> bool:
-        if not self.coordinate_active:
-            return False
-        self._controller.cancel_active_motion("Coordinate move cancel requested.")
-        self.coordinate_active = False
-        self.pending.clear()
-        return True
-
-    def cancel_planned_xy_move(self) -> None:
-        self.cancel_planned_calls += 1
-
-    def clear_exact_steps(self, reason: ExactStepClearReason) -> None:
-        self.exact_clear_reasons.append(reason)
+    def cancel_stage_motion(self) -> StageMotionCancelOutcome:
+        self._events.append("stage")
+        self.exact_clear_reasons.append(ExactStepClearReason.CANCEL_REQUESTED)
+        coordinate_priority = self.coordinate_active
+        if coordinate_priority:
+            self._controller.cancel_active_motion("Coordinate move cancel requested.")
+            self._controller.queue_feed_override_reset()
+            self.coordinate_active = False
+            cancelled = True
+        elif self._controller.is_busy():
+            self._controller.cancel_active_task("Operation cancel requested.")
+            self.cancel_planned_calls += 1
+            cancelled = True
+        else:
+            cancelled = False
+        pending_edits_cleared = self.clear_pending_coordinate_edits()
+        return StageMotionCancelOutcome(
+            stage_motion_cancelled=cancelled,
+            coordinate_priority=coordinate_priority,
+            pending_edits_cleared=pending_edits_cleared,
+        )
 
 
 class _Runner:
-    def __init__(self) -> None:
+    def __init__(self, events: list[str] | None = None) -> None:
         self.stop_calls = 0
+        self._events = events
 
     def stop(self) -> None:
+        if self._events is not None:
+            self._events.append("route")
         self.stop_calls += 1
 
 
@@ -150,18 +169,24 @@ class _DesignNavigatorPanel:
 
 
 class _SurfaceMapWindow:
-    def __init__(self) -> None:
+    def __init__(self, events: list[str] | None = None) -> None:
         self.stop_calls = 0
+        self._events = events
 
     def stop_capture(self) -> None:
+        if self._events is not None:
+            self._events.append("surface")
         self.stop_calls += 1
 
 
 class _StopEvent:
-    def __init__(self) -> None:
+    def __init__(self, events: list[str] | None = None) -> None:
+        self._events = events
         self.set_calls = 0
 
     def set(self) -> None:
+        if self._events is not None:
+            self._events.append("scan")
         self.set_calls += 1
 
 
@@ -186,9 +211,10 @@ class _Owner:
     MANUAL_JOG_SETTLE_POLL_DELAYS_MS = (40, 120)
 
     def __init__(self) -> None:
+        self.cancel_order: list[str] = []
         self.stage_controller = _StageController()
         self.view = _View()
-        self._microscope_interaction = _MicroscopeInteraction()
+        self._microscope_interaction = _MicroscopeInteraction(self.cancel_order)
         self.joystick_panel = _JoystickPanel()
         self._manual_alignment_pick_slot = None
         self._pending_alignment_preparation = None
@@ -201,8 +227,11 @@ class _Owner:
         self.microscope_scan_dialog = None
         self._surface_map_running = False
         self._microscope_scan_running_value = False
-        self._microscope_scan_stop_requested = _StopEvent()
-        self._stage_motion = _StageMotionBoundary(self.stage_controller)
+        self._microscope_scan_stop_requested = _StopEvent(self.cancel_order)
+        self._stage_motion = _StageMotionBoundary(
+            self.stage_controller,
+            self.cancel_order,
+        )
         self._design_session = types.SimpleNamespace(
             applied=[],
             apply_prepared_alignment=lambda preparation: (
@@ -329,11 +358,13 @@ class _Owner:
         self.homing_starts += 1
 
 
-def test_has_cancelable_operation_reports_active_coordinate_move() -> None:
+def test_application_cancelability_excludes_session_motion_state() -> None:
     owner = _Owner()
     owner._stage_motion.coordinate_active = True
 
-    assert move_lifecycle.has_cancelable_operation(owner) is True
+    assert move_lifecycle.has_application_cancelable_operation(owner) is False
+    owner._microscope_interaction.has_pending_move = True
+    assert move_lifecycle.has_application_cancelable_operation(owner) is True
 
 
 def test_coordinate_cancel_has_priority_over_generic_busy_task() -> None:
@@ -353,7 +384,7 @@ def test_coordinate_cancel_has_priority_over_generic_busy_task() -> None:
     assert owner.stage_controller.cancelled_tasks == []
     assert owner.statuses == []
     assert owner.view.focus_reasons == ["focus"]
-    assert owner.status_refreshes == [owner.MANUAL_JOG_SETTLE_POLL_DELAYS_MS]
+    assert owner.status_refreshes == []
     assert owner.cancel_refreshes == 1
     assert owner._stage_motion.pending == {}
     assert owner._stage_motion.coordinate_active is False
@@ -361,7 +392,7 @@ def test_coordinate_cancel_has_priority_over_generic_busy_task() -> None:
 
 def test_route_cancel_runs_before_active_coordinate_move_early_return() -> None:
     owner = _Owner()
-    runner = _Runner()
+    runner = _Runner(owner.cancel_order)
     design_panel = _DesignNavigatorPanel()
     activate_route_run(owner, runner)
     owner.design_navigator_panel = design_panel
@@ -376,11 +407,33 @@ def test_route_cancel_runs_before_active_coordinate_move_early_return() -> None:
         "Coordinate move cancel requested."
     ]
     assert owner.statuses == []
+    assert owner.cancel_order == ["route", "stage"]
+
+
+def test_global_cancel_preserves_all_application_to_stage_slice_order() -> None:
+    owner = _Owner()
+    runner = _Runner(owner.cancel_order)
+    activate_route_run(owner, runner)
+    owner._microscope_interaction.has_pending_move = True
+    owner.surface_map_window = _SurfaceMapWindow(owner.cancel_order)
+    owner._surface_map_running = True
+    owner._microscope_scan_running_value = True
+    owner._stage_motion.coordinate_active = True
+
+    move_lifecycle.cancel_stage_coordinate_action(owner, focus_reason="focus")
+
+    assert owner.cancel_order == [
+        "pending-ui",
+        "route",
+        "surface",
+        "scan",
+        "stage",
+    ]
 
 
 def test_background_capture_cancel_reports_generic_cancel_status() -> None:
     owner = _Owner()
-    surface_map = _SurfaceMapWindow()
+    surface_map = _SurfaceMapWindow(owner.cancel_order)
     scan_dialog = _MicroscopeScanDialog()
     owner.surface_map_window = surface_map
     owner.microscope_scan_dialog = scan_dialog
@@ -394,6 +447,7 @@ def test_background_capture_cancel_reports_generic_cancel_status() -> None:
     assert scan_dialog.statuses == ["Microscope scan stop requested."]
     assert owner.statuses == [("Cancel requested.", 3000)]
     assert owner.view.focus_reasons == ["focus"]
+    assert owner.cancel_order == ["surface", "scan", "stage"]
 
 
 def test_pending_edits_only_cancel_clears_edits_and_reports_edit_status() -> None:

@@ -24,6 +24,15 @@ class _Controller:
         if self.polls is not None:
             self.pending_counts.append(len(self.polls._timers))
 
+    def latest_stage_state(self) -> str:
+        return "Idle"
+
+    def last_status_timestamp(self) -> float | None:
+        return None
+
+    def is_busy(self) -> bool:
+        return False
+
 
 class _TimerSignal:
     def __init__(self, timer) -> None:

@@ -95,6 +95,7 @@ class StageMotionResetReason(Enum):
     """Reason transient Stage-motion presentation state is discarded."""
 
     CONNECTION_CHANGED = auto()
+    DISCONNECT = auto()
     APPLICATION_CLOSED = auto()
 
 

@@ -73,18 +73,18 @@ def on_serial_disconnected(owner: object) -> None:
     owner.serial_connection = None
     persist_serial_connection_state(owner, False)
     owner._stage_unhomed_display_origins.clear()
-    owner._stage_motion.reset(StageMotionResetReason.CONNECTION_CHANGED)
-    owner._controller_reboot_recovery_scheduled = False
-    homing_ui.clear_pending_homing_queue(owner)
-    stage_position_panel.clear_stage_motion_axes(owner)
-    owner._update_stage_coordinate_apply_state()
-    logger.info("Serial disconnected")
     owner.stage_controller.request_stop_oscillation()
     owner._controller_state_persistence_suspended = True
     try:
         owner.stage_controller.set_serial(None)
     finally:
         owner._controller_state_persistence_suspended = False
+    owner._stage_motion.reset(StageMotionResetReason.DISCONNECT)
+    owner._controller_reboot_recovery_scheduled = False
+    homing_ui.clear_pending_homing_queue(owner)
+    stage_position_panel.clear_stage_motion_axes(owner)
+    owner._update_stage_coordinate_apply_state()
+    logger.info("Serial disconnected")
     stage_position_panel.update_stage_position_display(owner, None)
     auto_retry = owner.sender() is not owner.serial_connection_panel
     if owner.serial_connection_panel:

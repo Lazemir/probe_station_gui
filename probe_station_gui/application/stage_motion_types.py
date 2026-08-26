@@ -26,6 +26,14 @@ class StageMotionConfig:
     settle_status_poll_delays_ms: tuple[int, ...] = ()
     exact_step_accumulation_ms: int = 80
     terminal_resume_after_jog_ms: int = 180
+    controller_active_state_stale_s: float = 2.0
+
+
+@dataclass(frozen=True)
+class StageMotionCancelOutcome:
+    stage_motion_cancelled: bool
+    coordinate_priority: bool
+    pending_edits_cleared: bool
 
 
 @dataclass(frozen=True)
@@ -41,6 +49,7 @@ class StageMotionSnapshot:
     presented_stage_xy: tuple[float, float] | None
     physical_machine_pose: PhysicalMachinePose
     active_axes: frozenset[str]
+    reported_active_motion: bool
     cancelable: bool
     coordinate_active: bool
     coordinate_display_basis: object | None

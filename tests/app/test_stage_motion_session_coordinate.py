@@ -42,6 +42,9 @@ class _Controller:
     def latest_stage_state(self) -> str:
         return self.state
 
+    def last_status_timestamp(self) -> float | None:
+        return None
+
     def is_busy(self) -> bool:
         return self.busy
 

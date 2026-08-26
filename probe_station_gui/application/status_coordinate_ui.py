@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-import time
 from datetime import datetime
 from pathlib import Path
 
@@ -20,6 +19,7 @@ from probe_station_gui.coordinates.rotation_geometry import (
 from probe_station_gui.design import objective_offsets as offsets
 from probe_station_gui.design.model import DesignModelError
 from probe_station_gui.settings.manager import ordered_objective_names
+from probe_station_gui.application.stage_motion_types import StageMotionActionState
 from probe_station_gui.shared.wheel_guard import GuardedComboBox as QComboBox
 from probe_station_gui.stage import move_lifecycle as stage_move_lifecycle
 from probe_station_gui.stage.exact_step import ExactStepClearReason
@@ -219,19 +219,7 @@ class _MainStatusCoordinateUiMixin:
         return thread is not None and thread.is_alive()
 
     def _controller_reports_active_motion(self) -> bool:
-        if not hasattr(self, "stage_controller"):
-            return False
-        state = (self.stage_controller.latest_stage_state() or "").strip().lower()
-        if state not in {"run", "jog"}:
-            return False
-        if self._controller_latest_state_is_stale():
-            logger.debug(
-                "Ignoring stale controller active state %r after %.3f s.",
-                state,
-                self._controller_latest_state_age_s() or 0.0,
-            )
-            return False
-        return True
+        return bool(self._stage_motion.snapshot().reported_active_motion)
 
     def _controller_latest_state_blocks_motion(self) -> bool:
         if not hasattr(self, "stage_controller"):
@@ -240,44 +228,29 @@ class _MainStatusCoordinateUiMixin:
         if state in {"", "idle"}:
             return False
         if state in {"run", "jog"}:
-            return self._controller_reports_active_motion()
+            return bool(self._stage_motion.snapshot().reported_active_motion)
         return True
-
-    def _controller_latest_state_age_s(self) -> float | None:
-        timestamp_getter = getattr(
-            getattr(self, "stage_controller", None),
-            "last_status_timestamp",
-            None,
-        )
-        if not callable(timestamp_getter):
-            return None
-        timestamp = timestamp_getter()
-        if timestamp is None:
-            return None
-        try:
-            return max(0.0, time.monotonic() - float(timestamp))
-        except (TypeError, ValueError):
-            return None
-
-    def _controller_latest_state_is_stale(self) -> bool:
-        age_s = self._controller_latest_state_age_s()
-        return age_s is not None and age_s > self.CONTROLLER_ACTIVE_STATE_STALE_S
 
     def _schedule_cancel_state_refresh(self) -> None:
         for delay_ms in (0, 100, 300, 1000, 2500):
             QTimer.singleShot(delay_ms, self._update_stage_coordinate_apply_state)
 
     def _update_stage_coordinate_apply_state(
-        self, _pending: bool | None = None
+        self, action_state: StageMotionActionState | None = None
     ) -> None:
         panel = getattr(self, "_stage_position_panel", None)
         if panel is None:
             return
         stage_position_panel_adapter.apply_coordinate_common_feedrate(self)
-        controller_busy = (
-            hasattr(self, "stage_controller") and self.stage_controller.is_busy()
-        )
-        active = self._stage_motion.snapshot().coordinate_active or controller_busy
+        snapshot = self._stage_motion.snapshot()
+        motion_active = bool(getattr(snapshot, "cancelable", False))
+        session_cancelable = motion_active
+        if isinstance(action_state, StageMotionActionState):
+            session_cancelable = action_state.cancelable
+            coordinate_active = action_state.coordinate_active
+        else:
+            coordinate_active = snapshot.coordinate_active
+        active = coordinate_active or motion_active
         available = panel.has_pending_or_modified_fields()
         panel.set_action_buttons_enabled(
             available
@@ -285,7 +258,9 @@ class _MainStatusCoordinateUiMixin:
             and stage_position_panel_adapter.gui_coordinate_motion_editing_enabled(
                 self
             ),
-            available or stage_move_lifecycle.has_cancelable_operation(self),
+            available
+            or session_cancelable
+            or stage_move_lifecycle.has_application_cancelable_operation(self),
         )
 
     def _append_status_log(self, message: str) -> None:
